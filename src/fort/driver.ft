@@ -810,9 +810,9 @@ fn append_config(options* opts, containers.str_vec mut* keys, containers.str_vec
 // Adds the compiler keys and the user keys to the one analysis session.
 fn configure(session.session mut* s, options* opts) void {
     containers.str_vec mut keys = containers.str_create();
-    defer containers.str_free(&keys);
+    defer del(keys.items);
     containers.str_vec mut values = containers.str_create();
-    defer containers.str_free(&values);
+    defer del(values.items);
     append_config(opts, &keys, &values);
     u64 mut i = 0;
     while (i < keys.len) {
@@ -870,10 +870,10 @@ fn tokens_entry(options* opts) i32 {
     diag.set_text(session.diags(&s), true);
     session.show_sources(&s);
     lexer.tok_vec mut toks = lexer.tokvec_create();
-    defer lexer.tokvec_free(&toks);
+    defer del(toks.items);
     bool clean = lexer.lex_file(&s, opts->entry, source, &toks);
     strbuf.str_buf mut dump = strbuf.create();
-    defer strbuf.free(&dump);
+    defer del(dump.data);
     lexer.tok_dump(&toks, &dump);
     print(strbuf.view(&dump));
     if (clean) {
@@ -898,14 +898,14 @@ fn ast_entry(options* opts) i32 {
     diag.set_text(session.diags(&s), true);
     session.show_sources(&s);
     lexer.tok_vec mut toks = lexer.tokvec_create();
-    defer lexer.tokvec_free(&toks);
+    defer del(toks.items);
     lexer.lex_file(&s, opts->entry, source, &toks);
     // the tokens cover the whole file, so the parse runs
     ast.arena mut ar = ast.arena{};
     defer ast.ast_arena_free(&ar);
     ast.node mut* mod = parser.parse_module(&s, opts->entry, &toks, &ar);
     strbuf.str_buf mut dump = strbuf.create();
-    defer strbuf.free(&dump);
+    defer del(dump.data);
     ast.ast_dump(mod, &dump);
     strbuf.push(&dump, '\n');
     print(strbuf.view(&dump));
@@ -927,7 +927,7 @@ string STD_DIR_NAME = "std";
 // interned in `p`.
 fn exe_path(containers.pool mut* p, string mut* out) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     if (!os.exe_path(&b)) {
         return false;
     }
@@ -939,7 +939,7 @@ fn exe_path(containers.pool mut* p, string mut* out) bool {
 // has no directory part. Interned in `p`.
 fn std_dir_beside(containers.pool mut* p, string program) string {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     i64 last = str.last_index_of(program, '/');
     if (last >= 0) {
         strbuf.append(&b, program[0..cast(last, u64) + 1]);
@@ -1020,7 +1020,7 @@ fn entry_base(string entry) string {
 // left out, where bootstrap0/src/driver.c passes NULL.
 fn join_path(containers.pool mut* p, string dir, string name, string suffix) string {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     if (dir.len > 0) {
         strbuf.append(&b, dir);
         strbuf.push(&b, '/');
@@ -1063,7 +1063,7 @@ fn make_temp_dir(containers.pool mut* p, string mut* parent_out, i32 mut* error_
     }
     *parent_out = parent;
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, parent);
     strbuf.append(&b, TMP_DIR_TEMPLATE);
     // mkdtemp replaces the six X in place, so this is our own
@@ -1189,16 +1189,11 @@ fn cc_command_fill(char mut@ bytes, char mut* mut@ items, containers.str_vec* ar
     items[argv->len] = null;
 }
 
-fn cc_command_free(cc_command mut* c) void {
-    del(c->bytes);
-    del(c->items);
-}
-
 // Reports either `<role> failed with status N` or `<role> failed with signal N`, where `role` is
 // `cc` or `ar`.
 fn error_tool_status(string role, string what, i64 value) void {
     strbuf.str_buf mut m = strbuf.create();
-    defer strbuf.free(&m);
+    defer del(m.data);
     strbuf.append(&m, role);
     strbuf.append(&m, " failed with ");
     strbuf.append(&m, what);
@@ -1247,10 +1242,16 @@ i32 EXEC_FAILED_STATUS = 127;
 // Runs --cc once over the module: it compiles and links in one invocation.
 // Returns EXIT_OK, or EXIT_USAGE after reporting the failure.
 fn run_cc(options* opts, string ir_path, string out_path) i32 {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
     containers.str_vec mut argv = containers.str_create();
-    defer containers.str_free(&argv);
+    defer del(argv.items);
+    containers.pool mut p = containers.pool_create();
+    defer {
+        // The leak rule reads no callee: the test of the loop proves the pool empty, and the body
+        // runs at most once.
+        while (p.head != null) {
+            containers.pool_free(&p);
+        }
+    }
     cc_argv(&p, opts, ir_path, out_path, &argv);
     return run_tool("cc", &argv);
 }
@@ -1268,7 +1269,10 @@ string ZERO_AR_DATE_VALUE = "1";
 fn run_tool(string role, containers.str_vec* argv) i32 {
     string program = containers.str_at(argv, 0);
     cc_command mut cmd = cc_command_build(argv);
-    defer cc_command_free(&cmd);
+    defer {
+        del(cmd.bytes);
+        del(cmd.items);
+    }
     // taken before the first call, because prover.prove_uses takes each call as a change of `cmd`
     char* path = &cmd.bytes[0];
     void* args = cast(&cmd.items[0], void*);
@@ -1395,7 +1399,7 @@ fn hash_identity(libraries mut* libs) bool {
         return true;
     }
     strbuf.str_buf mut exe = strbuf.create();
-    defer strbuf.free(&exe);
+    defer del(exe.data);
     if (!artifact.hash_compiler(&libs->compiler, &exe)) {
         strbuf.clear(&libs->compiler);
         if (strbuf.view(&exe).len == 0) {
@@ -1471,9 +1475,9 @@ fn read_libraries(options* opts, libraries mut* libs) i32 {
     libs->items = new(artifact.contents, n);
     libs->len = n;
     containers.str_vec mut keys = containers.str_create();
-    defer containers.str_free(&keys);
+    defer del(keys.items);
     containers.str_vec mut values = containers.str_create();
-    defer containers.str_free(&values);
+    defer del(values.items);
     artifact.manifest mut build = artifact.manifest{};
     if (!build_fields(opts, libs, &build, &keys, &values)) {
         return EXIT_USAGE;
@@ -1487,10 +1491,16 @@ fn read_libraries(options* opts, libraries mut* libs) i32 {
         i += 1;
     }
     graph.graph mut g = graph.graph{};
-    defer graph.free(&g);
+    defer {
+        del(g.names.items);
+        del(g.interfaces.items);
+        del(g.use_names.items);
+        del(g.use_hashes.items);
+        del(g.owners.items);
+    }
     add_libraries(&g, opts, libs);
     strbuf.str_buf mut message = strbuf.create();
-    defer strbuf.free(&message);
+    defer del(message.data);
     if (!graph.check(&g, &message)) {
         error(strbuf.view(&message));
         return EXIT_USAGE;
@@ -1562,7 +1572,7 @@ fn check_outside(session.session mut* s, options* opts, libraries* libs, analysi
         return true;
     }
     containers.str_vec mut names = containers.str_create();
-    defer containers.str_free(&names);
+    defer del(names.items);
     u64 mut k = libs->order.len;
     while (k > 0) {
         k -= 1;
@@ -1617,7 +1627,13 @@ fn load_closure(session.session mut* s, options* opts, string program, analysis 
         i += 1;
     }
     containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
+    defer {
+        // The leak rule reads no callee: the test of the loop proves the pool empty, and the body
+        // runs at most once.
+        while (p.head != null) {
+            containers.pool_free(&p);
+        }
+    }
     // `std` is looked up in the standard library directory. A library build has none: its
     // `std` paths resolve in the interface file of the used library std (module-system.md 10.2).
     if (opts->use_names.len == 0) {
@@ -1785,7 +1801,7 @@ fn build_document(strbuf.str_buf mut* out, session.session mut* s,
 // ended by a newline.
 fn write_document(session.session mut* s, containers.str_vec* files, index.index* ix) void {
     strbuf.str_buf mut doc = strbuf.create();
-    defer strbuf.free(&doc);
+    defer del(doc.data);
     build_document(&doc, s, files, ix);
     strbuf.push(&doc, '\n');
     print(strbuf.view(&doc));
@@ -1797,10 +1813,19 @@ fn write_document(session.session mut* s, containers.str_vec* files, index.index
 fn check_document(session.session mut* s, options* opts, libraries* libs, analysis mut* an,
                        containers.pool mut* p) void {
     containers.str_vec mut files = containers.str_create();
-    defer containers.str_free(&files);
+    defer del(files.items);
     collect_files(p, libs, &an->set, &files);
     index.index mut ix = index.create();
-    defer index.free(&ix);
+    defer {
+        index.free(&ix);
+        // The leak rule reads no callee: after the calls, the test of a loop proves each chain
+        // empty, and each other owner takes a `del`.
+        while (ix.pool.head != null) {
+            containers.pool_free(&ix.pool);
+        }
+        del(ix.entries);
+        del(ix.msg.data);
+    }
     if (opts->index) {
         index.build(&ix, &an->set);
     }
@@ -1822,14 +1847,20 @@ fn fir_entry(session.session mut* s, analysis mut* an, options* opts) i32 {
     fir_verify.runtime rt = fir_verify.runtime_of(&an->ck);
     bool build = opts->fir_after == FIR_BUILD_MODE;
     gen.node_ref_vec mut decls = gen.node_ref_vec{};
-    defer gen.refs_free(&decls);
+    defer del(decls.items);
     fir_lower.program_functions(&an->set, &decls);
     // The module keeps each function for the passes after the build-mode pass. The text is
     // written from each function before it moves into the module.
-    fir.module mut m = fir.module_new();
-    defer fir.module_free(&m);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
+    fir.module mut m = fir.module_new();
+    defer {
+        fir.module_free(&m);
+        // The leak rule reads no callee, so each owner takes a `del` after the call.
+        del(m.funcs.items);
+        del(m.globals.items);
+        del(m.externs.items);
+    }
     bool mut proved = true;
     u64 mut i = 0;
     while (i < decls.len) {
@@ -1837,10 +1868,28 @@ fn fir_entry(session.session mut* s, analysis mut* an, options* opts) i32 {
             strbuf.push(&text, '\n');
         }
         fir.func mut f = fir.func{};
+        defer {
+            // A function that moved out leaves `f` empty here.
+            fir.func_free(&f);
+            // The leak rule reads no callee, so each owner takes a `del` after the call.
+            del(f.locals.items);
+            del(f.projs.items);
+            del(f.ops.items);
+            del(f.arms.items);
+            del(f.blocks.items);
+        }
         fir_lower.report mut why = fir_lower.report{};
         if (fir_lower.lower_function(&an->ck, gen.refs_at(&decls, i), &f, &why)) {
             fir_verify.verify(&f, &rt);
             prover.proof mut verdicts = run_emptiness(s, &f, false);
+            defer {
+                del(verdicts.proved);
+                del(verdicts.stores);
+                del(verdicts.exits);
+                del(verdicts.inners);
+                del(verdicts.uses);
+                del(verdicts.aggregates);
+            }
             if (prover.has_error(&verdicts)) {
                 proved = false;
             }
@@ -1848,7 +1897,6 @@ fn fir_entry(session.session mut* s, analysis mut* an, options* opts) i32 {
                 fir_passes.build_mode(&f, opts->release, opts->no_bounds_check, &verdicts);
                 fir_verify.verify(&f, &rt);
             }
-            prover.free(&verdicts);
             fir_print.print_function(&f, &text);
             fir.module_add_function(&m, move(f));
         } else {
@@ -1869,7 +1917,7 @@ fn fir_entry(session.session mut* s, analysis mut* an, options* opts) i32 {
 fn report_violation(fir.func* f, fir_verify.runtime* rt, diag.loc at,
                     strbuf.str_buf mut* out) bool {
     strbuf.str_buf mut line = strbuf.create();
-    defer strbuf.free(&line);
+    defer del(line.data);
     if (fir_verify.verify_report(f, rt, &line)) {
         return true;
     }
@@ -1892,7 +1940,14 @@ fn report_function(fir.func mut* f, fir_verify.runtime* rt, diag.loc at, bool re
     if (report_violation(f, rt, at, out)) {
         // the proof decides which overwrite checks the pass removes, and reports nothing here
         prover.proof mut verdicts = prover.prove(f);
-        defer prover.free(&verdicts);
+        defer {
+            del(verdicts.proved);
+            del(verdicts.stores);
+            del(verdicts.exits);
+            del(verdicts.inners);
+            del(verdicts.uses);
+            del(verdicts.aggregates);
+        }
         fir_passes.build_mode(f, release, no_bounds, &verdicts);
         report_violation(f, rt, at, out);
     }
@@ -1905,10 +1960,10 @@ fn report_function(fir.func mut* f, fir_verify.runtime* rt, diag.loc at, bool re
 fn fir_report_entry(analysis mut* an, options* opts) i32 {
     fir_verify.runtime rt = fir_verify.runtime_of(&an->ck);
     gen.node_ref_vec mut decls = gen.node_ref_vec{};
-    defer gen.refs_free(&decls);
+    defer del(decls.items);
     fir_lower.program_functions(&an->set, &decls);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     u64 mut i = 0;
     while (i < decls.len) {
         report_declaration(an, opts, gen.refs_at(&decls, i), &rt, &text);
@@ -1923,10 +1978,19 @@ fn fir_report_entry(analysis mut* an, options* opts) i32 {
 fn report_declaration(analysis mut* an, options* opts, ast.node* decl, fir_verify.runtime* rt,
                       strbuf.str_buf mut* text) void {
     fir.func mut f = fir.func{};
+    defer {
+        // A function that moved out leaves `f` empty here.
+        fir.func_free(&f);
+        // The leak rule reads no callee, so each owner takes a `del` after the call.
+        del(f.locals.items);
+        del(f.projs.items);
+        del(f.ops.items);
+        del(f.arms.items);
+        del(f.blocks.items);
+    }
     fir_lower.report mut why = fir_lower.report{};
     if (fir_lower.lower_function(&an->ck, decl, &f, &why)) {
         report_function(&f, rt, decl->name_loc, opts->release, opts->no_bounds_check, text);
-        fir.func_free(&f);
     }
 }
 
@@ -1964,20 +2028,38 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts,
     fir_verify.runtime mut rt = fir_verify.runtime_of(&an->ck);
     fir_verify.excuse_mode(&rt, opts->release, opts->no_bounds_check);
     gen.node_ref_vec mut decls = gen.node_ref_vec{};
-    defer gen.refs_free(&decls);
+    defer del(decls.items);
     fir_lower.program_functions(&an->set, &decls);
     strbuf.str_buf mut leaks = strbuf.create();
-    defer strbuf.free(&leaks);
+    defer del(leaks.data);
     bool mut proved = true;
     u64 mut i = 0;
     while (i < decls.len) {
         fir.func mut f = fir.func{};
+        defer {
+            // A function that moved out leaves `f` empty here.
+            fir.func_free(&f);
+            // The leak rule reads no callee, so each owner takes a `del` after the call.
+            del(f.locals.items);
+            del(f.projs.items);
+            del(f.ops.items);
+            del(f.arms.items);
+            del(f.blocks.items);
+        }
         fir_lower.report mut why = fir_lower.report{};
         if (fir_lower.lower_function(&an->ck, gen.refs_at(&decls, i), &f, &why)) {
             fir.check_kind mut missing = fir.check_kind.chk_overflow;
             if (fir_verify.runtime_holds(&f, &rt, &missing)) {
                 fir_verify.verify(&f, &rt);
                 prover.proof mut verdicts = run_emptiness(s, &f, opts->aggregate_report);
+                defer {
+                    del(verdicts.proved);
+                    del(verdicts.stores);
+                    del(verdicts.exits);
+                    del(verdicts.inners);
+                    del(verdicts.uses);
+                    del(verdicts.aggregates);
+                }
                 if (opts->leak_report) {
                     report.write_inners(&f, &verdicts, s, &leaks);
                 }
@@ -1989,9 +2071,7 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts,
                 } else {
                     summary.add(calls, &f, verdicts.inner_work);
                 }
-                prover.free(&verdicts);
             }
-            fir.func_free(&f);
         }
         i += 1;
     }
@@ -2141,7 +2221,7 @@ fn fir_test_pass(string text, test_pass mut* out) i32 {
 // The function of `m` or of the closure of `ck` whose dotted name is `name` (D9.7), or null.
 fn find_function(fir.module* m, check.checker* ck, string name) ast.sym* {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     return find_by_name(m, ck, name, &b);
 }
 
@@ -2282,7 +2362,12 @@ fn run_test_passes(fir.module mut* m, test_pass@ passes, fir_verify.runtime* rt,
                 // the pass removes the overwrite checks that the emptiness pass proves
                 prover.proof mut verdicts = prover.prove(f);
                 fir_passes.build_mode(f, p.release, p.no_bounds, &verdicts);
-                prover.free(&verdicts);
+                del(verdicts.proved);
+                del(verdicts.stores);
+                del(verdicts.exits);
+                del(verdicts.inners);
+                del(verdicts.uses);
+                del(verdicts.aggregates);
             }
             k += 1;
         }
@@ -2311,8 +2396,8 @@ fn fir_test_entry(options* opts, string program) i32 {
         return EXIT_USAGE;
     }
     fir_test mut t = fir_test{};
-    defer strbuf.free(&t.prelude);
-    defer containers.str_free(&t.passes);
+    defer del(t.prelude.data);
+    defer del(t.passes.items);
     read_fir_test(text, &t);
     if (t.passes.len == 0) {
         error("the .fir test has no '//! pass:' directive");
@@ -2384,7 +2469,7 @@ fn fir_test_entry(options* opts, string program) i32 {
     }
     fir_verify.runtime rt = fir_verify.runtime_of(&an.ck);
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
+    defer del(out.data);
     run_test_passes(&m, passes, &rt, &an.ck, opts->entry, &out);
     if (!runs) {
         fir_print.print_module(&m, &out);
@@ -2406,7 +2491,7 @@ fn run_entry(analysis mut* an, options* opts) i32 {
     interpreter.init(&it, &an->ck, &none, false);
     defer interpreter.free(&it);
     containers.str_vec mut argv = containers.str_create();
-    defer containers.str_free(&argv);
+    defer del(argv.items);
     containers.str_push(&argv, opts->entry);
     for (u64 mut i = 0; i < opts->run_args.len; i++) {
         containers.str_push(&argv, containers.str_at(&opts->run_args, i));
@@ -2414,7 +2499,7 @@ fn run_entry(analysis mut* an, options* opts) i32 {
     it.sh.reporting = opts->fir_events;
     interpreter.outcome o = interpreter.run_program(&it, entry, containers.str_items(&argv));
     strbuf.str_buf mut events = strbuf.create();
-    defer strbuf.free(&events);
+    defer del(events.data);
     shadow.write_events(&it.sh, "fort: ", &events);
     eprint(strbuf.view(&events));
     return run_status(&o, opts->target);
@@ -2606,10 +2691,16 @@ fn copy_archives(options* opts, libraries* libs, containers.pool mut* p, string 
 // <archives> <-l options> <-Xcc args>`, the archives in the link order.
 fn link_entry(options* opts, string object_path, containers.str_vec* archives, string out_path)
     i32 {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
     containers.str_vec mut argv = containers.str_create();
-    defer containers.str_free(&argv);
+    defer del(argv.items);
+    containers.pool mut p = containers.pool_create();
+    defer {
+        // The leak rule reads no callee: the test of the loop proves the pool empty, and the body
+        // runs at most once.
+        while (p.head != null) {
+            containers.pool_free(&p);
+        }
+    }
     containers.str_push(&argv, opts->cc);
     containers.str_push(&argv, join_path(&p, "", "--target=", opts->target));
     containers.str_push(&argv, "-o");
@@ -2638,11 +2729,11 @@ fn link_entry(options* opts, string object_path, containers.str_vec* archives, s
 // 2.3).
 fn store_entry(u8@ object, cached_unit mut* u) void {
     strbuf.str_buf mut object_hash = strbuf.create();
-    defer strbuf.free(&object_hash);
+    defer del(object_hash.data);
     artifact.append_hash(&object_hash, object);
     u->fields.object = strbuf.view(&object_hash);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     artifact.write_manifest(&u->fields, &text);
     // the field points into a buffer of this call, so it goes before the buffer does
     u->fields.object = "";
@@ -2685,15 +2776,21 @@ fn make_object(options* opts, cached_unit mut* u, string ir_path, string object_
 // Removes each file that it wrote in `dir`, and then `dir`.
 fn build_entry_unit(options* opts, libraries* libs, cached_unit mut* u, i32 built, string dir,
                     string ir_path, string out_path) i32 {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
     containers.str_vec mut written = containers.str_create();
-    defer containers.str_free(&written);
+    defer del(written.items);
+    strbuf.str_buf mut object = strbuf.create();
+    defer del(object.data);
+    containers.pool mut p = containers.pool_create();
+    defer {
+        // The leak rule reads no callee: the test of the loop proves the pool empty, and the body
+        // runs at most once.
+        while (p.head != null) {
+            containers.pool_free(&p);
+        }
+    }
     containers.str_push(&written, ir_path);
     string object_path = join_path(&p, dir, entry_base(opts->entry), OBJECT_SUFFIX);
     containers.str_push(&written, object_path);
-    strbuf.str_buf mut object = strbuf.create();
-    defer strbuf.free(&object);
     i32 mut status = built;
     if (status == EXIT_OK) {
         status = make_object(opts, u, ir_path, object_path, &object);
@@ -2713,7 +2810,7 @@ fn build_entry_unit(options* opts, libraries* libs, cached_unit mut* u, i32 buil
         }
     } else if (status == EXIT_OK) {
         containers.str_vec mut archives = containers.str_create();
-        defer containers.str_free(&archives);
+        defer del(archives.items);
         if (!copy_archives(opts, libs, &p, dir, &archives)) {
             status = EXIT_USAGE;
         } else {
@@ -2816,7 +2913,7 @@ fn write_stats(options* opts, cached_unit* u) void {
         name = u->fields.entry;
     }
     strbuf.str_buf mut line = strbuf.create();
-    defer strbuf.free(&line);
+    defer del(line.data);
     cache.append_stats(&line, !u->fields.entry_unit, name, strbuf.view(&u->key), u->found);
     print(strbuf.view(&line));
 }
@@ -2867,10 +2964,16 @@ fn has_usable_target(options* opts) bool {
 // Runs the compile line of a library build over the module `ir_path` (toolchain.md 2.1, step 7):
 // the --cc line with `-c` and no `-l` option, to the object `object_path`.
 fn compile_library(options* opts, string ir_path, string object_path) i32 {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
     containers.str_vec mut argv = containers.str_create();
-    defer containers.str_free(&argv);
+    defer del(argv.items);
+    containers.pool mut p = containers.pool_create();
+    defer {
+        // The leak rule reads no callee: the test of the loop proves the pool empty, and the body
+        // runs at most once.
+        while (p.head != null) {
+            containers.pool_free(&p);
+        }
+    }
     push_cc_line(&p, opts, ir_path, object_path, true, &argv);
     return run_tool("cc", &argv);
 }
@@ -2879,7 +2982,7 @@ fn compile_library(options* opts, string ir_path, string object_path) i32 {
 // an archive with one member, the object.
 fn archive_library(options* opts, string archive_path, string object_path) i32 {
     containers.str_vec mut argv = containers.str_create();
-    defer containers.str_free(&argv);
+    defer del(argv.items);
     containers.str_push(&argv, opts->ar);
     containers.str_push(&argv, "rcs");
     containers.str_push(&argv, archive_path);
@@ -2896,21 +2999,21 @@ fn archive_library(options* opts, string archive_path, string object_path) i32 {
 fn write_artifact(string dir, string interface_text, string summaries_text, string archive_path,
                   cached_unit mut* u) i32 {
     strbuf.str_buf mut archive = strbuf.create();
-    defer strbuf.free(&archive);
+    defer del(archive.data);
     if (!io.read_file(archive_path, &archive)) {
         error_path("cannot read", archive_path, str.from_cstr(libc.strerror(sys.errno())));
         return EXIT_USAGE;
     }
     strbuf.str_buf mut interface_hash = strbuf.create();
-    defer strbuf.free(&interface_hash);
+    defer del(interface_hash.data);
     artifact.append_interface_hash(&interface_hash, interface_text, summaries_text);
     strbuf.str_buf mut archive_hash = strbuf.create();
-    defer strbuf.free(&archive_hash);
+    defer del(archive_hash.data);
     artifact.append_hash(&archive_hash, strbuf.bytes(&archive));
     u->fields.interface = strbuf.view(&interface_hash);
     u->fields.archive = strbuf.view(&archive_hash);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     artifact.write_manifest(&u->fields, &text);
     // the two fields point into buffers of this call, so they go before the buffers do
     u->fields.interface = "";
@@ -2918,7 +3021,7 @@ fn write_artifact(string dir, string interface_text, string summaries_text, stri
     cache.store_library(strbuf.view(&u->dir), strbuf.view(&u->key), interface_text,
                         summaries_text, strbuf.bytes(&archive), strbuf.view(&text));
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut failure = 0;
     if (!artifact.write(dir, interface_text, summaries_text, strbuf.bytes(&archive),
                         strbuf.view(&text), &failed, &failure)) {
@@ -2934,7 +3037,7 @@ fn write_artifact(string dir, string interface_text, string summaries_text, stri
 fn copy_entry(string dir, cached_unit* u) i32 {
     artifact.contents* c = &u->entry;
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut failure = 0;
     if (!artifact.write(dir, strbuf.view(&c->interface), strbuf.view(&c->summaries),
                         strbuf.bytes(&c->archive), strbuf.view(&c->text), &failed, &failure)) {
@@ -3015,11 +3118,11 @@ fn library_entry(options* opts) i32 {
     diag.set_text(session.diags(&s), true);
     session.show_sources(&s);
     containers.str_vec mut paths = containers.str_create();
-    defer containers.str_free(&paths);
+    defer del(paths.items);
     containers.str_vec mut files = containers.str_create();
-    defer containers.str_free(&files);
+    defer del(files.items);
     containers.str_vec mut texts = containers.str_create();
-    defer containers.str_free(&texts);
+    defer del(texts.items);
     bool listed = read_listed(&s, &t, &paths, &files, &texts);
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
@@ -3076,7 +3179,7 @@ fn library_entry(options* opts) i32 {
         return EXIT_COMPILE_ERROR;
     }
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     interface.write(&an.ck, &an.set, opts->lib_name, &text);
     if (opts->emit_interface) {
         print(strbuf.view(&text));
@@ -3086,7 +3189,7 @@ fn library_entry(options* opts) i32 {
     defer summary.free_table(&summaries);
     summary.collect(&calls, &summaries);
     strbuf.str_buf mut summary_text = strbuf.create();
-    defer strbuf.free(&summary_text);
+    defer del(summary_text.data);
     summary.write(&summaries, opts->lib_name, &summary_text);
     if (opts->emit_summaries) {
         print(strbuf.view(&summary_text));
@@ -3156,7 +3259,16 @@ fn run(string@ args) i32 {
         return EXIT_USAGE;
     }
     options mut opts = options_create();
-    defer options_free(&opts);
+    defer {
+        del(opts.includes.items);
+        del(opts.libs.items);
+        del(opts.cc_args.items);
+        del(opts.cfg_keys.items);
+        del(opts.cfg_values.items);
+        del(opts.use_names.items);
+        del(opts.use_paths.items);
+        del(opts.run_args.items);
+    }
     i32 parsed = parse(&opts, args);
     if (parsed == PARSE_ERROR) {
         return EXIT_USAGE;

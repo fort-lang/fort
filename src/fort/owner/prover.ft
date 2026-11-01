@@ -577,12 +577,6 @@ fn make_probes(u32 count) probes {
     return pr;
 }
 
-fn free_probes(probes mut* pr) void {
-    fir_flow.bits_free(&pr->none);
-    fir_flow.bits_free(&pr->all);
-    fir_flow.bits_free(&pr->edge);
-}
-
 // Empties the first probe and the edge set, and fills the second probe.
 fn reset_probes(probes mut* pr) void {
     fir_flow.bits_clear_all(&pr->none);
@@ -596,6 +590,12 @@ fn run_locals(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d, bool
     fir.func* f = c->places.f;
     u32 n = fir.block_count(f);
     u32 count = fir.local_count(f);
+    probes mut pr = make_probes(count);
+    defer {
+        del(pr.none.words);
+        del(pr.all.words);
+        del(pr.edge.words);
+    }
     fir_flow.bits mut@ own gens = make_sets(n, count);
     fir_flow.bits mut@ own kills = make_sets(n, count);
     defer {
@@ -604,8 +604,6 @@ fn run_locals(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d, bool
         del(gens);
         del(kills);
     }
-    probes mut pr = make_probes(count);
-    defer free_probes(&pr);
     u32 mut b = 0;
     while (b < n) {
         reset_probes(&pr);
@@ -671,7 +669,7 @@ fn find_fact(context mut* c, place.path q, u64 mark) u32 {
 fn collect_facts(context mut* c, fir_flow.dataflow* stale, proof* out) void {
     fir.func* f = c->places.f;
     fir_flow.bits mut at_stale = fir_flow.bits_new(fir.local_count(f));
-    defer fir_flow.bits_free(&at_stale);
+    defer del(at_stale.words);
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         collect_block_facts(c, stale, out, b, &at_stale);
@@ -716,6 +714,18 @@ fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
     u32 n = fir.block_count(f);
     u32 count = cast(c->fact_count, u32);
     u32 locals = fir.local_count(f);
+    probes mut pr = make_probes(count);
+    defer {
+        del(pr.none.words);
+        del(pr.all.words);
+        del(pr.edge.words);
+    }
+    fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
+    defer del(at_stale.words);
+    fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
+    defer del(at_fresh.words);
+    fir_flow.bits mut at_alias = alias_state(c);
+    defer del(at_alias.words);
     fir_flow.bits mut@ own gens = make_sets(n, count);
     fir_flow.bits mut@ own kills = make_sets(n, count);
     defer {
@@ -724,14 +734,6 @@ fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
         del(gens);
         del(kills);
     }
-    probes mut pr = make_probes(count);
-    defer free_probes(&pr);
-    fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
-    defer fir_flow.bits_free(&at_stale);
-    fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
-    defer fir_flow.bits_free(&at_fresh);
-    fir_flow.bits mut at_alias = alias_state(c);
-    defer fir_flow.bits_free(&at_alias);
     fir_flow.bits mut@ own edge_gens = make_sets(n, count);
     u32 mut@ own edge_to = new(u32, cast(n, u64));
     defer {
@@ -899,7 +901,7 @@ fn needs_proof(fir.func* f, u32@ check_of, u32 b, u32 i, fir_flow.bits mut* writ
 fn find_stores(fir.func* f, u32@ check_of, proof mut* out) void {
     u64 mut count = 0;
     fir_flow.bits mut written = fir_flow.bits_new(fir.local_count(f));
-    defer fir_flow.bits_free(&written);
+    defer del(written.words);
     bool mut checked = false;
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
@@ -1056,18 +1058,26 @@ fn prove_all(fir.func* f, u64 limit, u64 use_limit, bool causes) proof {
     u32 n = fir.block_count(f);
     proof mut out = proof{};
     out.proved = new(bool, cast(n, u64));
+    prove_into(f, limit, use_limit, causes, &out);
+    return out;
+}
+
+// The proof of prove_all into `out`. The context is a local here, so that the call that frees it
+// does not come after the move of the result of prove_all.
+fn prove_into(fir.func* f, u64 limit, u64 use_limit, bool causes, proof mut* out) void {
+    u32 n = fir.block_count(f);
     u32 mut@ own check_of = new(u32, cast(n, u64));
     defer del(check_of);
     u64 units = count_units(f);
-    mark_checks(f, &out, check_of);
-    find_stores(f, check_of, &out);
-    find_inners(f, &out);
-    bool overwrite = out.checks > 0 || out.stores.len > 0;
+    mark_checks(f, out, check_of);
+    find_stores(f, check_of, out);
+    find_inners(f, out);
+    bool overwrite = out->checks > 0 || out->stores.len > 0;
     // rule (b) needs a local owner, also one in a local of an owning aggregate or in `_0`
-    bool emptiness = overwrite || has_owner(f, false) || out.inners.len > 0;
+    bool emptiness = overwrite || has_owner(f, false) || out->inners.len > 0;
     bool owners = has_local_owner(f);
     if (!emptiness && !owners) {
-        return out;
+        return;
     }
     u64 locals = cast(fir.local_count(f), u64);
     // `context{}` is the zero value of the struct, so the pass proves the stores into its fields
@@ -1078,10 +1088,35 @@ fn prove_all(fir.func* f, u64 limit, u64 use_limit, bool causes) proof {
     c.places.locals = new(place.local_info, locals);
     c.places.first_source = new(u32, locals);
     c.block_fact = new(u32, cast(n, u64));
-    c.store_fact = new(u32, out.stores.len);
+    c.store_fact = new(u32, out->stores.len);
     c.first_store = new(u64, cast(n, u64) + 1);
-    defer free_context(&c);
-    index_stores(&c, &out);
+    defer {
+        free_context(&c);
+        // The leak rule reads no callee, so each owner takes a `del` after the call.
+        del(c.places.locals);
+        del(c.places.first_source);
+        del(c.places.first_reader);
+        del(c.places.readers);
+        del(c.places.held);
+        del(c.places.steps);
+        del(c.places.reads.items);
+        del(c.facts);
+        del(c.block_fact);
+        del(c.store_fact);
+        del(c.exit_fact);
+        del(c.first_store);
+        del(c.inner_fact);
+        del(c.first_inner);
+        del(c.site_fact);
+        del(c.aggregate_fact);
+        del(c.tested);
+        del(c.tests);
+        del(c.aliases.borrow_rank);
+        del(c.aliases.frame_rank);
+        del(c.aliases.ins);
+        del(c.origins.words);
+    }
+    index_stores(&c, out);
     if (emptiness) {
         place.count_uses(&c.places);
     } else {
@@ -1093,40 +1128,40 @@ fn prove_all(fir.func* f, u64 limit, u64 use_limit, bool causes) proof {
     c.use_limit = use_limit;
     c.causes = causes;
     if (!emptiness) {
-        prove_uses_alone(&c, &out);
-        return out;
+        prove_uses_alone(&c, out);
+        return;
     }
-    u64 checked = cast(out.checks, u64) + count_alone(&c, check_of, &out);
+    u64 checked = cast(out->checks, u64) + count_alone(&c, check_of, out);
     u64 sets = cast(n, u64) * locals + place.stale_steps(&c.places);
     // a function with no check and no store that needs a proof has no work (D17.11)
     if (overwrite) {
-        out.work = units * checked + sets;
+        out->work = units * checked + sets;
     }
-    out.leak_work = units * (checked + count_owner_facts(&c)) + sets;
+    out->leak_work = units * (checked + count_owner_facts(&c)) + sets;
     // a separate count keeps each verdict of part 1 when only the inner owners pass the limit
-    out.inner_work = out.leak_work + types.capped_product(units, count_inner_steps(&c, &out));
-    out.over = out.work > limit;
-    out.leak_over = out.leak_work > limit;
-    out.inner_over = out.inner_work > limit;
-    out.aggregate_work = types.capped_sum(out.inner_work,
-                                          types.capped_product(units, count_aggregate_steps(f)));
-    out.aggregate_over = out.aggregate_work > limit;
-    if (out.leak_over) {
-        find_exits(&c, null, &out);
-        pass_exits(&c, &out);
+    out->inner_work = out->leak_work + types.capped_product(units, count_inner_steps(&c, out));
+    out->over = out->work > limit;
+    out->leak_over = out->leak_work > limit;
+    out->inner_over = out->inner_work > limit;
+    out->aggregate_work = types.capped_sum(out->inner_work,
+                                           types.capped_product(units, count_aggregate_steps(f)));
+    out->aggregate_over = out->aggregate_work > limit;
+    if (out->leak_over) {
+        find_exits(&c, null, out);
+        pass_exits(&c, out);
         // the aggregate work holds the leak work
-        pass_aggregates(&out);
+        pass_aggregates(out);
     }
-    if (out.inner_over) {
-        pass_inners(&out);
+    if (out->inner_over) {
+        pass_inners(out);
     }
-    if (out.over) {
-        judge(&c, null, null, null, null, &out);
-        prove_uses_alone(&c, &out);
-        return out;
+    if (out->over) {
+        judge(&c, null, null, null, null, out);
+        prove_uses_alone(&c, out);
+        return;
     }
-    run_dataflows(&c, &out);
-    return out;
+    run_dataflows(&c, out);
+    return;
 }
 
 // Runs the dataflows of the proof `c` within the limit and writes the verdict of each check and
@@ -1138,70 +1173,82 @@ fn run_dataflows(context mut* c, proof mut* out) void {
     fir.func* f = c->places.f;
     u32 locals = fir.local_count(f);
     fir.pred_table mut pt = fir.func_predecessors(f);
-    defer fir.pred_table_free(&pt);
-    fir_flow.dataflow mut stale = fir_flow.dataflow_new(locals, fir_flow.join_kind.join_union,
-                                                        transfer_none);
-    defer fir_flow.dataflow_free(&stale);
-    run_locals(c, &pt, &stale, false);
-    fir_flow.dataflow mut fresh = fir_flow.dataflow_new(locals, fir_flow.join_kind.join_intersect,
-                                                        transfer_none);
-    defer fir_flow.dataflow_free(&fresh);
-    run_locals(c, &pt, &fresh, true);
+    defer {
+        del(pt.first);
+        del(pt.preds);
+    }
+    fir_flow.dataflow mut* own stale = fir_flow.dataflow_make(locals,
+                                                              fir_flow.join_kind.join_union,
+                                                              transfer_none);
+    defer fir_flow.dataflow_drop(move(stale));
+    run_locals(c, &pt, stale, false);
+    fir_flow.dataflow mut* own fresh = fir_flow.dataflow_make(locals,
+                                                              fir_flow.join_kind.join_intersect,
+                                                              transfer_none);
+    defer fir_flow.dataflow_drop(move(fresh));
+    run_locals(c, &pt, fresh, true);
     find_tests(c);
-    fir_flow.dataflow mut scratch = fir_flow.dataflow_new(locals,
-                                                          fir_flow.join_kind.join_intersect,
-                                                          transfer_none);
-    defer fir_flow.dataflow_free(&scratch);
-    run_scratch(c, &pt, &scratch);
+    fir_flow.dataflow mut* own scratch = fir_flow.dataflow_make(locals,
+                                                                fir_flow.join_kind.join_intersect,
+                                                                transfer_none);
+    defer fir_flow.dataflow_drop(move(scratch));
+    run_scratch(c, &pt, scratch);
     if (!out->leak_over && has_owner(f, true)) {
         // the ended dataflow runs only for a function with a named owner local or a named local
         // of an owning aggregate type
         fir_flow.dataflow mut ended = fir_flow.dataflow_new(locals,
                                                             fir_flow.join_kind.join_intersect,
                                                             transfer_none);
-        defer fir_flow.dataflow_free(&ended);
+        defer {
+            fir_flow.dataflow_free(&ended);
+            // The leak rule reads no callee, so each owner takes a `del` after the call.
+            del(ended.entry.words);
+            del(ended.init.words);
+            del(ended.ins);
+            del(ended.outs);
+        }
         run_ended(c, &pt, &ended);
         find_exits(c, &ended, out);
     } else if (!out->leak_over) {
         find_exits(c, null, out);
     }
-    collect_facts(c, &stale, out);
+    collect_facts(c, stale, out);
     // the store follows a `del`, because each call above can change the fields of `*c`
     del(c->exit_fact);
     c->exit_fact = new(u32, out->exits.len);
     if (!out->leak_over) {
-        collect_exit_facts(c, &stale, out);
+        collect_exit_facts(c, stale, out);
     }
     if (!out->inner_over) {
-        collect_inner_facts(c, &stale, out);
+        collect_inner_facts(c, stale, out);
     }
     collect_aggregate_facts(c, out);
     if (c->fact_count == 0) {
-        judge(c, &stale, &fresh, null, &scratch, out);
+        judge(c, stale, fresh, null, scratch, out);
         if (!out->leak_over) {
-            judge_exits(c, &stale, &fresh, null, &scratch, out);
+            judge_exits(c, stale, fresh, null, scratch, out);
         }
         if (!out->inner_over) {
-            judge_inners(c, &stale, &fresh, null, &scratch, out);
+            judge_inners(c, stale, fresh, null, scratch, out);
         }
-        prove_uses(c, &pt, &stale, out);
+        prove_uses(c, &pt, stale, out);
         return;
     }
     run_aliases(c, &pt, out);
-    fir_flow.dataflow mut facts = fir_flow.dataflow_new(cast(c->fact_count, u32),
-                                                        fir_flow.join_kind.join_intersect,
-                                                        transfer_none);
-    defer fir_flow.dataflow_free(&facts);
-    run_facts(c, &pt, &stale, &fresh, &facts);
-    judge(c, &stale, &fresh, &facts, &scratch, out);
+    fir_flow.dataflow mut* own facts = fir_flow.dataflow_make(cast(c->fact_count, u32),
+                                                              fir_flow.join_kind.join_intersect,
+                                                              transfer_none);
+    defer fir_flow.dataflow_drop(move(facts));
+    run_facts(c, &pt, stale, fresh, facts);
+    judge(c, stale, fresh, facts, scratch, out);
     if (!out->leak_over) {
-        judge_exits(c, &stale, &fresh, &facts, &scratch, out);
+        judge_exits(c, stale, fresh, facts, scratch, out);
     }
     if (!out->inner_over) {
-        judge_inners(c, &stale, &fresh, &facts, &scratch, out);
+        judge_inners(c, stale, fresh, facts, scratch, out);
     }
-    judge_aggregates(c, &pt, &stale, &fresh, &facts, out);
-    prove_uses(c, &pt, &stale, out);
+    judge_aggregates(c, &pt, stale, fresh, facts, out);
+    prove_uses(c, &pt, stale, out);
 }
 
 // Runs the fixpoint of owner.alias for the facts of `c`, before the facts dataflow, whose kill
@@ -1244,7 +1291,7 @@ fn judge(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fresh,
     }
     fir.func* f = c->places.f;
     fir_flow.bits mut seen = fir_flow.bits_new(fir.block_count(f));
-    defer fir_flow.bits_free(&seen);
+    defer del(seen.words);
     u32 mut@ own queue = new(u32, cast(fir.block_count(f), u64));
     defer del(queue);
     judge_checks(c, d, out, &seen, queue);
@@ -1280,15 +1327,19 @@ fn judge_stores(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
     fir.func* f = c->places.f;
     u32 locals = fir.local_count(f);
     probes mut pr = make_probes(cast(c->fact_count, u32));
-    defer free_probes(&pr);
+    defer {
+        del(pr.none.words);
+        del(pr.all.words);
+        del(pr.edge.words);
+    }
     fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
-    defer fir_flow.bits_free(&at_stale);
+    defer del(at_stale.words);
     fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
-    defer fir_flow.bits_free(&at_fresh);
+    defer del(at_fresh.words);
     fir_flow.bits mut at_scratch = fir_flow.bits_new(locals);
-    defer fir_flow.bits_free(&at_scratch);
+    defer del(at_scratch.words);
     fir_flow.bits mut at_alias = alias_state(c);
-    defer fir_flow.bits_free(&at_alias);
+    defer del(at_alias.words);
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         u64 mut k = c->first_store[cast(b, u64)];
@@ -1385,6 +1436,12 @@ fn run_scratch(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d) voi
     fir.func* f = c->places.f;
     u32 n = fir.block_count(f);
     u32 count = fir.local_count(f);
+    probes mut pr = make_probes(count);
+    defer {
+        del(pr.none.words);
+        del(pr.all.words);
+        del(pr.edge.words);
+    }
     fir_flow.bits mut@ own gens = make_sets(n, count);
     fir_flow.bits mut@ own kills = make_sets(n, count);
     fir_flow.bits mut@ own edge_gens = make_sets(n, count);
@@ -1398,8 +1455,6 @@ fn run_scratch(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d) voi
         del(edge_gens);
         del(edge_to);
     }
-    probes mut pr = make_probes(count);
-    defer free_probes(&pr);
     u32 mut b = 0;
     while (b < n) {
         reset_probes(&pr);
@@ -1700,15 +1755,19 @@ fn judge_exits(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fres
     fir.func* f = c->places.f;
     u32 locals = fir.local_count(f);
     probes mut pr = make_probes(cast(c->fact_count, u32));
-    defer free_probes(&pr);
+    defer {
+        del(pr.none.words);
+        del(pr.all.words);
+        del(pr.edge.words);
+    }
     fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
-    defer fir_flow.bits_free(&at_stale);
+    defer del(at_stale.words);
     fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
-    defer fir_flow.bits_free(&at_fresh);
+    defer del(at_fresh.words);
     fir_flow.bits mut at_scratch = fir_flow.bits_new(locals);
-    defer fir_flow.bits_free(&at_scratch);
+    defer del(at_scratch.words);
     fir_flow.bits mut at_alias = alias_state(c);
-    defer fir_flow.bits_free(&at_alias);
+    defer del(at_alias.words);
     bool mut unused = false;
     u64 mut k = 0;
     while (k < out->exits.len) {
@@ -1834,13 +1893,17 @@ fn walk_aggregates(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* 
     fir.func* f = c->places.f;
     u32 locals = fir.local_count(f);
     probes mut pr = make_probes(cast(c->fact_count, u32));
-    defer free_probes(&pr);
+    defer {
+        del(pr.none.words);
+        del(pr.all.words);
+        del(pr.edge.words);
+    }
     fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
-    defer fir_flow.bits_free(&at_stale);
+    defer del(at_stale.words);
     fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
-    defer fir_flow.bits_free(&at_fresh);
+    defer del(at_fresh.words);
     fir_flow.bits mut at_alias = alias_state(c);
-    defer fir_flow.bits_free(&at_alias);
+    defer del(at_alias.words);
     bool mut unused = false;
     u64 mut k = 0;
     while (k < out->aggregates.len) {
@@ -1902,13 +1965,24 @@ fn gen_addressed(context mut* c, fir.statement* s, fir_flow.bits* stale, probes 
 fn find_causes(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
                fir_flow.dataflow* fresh, proof mut* out, u64 mut@ from, u64 mut@ first) void {
     u32 count = cast(c->fact_count, u32);
-    fir_flow.dataflow mut r1 = fir_flow.dataflow_new(count, fir_flow.join_kind.join_intersect,
-                                                     transfer_none);
-    defer fir_flow.dataflow_free(&r1);
-    c->r1 = true;
-    run_facts(c, pt, stale, fresh, &r1);
-    walk_aggregates(c, stale, fresh, &r1, out, from, first);
-    c->r1 = false;
+    // Each dataflow ends in a block of its own, so that the call that frees one comes before no
+    // `del` of the other.
+    {
+        fir_flow.dataflow mut r1 = fir_flow.dataflow_new(count, fir_flow.join_kind.join_intersect,
+                                                         transfer_none);
+        defer {
+            fir_flow.dataflow_free(&r1);
+            // The leak rule reads no callee, so each owner takes a `del` after the call.
+            del(r1.entry.words);
+            del(r1.init.words);
+            del(r1.ins);
+            del(r1.outs);
+        }
+        c->r1 = true;
+        run_facts(c, pt, stale, fresh, &r1);
+        walk_aggregates(c, stale, fresh, &r1, out, from, first);
+        c->r1 = false;
+    }
     u64 mut k = 0;
     while (k < out->aggregates.len) {
         aggregate mut* a = &out->aggregates[k];
@@ -1918,11 +1992,20 @@ fn find_causes(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
         from[k] = a->first;
         k += 1;
     }
-    fir_flow.dataflow mut some = fir_flow.dataflow_new(count, fir_flow.join_kind.join_union,
-                                                       transfer_none);
-    defer fir_flow.dataflow_free(&some);
-    run_facts(c, pt, stale, fresh, &some);
-    walk_aggregates(c, stale, fresh, &some, out, from, first);
+    {
+        fir_flow.dataflow mut some = fir_flow.dataflow_new(count, fir_flow.join_kind.join_union,
+                                                           transfer_none);
+        defer {
+            fir_flow.dataflow_free(&some);
+            // The leak rule reads no callee, so each owner takes a `del` after the call.
+            del(some.entry.words);
+            del(some.init.words);
+            del(some.ins);
+            del(some.outs);
+        }
+        run_facts(c, pt, stale, fresh, &some);
+        walk_aggregates(c, stale, fresh, &some, out, from, first);
+    }
     k = 0;
     while (k < out->aggregates.len) {
         aggregate mut* a = &out->aggregates[k];
@@ -1968,6 +2051,12 @@ fn run_ended(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d) void 
     fir.func* f = c->places.f;
     u32 n = fir.block_count(f);
     u32 count = fir.local_count(f);
+    probes mut pr = make_probes(count);
+    defer {
+        del(pr.none.words);
+        del(pr.all.words);
+        del(pr.edge.words);
+    }
     fir_flow.bits mut@ own gens = make_sets(n, count);
     fir_flow.bits mut@ own kills = make_sets(n, count);
     defer {
@@ -1976,8 +2065,6 @@ fn run_ended(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d) void 
         del(gens);
         del(kills);
     }
-    probes mut pr = make_probes(count);
-    defer free_probes(&pr);
     u32 mut b = 0;
     while (b < n) {
         reset_probes(&pr);
@@ -2182,7 +2269,7 @@ fn collect_inner_facts(context mut* c, fir_flow.dataflow* stale, proof* out) voi
 fn collect_site_facts(context mut* c, fir_flow.dataflow* stale, proof* out) void {
     fir.func* f = c->places.f;
     fir_flow.bits mut at_stale = fir_flow.bits_new(fir.local_count(f));
-    defer fir_flow.bits_free(&at_stale);
+    defer del(at_stale.words);
     u64 mut k = 0;
     while (k < out->inners.len) {
         u32 b = out->inners[k].block;
@@ -2235,15 +2322,19 @@ fn judge_inners(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
     fir.func* f = c->places.f;
     u32 locals = fir.local_count(f);
     probes mut pr = make_probes(cast(c->fact_count, u32));
-    defer free_probes(&pr);
+    defer {
+        del(pr.none.words);
+        del(pr.all.words);
+        del(pr.edge.words);
+    }
     fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
-    defer fir_flow.bits_free(&at_stale);
+    defer del(at_stale.words);
     fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
-    defer fir_flow.bits_free(&at_fresh);
+    defer del(at_fresh.words);
     fir_flow.bits mut at_scratch = fir_flow.bits_new(locals);
-    defer fir_flow.bits_free(&at_scratch);
+    defer del(at_scratch.words);
     fir_flow.bits mut at_alias = alias_state(c);
-    defer fir_flow.bits_free(&at_alias);
+    defer del(at_alias.words);
     bool mut unused = false;
     u64 mut k = 0;
     while (k < out->inners.len) {
@@ -2410,20 +2501,6 @@ struct usage {
     u64 charge;
 }
 
-fn free_usage(usage mut* u) void {
-    del(u->acts);
-    del(u->first_act);
-    del(u->owners);
-    del(u->first_owner);
-    del(u->whole);
-    del(u->memory);
-    del(u->keyed);
-    del(u->named);
-    del(u->records);
-    del(u->ops);
-    del(u->owned);
-}
-
 // Appends `a` to the acts of `u`, in block `u->block`.
 fn push_act(usage mut* u, act a) void {
     if (u->act_count == u->acts.len) {
@@ -2472,7 +2549,10 @@ fn prove_uses_alone(context mut* c, proof mut* out) void {
     }
     fir.func* f = c->places.f;
     fir.pred_table mut pt = fir.func_predecessors(f);
-    defer fir.pred_table_free(&pt);
+    defer {
+        del(pt.first);
+        del(pt.preds);
+    }
     find_tests(c);
     if (!place.has_local_sources(&c->places) && c->places.held.len == 0) {
         prove_uses(c, &pt, null, out);
@@ -2481,7 +2561,14 @@ fn prove_uses_alone(context mut* c, proof mut* out) void {
     fir_flow.dataflow mut flow = fir_flow.dataflow_new(fir.local_count(f),
                                                        fir_flow.join_kind.join_union,
                                                        transfer_none);
-    defer fir_flow.dataflow_free(&flow);
+    defer {
+        fir_flow.dataflow_free(&flow);
+        // The leak rule reads no callee, so each owner takes a `del` after the call.
+        del(flow.entry.words);
+        del(flow.init.words);
+        del(flow.ins);
+        del(flow.outs);
+    }
     run_locals(c, &pt, &flow, false);
     prove_uses(c, &pt, &flow, out);
 }
@@ -2505,7 +2592,19 @@ fn prove_uses(context mut* c, fir.pred_table* preds, fir_flow.dataflow* stale, p
     u32 locals = fir.local_count(f);
     u64 limit = c->use_limit;
     usage mut u = usage{};
-    defer free_usage(&u);
+    defer {
+        del(u.acts);
+        del(u.first_act);
+        del(u.owners);
+        del(u.first_owner);
+        del(u.whole);
+        del(u.memory);
+        del(u.keyed);
+        del(u.named);
+        del(u.records);
+        del(u.ops);
+        del(u.owned);
+    }
     u.first_act = new(u64, cast(n, u64) + 1);
     u.whole = new(bool, cast(locals, u64));
     mark_memory_owners(c, &u);
@@ -2560,7 +2659,7 @@ fn collect_usage(context mut* c, fir_flow.dataflow* stale, usage mut* u) void {
     fir.func* f = c->places.f;
     u32 n = fir.block_count(f);
     fir_flow.bits mut at_stale = fir_flow.bits_new(fir.local_count(f));
-    defer fir_flow.bits_free(&at_stale);
+    defer del(at_stale.words);
     u32 mut b = 0;
     while (b < n) {
         u->first_act[cast(b, u64)] = u->act_count;
@@ -3205,12 +3304,6 @@ struct walk {
     bool edged;
 }
 
-fn free_walk(walk mut* w) void {
-    del(w->s);
-    del(w->edge);
-    fir_flow.bits_free(&w->aliased);
-}
-
 // Walks the acts of block `b` from the state in w.s, and moves w.s to the end of the block. With
 // an edge state, w.edge takes the state at the act of the test with the end of its owner, and each
 // later act; with no test, the state at the end of the block. With `judging`, each act of a use
@@ -3343,8 +3436,10 @@ fn iterate_uses(context mut* c, usage mut* u, fir.pred_table* pt, u64 limit, u64
         del(outs);
         del(edges);
         del(ring);
-        fir_flow.bits_free(&listed);
-        free_walk(&w);
+        del(listed.words);
+        del(w.s);
+        del(w.edge);
+        del(w.aliased.words);
     }
     u64 mut i = 0;
     while (i < ins.len) {
@@ -3428,7 +3523,11 @@ fn judge_uses(context mut* c, usage mut* u, u64@ ins, bool over) void {
     walk mut w = walk{};
     w.s = new(u64, values);
     w.aliased = alias_state(c);
-    defer free_walk(&w);
+    defer {
+        del(w.s);
+        del(w.edge);
+        del(w.aliased.words);
+    }
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         if (!stateless) {

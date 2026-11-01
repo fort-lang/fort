@@ -56,7 +56,14 @@ fn check_proved(gen.emitter mut* g, fir_verify.runtime* rt, fir.func mut* f,
                 summary.graph mut* calls) bool {
     fir_verify.verify(f, rt);
     prover.proof mut verdicts = prover.prove(f);
-    defer prover.free(&verdicts);
+    defer {
+        del(verdicts.proved);
+        del(verdicts.stores);
+        del(verdicts.exits);
+        del(verdicts.inners);
+        del(verdicts.uses);
+        del(verdicts.aggregates);
+    }
     if (prover.has_error(&verdicts)) {
         report.write(f, &verdicts, g->sess);
         report.write_leaks(f, &verdicts, g->sess);
@@ -101,10 +108,20 @@ fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
     // read before the first call, because prover.prove_uses takes each call as a change of `f` and
     // `text`
     string name = fn_node->sym->name;
-    fir.func mut f = fir.func{};
-    fir_lower.report mut why = fir_lower.report{};
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
+    fir.func mut f = fir.func{};
+    defer {
+        // A path that moves `f` to emit_fir leaves it empty here.
+        fir.func_free(&f);
+        // The leak rule reads no callee, so each owner takes a `del` after the call.
+        del(f.locals.items);
+        del(f.projs.items);
+        del(f.ops.items);
+        del(f.arms.items);
+        del(f.blocks.items);
+    }
+    fir_lower.report mut why = fir_lower.report{};
     if (!fir_lower.lower_function(fp->ck, fn_node, &f, &why)) {
         if (why.entry.len > 0) {
             strbuf.append(&text, "the runtime `std.rt` has no entry `");
@@ -128,7 +145,6 @@ fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
     }
     fir.check_kind mut missing = fir.check_kind.chk_overflow;
     if (!fir_verify.runtime_holds(&f, &fp->rt, &missing)) {
-        fir.func_free(&f);
         strbuf.append(&text, "the runtime `std.rt` has no entry `");
         strbuf.append(&text, fir.check_entry(missing));
         strbuf.append(&text, "` with the parameters that `");
@@ -146,7 +162,13 @@ fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
 /// error of the emptiness pass, which writes no text.
 fn emit_fir(gen.emitter mut* g, fir_path mut* fp, fir.func f) bool {
     fir.module mut m = fir.module_new();
-    defer fir.module_free(&m);
+    defer {
+        fir.module_free(&m);
+        // The leak rule reads no callee, so each owner takes a `del` after the call.
+        del(m.funcs.items);
+        del(m.globals.items);
+        del(m.externs.items);
+    }
     fir.module_add_function(&m, move(f));
     return emit_module(g, fp, &m);
 }

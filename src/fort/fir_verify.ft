@@ -1138,7 +1138,7 @@ fn reach(fir_flow.bits mut* seen, u32 mut@ stack, u64 mut* top, u32 b) void {
 fn v9_reachable(walk mut* w) bool {
     u32 n = fir.block_count(w->f);
     fir_flow.bits mut seen = fir_flow.bits_new(n);
-    defer fir_flow.bits_free(&seen);
+    defer del(seen.words);
     u32 mut@ own stack = new(u32, cast(n, u64));
     defer del(stack);
     mark_reachable(w->f, &seen, stack);
@@ -1282,7 +1282,7 @@ fn effects_of(fir.func* f) effects {
     effects mut e = effects{};
     e.first = new(u64, cast(n, u64) + 1);
     fir.read_list mut reads = fir.read_list{};
-    defer fir.read_list_free(&reads);
+    defer del(reads.items);
     collect_effects(f, &reads, &e);
     return e;
 }
@@ -1379,6 +1379,9 @@ fn transfer_sets(effects* e, u32 rule, u32 n, u32 count, fir_flow.bits mut@ gens
 fn test_flow(walk mut* w, fir.pred_table* pt, effects* e, u32 rule, fir_flow.dataflow mut* d,
              string what) bool {
     u32 n = fir.block_count(w->f);
+    // `at` comes first, so that its `del` runs after the calls of the next deferred block
+    fir_flow.bits mut at = fir_flow.bits_new(d->count);
+    defer del(at.words);
     fir_flow.bits mut@ own gens = new(fir_flow.bits, cast(n, u64));
     fir_flow.bits mut@ own kills = new(fir_flow.bits, cast(n, u64));
     defer {
@@ -1393,8 +1396,6 @@ fn test_flow(walk mut* w, fir.pred_table* pt, effects* e, u32 rule, fir_flow.dat
     }
     transfer_sets(e, rule, n, d->count, gens, kills);
     fir_flow.dataflow_forward_sets(w->f, pt, d, gens, kills);
-    fir_flow.bits mut at = fir_flow.bits_new(d->count);
-    defer fir_flow.bits_free(&at);
     u32 mut b = 0;
     while (b < n) {
         fir_flow.bits_copy(&at, &d->ins[cast(b, u64)]);
@@ -1424,7 +1425,14 @@ fn no_transfer(fir.func* f, u32 b, fir_flow.bits mut* set) void {
 fn v12_moves(walk mut* w, fir.pred_table* pt, effects* e) bool {
     fir_flow.dataflow mut d = fir_flow.dataflow_new(fir.local_count(w->f),
                                                     fir_flow.join_kind.join_union, no_transfer);
-    defer fir_flow.dataflow_free(&d);
+    defer {
+        fir_flow.dataflow_free(&d);
+        // The leak rule reads no callee, so each owner takes a `del` after the call.
+        del(d.entry.words);
+        del(d.init.words);
+        del(d.ins);
+        del(d.outs);
+    }
     return test_flow(w, pt, e, RULE_V12, &d, V12_MOVED);
 }
 
@@ -1435,7 +1443,14 @@ fn v13_assignments(walk mut* w, fir.pred_table* pt, effects* e) bool {
     fir_flow.dataflow mut d = fir_flow.dataflow_new(fir.local_count(w->f),
                                                     fir_flow.join_kind.join_intersect,
                                                     no_transfer);
-    defer fir_flow.dataflow_free(&d);
+    defer {
+        fir_flow.dataflow_free(&d);
+        // The leak rule reads no callee, so each owner takes a `del` after the call.
+        del(d.entry.words);
+        del(d.init.words);
+        del(d.ins);
+        del(d.outs);
+    }
     fir_flow.bits_fill(&d.init);
     return test_flow(w, pt, e, RULE_V13, &d, V13_UNASSIGNED);
 }
@@ -1524,9 +1539,11 @@ fn find_violation(fir.func* f, runtime* rt, violation mut* out) bool {
             // V12 and V13 read one list of the effects of the items on the temporaries
             effects mut e = effects_of(f);
             ok = v12_moves(&w, &pt, &e) && v13_assignments(&w, &pt, &e);
-            effects_free(&e);
+            del(e.items);
+            del(e.first);
         }
-        fir.pred_table_free(&pt);
+        del(pt.first);
+        del(pt.preds);
     }
     if (!ok) {
         *out = w.v;
@@ -1578,5 +1595,5 @@ fn verify(fir.func* f, runtime* rt) void {
         // panic-coverage: tests: fir_verify_v01 fir_verify_v02 gen_fir_excuse gen_fir_v9
         panic(strbuf.view(&text));
     }
-    strbuf.free(&text);
+    del(text.data);
 }

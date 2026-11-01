@@ -3,6 +3,7 @@
 //! stdout:
 //| aggregate exits ok
 //| aggregate source ok
+//| aggregate forms ok
 //| aggregate work ok
 //| aggregate report ok
 //| aggregate text ok
@@ -830,6 +831,270 @@ fn each_exit_of_lowered_source_has_its_verdict() void {
     }
 }
 
+// One pair for each form that ends a local of an owning aggregate type: `<form>_before` keeps a
+// shape that the pass does not prove, and `<form>_after` takes the form (notes/compiler.md 6). A
+// comment gives the verdicts of each function (write_verdicts). A `pair` owns two leaves, which
+// hold no owner. A `chain` owns its nodes through `head`, so a `del` of `head` frees a node whose
+// owner can hold an allocation: a site of part 2.
+string[208] FORM_SOURCE = {
+    "struct leaf {",
+    "    i32 v;",
+    "}",
+    "struct node {",
+    "    node mut* own next;",
+    "}",
+    "struct pair {",
+    "    leaf mut* own a;",
+    "    leaf mut* own b;",
+    "}",
+    "struct chain {",
+    "    node mut* own head;",
+    "}",
+    "fn g() void {",
+    "}",
+    "fn make_pair() pair {",
+    "    return pair{new(leaf), null};",
+    "}",
+    "fn take_pair(pair p) void {",
+    "    del(p.a);",
+    "    del(p.b);",
+    "}",
+    "fn free_pair(pair mut* p) void {",
+    "    del(p->a);",
+    "    del(p->b);",
+    "}",
+    "fn drop_pair(pair mut* own p) void {",
+    "    del(p->a);",
+    "    del(p->b);",
+    "    del(p);",
+    "}",
+    "fn free_chain(chain mut* c) void {",
+    "    while (c->head != null) {",
+    "        node mut* own n = move(c->head);",
+    "        c->head = move(n->next);",
+    "        del(n);",
+    "    }",
+    "}",
+    "fn use_pair(pair mut* p) void {",
+    "    g();",
+    "}",
+    "fn use_chain(chain mut* c) void {",
+    "    g();",
+    "}",
+    "fn fill(pair mut* p) void {",
+    "    chain mut c = chain{};",
+    "    defer {",
+    "        free_chain(&c);",
+    "        while (c.head != null) {",
+    "            free_chain(&c);",
+    "        }",
+    "    }",
+    "    use_chain(&c);",
+    "    use_pair(p);",
+    "}",
+    // del: a free that only dels: dpU0:1, then the `del` of each owner: dpP
+    "fn del_before() void {",
+    "    pair mut p = make_pair();",
+    "    defer free_pair(&p);",
+    "    use_pair(&p);",
+    "}",
+    "fn del_after() void {",
+    "    pair mut p = make_pair();",
+    "    defer {",
+    "        del(p.a);",
+    "        del(p.b);",
+    "    }",
+    "    use_pair(&p);",
+    "}",
+    // end: a free that calls: dcU0:1; a `del` of the chain after it: dcP and a site of part 2; a
+    // loop on null after it: dcP
+    "fn end_before() void {",
+    "    chain mut c = chain{};",
+    "    defer free_chain(&c);",
+    "    use_chain(&c);",
+    "}",
+    "fn end_del() void {",
+    "    chain mut c = chain{};",
+    "    defer {",
+    "        free_chain(&c);",
+    "        del(c.head);",
+    "    }",
+    "    use_chain(&c);",
+    "}",
+    "fn end_after() void {",
+    "    chain mut c = chain{};",
+    "    defer {",
+    "        free_chain(&c);",
+    "        while (c.head != null) {",
+    "            free_chain(&c);",
+    "        }",
+    "    }",
+    "    use_chain(&c);",
+    "}",
+    // order: the `del`s run before the free of `c`, which kills them: dcP dpU0:3; written first,
+    // they run after it: dpP dcP
+    "fn order_before() void {",
+    "    chain mut c = chain{};",
+    "    defer {",
+    "        free_chain(&c);",
+    "        while (c.head != null) {",
+    "            free_chain(&c);",
+    "        }",
+    "    }",
+    "    pair mut p = make_pair();",
+    "    defer {",
+    "        del(p.a);",
+    "        del(p.b);",
+    "    }",
+    "    use_chain(&c);",
+    "    use_pair(&p);",
+    "}",
+    "fn order_after() void {",
+    "    pair mut p = make_pair();",
+    "    defer {",
+    "        del(p.a);",
+    "        del(p.b);",
+    "    }",
+    "    chain mut c = chain{};",
+    "    defer {",
+    "        free_chain(&c);",
+    "        while (c.head != null) {",
+    "            free_chain(&c);",
+    "        }",
+    "    }",
+    "    use_chain(&c);",
+    "    use_pair(&p);",
+    "}",
+    // block: the free of `c` kills the end of `d`: dcP ddU0:3; in blocks of their own: dcP ddP
+    "fn block_before() void {",
+    "    chain mut c = chain{};",
+    "    defer {",
+    "        free_chain(&c);",
+    "        while (c.head != null) {",
+    "            free_chain(&c);",
+    "        }",
+    "    }",
+    "    chain mut d = chain{};",
+    "    defer {",
+    "        free_chain(&d);",
+    "        while (d.head != null) {",
+    "            free_chain(&d);",
+    "        }",
+    "    }",
+    "    use_chain(&c);",
+    "    use_chain(&d);",
+    "}",
+    "fn block_after() void {",
+    "    {",
+    "        chain mut c = chain{};",
+    "        defer {",
+    "            free_chain(&c);",
+    "            while (c.head != null) {",
+    "                free_chain(&c);",
+    "            }",
+    "        }",
+    "        use_chain(&c);",
+    "    }",
+    "    {",
+    "        chain mut d = chain{};",
+    "        defer {",
+    "            free_chain(&d);",
+    "            while (d.head != null) {",
+    "                free_chain(&d);",
+    "            }",
+    "        }",
+    "        use_chain(&d);",
+    "    }",
+    "}",
+    // split: the free of `c` comes after the move of `p` into the temporary of the result: dcP
+    // dpU0:3 rtP; a function that takes `p` holds `c`: dpP
+    "fn split_before() pair {",
+    "    chain mut c = chain{};",
+    "    defer {",
+    "        free_chain(&c);",
+    "        while (c.head != null) {",
+    "            free_chain(&c);",
+    "        }",
+    "    }",
+    "    pair mut p = make_pair();",
+    "    use_chain(&c);",
+    "    use_pair(&p);",
+    "    return p;",
+    "}",
+    "fn split_after() pair {",
+    "    pair mut p = make_pair();",
+    "    fill(&p);",
+    "    return p;",
+    "}",
+    // drop: a value that a call frees through a pointer: dkeptP dbodyU0:1; a call that takes it by
+    // `move`, with no address of the local: dkeptP
+    "fn drop_before(pair mut* own q) void {",
+    "    pair kept = move(*q);",
+    "    del(q);",
+    "    pair mut body = move(kept);",
+    "    free_pair(&body);",
+    "}",
+    "fn drop_after(pair mut* own q) void {",
+    "    pair kept = move(*q);",
+    "    del(q);",
+    "    take_pair(move(kept));",
+    "}",
+    // allocation: two locals whose ends call: dxU0:1 dyU0:3; in allocations, no local of an owning
+    // aggregate type
+    "fn allocation_before() void {",
+    "    pair mut x = make_pair();",
+    "    defer free_pair(&x);",
+    "    pair mut y = make_pair();",
+    "    defer free_pair(&y);",
+    "    use_pair(&x);",
+    "    use_pair(&y);",
+    "}",
+    "fn allocation_after() void {",
+    "    pair mut* own x = new(pair);",
+    "    defer drop_pair(move(x));",
+    "    pair mut* own y = new(pair);",
+    "    defer drop_pair(move(y));",
+    "    use_pair(x);",
+    "    use_pair(y);",
+    "}",
+};
+
+string[15] FORM_NAMES = {
+    "del_before", "del_after", "end_before", "end_del", "end_after", "order_before", "order_after",
+    "block_before", "block_after", "split_before", "split_after", "drop_before", "drop_after",
+    "allocation_before", "allocation_after",
+};
+
+string[15] FORM_VERDICTS = {
+    "dpU0:1", "dpP", "dcU0:1", "dcP", "dcP", "dcP dpU0:3", "dpP dcP", "dcP ddU0:3", "dcP ddP",
+    "dcP dpU0:3 rtP", "dpP", "dkeptP dbodyU0:1", "dkeptP", "dxU0:1 dyU0:3", "",
+};
+
+// The sites of part 2 of each function of FORM_NAMES.
+u32[15] FORM_INNER = {0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+// Each form ends its local where the shape before it does not, and adds no site of part 2.
+fn each_form_ends_its_local() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, FORM_SOURCE[..], true);
+    u64 mut k = 0;
+    while (k < FORM_NAMES.len) {
+        fir.func mut f = fir.func{};
+        lower(&e, FORM_NAMES[k], &f);
+        expect_function(&f, FORM_VERDICTS[k], FORM_NAMES[k]);
+        prover.proof mut p = prover.prove(&f);
+        if (p.inner_leaks != FORM_INNER[k] || prover.has_error(&p)) {
+            eprintln(FORM_NAMES[k], " gives another count of sites of part 2, or an error");
+            panic("prover_aggregate_test: a form changes part 2");
+        }
+        prover.free(&p);
+        fir.func_free(&f);
+        k += 1;
+    }
+}
+
 // A function with a named owner local `n` and a local `w` of an owning aggregate type. Its 6
 // statements and 1 terminator are 7 units. Its leak work is 7 for the fact of `n` and 3 for the
 // sets of its 1 block and 3 locals: 10. Its inner work adds nothing. The 2 owners of a `wrap`
@@ -1095,6 +1360,8 @@ fn main() i32 {
     println("aggregate exits ok");
     each_exit_of_lowered_source_has_its_verdict();
     println("aggregate source ok");
+    each_form_ends_its_local();
+    println("aggregate forms ok");
     the_aggregate_work_has_a_limit_of_its_own();
     println("aggregate work ok");
     the_report_names_the_first_owner_of_each_exit();

@@ -214,11 +214,11 @@ Functions:
 
 Words (the glossary: one word has one meaning in all of the compiler):
 
-12. `make` allocates and returns a value (not `create`; `new` is a keyword). `init` fills
-    storage that the caller owns. `free` ends a value from `make` or `init` (not `destroy` or
-    `deinit`). `find` searches and can fail (not `lookup`, `locate` or `search`). `work` is the
-    W amount (not `cost` or `price`); `charge` takes W (not `spend`). `release` is only the
-    ownership term: the program gives up storage.
+12. `make` allocates and returns a value (not `create`; `new` is a keyword). `init` fills storage
+    that the caller owns. `free` ends a value from `make` or `init` (not `destroy` or `deinit`).
+    `drop` ends a value or an allocation that the caller moves in. `find` searches and can fail (not
+    `lookup`, `locate` or `search`). `work` is the W amount (not `cost` or `price`); `charge` takes
+    W (not `spend`). `release` is only the ownership term: the program gives up storage.
     (+) `index.free(ix)`. (-) `diag.create()`; use `diag.make()` (invented).
 13. Abbreviations come from a closed list: `ast`, `fir`, `llvm`, `lsp`, `rpc`, `json`, `uri`.
     Write every other word in full (`float`, not `flt`).

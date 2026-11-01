@@ -419,7 +419,7 @@ fn file_exists(string path) bool {
 fn find_file(module_set mut* set, ast.node* path, u64 n, string mut* out) bool {
     u64 count = candidate_count(set, path, n);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     if (is_library_path(set, path, n)) {
         // The walk listed every module, so no file outside the list is opened.
         i64 mut listed = 0;
@@ -461,7 +461,7 @@ fn working_dir(module_set mut* set) string {
 // is joined to the working directory first, so realpath does not read it.
 fn real_path(module_set mut* set, string path) string {
     strbuf.str_buf mut joined = strbuf.create();
-    defer strbuf.free(&joined);
+    defer del(joined.data);
     string cwd = working_dir(set);
     if (path.len > 0 && path[0] != '/' && cwd.len > 0) {
         strbuf.append(&joined, cwd);
@@ -469,7 +469,7 @@ fn real_path(module_set mut* set, string path) string {
     }
     strbuf.append(&joined, path);
     strbuf.str_buf mut resolved = strbuf.create();
-    defer strbuf.free(&resolved);
+    defer del(resolved.data);
     if (!os.real_path(strbuf.view(&joined), &resolved)) {
         return containers.pool_intern(&set->pool, path);
     }
@@ -489,7 +489,7 @@ fn note_candidates(session.session mut* s, module_set mut* set, diag.loc at, ast
                         u64 n) void {
     u64 count = candidate_count(set, path, n);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     u64 mut i = 0;
     while (i < count) {
         // Quotes the candidate from its construction buffer. The message copies
@@ -815,8 +815,8 @@ fn parse_file(session.session mut* s, module_set mut* set, module mut* m) void {
     // the tokens cover the file, so the parser runs either way
     lexer.lex_file(s, m->file, m->source, &toks);
     m->ast = parser.parse_module(s, m->file, &toks, &set->arena);
-    lexer.tokvec_free(&toks);
     m->parsed = session.error_count(s) == before;
+    del(toks.items);
 }
 
 // Adds a new module in the loading state and enters it in the path map. The caller enters a module
@@ -1088,7 +1088,7 @@ fn parse_section(session.session mut* s, module_set mut* set, used_library* lib,
                  module mut* m) void {
     u64 before = session.error_count(s);
     lexer.tok_vec mut toks = lexer.tokvec_create();
-    defer lexer.tokvec_free(&toks);
+    defer del(toks.items);
     copy_tokens(lib, k, &toks);
     m->ast = parser.parse_interface(s, m->file, &toks, &set->arena);
     m->parsed = session.error_count(s) == before;
@@ -1108,10 +1108,17 @@ fn has_declaration(session.session mut* s, module_set mut* set, used_library* li
         return found != null && scope.is_declaration(found);
     }
     bool mut declares = false;
-    ast.arena mut ar = ast.arena{};
-    defer ast.ast_arena_free(&ar);
     lexer.tok_vec mut toks = lexer.tokvec_create();
-    defer lexer.tokvec_free(&toks);
+    defer del(toks.items);
+    ast.arena mut ar = ast.arena{};
+    defer {
+        // The leak rule reads no callee: after the calls, the test of a loop proves each chain
+        // empty, and each other owner takes a `del`.
+        while (ar.last != null) {
+            ast.ast_arena_free(&ar);
+        }
+        del(ar.nodes);
+    }
     copy_tokens(lib, k, &toks);
     diag.mute(session.diags(s));
     u64 before = session.error_count(s);
@@ -1127,7 +1134,7 @@ fn has_declaration(session.session mut* s, module_set mut* set, used_library* li
 // the path stays a local here, so resolve_used_path has no local owner that a call can vacate.
 fn path_section(used_library* lib, ast.node* path, u64 n) i64 {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     return section_of(lib, path_view(&b, path, n));
 }
 
@@ -1182,7 +1189,7 @@ fn resolve_used_items(session.session mut* s, module_set mut* set, module mut* m
     ast.node* path = imp->a;
     u64 n = ast.ast_len(path);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     i64 k = section_of(lib, path_view(&b, path, n));
     if (k < 0) {
         error_not_in_library(s, set, imp->loc, path, n, lib);
@@ -1242,10 +1249,17 @@ fn prefix_declares(session.session mut* s, module_set mut* set, string path, str
         return false;
     }
     bool mut declares = false;
-    ast.arena mut ar = ast.arena{};
-    defer ast.ast_arena_free(&ar);
     lexer.tok_vec mut toks = lexer.tokvec_create();
-    defer lexer.tokvec_free(&toks);
+    defer del(toks.items);
+    ast.arena mut ar = ast.arena{};
+    defer {
+        // The leak rule reads no callee: after the calls, the test of a loop proves each chain
+        // empty, and each other owner takes a `del`.
+        while (ar.last != null) {
+            ast.ast_arena_free(&ar);
+        }
+        del(ar.nodes);
+    }
     diag.mute(session.diags(s));
     u64 before = session.error_count(s);
     // a file that reported anything declares nothing
@@ -1480,8 +1494,7 @@ fn free(module_set mut* set) void {
         module kept = move(*m);
         del(m);
         set->modules.last = move(kept.made_before);
-        module mut body = move(kept);
-        scope.free(&body.names);
+        scope.drop(move(kept.names));
     }
     del(set->modules.items);
     set->modules.len = 0;
@@ -1503,14 +1516,13 @@ fn free(module_set mut* set) void {
         used_library kept = move(*lib);
         del(lib);
         set->used.last = move(kept.made_before);
-        used_library mut body = move(kept);
-        lexer.tokvec_free(&body.toks);
-        containers.str_free(&body.paths);
-        strmap.free(&body.sections);
-        vec.int_free(&body.firsts);
-        vec.int_free(&body.ends);
-        vec.int_free(&body.lines);
-        vec.int_free(&body.offsets);
+        del(kept.toks.items);
+        del(kept.paths.items);
+        del(kept.sections.entries);
+        del(kept.firsts.items);
+        del(kept.ends.items);
+        del(kept.lines.items);
+        del(kept.offsets.items);
     }
     del(set->used.items);
     set->used.len = 0;
@@ -1676,7 +1688,7 @@ fn load_runtime(session.session mut* s, module_set mut* set) bool {
         return load_library_runtime(s, set);
     }
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string path = containers.pool_intern(&set->pool, RUNTIME_PATH);
     string file = containers.pool_intern(&set->pool, runtime_file(set, &b));
     return load_module(s, set, path, file, file_start(file), false) != null;
@@ -1759,7 +1771,7 @@ fn load_library_runtime(session.session mut* s, module_set mut* set) bool {
         string root = set->library_root;
         bool separate = root.len > 0 && root[root.len - 1] != DIRECTORY_SEPARATOR;
         strbuf.str_buf mut b = strbuf.create();
-        defer strbuf.free(&b);
+        defer del(b.data);
         strbuf.append(&b, root);
         if (separate) {
             strbuf.push(&b, DIRECTORY_SEPARATOR);

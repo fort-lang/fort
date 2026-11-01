@@ -899,7 +899,7 @@ fn not_value(translator mut* t, fir.operand x) gen.gen_val {
 fn alloc_value(translator mut* t, fir.statement* s) gen.gen_val {
     gen.gen_val n = operand_value(t, fir.rvalue_operand(t->f, s->value, 0));
     gen.gen_args mut args = gen.gen_args_init();
-    defer gen.gen_args_free(&args);
+    defer del(args.text.data);
     u64 size = types.type_sizeof(s->value.ty);
     gen.gen_args_add(&args, gen.gen_const_unsigned(t->g, "i64", size));
     gen.gen_args_add(&args, n);
@@ -934,7 +934,7 @@ fn call_of(translator mut* t, fir.statement* s) gen.gen_val {
         ext = r.callee_sym;
     }
     gen.signature mut sig = gen.signature_of(g, fir.callee_type(t->f, r), ext);
-    defer gen.signature_free(&sig);
+    defer del(sig.params);
     gen.gen_val callee = callee_value(t, r);
     held mut@ own args = new(held, cast(r.ops_len, u64));
     defer del(args);
@@ -949,7 +949,7 @@ fn call_of(translator mut* t, fir.statement* s) gen.gen_val {
         k += 1;
     }
     gen.gen_args mut text = gen.gen_args_init();
-    defer gen.gen_args_free(&text);
+    defer del(text.text.data);
     if (sig.sret.len > 0) {
         gen.gen_val dst = place_addr(t, s->place);
         gen.gen_args_add_ext(&text, dst, gen.sret_attr(g, &sig));
@@ -1132,9 +1132,9 @@ fn del_place(translator mut* t, fir.place p) void {
         }
     }
     gen.gen_args mut args = gen.gen_args_init();
+    defer del(args.text.data);
     gen.gen_args_add(&args, ptr);
     gen.gen_call_rt(t->g, runtime_sig.rt_entry.rt_free, &args);
-    gen.gen_args_free(&args);
     if (reg || temporary_place(t, p)) {
         return;
     }
@@ -1289,7 +1289,7 @@ fn add_reported(translator mut* t, fir.terminator* term, gen.gen_args mut* args)
 fn fail_call(translator mut* t, fir.terminator* term) void {
     gen.emitter mut* g = t->g;
     gen.gen_args mut args = gen.gen_args_init();
-    defer gen.gen_args_free(&args);
+    defer del(args.text.data);
     add_reported(t, term, &args);
     gen.gen_args_add_loc(g, &args, term->loc);
     gen.gen_call_rt(g, entry_of(term->check), &args);
@@ -1368,7 +1368,7 @@ fn check_to(translator mut* t, fir.terminator* term, u64 bad) void {
     gen.emitter mut* g = t->g;
     gen.gen_val cond = operand_value(t, term->cond);
     gen.gen_args mut args = gen.gen_args_init();
-    defer gen.gen_args_free(&args);
+    defer del(args.text.data);
     add_reported(t, term, &args);
     u64 next = label_of(t, term->target);
     if (term->check == fir.check_kind.chk_user) {
@@ -1437,7 +1437,7 @@ fn write_block(translator mut* t, u32 b) void {
 fn translate_function(gen.emitter mut* g, fir.func* f) void {
     gen.function_begin(g);
     gen.signature mut sig = gen.signature_of(g, f->ty, null);
-    defer gen.signature_free(&sig);
+    defer del(sig.params);
     string mut@ own names = new(string, sig.params.len);
     defer del(names);
     u64 mut i = 0;
@@ -1448,7 +1448,12 @@ fn translate_function(gen.emitter mut* g, fir.func* f) void {
     }
     gen.gen_define(g, f->sym, &sig, names);
     translator mut t = open(g, f);
-    defer close(&t);
+    defer {
+        del(t.locals);
+        del(t.notes);
+        del(t.cont_of);
+        del(t.fail_label);
+    }
     write_locals(&t);
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
