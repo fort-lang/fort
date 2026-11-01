@@ -835,7 +835,7 @@ changes the function, and the verifier runs after it. The passes run in this ord
    owners**), as a report first: `--leak-report` lists each site of part 2 that the pass cannot
    prove, and such a site is no error, so no build and no `--check` changes its verdict. Part 1
    adds no line to the report. The pass also proves part 1 for each owner below a local of an
-   owning aggregate type (**Aggregates**), which D17.20 defers to refinement R1, as a report:
+   owning aggregate type (**Aggregates**), which D17.20 defers to a migration, as a report:
    `--aggregate-report` lists each such exit that the pass cannot prove, and such an exit is no
    error either.
    Rule (b) of D17.21, a use after `move` or `del`, reads the places of this pass, its tests against
@@ -1185,8 +1185,9 @@ changes the function, and the verifier runs after it. The passes run in this ord
      the source text of the lvalue, or the FIR place when the source is not there (D17.11).
    - **Exits.** An owner local is a named local, a parameter or a temporary whose type is an `own`
      reference. `_0` passes its value to the caller, and a local of an owning aggregate waits for
-     refinement R1 (D17.20). An exit has the obligation that its owner local holds the zero value,
-     which its fact proves, or, for a scratch local, its bit (**Scratch**). The exits are these:
+     the migration of its exits (D17.20). An exit has the obligation that its owner local holds the
+     zero value, which its fact proves, or, for a scratch local, its bit (**Scratch**). The exits
+     are these:
      - each `dead(_n)` of a named owner local, at the closing brace, at the last token of a `case`
        clause, or at the `return`, `break` or `continue` that leaves its scope (9.5). A `dead` in
        an abort block has none: a runtime error runs no deferred code (D7.8, D11.4), so a leak
@@ -1281,7 +1282,7 @@ changes the function, and the verifier runs after it. The passes run in this ord
    - **Aggregates.** A local of an owning aggregate type (D17.7) is a named local, a parameter or a
      temporary whose type is a struct or a fixed array that holds an owner in its fixed storage.
      `_0` passes its value to the caller. D17.20 gives such a local no obligation of part 1 until
-     refinement R1 of `spec/ownership-design.md` 7, so its exits only report, and no build and no
+     the migration of its exits, so its exits only report, and no build and no
      `--check` changes its verdict. Its exits are those of an owner local in **Exits**: each `dead`
      outside an abort block, each `return` for a parameter and a temporary, and each `return` where
      the scope of a named local can be open, by the fifth dataflow, whose entry holds each named
@@ -1304,13 +1305,14 @@ changes the function, and the verifier runs after it. The passes run in this ord
      number of each field (`_3.1.1`). The cause tells where the proof fails, and it changes no
      verdict. Cause 1: the facts prove the exit when each call that takes the address of fixed
      storage of the local through an `addr` temporary makes each owner below that place empty, after
-     the kill of the call and before the kill rules of the store of its result: R1 can prove it if
-     each such callee empties the owner. Cause 2: else the first owner that the pass does not prove
-     holds the zero value on some path to the exit: the facts dataflow with the same gen and kill
-     rules, joined by union and with no fact at a block before its first transfer, holds its fact
-     there. Cause 3: each other exit. Cause 4: the function passed the aggregate work limit, and the
-     first site of the function then also takes the note `the function exceeds the aggregate work
-     limit; split it`, which names no other limit.
+     the kill of the call and before the kill rules of the store of its result: a summary of the
+     callee (R1, dropped, `spec/ownership-design.md` 7) can prove it if each such callee empties the
+     owner. Cause 2: else the first owner that the pass does not prove holds the zero value on some
+     path to the exit: the facts dataflow with the same gen and kill rules, joined by union and with
+     no fact at a block before its first transfer, holds its fact there. Cause 3: each other exit.
+     Cause 4: the function passed the aggregate work limit, and the first site of the function then
+     also takes the note `the function exceeds the aggregate work limit; split it`, which names no
+     other limit.
    - **Uses.** Rule (b) of D17.21 runs after the facts, apart from them, so it changes no fact of
      D17.11 or of D17.20. It runs for each function with a local whose type holds an owner (D17.20),
      `_0` included. A walk of each block, with the stale set of **Keys**, turns its items into acts
