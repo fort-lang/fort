@@ -266,6 +266,158 @@ fn the_main_symbol_is_reserved() void {
     assert(check_env.errors(&e) == 1);
 }
 
+// ---- the pointers that C gives (D17.13) ----------------------------------------------------
+
+// The declarations that the rule of the pointers that C gives refuses, four strings each: the
+// declaration, the position of its error, and the extern and the type that the error names. The
+// rule reads the result, each parameter type of a function pointer parameter, each pointer type
+// that a level of a parameter holds where the parameter marks that level `mut` (through fixed
+// arrays, D5.2), and the same three of a function pointer type that C gives. The first type that
+// marks a level `mut` with no `own`, and has no fixed parameter of the same type while a parameter
+// can carry a pointer, is the error: the result first, then the parameters in order.
+u64 REFUSED_LEN = 76;
+
+string[REFUSED_LEN] REFUSED = {
+    "extern fn strchr(char* s, i32 c) char mut*;",
+    "1:34", "strchr", "char mut*",
+    "extern fn pick(i32 n, ...) u64 mut*;",
+    "1:28", "pick", "u64 mut*",
+    "extern fn call(fn () u64* g) u64 mut*;",
+    "1:30", "call", "u64 mut*",
+    "extern fn take(void* p) u64 mut*;",
+    "1:25", "take", "u64 mut*",
+    "extern fn apply(u64* p, fn (u64 mut*) void cb) void;",
+    "1:25", "apply", "u64 mut*",
+    "extern fn strtol(char* nptr, char mut* mut* endptr, i32 base) i64;",
+    "1:30", "strtol", "char mut*",
+    "extern fn deep(char* s, char mut* mut** out) void;",
+    "1:25", "deep", "char mut*",
+    "extern fn two(char* s, char mut* mut* mut* out) void;",
+    "1:24", "two", "char mut* mut*",
+    "extern fn fill(char* s, char mut*[2] mut* out) void;",
+    "1:25", "fill", "char mut*",
+    "extern fn hold(void* p, void mut* mut* out) void;",
+    "1:25", "hold", "void mut*",
+    "extern fn get_strchr() fn (char*, i32) char mut*;",
+    "1:24", "get_strchr", "char mut*",
+    "extern fn hand_back(char* s, (fn (char*) char mut*) mut* out) void;",
+    "1:30", "hand_back", "char mut*",
+    "extern fn enroll(char* s, fn (fn (char*) char mut*) void cb) void;",
+    "1:27", "enroll", "char mut*",
+    "extern fn lend(char mut* own p) char mut*;",
+    "1:33", "lend", "char mut*",
+    "extern fn bytes(u8 mut* s, u64 n) char mut*;",
+    "1:35", "bytes", "char mut*",
+    "extern fn chain(char** s) char mut**;",
+    "1:27", "chain", "char mut**",
+    "extern fn both(char* s, u64 mut* mut* out) char mut*;",
+    "1:44", "both", "char mut*",
+    "extern fn two_out(char* s, char mut* mut* a, u64 mut* mut* b) void;",
+    "1:28", "two_out", "char mut*",
+    "extern fn rows(char*[2]* s) char mut*[2]*;",
+    "1:29", "rows", "char mut*[2]*",
+};
+
+// Declarations that the rule takes: a result with no `mut`, a parameter of the type of the result,
+// a result that says `own`, no parameter that can carry a pointer, an out-parameter that holds a
+// pointer with no `mut` or an `own` one or a type that a parameter has, a callback whose parameter
+// types a parameter has or that mark nothing, a level that the parameter does not mark `mut`, a
+// struct that C writes, and a function pointer type that C gives whose own result follows the rule.
+u64 TAKEN_LEN = 22;
+
+string[TAKEN_LEN] TAKEN = {
+    "extern fn strchr(char* s, i32 c) char*;",
+    "extern fn getcwd(char mut* buf, u64 size) char mut*;",
+    "extern fn opendir(char* path) void mut* own;\nextern fn closedir(void mut* own dir) i32;",
+    "extern fn fopen(char* path, char* mode) void mut* own;",
+    "extern fn errno_slot() i32 mut*;",
+    "extern fn give(i32 n, u64 m) u64 mut*;",
+    "extern fn fdopendir(i32 fd) void mut* own;",
+    "extern fn strtol(char* nptr, char* mut* endptr, i32 base) i64;",
+    "extern fn posix_memalign(void mut* own mut* out, u64 align, u64 size) i32;",
+    "extern fn keep(char mut* mut* slot, char mut* s) void;",
+    "extern fn walk(u64 mut* p, fn (u64 mut*) void cb) void;",
+    "extern fn sort_ints(i32 mut* base, u64 n, u64 size, fn (i32*, i32*) i32 cmp) void;",
+    "extern fn gmtime_r(i64* t, u64 mut* out) u64 mut*;",
+    "extern fn level_two(char* s, char* mut** out) void;",
+    "extern fn peek(char mut** p) void;",
+    "struct hdr {\n    void mut* name;\n}\nextern fn recv(i32 fd, hdr mut* h) i64;",
+    "extern fn get_cmp() fn (i32*, i32*) i32;",
+    "extern fn get_dup() fn (char mut*) char mut*;",
+    "extern fn get_fn() fn () u64 mut*;",
+    "extern fn swap_chain(char mut** s) char mut**;",
+    "extern fn printf(char* fmt, ...) i32;",
+    "extern fn readdir(void mut* dir) u64*;",
+};
+
+fn each_declaration_that_gives_a_mut_no_argument_had_is_one_error() void {
+    u64 mut k = 0;
+    while (k < REFUSED.len) {
+        refused_at(REFUSED[k], REFUSED[k + 1], REFUSED[k + 2], REFUSED[k + 3]);
+        k += 4;
+    }
+}
+
+// Checks the one declaration `decl` and holds that the rule refuses it with one error at `at`, and
+// that the error names the extern `name` and the type `given`.
+fn refused_at(string decl, string at, string name, string given) void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, decl);
+    strbuf.push(&text, '\n');
+    assert(!one_module(&e, strbuf.view(&text)));
+    strbuf.clear(&text);
+    strbuf.append(&text, at);
+    strbuf.append(&text, ": extern '");
+    strbuf.append(&text, name);
+    strbuf.append(&text, "': C gives '");
+    strbuf.append(&text, given);
+    strbuf.append(&text, "' with a 'mut' that no parameter of that type has");
+    if (check_env.errors(&e) != 1 || check_env.report_text(&e, 0) != strbuf.view(&text)) {
+        eprintln(decl, " gives ", check_env.report_text(&e, 0));
+        panic("check_extern_test: the rule of D17.13 gives another report");
+    }
+}
+
+fn each_declaration_that_gives_no_new_mut_is_taken() void {
+    for (string decl : TAKEN) {
+        check_env.env mut e = check_env.env{};
+        check_env.open(&e);
+        defer check_env.close(&e);
+        strbuf.str_buf mut text = strbuf.create();
+        defer strbuf.free(&text);
+        strbuf.append(&text, decl);
+        strbuf.push(&text, '\n');
+        if (!one_module(&e, strbuf.view(&text)) || check_env.errors(&e) != 0) {
+            eprintln(decl, " gives ", check_env.report_text(&e, 0));
+            panic("check_extern_test: the rule of D17.13 refuses a declaration that it takes");
+        }
+    }
+}
+
+// A refused extern and a function that writes through its result.
+string CALLS_REFUSED = "extern fn f(char* s) char mut*;\nfn g(char* s) void {\n    *f(s) = 0;\n}\n";
+
+fn a_refused_declaration_fails_its_symbol_and_its_calls_report_nothing(check_env.env mut* e) void {
+    assert(!check_env.check_decls(e, CALLS_REFUSED));
+    assert(check_env.errors(e) == 1);
+    assert(check_env.said(e, "extern 'f': C gives 'char mut*'"));
+    assert(check_env.sym_of(e, "main", "f")->error);
+}
+
+fn a_held_back_extern_meets_the_rule_at_its_declaration(check_env.env mut* e) void {
+    // the comparison of D9.8 waits for check_externs, and the rule of D17.13 does not
+    e->ck.defer_externs = true;
+    assert(!two_modules(e, "extern fn strchr(char* s, i32 c) char mut*;\n", ""));
+    e->ck.defer_externs = false;
+    assert(check_env.errors(e) == 1);
+    assert(check_env.said(e, "extern 'strchr': C gives 'char mut*' with a 'mut'"));
+    assert(check_env.sym_of(e, "main", "strchr")->error);
+}
+
 // ---- the extern declarations that the checker holds back ------------------------------
 
 fn a_held_back_extern_is_compared_by_check_externs(check_env.env mut* e) void {
@@ -338,6 +490,10 @@ fn main() i32 {
     a_fort_rt_name_is_an_ordinary_extern_declaration();
     a_c_name_other_than_main_is_an_ordinary_extern_declaration();
     the_main_symbol_is_reserved();
+    each_declaration_that_gives_a_mut_no_argument_had_is_one_error();
+    each_declaration_that_gives_no_new_mut_is_taken();
+    check_env.run(a_refused_declaration_fails_its_symbol_and_its_calls_report_nothing);
+    check_env.run(a_held_back_extern_meets_the_rule_at_its_declaration);
     check_env.run(a_held_back_extern_is_compared_by_check_externs);
     check_env.run(check_externs_reads_the_order_of_its_calls);
     check_externs_skips_a_declaration_that_failed();

@@ -80,10 +80,14 @@ extern fn readlink(char* path, char mut* buf, u64 size) i64;
 // A null buffer makes C allocate a result that fort cannot free, so use `os.real_path` instead.
 extern fn realpath(char* path, char mut* resolved) char*;
 
-// <dirent.h>: a directory stream and its entries. `dirent` is the arm64 Darwin layout of
-// `struct dirent`, with the 64-bit inode. Only `kind` and `name` are read.
-// readdir(3) gives a `dirent*` as a `void*`, so that no extern names a struct of this
-// module. It gives null at the end of the stream and on an error.
+// <dirent.h>: a directory stream is an allocation of C that closedir(3) frees, so the stream
+// that opendir(3) and fdopendir(3) give says `own`, and closedir takes it with `move`. `dirent`
+// is the arm64 Darwin layout of `struct dirent`, with the 64-bit inode. Only `kind` and `name`
+// are read. readdir(3) gives a `dirent*` with no `mut`, a view of storage of C that the next
+// readdir of the stream can change, and null at the end of the stream and on an error (D17.13).
+// The declaration gives it as a `void*`: tools/fort_lint.py checks this file beside its copy in
+// the standard root, and a result that named `dirent` would name two structs, which two
+// declarations of one C symbol cannot do (D9.8).
 struct dirent {
     u64 ino;
     u64 seekoff;
@@ -92,9 +96,9 @@ struct dirent {
     u8 kind;
     char[1024] name;
 }
-extern fn opendir(char* path) void mut*;
+extern fn opendir(char* path) void mut* own;
 extern fn readdir(void mut* dir) void*;
-extern fn closedir(void mut* dir) i32;
+extern fn closedir(void mut* own dir) i32;
 
 // The `kind` values of a directory entry. A file system that does not record the kind gives
 // DT_UNKNOWN.
@@ -117,10 +121,11 @@ i32 R_OK = 4;
 
 // <string.h>, <stdlib.h>: the error text of an errno value, the C float parsers, a
 // temporary directory (mkdtemp replaces the six X of its argument in place), and
-// the environment of the process.
+// the environment of the process. A float parser stores a `char*` into `*end`, so `end`
+// marks that level `mut` and the `char*` it holds marks none (D17.13).
 extern fn strerror(i32 code) char*;
-extern fn strtod(char* s, void* end) f64;
-extern fn strtof(char* s, void* end) f32;
+extern fn strtod(char* s, char* mut* end) f64;
+extern fn strtof(char* s, char* mut* end) f32;
 extern fn mkdtemp(char mut* tmpl) char*;
 extern fn setenv(char* name, char* value, i32 overwrite) i32;
 extern fn unsetenv(char* name) i32;
@@ -160,4 +165,4 @@ i32 ELOOP = 62;
 // entries of that directory.
 i32 AT_REMOVEDIR = 0x80;
 extern fn unlinkat(i32 dir_fd, char* path, i32 flags) i32;
-extern fn fdopendir(i32 fd) void mut*;
+extern fn fdopendir(i32 fd) void mut* own;

@@ -1,0 +1,50 @@
+//! run
+//! stdout:
+//| true 6
+//| 0
+//| true
+// A cast that is an argument of an `extern fn` follows each rule of a cast (D3.14), and these
+// forms keep each pointer place. `cb_view` holds the places of `cb_cell` with their types under
+// other names, the function pointer among them, so a view of one as the other is legal. A `mut`
+// view of bytes is legal over storage with no pointer place, here an integer. An extern that
+// writes storage with pointer places names its type in the parameter, so `bzero` takes the
+// address of a `cell` with no cast.
+import std.libc;
+
+struct cell {
+    u64* own p;
+}
+
+struct cb_cell {
+    fn (u64) u64 f;
+    u64* own p;
+}
+
+// The same places as `cb_cell` under other names.
+struct cb_view {
+    fn (u64) u64 g;
+    u64* own q;
+}
+
+// C reads no byte for a count of 0. Each function is in the C library of Linux and of Darwin.
+extern fn strnlen(cb_view* s, u64 n) u64;
+extern fn bzero(cell mut* c, u64 n) void;
+
+fn twice(u64 x) u64 {
+    return 2 * x;
+}
+
+fn main() i32 {
+    cb_cell mut k = cb_cell{.f = twice, .p = new(u64)};
+    u64 len = strnlen(cast(&k, cb_view*), 0);
+    println(len == 0, " ", k.f(3));
+    u64 mut x = 7;
+    libc.memset(cast(&x, u8 mut*), 0, sizeof(u64));
+    println(x);
+    cell mut c = cell{.p = null};
+    bzero(&c, sizeof(cell));
+    println(c.p == null);
+    del(k.p);
+    del(c.p);
+    return 0;
+}

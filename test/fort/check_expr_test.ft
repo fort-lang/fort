@@ -217,6 +217,9 @@ fn check_hiding(check_env.env mut* e, string@ lines) bool {
     return check_env.check_src(e, strbuf.view(&b));
 }
 
+// The rule of the report of a `mut` cast that hides the owner of `holder`.
+string HIDES_AT_8 = ": a 'mut' cast hides the pointer u64* own at byte 8";
+
 // Whether report `i` of `e` stands at `pos` and says `cast` and then `hidden`.
 fn reported_at(check_env.env mut* e, u64 i, string pos, string cast_text, string hidden) bool {
     strbuf.str_buf mut want = strbuf.create();
@@ -277,55 +280,58 @@ fn the_error_names_the_first_owner_that_the_target_does_not_hold() void {
                        ": a 'mut' cast hides the pointer u64* own at byte 8"));
 }
 
-fn an_argument_of_an_extern_call_is_exempt_and_of_a_fort_call_is_not() void {
+fn an_argument_of_an_extern_call_follows_the_rule_as_one_of_a_fort_call_does() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // C sees no `own`, and fort trusts the C side of an extern signature. Parentheses change
-    // nothing. A fort callee has no such trust.
+    // C writes the storage of an argument through the type of its parameter, so a `mut` view of
+    // the bytes of `h` lets C write bits into the owner slot (D3.14). Parentheses change nothing.
     string[4] lines = {"holder mut h = {};", "take(cast(&h, void mut*));",
                        "take((cast(&h, void mut*)));", "keep(cast(&h, void mut*));"};
     assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "32:10", "cannot cast holder mut* to void mut*",
-                       ": a 'mut' cast hides the pointer u64* own at byte 8"));
+    assert(check_env.errors(&e) == 3);
+    assert(reported_at(&e, 0, "30:10", "cannot cast holder mut* to void mut*", HIDES_AT_8));
+    assert(reported_at(&e, 1, "31:11", "cannot cast holder mut* to void mut*", HIDES_AT_8));
+    assert(reported_at(&e, 2, "32:10", "cannot cast holder mut* to void mut*", HIDES_AT_8));
 }
 
-fn an_extern_call_in_the_operand_leaves_the_cast_exempt() void {
+fn an_extern_call_in_the_operand_of_a_cast_changes_no_rule() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // The inner call gives the argument of the outer call back when it ends.
+    // The cast in the argument of `same` and the cast around the call of `holder_at` each hide
+    // the owner. The operand reports first.
     string[2] lines = {"holder mut h = {};",
                        "take(cast(holder_at(&h, same(cast(&h, void mut*))), void mut*));"};
-    assert(check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 0);
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 2);
+    assert(reported_at(&e, 0, "30:34", "cannot cast holder mut* to void mut*", HIDES_AT_8));
+    assert(reported_at(&e, 1, "30:10", "cannot cast holder mut* to void mut*", HIDES_AT_8));
 }
 
-fn a_cast_inside_an_extern_argument_is_not_exempt() void {
+fn a_cast_inside_an_extern_argument_follows_the_rule() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // Only the cast that is the argument itself is exempt, here the outer one.
+    // The inner cast hides the owner. The outer cast keeps the type `void mut*`.
     string[2] lines = {"holder mut h = {};", "take(cast(cast(&h, void mut*), void mut*));"};
     assert(!check_hiding(&e, lines[..]));
     assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "30:15", "cannot cast holder mut* to void mut*",
-                       ": a 'mut' cast hides the pointer u64* own at byte 8"));
+    assert(reported_at(&e, 0, "30:15", "cannot cast holder mut* to void mut*", HIDES_AT_8));
 }
 
-fn a_fort_call_inside_an_extern_argument_is_not_exempt() void {
+fn a_fort_call_inside_an_extern_argument_changes_no_rule() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // The inner cast is an argument of `holder_at`, a fort function, although the call of
-    // `holder_at` stands in an argument of `take`.
+    // The inner cast is an argument of `holder_at`, a fort function, and the call of `holder_at`
+    // is the operand of a cast that is an argument of `take`. Each cast hides the owner.
     string[2] lines = {"holder mut h = {};",
                        "take(cast(holder_at(&h, cast(&h, void mut*)), void mut*));"};
     assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "30:29", "cannot cast holder mut* to void mut*",
-                       ": a 'mut' cast hides the pointer u64* own at byte 8"));
+    assert(check_env.errors(&e) == 2);
+    assert(reported_at(&e, 0, "30:29", "cannot cast holder mut* to void mut*", HIDES_AT_8));
+    assert(reported_at(&e, 1, "30:10", "cannot cast holder mut* to void mut*", HIDES_AT_8));
 }
 
 fn a_call_through_a_function_pointer_is_not_exempt() void {
@@ -541,12 +547,13 @@ fn a_read_only_view_that_adds_a_marked_place_is_one_error_each() void {
                        ": a cast adds the pointer cell* at byte 0"));
 }
 
-fn the_exemption_of_an_extern_argument_covers_a_read_only_view() void {
+fn a_read_only_view_as_an_extern_argument_adds_no_place() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // C sees no `own` (D17.13), so an argument of an `extern fn` may add a place that carries a
-    // mark, as it may hide one. The same cast as an argument of a fort function is one error.
+    // C reads the storage of an argument through the type of its parameter, so a view that adds
+    // the owner `p` over the integer `x` gives C bits as an owner (D3.14). The same cast as an
+    // argument of a fort function is the same error.
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     strbuf.append(&b, "struct cell {\n    u64* own p;\n}\n");
@@ -557,8 +564,10 @@ fn the_exemption_of_an_extern_argument_covers_a_read_only_view() void {
     strbuf.append(&b, "    u64 c = look(cast(&x, cell*));\n");
     strbuf.append(&b, "    return cast(a + c, i32);\n}\n");
     assert(!check_env.check_src(&e, strbuf.view(&b)));
-    assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "11:18", "cannot cast u64 mut* to cell*",
+    assert(check_env.errors(&e) == 2);
+    assert(reported_at(&e, 0, "10:18", "cannot cast u64 mut* to cell*",
+                       ": a cast adds the pointer u64* own at byte 0"));
+    assert(reported_at(&e, 1, "11:18", "cannot cast u64 mut* to cell*",
                        ": a cast adds the pointer u64* own at byte 0"));
 }
 
@@ -738,13 +747,13 @@ fn a_cast_to_a_function_pointer_type_keeps_its_type() void {
                        ": a cast adds the function pointer fn () void"));
 }
 
-fn an_extern_argument_keeps_each_function_pointer_place() void {
+fn an_extern_argument_keeps_each_pointer_place() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // C calls a function as its type says, so the exemption of an argument of an `extern fn`
-    // covers no function pointer place. It still covers a place that carries `mut` or `own` and
-    // reaches no function pointer. The walk of a function pointer alone keeps its own answer.
+    // C calls a function as its type says, and it frees an owner and writes through a `mut`
+    // pointer as their types say, so an argument of an `extern fn` adds no pointer place. The
+    // error names the first place that the source does not hold.
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     strbuf.append(&b, "struct cell {\n    u64* own p;\n}\n");
@@ -761,15 +770,15 @@ fn an_extern_argument_keeps_each_function_pointer_place() void {
     strbuf.append(&b, "    u64 c = peek_both(cast(&w, both*));\n");
     strbuf.append(&b, "    return cast(a + b + c, i32);\n}\n");
     assert(!check_env.check_src(&e, strbuf.view(&b)));
-    // one report for each exempt cast that adds a function pointer place, at the cast
-    assert(check_env.errors(&e) == 2);
-    assert(reported_at(&e, 0, "17:21", "cannot cast u64 mut* to view_cb*",
+    // one report for each cast, at the cast
+    assert(check_env.errors(&e) == 3);
+    assert(reported_at(&e, 0, "16:23", "cannot cast u64 mut* to cell*",
+                       ": a cast adds the pointer u64* own at byte 0"));
+    assert(reported_at(&e, 1, "17:21", "cannot cast u64 mut* to view_cb*",
                        ": a cast adds the pointer fn (u64*) void at byte 0"));
-    assert(reported_at(&e, 1, "19:23", "cannot cast u64[2] mut* to both*",
-                       ": a cast adds the pointer fn (u64*) void at byte 8"));
-    // the exempt walks read the mark of a function pointer alone, and keep no mark of each kind
-    assert(fn_mark(&e, "cell") == check.MARK_NONE);
-    assert(fn_mark(&e, "both") == check.MARK_SOME);
+    assert(reported_at(&e, 2, "19:23", "cannot cast u64[2] mut* to both*",
+                       ": a cast adds the pointer u64* own at byte 0"));
+    // a place that the source does not hold at all needs no walk of the marks
     assert(kept_mark(&e, "cell") == check.MARK_UNKNOWN);
     assert(kept_mark(&e, "both") == check.MARK_UNKNOWN);
 }
@@ -1224,13 +1233,6 @@ fn a_struct_that_reaches_a_mark_through_a_cycle_keeps_it() void {
 // The mark that the struct `name` of the checked module keeps (types.layout.mark).
 fn kept_mark(check_env.env mut* e, string name) u8 {
     return types.mark_of(check_env.sym_main(e, name)->ty);
-}
-
-// The mark of the function pointers that the struct `name` of the checked module holds
-// (types.fn_mark_of). The read through `e` stands in a function that takes it as a parameter
-// (D17.21).
-fn fn_mark(check_env.env mut* e, string name) u8 {
-    return types.fn_mark_of(check_env.sym_main(e, name)->ty);
 }
 
 fn a_closed_walk_keeps_no_mark_for_each_struct_it_entered() void {
@@ -2402,10 +2404,10 @@ fn main() i32 {
     a_read_only_cast_may_hide_an_owner();
     a_target_that_holds_each_owner_at_its_byte_hides_none();
     the_error_names_the_first_owner_that_the_target_does_not_hold();
-    an_argument_of_an_extern_call_is_exempt_and_of_a_fort_call_is_not();
-    an_extern_call_in_the_operand_leaves_the_cast_exempt();
-    a_cast_inside_an_extern_argument_is_not_exempt();
-    a_fort_call_inside_an_extern_argument_is_not_exempt();
+    an_argument_of_an_extern_call_follows_the_rule_as_one_of_a_fort_call_does();
+    an_extern_call_in_the_operand_of_a_cast_changes_no_rule();
+    a_cast_inside_an_extern_argument_follows_the_rule();
+    a_fort_call_inside_an_extern_argument_changes_no_rule();
     a_call_through_a_function_pointer_is_not_exempt();
     a_span_that_drops_the_own_of_its_elements_hides_them();
     an_owning_target_hides_as_a_view_does();
@@ -2418,12 +2420,12 @@ fn main() i32 {
     a_read_only_view_may_hide_a_place_and_drop_the_marks_of_one();
     a_read_only_view_that_adds_or_changes_a_place_with_no_mark_is_one_error_each();
     a_read_only_view_that_adds_a_marked_place_is_one_error_each();
-    the_exemption_of_an_extern_argument_covers_a_read_only_view();
+    a_read_only_view_as_an_extern_argument_adds_no_place();
     a_mark_counts_in_each_kind_of_pointer_place();
     a_function_pointer_place_carries_a_mark_in_any_view();
     a_cast_to_a_function_pointer_type_keeps_its_type();
     the_walk_of_the_marks_ends_at_a_function_pointer();
-    an_extern_argument_keeps_each_function_pointer_place();
+    an_extern_argument_keeps_each_pointer_place();
     a_hidden_owner_is_named_before_an_added_one();
     each_source_level_below_the_end_of_the_target_chain_can_change();
     a_flat_array_over_nested_structs_takes_no_walk_of_each_owner();

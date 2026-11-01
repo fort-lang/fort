@@ -177,9 +177,6 @@ struct checker {
     ast.sym mut* fn_sym; // the function whose body is being checked
     // an `extern fn` name is a callee and nowhere a value
     ast.node* callee;
-    // The argument of an `extern fn` call that the checker is checking. A cast that is this node
-    // may hide or add a pointer place (D3.14).
-    ast.node* extern_arg;
     // Whether the checker needs an operand address instead of its value.
     // `node N = node{&N};` is a legal self-reference. An address of a module
     // declaration is available from all modules, including its own module.
@@ -3126,7 +3123,6 @@ fn cover_of(types.node* u, u64 at, u64 len) target_part {
 // addresses of their types, so a memo lives for one cast. `work` counts the calls of first_hidden;
 // past POINTER_WORK_LIMIT, `over` holds and the walk stops. With `marked`, the walk reads only the
 // places that carry a mark (carries_mark), whose walk counts against the same limit. With
-// `fn_only` as well, a mark is a function pointer alone, for an argument of an `extern fn`. With
 // `view`, the other view also holds a place that carries no mark where it holds a place of a type
 // that differs only by the `mut` and `own` marks that the place drops.
 struct place_memo {
@@ -3136,7 +3132,6 @@ struct place_memo {
     u64 work;
     bool over;
     bool marked;
-    bool fn_only;
     bool view;
     // carries_mark: the walk met a struct whose layout waits, so a "no mark" answer is not final
     bool uncertain;
@@ -3158,8 +3153,7 @@ struct mark_frame {
 }
 
 // The mark of a struct: no answer yet, a walk is in it, it reaches no mark, it reaches one. A
-// struct keeps two marks: types.layout.mark for a reference marked `mut` or `own` or a function
-// pointer, and types.layout.fn_mark for a function pointer alone (kept_mark).
+// struct keeps it in types.layout.mark.
 u8 MARK_UNKNOWN = 0;
 u8 MARK_WALKING = 1;
 u8 MARK_NONE = 2;
@@ -3200,8 +3194,8 @@ fn carries_mark(place_memo mut* m, types.node* t) bool {
     // A struct that the walk did not answer for, after a mark or the limit, has no answer yet.
     u64 mut k = 0;
     while (k < m->entered_len) {
-        if (kept_mark(m, m->entered[k]) == MARK_WALKING) {
-            keep_mark(m, m->entered[k], MARK_UNKNOWN);
+        if (types.mark_of(m->entered[k]) == MARK_WALKING) {
+            types.keep_mark(m->entered[k], MARK_UNKNOWN);
         }
         k += 1;
     }
@@ -3214,19 +3208,18 @@ fn carries_mark(place_memo mut* m, types.node* t) bool {
 // arrays and references. It is MARK_NONE where that chain ends with no mark or at a struct that
 // answered MARK_NONE. For a struct with the mark MARK_UNKNOWN or MARK_WALKING, it is that mark,
 // with the struct in *enter. A struct with no layout answers MARK_NONE, and a layout that waits
-// makes the walk uncertain. With `m->fn_only`, a reference marked `mut` or `own` is no mark, and
-// the walk goes on to what it reaches.
+// makes the walk uncertain.
 fn mark_step(place_memo mut* m, types.node* t, types.node* mut* enter) u8 {
     types.node* mut cur = t;
     // a fixed array leads to its element, and a reference with no mark to what it reaches; the
     // characters of a `string` and the storage of a `void*` hold no pointer
     while (cur->kind == types.type_kind.k_array
-           || (types.type_is_reference(cur) && (m->fn_only || (!cur->is_mut && !cur->is_own))
+           || (types.type_is_reference(cur) && !cur->is_mut && !cur->is_own
                && cur->kind != types.type_kind.k_string
                && cur->kind != types.type_kind.k_voidptr)) {
         cur = cur->elem;
     }
-    if (!m->fn_only && types.type_is_reference(cur) && (cur->is_mut || cur->is_own)) {
+    if (types.type_is_reference(cur) && (cur->is_mut || cur->is_own)) {
         return MARK_SOME;
     }
     if (cur->kind == types.type_kind.k_fn) {
@@ -3243,29 +3236,11 @@ fn mark_step(place_memo mut* m, types.node* t, types.node* mut* enter) u8 {
         }
         return MARK_NONE;
     }
-    u8 kept = kept_mark(m, cur);
+    u8 kept = types.mark_of(cur);
     if (kept == MARK_UNKNOWN || kept == MARK_WALKING) {
         *enter = cur;
     }
     return kept;
-}
-
-// The mark that the struct `s` keeps for the walk of `m` (types.layout). With `m->fn_only` it is
-// the mark of a function pointer alone, and otherwise the mark of each kind.
-fn kept_mark(place_memo* m, types.node* s) u8 {
-    if (m->fn_only) {
-        return types.fn_mark_of(s);
-    }
-    return types.mark_of(s);
-}
-
-// Keeps `mark` as the mark of the struct `s` for the walk of `m` (kept_mark).
-fn keep_mark(place_memo* m, types.node* s, u8 mark) void {
-    if (m->fn_only) {
-        types.keep_fn_mark(s, mark);
-        return;
-    }
-    types.keep_mark(s, mark);
 }
 
 // The walk of carries_mark from the struct `root`: Tarjan's algorithm over the structs and the
@@ -3301,7 +3276,7 @@ fn walk_marks(place_memo mut* m, types.node* root) bool {
         if (found == MARK_SOME) {
             u64 mut k = 0;
             while (k < m->depth) {
-                keep_mark(m, m->frames[k].ty, MARK_SOME);
+                types.keep_mark(m->frames[k].ty, MARK_SOME);
                 k += 1;
             }
             return true;
@@ -3328,7 +3303,7 @@ fn close_set(place_memo mut* m, u64 first) void {
     }
     u64 mut k = first;
     while (k < m->entered_len) {
-        keep_mark(m, m->entered[k], answer);
+        types.keep_mark(m->entered[k], answer);
         k += 1;
     }
     m->entered_len = first;
@@ -3354,7 +3329,7 @@ fn enter_struct(place_memo mut* m, types.node* s) bool {
         m->entered = move(more);
     }
     u64 place = m->entered_len;
-    keep_mark(m, s, MARK_WALKING);
+    types.keep_mark(s, MARK_WALKING);
     // the work limit keeps the place below 2^32
     types.keep_walk(s, cast(place, u32));
     m->entered[place] = s;
@@ -3608,19 +3583,16 @@ fn report_pointer_limit(checker mut* ck, ast.node* n, types.node* src, types.nod
 // the walk follows the two chains of references through them, and through fixed arrays on both
 // sides; where one chain ends there, the result marks no deeper level `mut`. Through a `mut` level
 // a store can write any bits into a pointer slot of the source, and the source can read bits that
-// no pointer wrote. Then check_view_places reads each pointer place of level 1. A cast that is
-// itself an argument of an `extern fn` call is exempt from both, but for a function pointer: C
-// calls a function as its type says. So a cast to a function pointer type from another type is an
-// error. The matrix gives such a cast one source, a `void*`, which reaches no type.
-// An exempt view keeps each place that is or reaches a function pointer. Returns whether it
-// reported.
+// no pointer wrote. Then check_view_places reads each pointer place of level 1. A cast to a
+// function pointer type from another type is an error: a call through it runs a function with
+// arguments that its parameter types do not describe. The matrix gives such a cast one source, a
+// `void*`, which reaches no type. A cast that is an argument of an `extern fn` call follows each
+// rule, as each other cast does: C writes and reads the storage of an argument through the type of
+// its parameter. Returns whether it reported.
 fn check_pointer_places(checker mut* ck, ast.node* n, types.node* src, types.node* dst) bool {
     if (dst->kind == types.type_kind.k_fn && !types.type_equal(src, dst)) {
         report_function_pointer(ck, n, src, dst);
         return true;
-    }
-    if (n == ck->extern_arg) {
-        return check_view_places(ck, n, src, dst, true);
     }
     types.node* mut s = src;
     types.node* mut d = dst;
@@ -3680,7 +3652,7 @@ fn check_pointer_places(checker mut* ck, ast.node* n, types.node* src, types.nod
         d = dn;
         level += 1;
     }
-    return check_view_places(ck, n, src, dst, false);
+    return check_view_places(ck, n, src, dst);
 }
 
 // Reports the cast `n` of `src` to `dst` when level 1 of the result holds a pointer place where
@@ -3694,10 +3666,8 @@ fn check_pointer_places(checker mut* ck, ast.node* n, types.node* src, types.nod
 // no pointer place at level 1, so each place of the target that the rule reads is added; for a
 // `void*` source the rule reads only the places that carry a mark. A struct with no layout is in
 // error, which has reported, or waits in a module-level initializer, which D4.6 refuses, so the
-// rule reads nothing then. With `fn_only`, for an argument of an `extern fn`, the rule reads only
-// the places that reach a function pointer. Returns whether it reported.
-fn check_view_places(checker mut* ck, ast.node* n, types.node* src, types.node* dst,
-                     bool fn_only) bool {
+// rule reads nothing then. Returns whether it reported.
+fn check_view_places(checker mut* ck, ast.node* n, types.node* src, types.node* dst) bool {
     if (!types.has_target_level(dst) || dst->kind == types.type_kind.k_voidptr) {
         return false;
     }
@@ -3712,8 +3682,8 @@ fn check_view_places(checker mut* ck, ast.node* n, types.node* src, types.node* 
     }
     // A `void*` source keeps the walk of the places that carry a mark until the checker refuses
     // each cast of a `void*` to a typed pointer.
-    bool view = !fn_only && src->kind != types.type_kind.k_voidptr;
-    place_memo mut m = place_memo{.marked = !view, .fn_only = fn_only, .view = view};
+    bool view = src->kind != types.type_kind.k_voidptr;
+    place_memo mut m = place_memo{.marked = !view, .view = view};
     defer memo_free(&m);
     pointer_place mut h = pointer_place{};
     bool adds = first_hidden(&m, dp, 1, 0, sp, &h);
@@ -4196,15 +4166,9 @@ fn check_call(checker mut* ck, ast.node mut* n, expr mut* out) void {
             return;
         }
     }
-    // C sees no `own` (D17.13), so a cast that is an argument of an `extern fn` may pun pointers.
-    bool trusted = f.sym != null && f.sym->kind == ast.sym_kind.s_extern_fn;
-    ast.node* outer_arg = ck->extern_arg;
     u64 mut i = 0;
     while (i < ast.ast_len(n)) {
         expr mut arg = expr{};
-        if (trusted) {
-            ck->extern_arg = ast.ast_child(n, i);
-        }
         if (known && i < f.ty->params.len) {
             check_expr_as(ck, ast_child_mut(n, i), f.ty->params[i], "the argument", &arg);
         } else {
@@ -4219,8 +4183,6 @@ fn check_call(checker mut* ck, ast.node mut* n, expr mut* out) void {
         }
         i += 1;
     }
-    // An extern call in an argument of an extern call gives the outer argument back.
-    ck->extern_arg = outer_arg;
     if (!known) {
         return;
     }
@@ -4912,6 +4874,118 @@ fn extern_legal(types.node* t) bool {
     }
 }
 
+// ---- the pointers that C gives (D17.13) ----------------------------------------------------
+
+// A pointer type that C gives to fort code with a `mut` that no parameter of its type has, and
+// where the signature names it: 0 for the result, and `k + 1` for parameter `k`. A null `ty` is
+// none.
+struct given_mut {
+    types.node* ty;
+    u64 at;
+}
+
+// The first pointer type that C gives in a call of a function of the type `f`, with a variable
+// tail when `tail` holds, that marks a level `mut` with no `own`, where `f` has a parameter that
+// can carry a pointer and no fixed parameter of that type (D17.13). C can give back an argument
+// (A7 of ownership-design.md 5.1), and a `mut` that no argument had writes storage that fort code
+// lent read-only. C gives the result, each parameter type of a function pointer parameter, because
+// C calls it with such values, and each pointer type that a level of a parameter holds where the
+// parameter marks that level `mut`, because C can store a pointer there. A fixed array adds no
+// level (D5.2), and the rule reads no field of a struct. The result comes first, and then the
+// parameters in order. A function pointer type that C gives runs C when fort code calls it, so a
+// call through it follows the same rule.
+fn first_given_mut(types.node* f, bool tail) given_mut {
+    // a pointer, a `void*`, a function pointer and the variable tail can carry a pointer
+    bool mut carries = tail;
+    u64 mut i = 0;
+    while (i < f->params.len) {
+        if (types.type_is_pointer_place(f->params[i])) {
+            carries = true;
+        }
+        i += 1;
+    }
+    types.node* r = given_lacks_mut(f, carries, f->elem);
+    if (r != null) {
+        return given_mut{.ty = r, .at = 0};
+    }
+    i = 0;
+    while (i < f->params.len) {
+        types.node* p = f->params[i];
+        types.node* mut found = null;
+        if (p->kind == types.type_kind.k_fn) {
+            u64 mut j = 0;
+            while (found == null && j < p->params.len) {
+                found = given_lacks_mut(f, carries, p->params[j]);
+                j += 1;
+            }
+        }
+        types.node* mut cur = p;
+        while (found == null && types.has_target_level(cur)) {
+            types.node* held = types.behind_arrays(cur->elem);
+            if (cur->is_mut && types.type_is_pointer_place(held)) {
+                found = given_lacks_mut(f, carries, held);
+            }
+            cur = held;
+        }
+        if (found != null) {
+            return given_mut{.ty = found, .at = i + 1};
+        }
+        i += 1;
+    }
+    return given_mut{};
+}
+
+// For the type `g` that C gives in a call of a function of the type `f`: `g` when it marks a level
+// `mut`, does not say `own` and has no fixed parameter of its type in `f`, and `carries` says that
+// a parameter of `f` can carry a pointer. For a function pointer type, the first such type of a
+// call through it. Null otherwise.
+fn given_lacks_mut(types.node* f, bool carries, types.node* g) types.node* {
+    if (g->kind == types.type_kind.k_fn) {
+        return first_given_mut(g, false).ty;
+    }
+    if (!carries || (types.type_is_reference(g) && g->is_own) || !marks_a_level_mut(g)) {
+        return null;
+    }
+    u64 mut i = 0;
+    while (i < f->params.len) {
+        if (types.type_equal(f->params[i], g)) {
+            return null;
+        }
+        i += 1;
+    }
+    return g;
+}
+
+// Whether the type `t` marks a level `mut`: level `k` is the storage that the `k`-th reference of
+// its chain reaches, and a fixed array adds no level (D5.2). An extern signature holds no fixed
+// array, so `t` is a reference or no pointer.
+fn marks_a_level_mut(types.node* t) bool {
+    types.node* mut cur = t;
+    while (types.has_target_level(cur)) {
+        if (cur->is_mut) {
+            return true;
+        }
+        cur = types.behind_arrays(cur->elem);
+    }
+    return false;
+}
+
+// Reports that the extern `name`, declared by `decl`, gives the type of `g` with a `mut` that no
+// parameter of that type has, at the result or at the parameter that names it (D17.13).
+fn report_given_mut(checker mut* ck, ast.node* decl, string name, given_mut g) void {
+    check_msg_begin(ck);
+    msg_str(ck, "extern ");
+    msg_quote(ck, name);
+    msg_str(ck, ": C gives '");
+    check_msg_type(ck, g.ty);
+    msg_str(ck, "' with a 'mut' that no parameter of that type has");
+    diag.loc mut at = decl->a->loc;
+    if (g.at > 0) {
+        at = param_at(decl, g.at - 1)->loc;
+    }
+    check_msg_end(ck, at);
+}
+
 // The `i`-th parameter declaration of a function, for the position a
 // signature difference is reported at.
 fn param_at(ast.node* decl, u64 k) ast.node* {
@@ -5216,6 +5290,14 @@ fn resolve_fn(checker mut* ck, ast.sym mut* s) void {
         return;
     }
     s->ty = types.type_fn(&ck->types, ret.ty, params[0..n], is_noreturn(decl->a));
+    if (is_extern && s->ty->kind == types.type_kind.k_fn) {
+        given_mut g = first_given_mut(s->ty, (decl->flags & ast.FLAG_VARIADIC) != 0);
+        if (g.ty != null) {
+            report_given_mut(ck, decl, s->name, g);
+            sym_fail(ck, s);
+            return;
+        }
+    }
     if (is_extern && !ck->defer_externs && !check_extern_agreement(ck, decl, s)) {
         // no one signature, so the symbol is poisoned
         sym_fail(ck, s);

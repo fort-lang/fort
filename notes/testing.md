@@ -1135,7 +1135,9 @@ bullet at a time and without a rewrite.
   absent. Two earlier changes
   mutated `src/fort/check.ft`, and then both compilers, by hand, because no table covered either
   file. `tools/mutations/checker_fort.json` covers one rule of the fort checker, the pointer places
-  that a cast keeps (D3.14), since 2026-10-26. No table covers the rest of the fort checker.
+  that a cast keeps (D3.14), since 2026-10-26, and `tools/mutations/extern_fort.json` covers the
+  pointers that an `extern fn` declaration gives (D17.13). No table covers the rest of the fort
+  checker.
   **The checker table reads its rows from history.** Commit 39a58dd8 deleted every `Dn.m`
   citation of `bootstrap0/src/check.c` and `check_stmt.c` and kept the code. The table has one
   row for each of the 78 decisions those files cited at `39a58dd8^`, one row for each of the 6

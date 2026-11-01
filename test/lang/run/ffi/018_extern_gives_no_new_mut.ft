@@ -1,0 +1,68 @@
+//! run
+//! stdout:
+//| bc
+//| 42 2
+//| 1970 2
+//| true 1970 2
+//| true
+// The declarations of C functions that the rule of the pointers that C gives takes (D17.13). A
+// result with no `mut` reads storage that fort code lent: `strchr` gives a `char*`. An
+// out-parameter drops the `mut` of the level that it holds: `strtol` stores a `char*`. A result
+// that fort code only reads drops its `mut`: `gmtime` gives a `tm*`. A result of the type of a
+// parameter gives back that parameter: `gmtime_r` gives the `tm mut*` that it fills. A C object
+// that one function opens and another closes is an allocation of C: `fopen` gives it with `own`,
+// and `fclose` takes it with `move`. Each function is in the C library of Linux and of Darwin.
+import std.str;
+
+// struct tm of glibc on x86-64 and of Darwin on arm64: nine `int`, a `long` and a `char*`.
+struct tm {
+    i32 sec;
+    i32 min;
+    i32 hour;
+    i32 mday;
+    i32 mon;
+    i32 year;
+    i32 wday;
+    i32 yday;
+    i32 isdst;
+    i64 gmtoff;
+    char* zone;
+}
+
+extern fn strchr(char* s, i32 c) char*;
+extern fn strtol(char* nptr, char* mut* endptr, i32 base) i64;
+extern fn gmtime(i64* t) tm*;
+extern fn gmtime_r(i64* t, tm mut* out) tm mut*;
+extern fn fopen(char* path, char* mode) void mut* own;
+extern fn fclose(void mut* own f) i32;
+
+fn main() i32 {
+    char[4] abc = {'a', 'b', 'c', cast(0, char)};
+    char* found = strchr(&abc[0], 98);
+    println(str.from_cstr(found));
+
+    char[4] digits = {'4', '2', 'x', cast(0, char)};
+    char* mut end = null;
+    i64 v = strtol(&digits[0], &end, 10);
+    println(v, " ", cast(end, u64) - cast(&digits[0], u64));
+
+    // one day after the epoch, in UTC
+    i64 day = 86400;
+    tm* shared = gmtime(&day);
+    println(shared->year + 1900, " ", shared->mday);
+    tm mut out = {};
+    tm mut* back = gmtime_r(&day, &out);
+    back->isdst = 0;
+    println(back == &out, " ", out.year + 1900, " ", out.mday);
+
+    char mut@ own path = str.to_cstr("/dev/null");
+    defer del(path);
+    char[2] mode = {'r', cast(0, char)};
+    void mut* own f = fopen(&path[0], &mode[0]);
+    if (f == null) {
+        println(false);
+        return 1;
+    }
+    println(fclose(move(f)) == 0);
+    return 0;
+}

@@ -3228,10 +3228,11 @@ says ownership is "by convention", this section supersedes it.
   with `fclose(void mut* own f)`. A result that fort code only reads drops its `mut`:
   `gmtime(i64* t) tm*`, or `gmtime_r(i64* t, tm mut* out) tm mut*`, whose `out` has the type of
   the result. An out-parameter drops the `mut` of the level that it holds:
-  `strsep(char* mut* stringp, char* delim) char*`. A count at 855b512f
-  found 3 declarations that the rule refuses: `opendir` in the two `std.libc` modules and
-  `malloc_get_all_zones` of `test/fort/support/heap.ft`, whose `zone* mut* mut* addresses` becomes
-  `zone** mut* addresses`.
+  `strtod(char* s, char* mut* end) f64`. It keeps A7, because C writes only `*end`, the level that
+  `end` marks `mut`, and the `char*` that it stores there points into `s` and marks no `mut`. A
+  count at 855b512f found 3 declarations that the rule refuses: `opendir` in the two `std.libc`
+  modules and `malloc_get_all_zones` of `test/fort/support/heap.ft`, whose
+  `zone* mut* mut* addresses` becomes `zone** mut* addresses`.
 - history: Amended 2026-09-14 (T-086): `malloc` was declared `void* own`, because `void mut*` was
   not a type until D3.11 was amended.
   Amended 2026-09-29 (T-257): added the borrowing form for a C result that is owned on some calls
@@ -3248,7 +3249,10 @@ says ownership is "by convention", this section supersedes it.
   a `mut` (probed). The rule now reads each type that C gives, and the count stays 2. A review of
   2026-11-01 found the out-parameter: `strtol` with `char mut* mut* endptr` stored a `mut` pointer
   into the immutable argument (probed). The rule now reads the types that a `mut` level of a
-  parameter holds, and the count is 3 with `malloc_get_all_zones` of a test.
+  parameter holds, and the count is 3 with `malloc_get_all_zones` of a test. A review of
+  2026-11-01 found that the `strsep` example of "The cost" broke A7: C `strsep` writes a NUL into
+  the string, a level that `char* mut*` marks read-only. The coordinator ratified `strtod` as the
+  example (2026-11-01).
 
 ### D17.14 What ownership does not track
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
