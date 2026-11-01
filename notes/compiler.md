@@ -1335,9 +1335,11 @@ came here.
   declaration added to `std.libc` binds every program in the repository**, and the cost of a wrong
   signature is paid by all of them at once: T-045 added `qsort` there, and a program that
   redeclares it must now write the same parameter types, `fn (void*, void*) i32` included.
-  `grep -rn 'extern fn void qsort' .` finds one in each `std/<target>/libc.ft` and one in
-  `spec/module-system.md` 8.5, which spells it out as its callback example. **Retyping one costs
-  the same**, and the bill is the programs that redeclare it, not the ones that call it: T-086
+  `grep -rn 'extern fn qsort' .` finds one in each `std/<target>/libc.ft` and one in
+  `spec/module-system.md` 8.5, which spells it out as its callback example. Since the decision
+  text of 2026-10-31, `stdlib.md` 2.2 declares no `qsort`: its comparator reads a `void*`, which no
+  cast types (D3.14), and the code follows when the migration of that rule lands. **Retyping one
+  costs the same**, and the bill is the programs that redeclare it, not the ones that call it: T-086
   gave `read`, `write` and the four `<string.h>` byte functions `u8*` and `u8 mut*` and made
   `malloc` return `void mut* own`, and 9 corpus tests had to redeclare their `extern` while 7
   only dropped a cast. `spec/decisions.md` D9.8 carried a `void* buf` example of `write` that a

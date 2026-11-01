@@ -202,8 +202,9 @@ Each event names the function, the FIR location and one of these kinds:
 `leak at exit` finds the allocations of a cycle of owners, whose counts never become 0. A load or a
 store through a value is `forged` when it reaches a byte of a local of a run that stands, and the
 value does not derive from an address of the entry of that local that the run took (D10.7). A byte
-of padding counts as a byte of the local before it. D10.7 makes each access of padding undefined,
-so the oracle reports fewer events there than D10.7 allows.
+of padding counts as a byte of the local before it. D10.7 gives padding between locals no address
+that fort code takes, so no program that compiles reaches it, and the oracle reports no event of
+its own there.
 After a `forged` event the run reports no event, because each rule assumes A8 (5.1). A run also has
 an outcome: its output, its exit status, or its runtime error. A load through a null that no
 vacated slot gave is the outcome `null dereference`, which is no ownership event.
@@ -473,9 +474,8 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   release`. A store of another type can copy an owner into a second slot, and that breaks A2 too. An
   example was `*q = cast(x, u64)` with `q = cast(&y, u64 mut*)`. A later `del(y)` frees through a
   slot that is no owner slot of its allocation, and the oracle reports `duplicate owner`. D3.14 now
-  refuses `cast(&y, u64 mut*)`, because the view hides the owner `y`. Such a store still reaches an
-  owner slot through an argument of an `extern fn` (A7). It also reaches one through the form
-  that A8 below names, which the rule of D3.14 does not read. A2 says nothing of types:
+  refuses `cast(&y, u64 mut*)`, because the view hides the owner `y`, and it refuses the same view
+  as an argument of an `extern fn` (since 2026-10-31). A2 says nothing of types:
   D10.7 has no strict-aliasing rule, so no rule of V1 reads the type of a place through a
   pointer.
 - **A3**: an `own` reference designates the start of a live allocation, or it is null (D17.1).
@@ -485,27 +485,56 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
 - **A7**: the C code of an extern keeps A1 to A5, and it frees no allocation that fort still owns.
   D17.13 already trusts the C side of an extern signature, and V1 trusts C no further: an extern
   call follows 4.6 as each call does. No rule can check C, so the design takes A7 (section 15).
-  A7 also covers a view that C gives back: a cast that is itself an argument of an `extern fn`
-  may hide a pointer place (D3.14), and `memmove(dst, src, 0)` returns `dst` to fort code as a
-  `u8 mut*`.
-  A store through that result reaches the owner slot, so A7 asks that such a view not be used to
-  write an owner slot either. A7 also asks that a function pointer that C gives to fort code
-  names a function of its type. The exemption covers no function pointer place (D3.14), so fort
-  gives C no function pointer of another type.
+  A7 also bounds each pointer that C gives to fort code: a result, a value that C stores in fort
+  storage, a pointer that fort code reads from storage of C, an argument of a fort callback, and
+  a pointer that a callback gave to C and C gives back. Each names storage that C gave, or
+  storage that fort code gave to C (an argument, a callback result, or a value that fort code
+  stored where C reads it). The whole pointee of its type, from the byte that it names, lies
+  inside that storage, the address is aligned for the pointee (D3.1), and the pointer marks no
+  `mut` that the pointer of fort code lacked. So `extern fn memchr(void* s, i32 c, u64 n) i64*`
+  breaks A7 for a search of one byte. C reads and writes only the storage that its arguments name,
+  as the contract of the C function says: a C string ends in a NUL inside its storage, and a length
+  fits its buffer. C writes a pointer place of a struct only where the contract of the C function
+  writes it, as `recvmsg` writes the fields of its `struct msghdr`. C writes only a level that the
+  type of its parameter marks `mut`: with
+  `strtod(char* s, void* end)`, C writes `*end`, and the declaration breaks A7. The user ruled this
+  growth with "(A) Close R1-R7" (2026-10-31), and the coordinator ratified the out-parameter and
+  the alignment on 2026-11-01. D17.13 gives its compile-time part for `mut`: a pointer type that
+  C gives, a result, a parameter of a callback or a pointer that a `mut` level of a parameter holds,
+  marks `mut` only where it says `own`, where a parameter of the same type marks the level, or
+  where the extern has no parameter that can carry a pointer (`...` and a function pointer count).
+  D10.7 names an extern declaration or C code that breaks A7 as outside its guarantee. A7 also asks
+  that a function pointer that C gives to fort code names a function of its type. No cast gives a
+  function pointer another type, as an argument of an `extern fn` too (D3.14), so fort gives C no
+  function pointer of another type.
 - **A8**: a value designates storage of a local of this run of F only when it derives from an
   address of that local that this run took. It derives through copies, casts, arithmetic, stores and
-  loads, in F or in a callee. The user ruled on 2026-10-26: "Yes, add A8 to D10.7" (section 12).
-  D10.7 now makes a read or a write of a local through a value that does not derive this way
-  undefined behavior, and it gives the exact terms. Before the ruling, D10.7 listed no forged
-  pointer. So a callee could return `cast(cast(p, u64) + 8, i32*)` for an argument `p`, and D10.7
-  defined a read through that value. Rules (b) and (e) of V1 need A8 for such a read. Without A8 the
+  loads, in F or in a callee. The user ruled on 2026-10-26: "Yes, add A8 to D10.7" (section 12),
+  and D10.7 made a read or a write of a local through a value that does not derive this way
+  undefined behavior. Before that ruling, a callee could return `cast(cast(p, u64) + 8, i32*)`
+  for an argument `p`, and D10.7 defined a read through that value. The user then ruled on
+  2026-10-31: "No undefined behavior. Fix with compile time guarantees" and "(A) Close R1-R7".
+  Compile-time rules now refuse each route by which fort code got such a value, and D10.7 lists
+  no forged value; it states A8 as a guarantee. No cast takes an integer to a pointer or a
+  `void*`, no cast takes a `void*` to a typed pointer, and no cast makes the pointee larger. No
+  view adds or changes a pointer place, but for a drop of marks in a place that carries no mark.
+  An argument of an `extern fn` follows these rules, with no exemption (D3.14). No span
+  expression takes a raw pointer but in `str.from_cstr` and `rt.args_init` (D6.9), and no
+  source calls `rt.args_init`. The `.ptr` of a span is legal only where no fort code loads or
+  stores through it (D3.5). A pointer type that C gives marks `mut` only where it says `own`,
+  where a parameter of the same type marks the level, or where the extern has no parameter that
+  can carry a pointer (D17.13). With A7 for C, a pointer that fort code holds is `null`, a value
+  that derives from an address and keeps its whole pointee inside the object of that address, or
+  a dangling pointer. So A8 holds for each program that compiles, in a build without
+  `--no-bounds-check`, and keeps A1 and A7, for a `del` too.
+  Rules (b) and (e) of V1 need A8 for such a read. Without A8 the
   read can name a local that is not memory, and it is then no use (5.5 rule (b)) and no borrow
   (lemma (ii)). Refinement R6 needs A8 for each local (section 7). Rules (a) and (c), and kill rule
   5 of D17.11, need only that no write and no release goes through a forged pointer. D3.14 gives
   that for a cast alone, because a cast from an integer marks no level `mut` and no level `own`.
   D10.6 gives it for an index in each build without `--no-bounds-check`, and D10.7 gives it for a
-  slice. A same-size reinterpretation can still load a `mut` or an `own` pointer from the bytes of
-  an integer. D10.7 (A8) makes an access to a local through such a forged value undefined. A write
+  slice. A same-size reinterpretation cannot load a pointer from the bytes of an integer: D3.14
+  refuses the view in each form, an argument of an `extern fn` included. A write
   through a same-size reinterpretation of a value that derives from the address of the slot stays
   defined as an access, but D3.14 refuses the cast that makes the view: at the first level that
   its result marks `mut`, a cast must keep each pointer place of its source with its exact type,
@@ -529,7 +558,7 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   from a `void*` or from an integer to such a view (`cast(v, holder*)` for a `void* v`):
   D3.14 keeps each pointer place that carries a mark, with its exact type, in any view.
   Since the user ruled "A: always marked" (2026-10-31), four more forms do not compile. A
-  function pointer place carries a mark, and the exemption covers no function pointer place. A
+  function pointer place carries a mark, and no exemption covers a function pointer place. A
   cast from a `void*` to a function pointer type is an error, as an argument of an `extern fn`
   too (D3.14):
   - a call through a function pointer to which a cast through `void*` gave another type:
@@ -547,11 +576,12 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
     C a function pointer place over the bits of an integer, and C can call it.
 
   The guarantee of rules (a) and (c) now covers an owner slot in a local, a global or an
-  allocation against such views. One form stays outside it, and it compiled on 2026-10-30
-  (probed). It is a view that C gives back from an exempt argument (A7). An example is
+  allocation against such views. One form stayed outside it until 2026-10-31, and it compiled on
+  2026-10-30 (probed): a view that C gave back from an exempt argument, as
   `cast(memmove(cast(&o, u8 mut*), cast(&o, u8*), 0), u64 mut*)` for a `u64* own mut o`, then a
-  store of an integer. An owner slot that this form forges is outside the guarantee of rules (a)
-  and (c). The oracle reports a break of A8 as `forged` (3.4).
+  store of an integer. D3.14 now refuses the argument `cast(&o, u8 mut*)`, because it hides the
+  owner place, so no form stays outside. The oracle reports a break of A8 as `forged` (3.4). A run
+  that reports `forged` shows a program that breaks A1 or A7, or a defect of a compile rule.
 
 ### 5.2 Outside the scopes
 
@@ -568,8 +598,8 @@ These cases are outside the scope of every rule. The oracle counts their events 
   callee. To cover it costs 93 more sites in 20 more functions of `src/fort`, 6 in `std` and in
   `test/fort`, and 40 in `test/lang` (measured, P4). The sources hold one global owner (read).
 - **X6**: no rule checks a store of another type over an owner slot, because rule (a) checks only
-  `own` reference places (D17.11). D3.14 refuses the `mut` view that such a store needs, except
-  for an argument of an `extern fn` and the form that A8 names. No rule
+  `own` reference places (D17.11). D3.14 refuses the `mut` view that such a store needs, as an
+  argument of an `extern fn` too (A8). No rule
   checks a `double release` through a value with no tag (X4, X5).
 
 ### 5.3 The state lemma
@@ -1198,12 +1228,24 @@ The user ruled on two questions of D17.21 on 2026-10-27. Through a pointer, the 
 edge where a test finds a value that is not `null` ends the vacated state: "Yes, the non-null
 edge clears it".
 
-The user ruled on assumption A8 (5.1) on 2026-10-26: "Yes, add A8 to D10.7". D10.7 now lists a read
-or a write of the storage of a local of a run through a value that does not derive from an address
-of that local that the run took as undefined behavior. So in each program that D10.7 defines, A8
-holds for each read and each write of a local. D10.7 does not cover a `del`, so it gives A8 for no
-`del` through a forged `own`. The rule of 5.1 on a cast that hides an owner place is to close that
-case. Items 10 and 13 of section 11, and R6 of section 7, no longer wait for a ruling.
+The user ruled on assumption A8 (5.1) on 2026-10-26: "Yes, add A8 to D10.7". D10.7 then listed a
+read or a write of the storage of a local of a run through a value that does not derive from an
+address of that local that the run took as undefined behavior. Items 10 and 13 of section 11, and
+R6 of section 7, no longer wait for a ruling.
+
+The user ruled on 2026-10-31: "No undefined behavior. Fix with compile time guarantees", and then
+"(A) Close R1-R7". Seven compile-time rules close the routes by which fort code got a pointer to
+storage whose address it did not hold: a cast from an integer, a view that adds or changes a
+pointer place with no mark, the exemption of an argument of an `extern fn`, a cast to a larger
+pointee, a cast from a `void*` to a typed pointer, a span of a raw pointer outside two named
+functions of `std`, and a pointer from C that adds `mut` (D3.14, D6.9, D17.13). The review of
+2026-10-31 added the `.ptr` of an empty span (D3.5) and the alignment of a pointee (D3.14). A7
+grows: C gives back only storage that C gave, or storage that fort code gave to C, with its whole
+pointee inside. D10.7 lists no forged value and states A8 as a guarantee, so A8 holds for each
+read, each write and each `del` of each program that compiles, in a build without
+`--no-bounds-check`, and keeps A1 and A7 (5.1). A
+count at 855b512f over `src`, `std`, `test/fort`, `test/lsp`, `test/lang` and `test/library` found
+165 sites and 2 extern declarations that the rules refuse.
 
 The questions, their options and their counts stay below as the record.
 

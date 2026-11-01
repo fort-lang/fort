@@ -713,11 +713,13 @@ bullet at a time and without a rewrite.
   its memory local before any call that follows its check: a call kills each fact of a memory
   local, so a call between the `del` and the exit makes the exit unproved for a reason that is not
   R6.
-  **The oracle reports an access through a forged pointer as `forged`**, which D10.7 (A8) makes
-  undefined (`spec/ownership-design.md` 3.4): a run that writes `x` through `cast(py, u64) + 8` for
-  `py = &y` reports `forged` at the access and no event after it, so the test counts no false
-  accept there, though R6 may keep the fact of `x`. Each set prints its count of `forged` events
-  on a line of its own (`outside each rule (A8)`), with its rejected sites that have no event at
+  **The oracle reports an access through a forged pointer as `forged`**, a break of A8
+  (`spec/ownership-design.md` 3.4). D10.7 states A8 as a guarantee of the compile-time rules of
+  D3.5, D3.14, D6.9 and D17.13, so a program that compiles makes no such access unless C breaks
+  A7; a FIR test still can. A FIR run that writes `x` through the address of `y` plus 8 reports
+  `forged` at the access and no event after it, so the test counts no false accept there, though R6
+  may keep the fact of `x`. Each set prints its count of `forged` events on a line of its own
+  (`outside each rule (A8)`), with its rejected sites that have no event at
   or after a `forged` event of their function: such a site is no false reject, because the run
   reports no event after `forged`. The generator forges no pointer to a local: its one cast of an
   integer to a pointer, `v = cast(u, i32*)`, reads back an integer of an `own` value or of an
