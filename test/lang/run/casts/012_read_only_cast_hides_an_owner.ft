@@ -1,16 +1,16 @@
 //! run
 //! stdout:
 //| 7 7 true
-//| true 2
+//| true 2 true
 //| 2
 //| 2
-//| 0 9 9 0
+//| 9 0
 //| 3 3
 //| 7 true
 // A cast whose result can change no level may hide a pointer place of its source, an owner
-// included, and it may add or change a pointer place that carries neither `mut` nor `own`
-// (D3.14): no store and no release goes through such a view. A read through it yields the bits,
-// as D10.7 defines for a pointer to another type of the same size.
+// included, and a pointer place of its target that carries neither `mut` nor `own` may drop the
+// marks of the place under it (D3.14): no store and no release goes through such a view. A read
+// through it yields the bits, as D10.7 defines for a pointer to another type of the same size.
 import std.str;
 
 struct holder {
@@ -67,7 +67,9 @@ fn holder_views(holder mut* h) void {
 fn slot_views(slots mut* k) void {
     u64* slot = cast(&k->one, u64*);
     header* words = cast(&k->text, header*);
-    println(*slot == cast(k->one, u64), " ", words->len);
+    // the `u64*` drops the `own` of the owner under it
+    u64** one = cast(&k->one, u64**);
+    println(*slot == cast(k->one, u64), " ", words->len, " ", cast(*one, u64) == *slot);
 }
 
 // A read-only view of an owning span header.
@@ -76,18 +78,16 @@ fn span_view(slots mut* k) void {
     println(span_words->len);
 }
 
-// Pointers with no mark added over an integer, over the storage behind a `void mut*`, from an
-// integer, and two levels down.
+// A pointer with no mark over the storage behind a `void mut*`, and one two levels down that
+// drops the `mut` of the pointer under it.
 fn unmarked() void {
     u64 mut word = 0;
-    u64** seen = cast(&word, u64**);
     void mut* anon_word = cast(&word, void mut*);
     holder_view* from_void = cast(anon_word, holder_view*);
     u64 mut nine = 9;
     u64 mut* mut pn = &nine;
     u64** deep = cast(&pn, u64**);
-    u64* from_bits = cast(cast(&nine, u64), u64*);
-    println(cast(*seen, u64), " ", **deep, " ", *from_bits, " ", from_void->count);
+    println(**deep, " ", from_void->count);
 }
 
 // A struct that reaches itself carries no mark when none of its pointers carries one.
@@ -95,7 +95,9 @@ fn self_reaching() void {
     link mut tail = link{.next = null, .v = 3};
     link mut head = link{.next = &tail, .v = 1};
     link* again = cast(cast(&head, void*), link*);
-    println(again->next->v, " ", cast(cast(&tail, u64), link*)->v);
+    link mut* mut cursor = &tail;
+    link** seen = cast(&cursor, link**);
+    println(again->next->v, " ", (*seen)->v);
 }
 
 // A place that carries a mark is legal where the source holds a place of the same type.

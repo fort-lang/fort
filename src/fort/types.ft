@@ -1113,10 +1113,20 @@ fn type_without_mut(table mut* tt, node* t) node* {
     return t;
 }
 
+/// Whether a cast from `src` to `dst` makes a pointer from an integer: `src` is an integer and
+/// `dst` is a pointer, a `void*` or a function pointer type. No such cast is legal, and
+/// `check_cast` refuses it before each other rule. A `char`, a `bool`, an enum and a float reach
+/// no such target in the matrix.
+fn type_cast_makes_pointer(node* dst, node* src) bool {
+    return type_is_int(src) && (is_ptr_like(dst) || dst->kind == type_kind.k_fn);
+}
+
 /// Tests the cast matrix for two types.
 /// The checker handles value category, `move`, and binding-level `mut` rules.
 /// The matrix admits casts that add `own`. `check_cast` refuses them after this check (D3.14),
-/// so a caller must not trust the matrix alone.
+/// so a caller must not trust the matrix alone. The matrix admits a `u64` to a pointer and to a
+/// `void*` too, which `check_cast` refuses before this check (type_cast_makes_pointer). FIR text
+/// that forges a pointer on purpose, a test of `fir.shadow`, keeps the row.
 fn type_cast_allowed(node* dst, node* src) bool {
     if (dst->kind == type_kind.k_error || src->kind == type_kind.k_error) {
         return true;
@@ -1150,7 +1160,7 @@ fn type_cast_allowed(node* dst, node* src) bool {
                (src->kind == type_kind.k_voidptr && dst->kind == type_kind.k_fn);
     }
     if (is_u64(src)) {
-        // an address comes back from `u64` alone
+        // the row that FIR text keeps; check_cast refuses it (type_cast_makes_pointer)
         return is_ptr_like(dst);
     }
     if (src->kind == type_kind.k_fn) {

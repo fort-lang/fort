@@ -3,23 +3,26 @@
   "The table of the fort checker and the rules of D3.14 for the pointer places of a cast. At the",
   "first level that the result of a cast marks `mut`, a cast keeps each pointer place of the source",
   "with its exact type. At level 1 of each view, it keeps each pointer place that carries a mark",
-  "with its exact type. A function pointer carries a mark, and a cast from a `void*` to a function",
-  "pointer type is an error. An argument of an `extern fn` is exempt from the first two rules, and",
-  "each rule has a work limit. The rows cover src/fort/check.ft and src/fort/types.ft. In",
-  "check.ft: check_pointer_places, check_marked_places, report_function_pointer, carries_mark,",
-  "mark_step, walk_marks, close_set, enter_struct, first_hidden, part_at and check_call. In",
-  "types.ft: type_is_pointer_place, the pointer count of type_layout_struct and the mark of a",
-  "layout. Each row breaks one rule of that walk. The stages are the cast",
-  "corpus of test/lang, whose fail tests pin the message, the byte and the level of each place,",
-  "and the checker suite, which pins the count and the position of each report. The table runs in",
-  "the VM: pass a --runner that runs tools/vm run in one slot and then syncs, as",
-  "notes/environment.md says. The md5 guard reads the product compiler that the build links. Put",
-  "a row that an earlier run caught first, because the first round of a run in the VM can read",
-  "stale (notes/testing.md). The checker suite runs with --timeout 120: the rows D3.14-keep-memo",
-  "and D3.14-keep-modulo change the time of the walk and not its answer, and the shapes of 128 to",
-  "the power 6 owners in check_expr_test.ft then pass the timeout.",
-  "The checker suite holds check_mark_limit_test.ft, the one witness of D3.14-mark-count:",
-  "its chain of 65600 structs takes about 13 s in the VM."
+  "with its exact type, and each place with no mark with its type or a type that differs only by",
+  "the marks that it drops. A function pointer carries a mark, and a cast from a `void*` to a",
+  "function pointer type is an error. No cast makes a pointer from an integer, and no cast makes",
+  "the pointee of a typed pointer larger or more aligned. An argument of an `extern fn` is exempt",
+  "from the first two rules, and the walks of the places have a work limit. The rows cover",
+  "src/fort/check.ft and src/fort/types.ft. In check.ft: check_cast, check_pointee_growth,",
+  "check_pointer_places, check_view_places, report_function_pointer, carries_mark, mark_step,",
+  "walk_marks, close_set, enter_struct, first_hidden, part_at and check_call. In types.ft:",
+  "type_cast_allowed, type_cast_makes_pointer, type_is_pointer_place, the pointer count of",
+  "type_layout_struct and the mark of a layout. Each row breaks one of these rules. The stages are",
+  "the cast corpus of test/lang, whose fail tests pin the message, the byte and the level of each",
+  "place, and the checker suite, which pins the count and the position of each report. The table",
+  "runs in the VM: pass a --runner that runs tools/vm run in one slot and then syncs, as",
+  "notes/environment.md says. The md5 guard reads the product compiler that the build links. Put a",
+  "row that an earlier run caught first, because the first round of a run in the VM can read stale",
+  "(notes/testing.md). The checker suite runs with --timeout 120: the rows D3.14-keep-memo and",
+  "D3.14-keep-modulo change the time of the walk and not its answer, and the shapes of 128 to the",
+  "power 6 owners in check_expr_test.ft then pass the timeout. The checker suite holds",
+  "check_mark_limit_test.ft, the one witness of D3.14-mark-count: its chain of 65600 structs takes",
+  "about 13 s in the VM."
  ],
  "sources": [
   "src/fort/check.ft",
@@ -209,7 +212,7 @@
   {
    "decision": "D3.14-mark-view",
    "file": "src/fort/check.ft",
-   "old": "    return check_marked_places(ck, n, src, dst, false);",
+   "old": "    return check_view_places(ck, n, src, dst, false);",
    "new": "    return false;",
    "what": "a read-only view keeps no pointer place that carries a mark"
   },
@@ -219,13 +222,6 @@
    "old": "    if (types.has_target_level(src) && src->kind != types.type_kind.k_voidptr) {\n        sp = src->elem;",
    "new": "    if (types.has_target_level(src)) {\n        sp = src->elem;",
    "what": "the storage of a `void*` source has the type `void`"
-  },
-  {
-   "decision": "D3.14-mark-integer",
-   "file": "src/fort/check.ft",
-   "old": "    if (!has_layout(dp) || (sp != null && !has_layout(sp))) {",
-   "new": "    if (!has_layout(dp) || (sp != null && !has_layout(sp)) || !types.has_target_level(src)) {",
-   "what": "a cast from an integer keeps no pointer place that carries a mark"
   },
   {
    "decision": "D3.14-mark-limit",
@@ -391,7 +387,7 @@
   {
    "decision": "D3.14-fn-exempt-view",
    "file": "src/fort/check.ft",
-   "old": "    if (n == ck->extern_arg) {\n        return check_marked_places(ck, n, src, dst, true);",
+   "old": "    if (n == ck->extern_arg) {\n        return check_view_places(ck, n, src, dst, true);",
    "new": "    if (n == ck->extern_arg) {\n        return false;",
    "what": "an argument of an `extern fn` may add or change a function pointer place"
   },
@@ -450,6 +446,83 @@
    "old": "           || (types.type_is_reference(cur) && (m->fn_only || (!cur->is_mut && !cur->is_own))",
    "new": "           || (types.type_is_reference(cur) && ((m->fn_only && (cur->is_mut || cur->is_own)) || (!m->fn_only && !cur->is_mut && !cur->is_own))",
    "what": "the walk of a function pointer alone passes only a reference marked `mut` or `own`"
+  },
+  {
+   "decision": "D3.14-int-check",
+   "file": "src/fort/check.ft",
+   "old": "    if (types.type_cast_makes_pointer(target.ty, a.ty)) {",
+   "new": "    if (types.type_cast_makes_pointer(target.ty, a.ty) && false) {",
+   "what": "a `u64` casts to a pointer and to a `void*`, as the matrix admits for FIR text"
+  },
+  {
+   "decision": "D3.14-int-text",
+   "file": "src/fort/check.ft",
+   "old": "        msg_str(ck, \": a cast never makes a pointer from an integer\");",
+   "new": "        msg_str(ck, \": a cast never adds 'mut'\");",
+   "what": "the error of a pointer from an integer names another rule"
+  },
+  {
+   "decision": "D3.14-int-fn",
+   "file": "src/fort/types.ft",
+   "old": "    return type_is_int(src) && (is_ptr_like(dst) || dst->kind == type_kind.k_fn);",
+   "new": "    return type_is_int(src) && (is_ptr_like(dst) || (dst->kind == type_kind.k_fn && false));",
+   "what": "the error of an integer cast to a function pointer type does not name the rule"
+  },
+  {
+   "decision": "D3.14-int-width",
+   "file": "src/fort/types.ft",
+   "old": "    return type_is_int(src) && (is_ptr_like(dst) || dst->kind == type_kind.k_fn);",
+   "new": "    return is_u64(src) && (is_ptr_like(dst) || dst->kind == type_kind.k_fn);",
+   "what": "only the error of a `u64` source names the rule"
+  },
+  {
+   "decision": "D3.14-grow-size",
+   "file": "src/fort/check.ft",
+   "old": "    if (to_size > from_size) {",
+   "new": "    if (to_size > from_size && false) {",
+   "what": "a cast may make the pointee larger"
+  },
+  {
+   "decision": "D3.14-grow-align",
+   "file": "src/fort/check.ft",
+   "old": "    if (to_align > from_align) {",
+   "new": "    if (to_align > from_align && false) {",
+   "what": "a cast may make the alignment of the pointee larger"
+  },
+  {
+   "decision": "D3.14-grow-what",
+   "file": "src/fort/check.ft",
+   "old": "        report_pointee_growth(ck, n, src, dst, \"alignment\", from_align, to_align);",
+   "new": "        report_pointee_growth(ck, n, src, dst, \"pointee\", from_align, to_align);",
+   "what": "the error of a larger alignment names the pointee"
+  },
+  {
+   "decision": "D3.14-grow-exempt",
+   "file": "src/fort/check.ft",
+   "old": "    if (src->kind != types.type_kind.k_ptr || dst->kind != types.type_kind.k_ptr) {",
+   "new": "    if (src->kind != types.type_kind.k_ptr || dst->kind != types.type_kind.k_ptr || n == ck->extern_arg) {",
+   "what": "an argument of an `extern fn` may make the pointee larger"
+  },
+  {
+   "decision": "D3.14-view-drop",
+   "file": "src/fort/check.ft",
+   "old": "        if (m->view && at == 0 && types.type_same_shape(u, t)) {",
+   "new": "        if (m->view && at == 0 && types.type_same_shape(u, t) && false) {",
+   "what": "a place with no mark may not drop the marks of the place under it"
+  },
+  {
+   "decision": "D3.14-view-marked",
+   "file": "src/fort/check.ft",
+   "old": "            if (!marked) {\n                return false;",
+   "new": "            if (!marked || true) {\n                return false;",
+   "what": "a place that carries a mark may drop the marks of the place under it"
+  },
+  {
+   "decision": "D3.14-view-typed",
+   "file": "src/fort/check.ft",
+   "old": "    bool view = !fn_only && src->kind != types.type_kind.k_voidptr;",
+   "new": "    bool view = !fn_only && src->kind != types.type_kind.k_voidptr && false;",
+   "what": "a view of a typed pointer reads only the places that carry a mark"
   }
  ]
 }

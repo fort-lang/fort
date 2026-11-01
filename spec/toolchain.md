@@ -1512,12 +1512,12 @@ to the emitter's text is a change here.
     verifier's dominance rule without any analysis in the compiler.
 
 12. **Casts** (D3.14). `trunc`, `zext` and `sext` for integer to integer, widening by the
-    source's signedness; `zext i1` for `bool` to integer; `ptrtoint` for pointer to `u64`, and no
-    `inttoptr`, because no cast takes an integer to a pointer (D3.14); nothing at all for pointer
-    to pointer and for casts that only drop mutability or ownership (D5.4, D17.4); `sitofp` and
-    `uitofp` for integer to float; `fptrunc` and `fpext` for float to float; and the saturating
-    intrinsics for float to integer, because
-    plain `fptosi` is poison out of range while D3.14 requires truncation toward zero,
+    source's signedness; `zext i1` for `bool` to integer; `ptrtoint` for pointer to `u64`;
+    `inttoptr` only for a `u64`-to-pointer cast in hand-written FIR text, which V4 admits; no fort
+    source produces it (D3.14); nothing at all for pointer to pointer and for casts that only
+    drop mutability or ownership (D5.4, D17.4); `sitofp` and `uitofp` for integer to float;
+    `fptrunc` and `fpext` for float to float; and the saturating intrinsics for float to integer,
+    because plain `fptosi` is poison out of range while D3.14 requires truncation toward zero,
     saturation at the target's range, 0 for NaN, and no trap:
 
     ```llvm

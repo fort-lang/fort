@@ -3126,7 +3126,9 @@ fn cover_of(types.node* u, u64 at, u64 len) target_part {
 // addresses of their types, so a memo lives for one cast. `work` counts the calls of first_hidden;
 // past POINTER_WORK_LIMIT, `over` holds and the walk stops. With `marked`, the walk reads only the
 // places that carry a mark (carries_mark), whose walk counts against the same limit. With
-// `fn_only` as well, a mark is a function pointer alone, for an argument of an `extern fn`.
+// `fn_only` as well, a mark is a function pointer alone, for an argument of an `extern fn`. With
+// `view`, the other view also holds a place that carries no mark where it holds a place of a type
+// that differs only by the `mut` and `own` marks that the place drops.
 struct place_memo {
     strmap.str_map held;
     containers.pool keys; // the text of each key of `held`, which keeps no copy
@@ -3135,6 +3137,7 @@ struct place_memo {
     bool over;
     bool marked;
     bool fn_only;
+    bool view;
     // carries_mark: the walk met a struct whose layout waits, so a "no mark" answer is not final
     bool uncertain;
     mark_frame mut@ own frames; // the structs of the walk of the marks, from the first
@@ -3468,6 +3471,17 @@ fn hidden_in_part(place_memo mut* m, types.node* t, u64 count, u64 at, types.nod
             // `u` holds the same type at the same byte, and so each pointer place of it
             return false;
         }
+        if (m->view && at == 0 && types.type_same_shape(u, t)) {
+            // A `t` that carries no mark marks no level, so `u` differs from it only by the marks
+            // that `t` drops. Past the limit the walk proves nothing.
+            bool marked = carries_mark(m, t);
+            if (m->over) {
+                return true;
+            }
+            if (!marked) {
+                return false;
+            }
+        }
         return hidden_in_copy(m, t, at, u, out);
     }
     u64 size = types.type_sizeof(t);
@@ -3527,16 +3541,22 @@ fn hidden_in_copy(place_memo mut* m, types.node* t, u64 at, types.node* u, point
     return false;
 }
 
-// Reports that the cast `n` of `src` to `dst` hides or adds, as `verb` says, the pointer place `h`
-// of the storage of level `level`. `what` names the rule: "a 'mut' cast" for the first level that
-// the result marks `mut`, and "a cast" for a place that carries a mark in any view.
-fn report_pointer_place(checker mut* ck, ast.node* n, types.node* src, types.node* dst,
-                        string what, string verb, pointer_place h, u64 level) void {
+// Begins the report of a cast of `src` to `dst` with `cannot cast S to T`. The caller adds the
+// rule and ends the report.
+fn msg_cannot_cast(checker mut* ck, types.node* src, types.node* dst) void {
     check_msg_begin(ck);
     msg_str(ck, "cannot cast ");
     check_msg_type(ck, src);
     msg_str(ck, " to ");
     check_msg_type(ck, dst);
+}
+
+// Reports that the cast `n` of `src` to `dst` hides or adds, as `verb` says, the pointer place `h`
+// of the storage of level `level`. `what` names the rule: "a 'mut' cast" for the first level that
+// the result marks `mut`, and "a cast" for a place that carries a mark in any view.
+fn report_pointer_place(checker mut* ck, ast.node* n, types.node* src, types.node* dst,
+                        string what, string verb, pointer_place h, u64 level) void {
+    msg_cannot_cast(ck, src, dst);
     msg_str(ck, ": ");
     msg_str(ck, what);
     msg_str(ck, " ");
@@ -3555,11 +3575,7 @@ fn report_pointer_place(checker mut* ck, ast.node* n, types.node* src, types.nod
 // Reports that the cast `n` of `src` to the function pointer type `dst` adds a function pointer.
 // A function pointer value has no storage level, so the error names no byte (D3.14).
 fn report_function_pointer(checker mut* ck, ast.node* n, types.node* src, types.node* dst) void {
-    check_msg_begin(ck);
-    msg_str(ck, "cannot cast ");
-    check_msg_type(ck, src);
-    msg_str(ck, " to ");
-    check_msg_type(ck, dst);
+    msg_cannot_cast(ck, src, dst);
     msg_str(ck, ": a cast adds the function pointer ");
     check_msg_type(ck, dst);
     check_msg_end(ck, n->loc);
@@ -3570,11 +3586,7 @@ fn report_function_pointer(checker mut* ck, ast.node* n, types.node* src, types.
 // report_pointer_place says.
 fn report_pointer_limit(checker mut* ck, ast.node* n, types.node* src, types.node* dst,
                         string what) void {
-    check_msg_begin(ck);
-    msg_str(ck, "cannot cast ");
-    check_msg_type(ck, src);
-    msg_str(ck, " to ");
-    check_msg_type(ck, dst);
+    msg_cannot_cast(ck, src, dst);
     msg_str(ck, ": the check of ");
     msg_str(ck, what);
     msg_str(ck, " passes its work limit of ");
@@ -3596,11 +3608,10 @@ fn report_pointer_limit(checker mut* ck, ast.node* n, types.node* src, types.nod
 // the walk follows the two chains of references through them, and through fixed arrays on both
 // sides; where one chain ends there, the result marks no deeper level `mut`. Through a `mut` level
 // a store can write any bits into a pointer slot of the source, and the source can read bits that
-// no pointer wrote. Then check_marked_places reads level 1 for each pointer place that carries a
-// mark. A cast that is itself an argument of an `extern fn` call is exempt from both, but for a
-// function pointer: C calls a function as its type says. So a cast to a function pointer type from
-// another type is an error. The matrix gives such a cast one source, a `void*`, which reaches no
-// type.
+// no pointer wrote. Then check_view_places reads each pointer place of level 1. A cast that is
+// itself an argument of an `extern fn` call is exempt from both, but for a function pointer: C
+// calls a function as its type says. So a cast to a function pointer type from another type is an
+// error. The matrix gives such a cast one source, a `void*`, which reaches no type.
 // An exempt view keeps each place that is or reaches a function pointer. Returns whether it
 // reported.
 fn check_pointer_places(checker mut* ck, ast.node* n, types.node* src, types.node* dst) bool {
@@ -3609,7 +3620,7 @@ fn check_pointer_places(checker mut* ck, ast.node* n, types.node* src, types.nod
         return true;
     }
     if (n == ck->extern_arg) {
-        return check_marked_places(ck, n, src, dst, true);
+        return check_view_places(ck, n, src, dst, true);
     }
     types.node* mut s = src;
     types.node* mut d = dst;
@@ -3649,8 +3660,8 @@ fn check_pointer_places(checker mut* ck, ast.node* n, types.node* src, types.nod
                 return true;
             }
             if (level == 1) {
-                // level 1 holds each pointer place of the source with its type, the marked ones
-                // among them, so the walk of the marks has nothing to add
+                // level 1 holds each pointer place of the source with its type, so the walk of a
+                // view has nothing to add
                 return false;
             }
             break;
@@ -3669,21 +3680,24 @@ fn check_pointer_places(checker mut* ck, ast.node* n, types.node* src, types.nod
         d = dn;
         level += 1;
     }
-    return check_marked_places(ck, n, src, dst, false);
+    return check_view_places(ck, n, src, dst, false);
 }
 
-// Reports the cast `n` of `src` to `dst` when level 1 of the result holds a pointer place that
-// carries a mark (carries_mark) where the source holds no pointer place of the same type, in a
-// read-only view as in a `mut` one (D3.14). Through such a place the result writes or frees the
-// storage that bits reach, and no pointer of that type wrote the bits. A place with no mark is
-// free, because through it a view only reads. A place of the same type reaches the same types,
-// so level 1 answers for each deeper level. The source of a `void*` and an integer holds no
-// pointer place at level 1, so each place of the target that carries a mark is added. A struct
-// with no layout is in error, which has reported, or waits in a module-level initializer, which
-// D4.6 refuses, so the rule reads nothing then. With `fn_only`, for an argument of an `extern fn`,
-// a mark is a function pointer alone. Returns whether it reported.
-fn check_marked_places(checker mut* ck, ast.node* n, types.node* src, types.node* dst,
-                       bool fn_only) bool {
+// Reports the cast `n` of `src` to `dst` when level 1 of the result holds a pointer place where
+// the source holds no pointer place that keeps it, in a read-only view as in a `mut` one (D3.14).
+// A place that carries a mark (carries_mark) needs a place of the same type. Through it the result
+// writes or frees the storage that bits reach, and no pointer of that type wrote the bits. A place
+// with no mark needs a place of the same type or of a type that differs only by the `mut` and
+// `own` marks that it drops. Through it the result reads storage whose address the program does
+// not hold. A place of the same type reaches the same types, and a drop of marks keeps the types
+// that a place reaches, so level 1 answers for each deeper level. The storage of a `void*` holds
+// no pointer place at level 1, so each place of the target that the rule reads is added; for a
+// `void*` source the rule reads only the places that carry a mark. A struct with no layout is in
+// error, which has reported, or waits in a module-level initializer, which D4.6 refuses, so the
+// rule reads nothing then. With `fn_only`, for an argument of an `extern fn`, the rule reads only
+// the places that reach a function pointer. Returns whether it reported.
+fn check_view_places(checker mut* ck, ast.node* n, types.node* src, types.node* dst,
+                     bool fn_only) bool {
     if (!types.has_target_level(dst) || dst->kind == types.type_kind.k_voidptr) {
         return false;
     }
@@ -3696,7 +3710,10 @@ fn check_marked_places(checker mut* ck, ast.node* n, types.node* src, types.node
     if (!has_layout(dp) || (sp != null && !has_layout(sp))) {
         return false;
     }
-    place_memo mut m = place_memo{.marked = true, .fn_only = fn_only};
+    // A `void*` source keeps the walk of the places that carry a mark until the checker refuses
+    // each cast of a `void*` to a typed pointer.
+    bool view = !fn_only && src->kind != types.type_kind.k_voidptr;
+    place_memo mut m = place_memo{.marked = !view, .fn_only = fn_only, .view = view};
     defer memo_free(&m);
     pointer_place mut h = pointer_place{};
     bool adds = first_hidden(&m, dp, 1, 0, sp, &h);
@@ -3709,6 +3726,49 @@ fn check_marked_places(checker mut* ck, ast.node* n, types.node* src, types.node
         return true;
     }
     return false;
+}
+
+// Reports the cast `n` of the typed pointer `src` to the typed pointer `dst` when the pointee of
+// `dst` is larger than the pointee of `src`, or has a larger alignment. The pointees are
+// the types that level 1 reaches, whatever the marks. Through a larger pointee a load or a store
+// reaches the bytes after the source object. Through a larger alignment it assumes an alignment
+// that the address can lack. The size comes first. A struct with no layout is in error, which has
+// reported, so the rule reads nothing then. Returns whether it reported.
+fn check_pointee_growth(checker mut* ck, ast.node* n, types.node* src, types.node* dst) bool {
+    if (src->kind != types.type_kind.k_ptr || dst->kind != types.type_kind.k_ptr) {
+        return false;
+    }
+    if (!has_layout(src->elem) || !has_layout(dst->elem)) {
+        return false;
+    }
+    u64 from_size = types.type_sizeof(src->elem);
+    u64 to_size = types.type_sizeof(dst->elem);
+    if (to_size > from_size) {
+        report_pointee_growth(ck, n, src, dst, "pointee", from_size, to_size);
+        return true;
+    }
+    u64 from_align = types.type_alignof(src->elem);
+    u64 to_align = types.type_alignof(dst->elem);
+    if (to_align > from_align) {
+        report_pointee_growth(ck, n, src, dst, "alignment", from_align, to_align);
+        return true;
+    }
+    return false;
+}
+
+// Reports that the cast `n` of `src` to `dst` makes `what`, the pointee or the alignment, larger:
+// `from` bytes in the source and `to` bytes in the target.
+fn report_pointee_growth(checker mut* ck, ast.node* n, types.node* src, types.node* dst,
+                         string what, u64 from, u64 to) void {
+    msg_cannot_cast(ck, src, dst);
+    msg_str(ck, ": a cast never makes the ");
+    msg_str(ck, what);
+    msg_str(ck, " larger (");
+    msg_uint(ck, from);
+    msg_str(ck, " to ");
+    msg_uint(ck, to);
+    msg_str(ck, " bytes)");
+    check_msg_end(ck, n->loc);
 }
 
 // ---- cast, sizeof and new ----------------------------------------------------------
@@ -3730,12 +3790,16 @@ fn check_cast(checker mut* ck, ast.node mut* n, expr mut* out) void {
     if (!check_layout(ck, target.ty) || !check_size_fits(ck, n->loc, target.ty)) {
         return;
     }
+    if (types.type_cast_makes_pointer(target.ty, a.ty)) {
+        // The first rule of a cast, before a `mut` or an `own` that the cast adds. The matrix
+        // admits a `u64` to a pointer for FIR text, so the test stands before it.
+        msg_cannot_cast(ck, a.ty, target.ty);
+        msg_str(ck, ": a cast never makes a pointer from an integer");
+        check_msg_end(ck, n->loc);
+        return;
+    }
     if (!types.type_cast_allowed(target.ty, a.ty)) {
-        check_msg_begin(ck);
-        msg_str(ck, "cannot cast ");
-        check_msg_type(ck, a.ty);
-        msg_str(ck, " to ");
-        check_msg_type(ck, target.ty);
+        msg_cannot_cast(ck, a.ty, target.ty);
         if (types.type_cast_adds_mut(target.ty, a.ty)
             && types.type_cast_allowed(types.type_without_mut(&ck->types, target.ty), a.ty)) {
             // The mark is named when the mark is the reason: the same cast to
@@ -3751,11 +3815,7 @@ fn check_cast(checker mut* ck, ast.node mut* n, expr mut* out) void {
         // D3.14: a cast carries `own` or drops it and never adds it, at any
         // level. The matrix admits the shape, so the test stands here, after
         // the matrix: a target that adds `mut` as well reports the `mut`.
-        check_msg_begin(ck);
-        msg_str(ck, "cannot cast ");
-        check_msg_type(ck, a.ty);
-        msg_str(ck, " to ");
-        check_msg_type(ck, target.ty);
+        msg_cannot_cast(ck, a.ty, target.ty);
         msg_str(ck, ": a cast never adds 'own'");
         check_msg_end(ck, n->loc);
         return;
@@ -3775,6 +3835,9 @@ fn check_cast(checker mut* ck, ast.node mut* n, expr mut* out) void {
             return;
         }
     } else if (check_owning_temporary(ck, n->loc, &a, "the cast target does not own it")) {
+        return;
+    }
+    if (check_pointee_growth(ck, n, a.ty, target.ty)) {
         return;
     }
     if (check_pointer_places(ck, n, a.ty, target.ty)) {

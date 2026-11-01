@@ -1,0 +1,45 @@
+//! fail
+// No cast makes the pointee larger or more aligned (D3.14). Through a larger pointee a load or a
+// store reaches the bytes after the object: for a `struct two { i32 x; i32 y; }`,
+// `*cast(&t.x, i64 mut*) = 0` wrote `t.y`. Through a larger alignment a load or a store assumes an
+// alignment that the address can lack. The pointees are the types that level 1 reaches, whatever
+// the marks, and a fixed array counts its elements. The size comes first. A cast to a smaller
+// pointee and back is an error at the second cast. An argument of an `extern fn` gets no
+// exemption. An added `mut`, an added `own` and an owner with no `move` report before the size,
+// and the pointer places of a `mut` cast and of a view report after it.
+struct two {
+    i32 x;
+    i32 y;
+}
+
+struct wrap {
+    u64* own p;
+}
+
+extern fn peek(i64* p) i64;
+
+fn main() i32 {
+    two mut t = two{.x = 1, .y = 2};
+    i64 mut* wide = cast(&t.x, i64 mut*); //! error: cannot cast i32 mut* to i64 mut*: a cast never makes the pointee larger (4 to 8 bytes)
+    i32 x = 3;
+    i64* a = cast(&x, i64*); //! error: cannot cast i32* to i64*: a cast never makes the pointee larger (4 to 8 bytes)
+    i32[2] pair = {1, 2};
+    i64* c = cast(&pair, i64*); //! error: cannot cast i32[2]* to i64*: a cast never makes the alignment larger (4 to 8 bytes)
+    i64[2]* both = cast(&pair, i64[2]*); //! error: cannot cast i32[2]* to i64[2]*: a cast never makes the pointee larger (8 to 16 bytes)
+    i64 y = 4;
+    u8* small = cast(&y, u8*);
+    i64* back = cast(small, i64*); //! error: cannot cast u8* to i64*: a cast never makes the pointee larger (1 to 8 bytes)
+    i64 seen = peek(cast(&x, i64*)); //! error: cannot cast i32* to i64*: a cast never makes the pointee larger (4 to 8 bytes)
+    i64 mut* m = cast(&x, i64 mut*); //! error: cannot cast i32* to i64 mut*: a cast never adds 'mut'
+    i64* own o = cast(&x, i64* own); //! error: cannot cast i32* to i64* own: a cast never adds 'own'
+    i32 mut* own q = new(i32);
+    i64 mut* own r = cast(q, i64 mut* own); //! error: casting an owning value to an owning type requires 'move'
+    i64 mut* own s = cast(move(q), i64 mut* own); //! error: cannot cast i32 mut* own to i64 mut* own: a cast never makes the pointee larger (4 to 8 bytes)
+    u8 mut b = 0;
+    wrap mut* w = cast(&b, wrap mut*); //! error: cannot cast u8 mut* to wrap mut*: a cast never makes the pointee larger (1 to 8 bytes)
+    u32 h = 0;
+    u64** v = cast(&h, u64**); //! error: cannot cast u32* to u64**: a cast never makes the pointee larger (4 to 8 bytes)
+    i32[2] mut words = {0, 0};
+    wrap mut* aligned = cast(&words, wrap mut*); //! error: cannot cast i32[2] mut* to wrap mut*: a cast never makes the alignment larger (4 to 8 bytes)
+    return 0;
+}

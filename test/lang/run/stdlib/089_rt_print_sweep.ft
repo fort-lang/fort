@@ -1,6 +1,6 @@
 //! run
 //! stdout:
-//| 474 true 2967 2967
+//| 445 true 2602 2602
 import std.libc;
 import std.mem;
 import std.rt;
@@ -21,8 +21,11 @@ import std.rt;
 // The values are the boundaries. Every power of ten and the value on each
 // side of it, which is where a decimal gains a digit and where a buffer
 // filled from its end is one byte out. The same for negative values. The ends
-// of i64 and u64. Every power of sixteen as a pointer, which is where a hex
-// text gains a digit. Every byte from 0 to 255 as a char, NUL and newline
+// of i64 and u64. The null pointer and the addresses of a local, a global
+// and an allocation. The run decides the text of an address, so the byte
+// counts leave it out. No cast makes a pointer from an integer (D3.14), so
+// run/stdlib/067 holds the text of format_hex at the values where a hex text
+// gains a digit. Every byte from 0 to 255 as a char, NUL and newline
 // included, which the directives of run/stdlib/067 cannot carry. Strings that
 // hold a NUL, which D3.7 allows, and the empty string.
 string C_PATH = "c.txt";
@@ -68,12 +71,18 @@ fn pair_i64(i64 v) void {
     written += 1;
 }
 
-fn pair_ptr(u64 bits) void {
-    void* p = cast(bits, void*);
+// The bytes of the text of each address other than null, which the byte counts leave out.
+u64 mut address_bytes = 0;
+
+fn pair_ptr(void* p) void {
     fprint(c_fd, p, "\n");
     rt.print_ptr(f_fd, p);
     rt.print_char(f_fd, '\n');
     written += 1;
+    if (p != null) {
+        u8[rt.HEX_MAX] mut text = {};
+        address_bytes += rt.HEX_MAX - rt.format_hex(text[..], cast(p, u64));
+    }
 }
 
 fn pair_char(char c) void {
@@ -131,18 +140,14 @@ fn main() i32 {
     pair_i64(i64_min);
     pair_i64(i64_min + 1);
 
-    // Every power of sixteen, which is where a pointer's hex text gains a
-    // digit, and both ends of the range.
-    u64 mut hex = 1;
-    while (true) {
-        pair_ptr(hex - 1);
-        pair_ptr(hex);
-        if (hex > u64_max / 16) {
-            break;
-        }
-        hex *= 16;
-    }
-    pair_ptr(u64_max);
+    // The null pointer, and the address of a local, a global and an allocation.
+    u64 local = 1;
+    u64 mut* own block = new(u64);
+    pair_ptr(null);
+    pair_ptr(cast(&local, void*));
+    pair_ptr(cast(&written, void*));
+    pair_ptr(cast(block, void*));
+    del(block);
 
     // Every byte a char can hold. The two files carry NUL, newline and byte
     // 255 as bytes, so this reaches the values no directive of this corpus
@@ -172,8 +177,8 @@ fn main() i32 {
     u8 mut@ own f_bytes = new(u8, 8192);
     u64 c_len = read_file(C_PATH, c_bytes);
     u64 f_len = read_file(F_PATH, f_bytes);
-    println(written, " ", mem.equal(c_bytes[..c_len], f_bytes[..f_len]), " ", c_len,
-            " ", f_len);
+    println(written, " ", mem.equal(c_bytes[..c_len], f_bytes[..f_len]), " ",
+            c_len - address_bytes, " ", f_len - address_bytes);
     del(c_bytes);
     del(f_bytes);
     return 0;
