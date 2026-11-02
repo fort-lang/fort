@@ -397,8 +397,9 @@ fn by_value(i32* a, i32* b) i32 {
 }
 ```
 
-An `i32 mut@ xs` is sorted with `qsort(xs.ptr, xs.len, sizeof(i32), by_value);`. C calls
-`by_value` with pointers to two elements of the argument `base` (A7 of `ownership-design.md` 5.1).
+An `i32 mut@ xs` is sorted with `qsort(&xs[0], xs.len, sizeof(i32), by_value);`. C calls
+`by_value` with pointers to two elements of the argument `base` (A7 of `ownership-design.md` 5.1),
+so the argument is the address of an element and no `.ptr` (D3.5).
 A function taking a span, string, struct or fixed array is not extern-legal and cannot be passed
 to C. The library declares no `qsort`. One C symbol has one signature in a closure (D9.8), so a
 program declares it with the element type that it sorts, and a comparator of `void*` reads no
@@ -408,15 +409,18 @@ element, because no cast gives a type to a `void*` (D3.14). `std.sort` sorts typ
 ### 8.6 Spans and strings
 
 Spans and strings never cross the boundary whole (D9.8, D13.4). Pass `.ptr` and `.len`: `s.ptr`
-of a `string` is `char*`; `xs.ptr` of a `T@` is `T*`, or `T mut*` for `T mut@`. A string
-literal is NUL-terminated (D3.7) and so is every element of `args` (D8.6); a string obtained as a
-span or read from a file is not. A C function expecting a terminator gets a copy: allocate
-`char mut@ own tmp = new(char, s.len + 1);` under a `defer del(tmp);`, copy the characters, and
-pass `tmp.ptr`; the last element is already `'\0'` (D10.2). Memory received from C as `T*`
-becomes a span with `p[0..n]` (D6.9), unchecked and borrowed; a `char*` becomes a `string`
-with `cast(p[0..n], string)` (D3.14). When C hands the memory over for good, its `extern`
-declares the result `own` (D17.13). The pointer is then the owner, `p[0..n]` is a view of it,
-and `del(p)` frees it (D17.3); memory from `new` may likewise be freed by C `free` and memory
+of a `string` is `char*`; `xs.ptr` of a `T@` is `T*`, or `T mut*` for `T mut@`. A `.ptr` goes
+only to an `extern fn` that can give fort code no pointer; each other extern takes the address
+of an element, `&s[0]` (D3.5). A string literal is NUL-terminated (D3.7) and so is every element
+of `args` (D8.6); a string obtained as a span or read from a file is not. A C function expecting
+a terminator gets a copy: allocate `char mut@ own tmp = new(char, s.len + 1);` under a
+`defer del(tmp);`, copy the characters, and pass `tmp.ptr`; the last element is already `'\0'`
+(D10.2). Memory received from C as `T*` becomes no span: only `str.from_cstr` and
+`rt.args_init` take a span of a raw pointer (D6.9). A C string becomes a `string` through
+`str.from_cstr`, and a C string that C wrote into a buffer of fort code through
+`str.from_cbuf`; other bytes go into a buffer of fort code through `memcpy`. When C hands the
+memory over for good, its `extern` declares the result `own` (D17.13). The pointer is then the
+owner, and `del(p)` frees it (D17.3); memory from `new` may likewise be freed by C `free` and memory
 from `malloc` by `del` (D10.3). A span expression is always a view and a cast never adds `own`
 (D3.14), so no cast turns C's block into an `own` span. There is no strict-aliasing rule
 (D10.7): memory may be read through any pointer type reached by `cast`. A fort wrapper around a
@@ -459,7 +463,7 @@ extern fn write(i32 fd, u8* buf, u64 n) i64;
 extern fn strlen(char* s) u64;
 
 fn put(string s) void {
-    write(1, cast(s.ptr, u8*), s.len);
+    write(1, cast(s, u8@).ptr, s.len);
 }
 
 fn main(string@ args) i32 {

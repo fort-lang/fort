@@ -571,11 +571,12 @@ fn end_twice(lower_env.env mut* e) void {
 
 // ---- constructs that stopped the lowering ------------------------------------------------------
 
-u64 REFUSAL_LINES = 89;
+u64 REFUSAL_LINES = 88;
 
 // One function for each construct that stopped the lowering before `defer`, `new`, `del` and the
 // `own` stores lowered, and one for each position in which such a construct stopped the lowering
-// from inside another construct: 83 functions.
+// from inside another construct: 82 functions. A span of a pointer stands in
+// a_pointer_span_with_a_writer_lowers, because only `str.from_cstr` takes one (D6.9).
 string[REFUSAL_LINES] REFUSAL_SOURCE = {
     "struct pair {",
     "    i32 a;",
@@ -639,7 +640,6 @@ string[REFUSAL_LINES] REFUSAL_SOURCE = {
     "fn in_indexed() i32 { return arrs(take(new(i32)))[0]; }",
     "fn in_spanned() string { return strs(take(new(i32)))[0..1]; }",
     "fn in_high(string s) string { return s[0..take(new(i32))]; }",
-    "fn in_pointer_span() u8@ { return bytes(take(new(i32)))[0..1]; }",
     "fn in_aggregate_call() pair { return mkpair(take(new(i32))); }",
     "fn in_aggregate_cast() u8@ { return cast(strs(take(new(i32))), u8@); }",
     "fn in_aggregate_condition(pair p) pair { return flag(new(i32)) ? p : p; }",
@@ -669,9 +669,9 @@ string[REFUSAL_LINES] REFUSAL_SOURCE = {
 };
 
 // The count of the functions of REFUSAL_SOURCE.
-u64 FORMER_REFUSALS = 83;
+u64 FORMER_REFUSALS = 82;
 
-// Each function of REFUSAL_SOURCE lowers, and each keeps every rule of the verifier: the 68 that
+// Each function of REFUSAL_SOURCE lowers, and each keeps every rule of the verifier: the 67 that
 // stopped at `defer`, `new`, `del`, an `own` declaration or an `own` store, and the 15 others.
 fn each_construct_that_stopped_the_lowering_lowers() void {
     lower_env.env mut e = lower_env.env{};
@@ -687,6 +687,31 @@ fn each_construct_that_stopped_the_lowering_lowers() void {
         }
     }
     assert(lowered == FORMER_REFUSALS);
+}
+
+// The module std.str of a sandbox, whose from_cstr may take `p[lo..hi]` of a raw pointer (D6.9):
+// a span of the pointer that a call gives, whose argument allocates.
+string[10] POINTER_SPAN = {
+    "fn take(i32 mut* own p) i32 {",
+    "    del(p);",
+    "    return 1;",
+    "}",
+    "fn bytes(i32 n) u8* {",
+    "    return null;",
+    "}",
+    "fn from_cstr() u8@ {",
+    "    return bytes(take(new(i32)))[0..1];",
+    "}",
+};
+
+// A span of a pointer whose operand calls a function with `new` in its argument lowers, and it
+// keeps every rule of the verifier.
+fn a_pointer_span_with_a_writer_lowers() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string text = lower_env.lower_str(&e, POINTER_SPAN[..], "from_cstr");
+    assert(str.find(text, "slice_ptr(") >= 0);
 }
 
 // ---- constructs that the lowering does not lower ----------------------------------------------
@@ -850,6 +875,7 @@ fn main() i32 {
     a_noreturn_body_ends_in_trap();
     println("ends ok");
     each_construct_that_stopped_the_lowering_lowers();
+    a_pointer_span_with_a_writer_lowers();
     a_construct_not_lowered_stops_its_function();
     println("refusals ok");
     the_program_lists_its_functions_in_module_order();

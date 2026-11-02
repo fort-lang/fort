@@ -81,6 +81,10 @@ struct layout {
     // (D3.14). check.carries_mark answers it for the life of the table. It is 0 until a walk of
     // the checker gives a final answer.
     u8 mark;
+    // The last walk of check.give_walk that entered the struct (D3.5): its number times 4, plus 1
+    // when it asked whether the struct holds a pointer that C gives, and plus 2 when it asked
+    // whether C can write a pointer through the struct. 0 until a walk enters it.
+    u64 give;
     u64 owners; // the `own` references in fixed storage, at most OWNER_CAP
     u64 owner_depth; // the most steps from the struct to one of them
     u64 pointers; // the pointer places in fixed storage (type_pointer_count), at most OWNER_CAP
@@ -1480,6 +1484,32 @@ fn walk_of(node* s) u32 {
 /// Keeps `at` as the place of the struct `s` in the stack of a walk (layout.walk).
 fn keep_walk(node* s, u32 at) void {
     layout_of(s)->walk = at;
+}
+
+/// The bit of layout.give for the question `exposing` of a walk of check.give_walk.
+fn give_bit(bool exposing) u64 {
+    if (exposing) {
+        return 2;
+    }
+    return 1;
+}
+
+/// Whether the walk of check.give_walk with the number `id` entered the struct `s` with the
+/// question `exposing` (layout.give).
+fn give_entered(node* s, u64 id, bool exposing) bool {
+    u64 g = layout_of(s)->give;
+    return g / 4 == id && ((g % 4) & give_bit(exposing)) != 0;
+}
+
+/// Keeps that the walk of check.give_walk with the number `id` entered the struct `s` with the
+/// question `exposing` (layout.give). A struct keeps the questions of one walk, the last.
+fn keep_give_entered(node* s, u64 id, bool exposing) void {
+    layout mut* l = layout_of(s);
+    u64 mut bits = 0;
+    if (l->give / 4 == id) {
+        bits = l->give % 4;
+    }
+    l->give = id * 4 + (bits | give_bit(exposing));
 }
 
 /// Gives the fields of the resolved struct `s` their names, in declaration order.

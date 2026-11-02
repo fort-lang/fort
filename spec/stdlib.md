@@ -379,10 +379,10 @@ writes a file atomically with a temporary file beside the target and a `rename` 
 must free it, but one symbol has one signature (D9.8) and a cast never adds `own` (D3.14), so
 fort code cannot free that result. `std.os.real_path` is the owning form: it allocates a buffer
 of `PATH_MAX` bytes with `new` and passes it (2.14, D17.13).
-Direct use looks like `libc.write(fd, cast(s.ptr, u8*), s.len) == cast(s.len, i64)`, which
+Direct use looks like `libc.write(fd, cast(s, u8@).ptr, s.len) == cast(s.len, i64)`, which
 writes a string to a descriptor, bypassing the runtime's buffers; the `cast` is there because a
-`string` carries `char*` and not `u8*`, and `libc.read(fd, buf.ptr, buf.len)` on a `u8 mut@`
-needs none.
+`string` carries `char*` and not `u8*`, and it casts the string because no cast takes a `.ptr`
+(D3.5). `libc.read(fd, buf.ptr, buf.len)` on a `u8 mut@` needs none.
 
 The seven socket calls come from `<sys/socket.h>` and `<netinet/in.h>`. `socklen_t` is
 `unsigned int`, so it is `u32`; an address is a struct of no fixed type here, so it crosses as
@@ -526,6 +526,7 @@ fn dup(string s) string own
 fn concat(string a, string b) string own
 fn to_cstr(string s) char mut@ own
 fn from_cstr(char* p) string
+fn from_cbuf(u8@ b) string
 fn parse_i64(string s, i64 mut* out) bool
 fn parse_u64(string s, u64 base, u64 mut* out) bool
 fn digit_value(char ch) i64
@@ -570,9 +571,15 @@ fn is_hex(char ch) bool
   string. It is the one trusted form by which a program gets a span from a raw pointer: no other
   function takes a span of a raw pointer but `rt.args_init`, which no source calls (D6.9).
   It trusts that a NUL ends `p` inside its storage, as `strlen` does; a `p` with no such NUL is
-  outside the guarantee of D10.7 (A7 of `ownership-design.md` 5.1). Ownership: a view (D17.3) of
-  whatever owns `p`; `del` on it does
-  not compile.
+  outside the guarantee of D10.7 (A7 of `ownership-design.md` 5.1). It takes no `.ptr` (D3.5): the
+  `.ptr` of an empty span names the byte after its object, and strlen would read from there. Pass
+  `&buf[0]`, whose index is checked, or give the buffer to `from_cbuf`. Ownership: a view (D17.3)
+  of whatever owns `p`; `del` on it does not compile.
+- `from_cbuf`: wraps the bytes of `b` before its first NUL as a `string`, with no copy; the scan
+  reads only the `b.len` bytes of `b`. A `b` with no NUL panics with
+  `str.from_cbuf: no NUL in the buffer` (1.2, D13.3), and so does an empty `b`. It is the form for
+  a buffer that C wrote a C string into: `str.from_cbuf(cast(buf[..], u8@))` after `getcwd` or
+  `realpath`. Ownership: a view (D17.3) of whatever owns `b`.
 - `parse_i64`: decimal with an optional leading `-`, at least one digit and nothing else: no
   `+`, no whitespace, no `_`. Returns `false` on a syntax error or when the value does not fit
   `i64`; `-9223372036854775808` is accepted. Overflow is detected arithmetically, without

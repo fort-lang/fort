@@ -329,6 +329,20 @@ came here.
   in a parameter its callback parameters or its levels from level 1. The error stands at the
   result or at the parameter, and the symbol fails, so its calls report nothing more
   (`check_extern_test.ft`, `fail/ffi/011` and `012`).
+- **The `.ptr` rule walks the declaration of each `extern fn` call with a `.ptr` argument** (D3.5).
+  `check_call` asks `c_gives_pointer` only when `has_ptr_argument` finds a `.ptr` or a `->ptr`
+  node, so a call with none costs nothing. The walk (`give_walk`) keeps an explicit stack of
+  items, a type and a question: with `exposing`, whether C can write a pointer through a value
+  that fort code gives; without it, whether a value that C gives holds a pointer that does not
+  say `own`. A struct keeps the number of the last walk that entered it and the questions of that
+  walk in one `u64` (`types.layout.give`), so the walk enters each struct at most twice and needs
+  no list of the structs that it saw; `checker.give_walks` numbers the walks from 1, and
+  `types.layout` grew from 72 to 80 bytes (`types_layout_test.ft`). Each
+  entry is a step of POINTER_WORK_LIMIT, and past it the call counts as one that gives a pointer:
+  a chain of 65537 structs is an error and a chain of 65536 is not, with no deep recursion
+  (`check_ptr_walk_limit_test.ft`). An argument of the variable tail is read after its check, with
+  a walk of its own and its own limit, and `report_tail_ptrs` then reports each `.ptr` argument of
+  the call; a struct field named `ptr` is no `.ptr` (`is_pseudo_ptr`).
 
 ## 5. Modules, the driver and the diagnostics
 
@@ -854,11 +868,11 @@ came here.
   limit with 1000 checked additions). `--check` skips a function whose check names a runtime entry
   that `std.rt` lacks, because the verifier would panic and a build reports the function. A
   `check(overwrite: p)` names no runtime entry, so the empty runtime of a test needs none for it.
-  `std/rt.ft` keeps `fail_overwrite` with no row in `runtime_sig.ft`: the pin of
-  `tools/bootstrap.ref` builds HEAD with HEAD's `std` in a checked build and emits a call of it for
-  each store into an `own` reference. Without it, `tools/vm build debug fort` exits 1 at the step
-  that builds HEAD with the pin: clang refuses the module with `error: use of undefined value
-  '@std.rt.fail_overwrite'`. Remove the function when a pin moves past the static error.
+  `std/rt.ft` keeps `fail_overwrite` with no row in `runtime_sig.ft`. bootstrap-1 (`0fe521c`) emits
+  a call of it for each store into an `own` reference. It builds bootstrap-2 with the `std` of
+  bootstrap-2, which keeps the function. The last pin of `tools/bootstrap.ref`, bootstrap-2, builds
+  HEAD with HEAD's `std` and emits no such call. So the build no longer needs the function in HEAD's
+  `std`, and `run/stdlib/082` and `run/modes/022` still call it.
 - **The emptiness pass proves part 1 of the leak rule, and each exit that it cannot prove is an
   error** (D17.20, `spec/fir.md` 11, Exits). `owner.prover.prove` lists in `proof.exits` each `dead`
   of a named owner local outside an abort block, and at each `return` each parameter and temporary
@@ -1496,6 +1510,15 @@ the closure**, called or not, and external linkage carries each one past the lin
 the 14 stands on its own `define` line and appears nowhere else in the module, and `nm` finds all
 14 in the binary:
 
+**`std.rt` imports `std.str` since D6.9**, because `std.rt` reads each C string that the compiler
+gives (a file, a type name, the name of an enum member) and each argument of `argv` through
+`str.from_cstr`, the one function beside `rt.args_init` that takes a span of a raw pointer. So
+every closure holds `std.str` as well. Measured on 2026-11-01 in VM slot 4 (linux, debug preset)
+for `fn main() i32 { println("hello, world!"); return 0; }`: the module of bootstrap-2 over its
+own standard root holds 92 definitions, 205,078 bytes and 15,469 bytes of `.text`; the module of
+the product compiler holds 110 definitions (20 of `std.str`, 2 fewer of `std.rt`), 259,756 bytes
+and 17,837 bytes of `.text` (`grep -c '^define'`, `wc -c`, `size -A`).
+
 **Product library scope.** Product tests use the current compiler and current standard library.
 The C compiler does not run this corpus. Only two C contract suites read the bootstrap-1 standard
 library (T-160).
@@ -1540,8 +1563,13 @@ library (T-160).
   array of function pointers is `struct slot { fn (i32) i32 f; }` and `slot[2]`). Both current
   parsers accept the group `(fn (i32) i32)[2]` (D3.6), but `src/fort` and `std` must not use a
   parenthesized type yet. `tools/bootstrap.ref` pins bootstrap-1 at `0fe521c`, which predates
-  groups and builds working-tree HEAD: it reports `expected a type, found '('` at a group. Use
-  the struct wrapper there until a re-pin moves the chain past the group change. T-153 puts an
+  groups: it reports `expected a type, found '('` at a group, so a tree that bootstrap-1 builds
+  uses the struct wrapper. Since D6.9 moved `std.rt.print_str`, `std.rt.panic` and
+  `std.rt.print_enum` to a `string` and a span, bootstrap-2 builds working-tree HEAD: a commit
+  whose lowering takes both forms of those entries, which bootstrap-1 builds over its own
+  pointer-and-length runtime. Each pin after the first gets an empty `rt_float.ft` in its standard
+  root, because bootstrap-1 loads that file for a closure that holds a float. A tree that the last
+  pin builds may use a group. T-153 puts an
   explicit C variable tail inside the subset when its types use no other unsupported form. These
   are the constructs a C file may hold that have no fort spelling, with what replaces each; the
   rules the bootstrap
@@ -1593,8 +1621,11 @@ library (T-160).
     `default` (D7.6). The bootstrap uses none of the three today; keep it that way.
   - **No pointer arithmetic at all** (D10.4): `p + 1`, `p++` and `p[i]` are errors, and
     `bootstrap0/src/str.c` is the file that uses them (`p->cur + p->used`, `b->data + b->len`).
-    The fort form is a span and an index; the only way from a raw pointer to a span is the
-    two-bound `p[lo..hi]` (D6.9).
+    The fort form is a span and an index. No span of a raw pointer exists either: only
+    `str.from_cstr` and `rt.args_init` take `p[lo..hi]` of one (D6.9). Foreign memory reaches fort
+    code through `str.from_cstr` for a C string that C gave, through `str.from_cbuf` for a C
+    string in a buffer of fort code, or through an `extern fn` that copies into a span of fort
+    code (`libc.memcpy(&buf[0], src, n)`).
   - **No implicit conversion but dropping `mut` and `own`** (D5.4, D17.4) and **no integer
     promotion, not even for `u8`/`i8`** (D6.2). Every mixed-width or mixed-signedness expression
     that C writes silently needs an explicit `cast`, and that is the single largest mechanical
@@ -1603,12 +1634,16 @@ library (T-160).
   - `char` is a distinct one-byte type with no arithmetic and no bitwise operators (D3.2):
     `c - '0'` becomes `cast(c, i64) - cast('0', i64)`.
   - `sizeof` takes a type, never an expression (D3.15): `sizeof(x)` becomes `sizeof(T)`.
-  - A C string is a NUL-terminated `const char*`; a fort `string` is a pointer and a length and
-    may hold an embedded NUL (D3.7). A literal carries a trailing NUL that `len` does not count,
-    so `s.ptr` is a C string for a literal and for nothing else: a sub-string is not
-    NUL-terminated, and `str.to_cstr` is the conversion at the C boundary, `str.from_cstr` the
-    one coming back. `strcmp` of two names becomes `==` on two `string`s, which compares `len`
-    and then the bytes.
+  - A C string is a NUL-terminated `const char*`; a fort `string` is a pointer and a length and may
+    hold an embedded NUL (D3.7). A literal carries a trailing NUL that `len` does not count, so
+    `s.ptr` is a C string for a literal and for nothing else: a sub-string is not NUL-terminated,
+    and `str.to_cstr` is the conversion at the C boundary, `str.from_cstr` the one coming back.
+    `.ptr` stands only in the two positions of D3.5: an argument of an `extern fn` that can give
+    fort code no pointer, at any level and in any struct field, and an operand of `==` or `!=`. No
+    cast takes it, and `str.from_cstr` takes none; each other use of the address of the first byte
+    is `&s[0]`, whose index is checked: `cast(&s[0], void*)`, `cast(&s[0], u64)`,
+    `str.from_cbuf(cast(buf[..], u8@))` for a buffer that C filled. `strcmp` of two names becomes
+    `==` on two `string`s, which compares `len` and then the bytes.
   - A fixed array is a value: `T[N]` copies on assignment, on argument passing and on return
     (D3.4), where C decays it to a pointer. A parameter that means "the caller's array" is a span
     `T@`, and `T[N]` has no `.ptr`.
@@ -1774,7 +1809,7 @@ library (T-160).
   `fort_lsp`, the lint, the VS Code extension and the `//! flags:` of `test/fort` and `test/lsp`
   pass `-I src`. Each pin edge passes `-I <pin>/src` too, so a pin after this spelling builds;
   the pin `0fe521c` finds its short imports beside its entry file and never reads that root.
-  The pinned bootstrap-1 builds HEAD with this spelling. `tools/long_imports.py` writes a short
+  The last pin, bootstrap-2, builds HEAD with this spelling. `tools/long_imports.py` writes a short
   import of a compiler module in the long spelling, and the ctest `long-imports` fails on one.
   A branch that adds a short import runs the tool after its rebase. A branch that edits an
   import header which the tool rewrote gets a conflict in that header: keep the branch side of

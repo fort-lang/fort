@@ -1,0 +1,59 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| at the limit ok
+//| past the limit ok
+/// Checks the work limit of the walk that decides whether an `extern fn` can give fort code a
+/// pointer (D3.5, src/fort/check.ft give_walk). Each struct that the walk enters is a step of the
+/// limit of 65536 steps of D3.14. Past the limit the call counts as one that gives a pointer, so a
+/// `.ptr` argument is an error, as D17.11 treats its limit. The walk uses an explicit stack, so a
+/// chain of 65537 structs needs no deep recursion in the checker.
+/// The test stands alone because its programs are large.
+import check_env;
+import std.strbuf;
+
+// The steps of the limit.
+u64 LIMIT = 65536;
+
+// The program of a chain of `count` structs, `struct c<k> { c<k+1>* n; }` and the last with a
+// `u64 x`, and a call with a `.ptr` argument of an extern that takes the first struct. No struct
+// holds a level marked `mut`, so C writes nothing through the chain, and the walk enters each
+// struct once.
+fn chain(strbuf.str_buf mut* b, u64 count) string {
+    strbuf.clear(b);
+    u64 mut k = 0;
+    while (k < count) {
+        strbuf.append(b, "struct c");
+        strbuf.append_u64(b, k);
+        if (k + 1 < count) {
+            strbuf.append(b, " {\n    c");
+            strbuf.append_u64(b, k + 1);
+            strbuf.append(b, "* n;\n}\n");
+        } else {
+            strbuf.append(b, " {\n    u64 x;\n}\n");
+        }
+        k += 1;
+    }
+    strbuf.append(b, "extern fn walk(char* s, c0* first) i32;\n");
+    strbuf.append(b, "fn f(string s, c0* p) i32 {\n    return walk(s.ptr, p);\n}\n");
+    return strbuf.view(b);
+}
+
+fn main() i32 {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // A walk of exactly LIMIT steps finds no pointer, so the `.ptr` stands.
+    assert(check_env.check_decls(&e, chain(&b, LIMIT)));
+    assert(check_env.errors(&e) == 0);
+    println("at the limit ok");
+    // One more struct passes the limit, and the walk proves nothing.
+    check_env.reopen(&e);
+    assert(!check_env.check_decls(&e, chain(&b, LIMIT + 1)));
+    assert(check_env.errors(&e) == 1);
+    assert(check_env.said(&e, "'.ptr' can name the byte after the last element: write '&s[0]'"));
+    println("past the limit ok");
+    return 0;
+}

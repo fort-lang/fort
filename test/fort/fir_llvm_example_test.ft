@@ -1,0 +1,98 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| hello ok
+//| abort ok
+/// Holds the definitions of the programs of spec/toolchain.md 6.1 and 6.2 as the FIR translator
+/// writes them over the runtime of lower_env, whose print_str takes a `string` (D6.9). The
+/// emitter starts each function fresh, so the data numbers from 0, as in a module that holds only
+/// the five definitions of the runtime that 6.1 shows. The entry module of the sandbox is `main`,
+/// so the function of 6.2 is `main.main` here and `abort.main` in `abort.ft`.
+import llvm_env;
+import pass_env;
+
+// The program of 6.1, on one line.
+string[1] HELLO = {"fn main() i32 { println(\"hello, world!\"); return 0; }"};
+
+// The definition of `main.main` that 6.1 shows.
+string[13] HELLO_MAIN = {
+    "define dso_local i32 @\"main.main\"() #0 {",
+    "entry:",
+    "  %result = alloca i32, align 4",
+    "  %tmp0 = alloca %fort.span, align 8",
+    "  %t0 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0",
+    "  store ptr @.str.0, ptr %t0, align 8",
+    "  %t1 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1",
+    "  store i64 13, ptr %t1, align 8",
+    "  call void @\"std.rt.print_str\"(i32 1, ptr %tmp0)",
+    "  call void @\"std.rt.print_char\"(i32 1, i8 zeroext 10)",
+    "  store i32 0, ptr %result, align 4",
+    "  %t2 = load i32, ptr %result, align 4",
+    "  ret i32 %t2",
+};
+
+// The program of 6.2, with the `[` of `a[i]` at line 12, column 13.
+string[13] ABORT = {
+    "// The program of spec/toolchain.md 6.2.",
+    "//",
+    "// The comments put the index at",
+    "// line 12.",
+    "//",
+    "//",
+    "//",
+    "fn main() i32 {",
+    "    println(\"before\");",
+    "    i32[3] a = {};",
+    "    i64 mut i = 5;",
+    "    return a[i];",
+    "}",
+};
+
+// The definition of the function of 6.2, which `abort.ft` names `abort.main`.
+string[29] ABORT_MAIN = {
+    "define dso_local i32 @\"main.main\"() #0 {",
+    "entry:",
+    "  %result = alloca i32, align 4",
+    "  %a.0 = alloca [3 x i32], align 4",
+    "  %i.1 = alloca i64, align 8",
+    "  %tmp0 = alloca %fort.span, align 8",
+    "  %t0 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0",
+    "  store ptr @.str.0, ptr %t0, align 8",
+    "  %t1 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1",
+    "  store i64 6, ptr %t1, align 8",
+    "  call void @\"std.rt.print_str\"(i32 1, ptr %tmp0)",
+    "  call void @\"std.rt.print_char\"(i32 1, i8 zeroext 10)",
+    "  call void @llvm.memset.p0.i64(ptr align 4 %a.0, i8 0, i64 12, i1 false)",
+    "  store i64 5, ptr %i.1, align 8",
+    "  %t2 = load i64, ptr %i.1, align 8",
+    "  %t3 = icmp uge i64 %t2, 3",
+    "  br i1 %t3, label %L2, label %L1",
+    "",
+    "L1:",
+    "  %t4 = getelementptr inbounds [3 x i32], ptr %a.0, i64 0, i64 %t2",
+    "  %t5 = load i32, ptr %t4, align 4",
+    "  store i32 %t5, ptr %result, align 4",
+    "  %t6 = load i32, ptr %result, align 4",
+    "  ret i32 %t6",
+    "",
+    "L2:",
+    "  call void @\"std.rt.fail_bounds\"(i64 %t2, i64 3, ptr @.file.0, i32 12, i32 13)",
+    "  unreachable",
+    "}",
+};
+
+fn main() i32 {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[1] tail = {"}"};
+    string hello = llvm_env.lowered_whole(&e, HELLO[..], "main", pass_env.CHECKED);
+    llvm_env.expect2(&e, hello, HELLO_MAIN[..], tail[..]);
+    llvm_env.verified(&e, hello);
+    println("hello ok");
+    string abort = llvm_env.lowered_whole(&e, ABORT[..], "main", pass_env.CHECKED);
+    llvm_env.expect(&e, abort, ABORT_MAIN[..]);
+    llvm_env.verified(&e, abort);
+    println("abort ok");
+    return 0;
+}

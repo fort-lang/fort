@@ -396,7 +396,7 @@ the check:
 | `overwrite` | none | none | every mode, after the emptiness pass proves it |
 | `enum` | `fail_enum` | the value as `i64`, the enum name as `bytes` | nothing |
 | `user` | `assert_fail` | the source text of the argument as `bytes` | nothing |
-| `panic` | `panic` | the pointer and the length of the message | nothing |
+| `panic` | `panic` | the message, a place of type `string` | nothing |
 
 Every runtime entry of the table also takes a file, a line and a column, which the translator
 adds from the location of the terminator (D11.4). The lowering computes the condition of a
@@ -594,15 +594,16 @@ so `G` is read before `bump` runs.
   `del(move _t)`. When the lowering of `e` already put the owning value in a temporary, that
   temporary is `_t`. The `del` stands at the name `del`, as section 13 shows.
 - **The print family**: `fd` into an operand once, then one `call fn std.rt.print_*` for each
-  argument, left to right, with the conversions of item 19: an enum as `cast<i32>(a)`,
-  `const enum_table m.E` and the member count; a `string` as its two fields. `println` ends with
-  `print_char` of `const char 10`. A `string` place gives `copy p.0` and `copy p.1` (D12.2). A
-  folded string constant gives `const bytes "..."` and `const u64` of its length, with no
-  temporary (D12.2).
+  argument, left to right, with the conversions of item 19: an enum as `cast<i32>(a)` and
+  `_t = aggregate enum_member@(const enum_table m.E, const u64 n)` of its `n` members; a
+  `string` as one place (D6.9). `println` ends with `print_char` of `const char 10`. A `string`
+  place gives `copy p`, and a folded string constant goes into a temporary first, `_t = const
+  "..."`, as each argument of an aggregate type does (rule V7). The translator passes each
+  aggregate argument as the address of the caller-made copy (toolchain.md 6 item 7).
 - **`assert(c)`**: the operand of `c`, then `check(a, user, "<text>") -> bb`.
-- **`panic(m)`**: the pointer and the length of `m`, as the print family takes a `string`, then
-  `fail(panic, ptr, len)` (D12.2). The `check` of `assert` and the `fail` of `panic` stand at the
-  name of the builtin, which the runtime reports (D11.4).
+- **`panic(m)`**: the place of `m`, as the print family takes a `string`, then `fail(panic, m)`
+  (D6.9, D12.2). The `check` of `assert` and the `fail` of `panic` stand at the name of the
+  builtin, which the runtime reports (D11.4).
 - **`T{...}`, `T[N]{...}` and `{...}`**: `const zero T` for `{}`, else `aggregate T(...)` with
   each member as an operand, in declaration or index order, and `const zero` for a field a
   designated literal leaves out (D6.5). A designated literal is `aggregate zeroed T(...)`. A
@@ -1409,8 +1410,8 @@ writes it (section 12), and it starts a program as `toolchain.md` 6 item 22 star
 - The operands of an rvalue are read in order, a `move` zeroes its place after its read, and the
   address of the destination comes after the right side (sections 6 and 7, 12.5).
 - A failed check calls the runtime entry of its kind with its reported operands and the file, the
-  line and the column of the check (12.4). `alloc` calls `std.rt.alloc` and `del` calls
-  `std.rt.free` (12.2).
+  line and the column of the check (12.4). The message of `panic` goes as the address of its
+  place. `alloc` calls `std.rt.alloc` and `del` calls `std.rt.free` (12.2).
 - A call of an extern of the list of `spec/ownership-design.md` 3.2 runs, from `std.rt` or from
   the program: `exit`, `abort`, `write`, `calloc`, `free`, `isatty`, `strlen`, `memcpy`,
   `memmove`, `memcmp`, `__errno_location`, `__error`, `strtod` and `strtof` with a null end
@@ -1555,7 +1556,9 @@ lost a `zeroext`.
   place in `entry`, as a `fail` after statements does. LLVM needs an entry block, and no
   terminator names `bb0` (V2), so no label could reach a moved `bb0` (T-251).
 - `fail(panic, ...)` after statements in an ordinary block is the call and `unreachable` in
-  place (item 19).
+  place (item 19). Its message is a place of type `string`: the translator copies it into a new
+  `%tmp` slot unless it is a temporary, and the call passes the address (item 7), as `call`
+  passes an aggregate argument.
 - `trap` is `call void @llvm.trap()` and `unreachable` (item 20). `unreachable` is
   `unreachable`.
 

@@ -73,9 +73,19 @@ fn both_bool(bool v) void {
 fn both_eq(string a, string b) void {
     print(a == b, " ");
     rt.flush(1);
-    rt.print_bool(1, rt.str_eq(a.ptr, a.len, b.ptr, b.len));
+    rt.print_bool(1, rt.str_eq(start(a), a.len, start(b), b.len));
     rt.print_char(1, '\n');
     rt.flush(1);
+}
+
+// The address of the first byte of s, or null for an empty s. str_eq reads no
+// byte of an empty string, and a `.ptr` is no argument of a fort function
+// (D3.5).
+fn start(string s) char* {
+    if (s.len == 0) {
+        return null;
+    }
+    return &s[0];
 }
 
 fn main(string@ argv) i32 {
@@ -92,12 +102,12 @@ fn main(string@ argv) i32 {
     // here either. The builtin passes the compiler's own table for the same
     // value (D11.7, D7.7).
     table[0].value = cast(color.red, i32);
-    table[0].name = "red".ptr;
+    table[0].name = &"red"[0];
     table[1].value = cast(color.blue, i32);
-    table[1].name = "blue".ptr;
+    table[1].name = &"blue"[0];
     print(color.blue, " ");
     rt.flush(1);
-    rt.print_enum(1, cast(color.blue, i32), &table[0], 2);
+    rt.print_enum(1, cast(color.blue, i32), table[..]);
     rt.print_char(1, '\n');
     rt.flush(1);
 
@@ -123,7 +133,7 @@ fn main(string@ argv) i32 {
     string greeting = "hello";
     print(greeting, " ");
     rt.flush(1);
-    rt.print_str(1, greeting.ptr, greeting.len);
+    rt.print_str(1, greeting);
     rt.print_char(1, '\n');
     rt.flush(1);
 
@@ -137,7 +147,7 @@ fn main(string@ argv) i32 {
     // this mode as in the other, so bcopy writes the block through it
     // (D3.11, toolchain.md 5.1).
     u64 n = 32;
-    void mut* own block = rt.alloc(1, n, "modes.ft".ptr, 1, 1);
+    void mut* own block = rt.alloc(1, n, &"modes.ft"[0], 1, 1);
     u8[32] mut seen = {};
     bool zeroed = bcmp(block, cast(&seen, void*), n) == 0;
     seen[n - 1] = 5;
@@ -147,30 +157,18 @@ fn main(string@ argv) i32 {
     println(block != null, " ", zeroed, " ", seen[n - 1] == 5);
     rt.free(move(block));
 
-    // args_init and args answer with the span main was given. The first manual
-    // call releases the runtime storage behind argv. Save the values that the
-    // test needs later. The saved string header still points at process bytes,
-    // which args_init does not own. The second call is the one the overwrite
-    // check refuses in the other mode, unless args_init releases what the first
-    // call allocated (D17.11).
-    u64 saved_argc = argv.len;
-    string saved_arg = argv[1];
-    char*[2] mut raw = {};
-    for (u64 mut i = 0; i < saved_argc; i++) {
-        raw[i] = argv[i].ptr;
-    }
-    rt.args_init(cast(saved_argc, i32), &raw[0]);
-    rt.args_init(cast(saved_argc, i32), &raw[0]);
+    // args answers with the span main was given. Only the main that the
+    // compiler emits calls args_init (D6.9).
     string@ mine = rt.args();
-    println(mine.len, " ", mine.len == saved_argc, " ", mine[1] == saved_arg);
+    println(mine.len, " ", mine.len == argv.len, " ", mine[1] == argv[1]);
 
     // The buffer still holds bytes back until something flushes it, and
     // print_str of nothing still writes nothing. Both the builtin above and
     // the calls below write into the one buffer of fd 1, so this flush is
     // what puts the line above before the bytes below (D11.5).
     rt.flush(1);
-    rt.print_str(1, greeting.ptr, 0);
-    rt.print_str(1, "buffered\n".ptr, 9);
+    rt.print_str(1, greeting[0..0]);
+    rt.print_str(1, "buffered\n");
     rt.flush_all();
     println("done");
     return 0;

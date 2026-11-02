@@ -92,8 +92,7 @@ fn every_failure_entry_point_is_the_one_of_5_1() void {
          "void @\"std.rt.fail_alloc_count\"(i64, ptr, i32, i32) noreturn");
     want(runtime_sig.rt_entry.rt_fail_enum,
          "void @\"std.rt.fail_enum\"(i64, ptr, ptr, i32, i32) noreturn");
-    want(runtime_sig.rt_entry.rt_panic,
-         "void @\"std.rt.panic\"(ptr, i64, ptr, i32, i32) noreturn");
+    want(runtime_sig.rt_entry.rt_panic, "void @\"std.rt.panic\"(ptr, ptr, i32, i32) noreturn");
     want(runtime_sig.rt_entry.rt_assert_fail,
          "void @\"std.rt.assert_fail\"(ptr, ptr, i32, i32) noreturn");
 }
@@ -110,9 +109,8 @@ fn every_print_entry_point_is_the_one_of_5_1() void {
     want(runtime_sig.rt_entry.rt_print_bool, "void @\"std.rt.print_bool\"(i32, i1 zeroext)");
     want(runtime_sig.rt_entry.rt_print_char, "void @\"std.rt.print_char\"(i32, i8 zeroext)");
     want(runtime_sig.rt_entry.rt_print_ptr, "void @\"std.rt.print_ptr\"(i32, ptr)");
-    want(runtime_sig.rt_entry.rt_print_str, "void @\"std.rt.print_str\"(i32, ptr, i64)");
-    want(runtime_sig.rt_entry.rt_print_enum,
-         "void @\"std.rt.print_enum\"(i32, i32, ptr, i64)");
+    want(runtime_sig.rt_entry.rt_print_str, "void @\"std.rt.print_str\"(i32, ptr)");
+    want(runtime_sig.rt_entry.rt_print_enum, "void @\"std.rt.print_enum\"(i32, i32, ptr)");
     want(runtime_sig.rt_entry.rt_flush, "void @\"std.rt.flush\"(i32)");
     want(runtime_sig.rt_entry.rt_flush_all, "void @\"std.rt.flush_all\"()");
 }
@@ -179,7 +177,9 @@ fn an_arity_is_read_off_the_row_and_the_row_ends_at_its_first_gap() void {
     // beside the row.
     assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_flush_all) == 0);
     assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_free) == 1);
-    assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_print_str) == 3);
+    assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_print_str) == 2);
+    assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_print_enum) == 3);
+    assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_panic) == 4);
     assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_alloc) == 5);
     // The widest runtime entry.
     assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_fail_span) == 6);
@@ -282,6 +282,27 @@ fn a_fort_signature_maps_to_the_row_the_call_site_needs() void {
     runtime_sig.rt_sig exit_got = runtime_sig.rt_signature_of_type("std.rt.exit", exit_sig);
     assert(exit_got.is_noreturn);
     assert(exit_got.p0 == runtime_sig.ir_form.ir_i32);
+    // `fn print_str(i32 fd, string s) void` and `fn panic(string msg, char* file, u32 line, u32
+    // col) noreturn`: a `string` parameter is one `ptr`, the address of the caller-made copy.
+    types.node*[2] mut text = {types.type_prim(&te.tt, prim.prim_kind.prim_i32), strspan};
+    types.node* str_sig = types.type_fn(&te.tt, voidt, text[..], false);
+    same_row(runtime_sig.rt_signature_of_type("std.rt.print_str", str_sig),
+             runtime_sig.rt_entry.rt_print_str);
+    types.node* u32t = types.type_prim(&te.tt, prim.prim_kind.prim_u32);
+    types.node*[4] mut message = {strspan, charp, u32t, u32t};
+    types.node* panic_sig = types.type_fn(&te.tt, voidt, message[..], true);
+    same_row(runtime_sig.rt_signature_of_type("std.rt.panic", panic_sig),
+             runtime_sig.rt_entry.rt_panic);
+}
+
+// Holds a row that rt_signature_of_type gave against the row of the entry `rt`.
+fn same_row(runtime_sig.rt_sig got, runtime_sig.rt_entry rt) void {
+    runtime_sig.rt_sig row = runtime_sig.rt_sig_of(rt);
+    assert(got.name == row.name);
+    assert(got.result == row.result);
+    assert(got.is_noreturn == row.is_noreturn);
+    assert(got.p0 == row.p0 && got.p1 == row.p1 && got.p2 == row.p2);
+    assert(got.p3 == row.p3 && got.p4 == row.p4 && got.p5 == row.p5);
 }
 
 fn a_fort_type_maps_to_the_form_the_boundary_gives_it() void {

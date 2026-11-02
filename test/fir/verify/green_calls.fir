@@ -60,7 +60,7 @@
 //|         switch(copy _6) -> [true: bb10, otherwise: bb11] #17:1 s16;
 //|     }
 //|     bb10: {
-//|         fail(panic, copy _3.0, copy _3.1) #18:1 s17;
+//|         fail(panic, copy _3) #18:1 s17;
 //|     }
 //|     bb11: {
 //|         _9 = call fn std.rt.fail_overflow(copy _8, const u32 19, const u32 1) #19:1 s18;
@@ -123,7 +123,7 @@ fn main.f(_1 (x): i32, _2 (w): i64, _3 (s): string own) -> i64 {
         switch(copy _6) -> [true: bb10, otherwise: bb11] #17:1 s16;
     }
     bb10: {
-        fail(panic, copy _3.0, copy _3.1) #18:1 s17;
+        fail(panic, copy _3) #18:1 s17;
     }
     bb11: {
         _9 = call fn std.rt.fail_overflow(copy _8, const u32 19, const u32 1) #19:1 s18;

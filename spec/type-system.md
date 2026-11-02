@@ -265,7 +265,7 @@ mutable (D5.2), whether or not the string is `own`.
 string s = "hello";                  // storage: h e l l o NUL; s.len == 5
 char c = s[1];                       // 'e'
 string t = s[1..3];                  // "el", shares s's bytes, not NUL-terminated
-char* p = &s[0];                     // 'h'; s.ptr goes only to C, to a comparison or a cast (D3.5)
+char* p = &s[0];                     // 'h'; s.ptr goes only to C or to a comparison (D3.5)
 string z = {};                       // {null, 0}
 bool eq = z == "";                   // true: both have len 0
 bool dist = z.ptr == "".ptr;         // false
