@@ -42,12 +42,35 @@ fn free(env mut* e) void {
     session.free(&e->sess);
 }
 
+// Releases an environment that the caller moves in, in the order of free.
+fn drop(env mut e) void {
+    ast.arena_drop(move(e.arena));
+    del(e.toks.items);
+    del(e.buf.data);
+    del(e.src_buf.data);
+    del(e.join_buf.data);
+    session.drop(move(e.sess));
+}
+
+// An empty environment in an allocation of its own, for a function that lends it to calls. `new`
+// fills the allocation with the value that create gives.
+fn make() env mut* own {
+    return new(env);
+}
+
+// Ends an environment of make that the caller moves in.
+fn drop_made(env mut* own p) void {
+    env kept = move(*p);
+    del(p);
+    drop(move(kept));
+}
+
 // Makes an environment, runs `body` on it, and releases it. `body` reaches the environment through
 // a pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
 fn run(fn (env mut*) void body) void {
-    env mut e = create();
-    defer free(&e);
-    body(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    body(e);
 }
 
 // Lexes and parses `src` into a module node, as `fort --ast` does. The

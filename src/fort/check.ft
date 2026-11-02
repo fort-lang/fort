@@ -238,27 +238,31 @@ fn check_init(checker mut* ck, session.session mut* s) void {
 }
 
 /// Clears all checker state.
+// drop holds the releases, and the move leaves the zero value, so check_init after check_free
+// gives the checker that it gives to a fresh one.
 fn check_free(checker mut* ck) void {
+    drop(move(*ck));
+}
+
+// Frees a checker that the caller moves in: each symbol record, the folded values, the two maps,
+// the externs, the message, the type table, the suffixes and the sized checks. No part of it
+// reads the session or the set that the checker points to.
+fn drop(checker mut ck) void {
     u64 mut i = 0;
-    while (i < ck->syms_len) {
-        ast.sym mut* own s = move(ck->syms[i]);
+    while (i < ck.syms_len) {
+        ast.sym mut* own s = move(ck.syms[i]);
         del(s);
         i += 1;
     }
-    del(ck->syms);
-    ck->syms_len = 0;
-    del(ck->values);
-    ck->values_len = 0;
-    strmap.free(&ck->bad_imports);
-    strmap.free(&ck->extern_first);
-    del(ck->externs);
-    ck->externs_len = 0;
-    strbuf.free(&ck->msg);
-    types.type_table_free(&ck->types);
-    del(ck->suffixes);
-    ck->suffix_top = 0;
-    del(ck->sized);
-    ck->sized_len = 0;
+    del(ck.syms);
+    del(ck.values);
+    del(ck.bad_imports.entries);
+    del(ck.extern_first.entries);
+    del(ck.externs);
+    del(ck.msg.data);
+    types.table_drop(move(ck.types));
+    del(ck.suffixes);
+    del(ck.sized);
 }
 
 // ---- the three vectors -------------------------------------------------------------

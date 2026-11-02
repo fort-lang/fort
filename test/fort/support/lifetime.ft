@@ -68,6 +68,27 @@
 // fills `declared` only for the bodiless functions of an interface module,
 // and the checker fills `sized` only for an array whose layout is pending.
 //
+// Then the releases of the session, the analysis, the emitter, the index and
+// the pools moved into the drops of their types: gen.drop, check.drop,
+// session.drop, diag.drop, diag.sources_drop, ast.arena_drop, index.drop and
+// containers.pool_drop. gen.gen_free, check.check_free, index.free and the
+// other frees by pointer of these types move their value into their drop.
+// session.free and driver.analysis_free free each field through the free of
+// its type. driver.check_document and driver.ast_entry hold their index and
+// their arena in an allocation, so no second call makes a release again. On
+// that tree 48 releases were deleted one at a time from the drops and the
+// driver, a 49th mutant made the loop of pool_drop an `if` that frees one
+// block of the chain, and the six probes ran under glibc 2.39. 45 of the 49
+// made at least one probe fail, the `if` the emitter and the index probe. The
+// compiler refused 2: a deleted `del(s)` of check.drop and `del(n)` of
+// ast.arena_drop leave an own local that the next round of the loop
+// overwrites. 2 moved no probe, for the reason above: `del(g.declared.items)`
+// of gen.drop and `del(ck.sized)` of check.drop. test/aggregate_sites_test.py
+// fails for each of these two, because the drop then leaves an owner that the
+// leak rule does not prove. The drop of an own pointer local, as
+// `session.drop_made`, cannot go: part 1 of the leak rule refuses the program
+// without it.
+//
 // This module uses no function-pointer dispatch table. A repeated analysis
 // must not grow the heap.
 

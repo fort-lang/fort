@@ -150,10 +150,15 @@ struct table {
 // `table{}` is an empty table, ready for use. A table needs no init function: one that wrote
 // `table{}` over the table of its caller would lose the nodes of a table in use.
 
-// Clears the table.
+// Clears the table. table_drop holds the releases, and the move leaves `table{}`.
 fn type_table_free(table mut* tt) void {
-    while (tt->last != null) {
-        node mut* own t = move(tt->last);
+    table_drop(move(*tt));
+}
+
+// Frees a table that the caller moves in: each node from the newest, then `nodes` and the index.
+fn table_drop(table mut tt) void {
+    while (tt.last != null) {
+        node mut* own t = move(tt.last);
         node mut* own before = move(t->made_before);
         del(t->params);
         if (t->layout != null) {
@@ -161,20 +166,22 @@ fn type_table_free(table mut* tt) void {
         }
         del(t->layout);
         del(t);
-        tt->last = move(before);
+        tt.last = move(before);
     }
-    del(tt->nodes);
-    tt->count = 0;
-    del(tt->index);
-    tt->indexed = 0;
-    tt->void_type = null;
-    tt->null_type = null;
-    tt->error_type = null;
-    u64 mut k = 0;
-    while (k < prim.PRIM_COUNT) {
-        tt->prims[k] = null;
-        k += 1;
-    }
+    del(tt.nodes);
+    del(tt.index);
+}
+
+// An empty table in an allocation of its own, for a function that lends the table to calls.
+fn table_make() table mut* own {
+    return new(table);
+}
+
+// Ends a table of table_make that the caller moves in.
+fn table_drop_made(table mut* own p) void {
+    table kept = move(*p);
+    del(p);
+    table_drop(move(kept));
 }
 
 // Ensures room for one more node, growing to the largest of NODE_MIN_CAP and

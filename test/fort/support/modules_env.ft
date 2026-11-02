@@ -55,12 +55,33 @@ fn close(env mut* e) void {
     del(e->dir);
 }
 
+// Releases an environment that the caller moves in, in the order of close.
+fn drop(env mut e) void {
+    modules.drop(move(e.set));
+    session.drop(move(e.s));
+    del(e.dir);
+}
+
+// Opens an environment in an allocation of its own, for a function that lends it to calls.
+fn make() env mut* own {
+    env mut* own e = new(env);
+    *e = open();
+    return e;
+}
+
+// Ends an environment of make that the caller moves in.
+fn drop_made(env mut* own p) void {
+    env kept = move(*p);
+    del(p);
+    drop(move(kept));
+}
+
 // Opens an environment, runs `body` on it, and closes it. `body` reaches the environment through
 // a pointer, so the use rule of `move` and `del` asks no proof of its reads after a call.
 fn run(fn (env mut*) void body) void {
-    env mut e = open();
-    defer close(&e);
-    body(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    body(e);
 }
 
 // Creates one directory of the sandbox, ignoring a directory that is there.

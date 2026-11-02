@@ -859,25 +859,29 @@ fn target_allowed(options* opts) bool {
 // It writes one line per token to stdout. A lexical error does not stop lexing, so the
 // dump covers the whole file either way. The status is then a compile error.
 fn tokens_entry(options* opts) i32 {
-    session.session mut s = session.create();
-    defer session.free(&s);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
     string mut source = "";
-    if (!session.read_source(&s, opts->entry, &source)) {
+    if (!session.read_source(s, opts->entry, &source)) {
         error_path("cannot read", opts->entry, str.from_cstr(libc.strerror(sys.errno())));
         return EXIT_USAGE;
     }
     // a batch driver writes the text form as it arrives
-    diag.set_text(session.diags(&s), true);
-    session.show_sources(&s);
-    lexer.tok_vec mut toks = lexer.tokvec_create();
-    defer del(toks.items);
-    bool clean = lexer.lex_file(&s, opts->entry, source, &toks);
-    strbuf.str_buf mut dump = strbuf.create();
-    defer del(dump.data);
-    lexer.tok_dump(&toks, &dump);
-    print(strbuf.view(&dump));
-    if (clean) {
-        return EXIT_OK;
+    diag.set_text(session.diags(s), true);
+    session.show_sources(s);
+    // The buffers end in a block, before the session: the leak rule proves a `del` that no call
+    // follows, and the frees keep their order.
+    {
+        lexer.tok_vec mut toks = lexer.tokvec_create();
+        defer del(toks.items);
+        bool clean = lexer.lex_file(s, opts->entry, source, &toks);
+        strbuf.str_buf mut dump = strbuf.create();
+        defer del(dump.data);
+        lexer.tok_dump(&toks, &dump);
+        print(strbuf.view(&dump));
+        if (clean) {
+            return EXIT_OK;
+        }
     }
     return EXIT_COMPILE_ERROR;
 }
@@ -887,30 +891,37 @@ fn tokens_entry(options* opts) i32 {
 // The parser continues after a syntax error. Thus, the tree covers the complete file. The status is
 // then a compile error.
 fn ast_entry(options* opts) i32 {
-    session.session mut s = session.create();
-    defer session.free(&s);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
     string mut source = "";
-    if (!session.read_source(&s, opts->entry, &source)) {
+    if (!session.read_source(s, opts->entry, &source)) {
         error_path("cannot read", opts->entry, str.from_cstr(libc.strerror(sys.errno())));
         return EXIT_USAGE;
     }
     // a batch driver writes the text form as it arrives
-    diag.set_text(session.diags(&s), true);
-    session.show_sources(&s);
-    lexer.tok_vec mut toks = lexer.tokvec_create();
-    defer del(toks.items);
-    lexer.lex_file(&s, opts->entry, source, &toks);
-    // the tokens cover the whole file, so the parse runs
-    ast.arena mut ar = ast.arena{};
-    defer ast.ast_arena_free(&ar);
-    ast.node mut* mod = parser.parse_module(&s, opts->entry, &toks, &ar);
-    strbuf.str_buf mut dump = strbuf.create();
-    defer del(dump.data);
-    ast.ast_dump(mod, &dump);
-    strbuf.push(&dump, '\n');
-    print(strbuf.view(&dump));
-    if (session.error_count(&s) == 0) {
-        return EXIT_OK;
+    diag.set_text(session.diags(s), true);
+    session.show_sources(s);
+    // The tokens end in a block, before the session, and the dump in a block of its own, before
+    // the arena: the leak rule proves a `del` that no call follows, and the frees keep their
+    // order.
+    {
+        lexer.tok_vec mut toks = lexer.tokvec_create();
+        defer del(toks.items);
+        lexer.lex_file(s, opts->entry, source, &toks);
+        // the tokens cover the whole file, so the parse runs
+        ast.arena mut* own ar = ast.arena_make();
+        defer ast.arena_drop_made(move(ar));
+        ast.node mut* mod = parser.parse_module(s, opts->entry, &toks, ar);
+        {
+            strbuf.str_buf mut dump = strbuf.create();
+            defer del(dump.data);
+            ast.ast_dump(mod, &dump);
+            strbuf.push(&dump, '\n');
+            print(strbuf.view(&dump));
+        }
+        if (session.error_count(s) == 0) {
+            return EXIT_OK;
+        }
     }
     return EXIT_COMPILE_ERROR;
 }
@@ -1373,18 +1384,31 @@ struct libraries {
     strbuf.str_buf compiler; // the compiler identity, empty until hash_identity computes it
 }
 
-fn free_libraries(libraries mut* libs) void {
+// Frees the libraries that the caller moves in: each contents in command-line order, then the
+// other fields. The pool holds a chain, so it moves into the drop of its type.
+fn libraries_drop(libraries mut libs) void {
     u64 mut i = 0;
-    while (i < libs->len) {
-        artifact.free(&libs->items[i]);
+    while (i < libs.len) {
+        artifact.drop(move(libs.items[i]));
         i += 1;
     }
-    del(libs->items);
-    libs->len = 0;
-    containers.str_free(&libs->files);
-    containers.pool_free(&libs->pool);
-    vec.int_free(&libs->order);
-    strbuf.free(&libs->compiler);
+    del(libs.items);
+    del(libs.files.items);
+    containers.pool_drop(move(libs.pool));
+    del(libs.order.items);
+    del(libs.compiler.data);
+}
+
+// No library, in an allocation of its own, for a build that lends its libraries to calls.
+fn libraries_make() libraries mut* own {
+    return new(libraries);
+}
+
+// Ends the libraries of libraries_make that the caller moves in.
+fn libraries_drop_made(libraries mut* own p) void {
+    libraries kept = move(*p);
+    del(p);
+    libraries_drop(move(kept));
 }
 
 // Reports `library '<path>' is corrupt`.
@@ -1603,18 +1627,36 @@ fn analysis_create(session.session mut* s) analysis {
     return an;
 }
 
-// Releases a live analysis. Repeated calls have no effect.
-fn analysis_release(analysis mut* an, bool mut* live) void {
-    if (!*live) {
-        return;
-    }
-    *live = false;
-    analysis_free(an);
-}
-
 fn analysis_free(analysis mut* an) void {
     check.check_free(&an->ck);
     modules.free(&an->set);
+}
+
+// Frees an analysis that the caller moves in, in the order of analysis_free. The set and the
+// checker each hold a chain, so each moves into the drop of its type.
+fn analysis_drop(analysis mut an) void {
+    check.drop(move(an.ck));
+    modules.drop(move(an.set));
+}
+
+// The analysis of analysis_create in an allocation of its own, for a run that lends it to calls.
+// The checker stores the session, which must outlive the analysis.
+fn analysis_make(session.session mut* s) analysis mut* own {
+    analysis mut* own an = new(analysis);
+    check.check_init(&an->ck, s);
+    return an;
+}
+
+// Ends an analysis of analysis_make that the caller moves in, and does nothing for null: a build
+// ends its analysis before it starts --cc, and its deferred drop then takes the null that the
+// move left.
+fn analysis_drop_made(analysis mut* own p) void {
+    if (p == null) {
+        return;
+    }
+    analysis kept = move(*p);
+    del(p);
+    analysis_drop(move(kept));
 }
 
 // Loads the entry file and import closure with the search roots in order.
@@ -1717,30 +1759,29 @@ fn emit_module(session.session mut* s, options* opts, analysis mut* an, string i
     gopts.release = opts->release;
     gopts.no_bounds_check = opts->no_bounds_check;
     gopts.target = opts->target;
-    gen.emitter mut g = gen.emitter{};
-    gen.gen_init(&g, s, gopts);
-    defer gen.gen_free(&g);
-    summary.graph mut calls = summary.graph{};
-    defer summary.free(&calls);
+    gen.emitter mut* own g = gen.make(s, gopts);
+    defer gen.drop_made(move(g));
+    summary.graph mut* own calls = summary.make();
+    defer summary.drop_made(move(calls));
     summary.graph mut* mut taken = null;
     if (opts->use_names.len == 0 && !opts->have_lib) {
-        taken = &calls;
+        taken = calls;
     }
-    if (!gen_fir.emit_program(&g, &an->ck, &an->set, taken)) {
+    if (!gen_fir.emit_program(g, &an->ck, &an->set, taken)) {
         return EXIT_COMPILE_ERROR;
     }
     bool mut written = false;
     if (ir_path == STDOUT_OUTPUT) {
-        written = write_stdout(strbuf.bytes(&g.out));
+        written = write_stdout(strbuf.bytes(&g->out));
     } else {
-        written = io.write_file(ir_path, strbuf.bytes(&g.out));
+        written = io.write_file(ir_path, strbuf.bytes(&g->out));
     }
     if (!written) {
         error_path("cannot write", ir_path, str.from_cstr(libc.strerror(sys.errno())));
         return EXIT_USAGE;
     }
     if (opts->fir_stats) {
-        println("lowered ", g.lowered, " of ", g.functions);
+        println("lowered ", g->lowered, " of ", g->functions);
     }
     return EXIT_OK;
 }
@@ -1815,21 +1856,12 @@ fn check_document(session.session mut* s, options* opts, libraries* libs, analys
     containers.str_vec mut files = containers.str_create();
     defer del(files.items);
     collect_files(p, libs, &an->set, &files);
-    index.index mut ix = index.create();
-    defer {
-        index.free(&ix);
-        // The leak rule reads no callee: after the calls, the test of a loop proves each chain
-        // empty, and each other owner takes a `del`.
-        while (ix.pool.head != null) {
-            containers.pool_free(&ix.pool);
-        }
-        del(ix.entries);
-        del(ix.msg.data);
-    }
+    index.index mut* own ix = index.make();
+    defer index.drop_made(move(ix));
     if (opts->index) {
-        index.build(&ix, &an->set);
+        index.build(ix, &an->set);
     }
-    write_document(s, &files, &ix);
+    write_document(s, &files, ix);
 }
 
 // --fir lowers each function of a checked program into a FIR module and writes the module to
@@ -2325,17 +2357,16 @@ fn resolve_run(fir.module* m, check.checker* ck, test_pass mut* p) i32 {
 // writes. The report of fir.interpreter.write_report, with the events of the run, goes to `out`.
 fn run_test(check.checker mut* ck, fir.module* m, test_pass* p, string entry,
             strbuf.str_buf mut* out) void {
-    interpreter.machine mut it = interpreter.machine{};
-    interpreter.init(&it, ck, m, true);
-    defer interpreter.free(&it);
-    it.sh.reporting = true;
+    interpreter.machine mut* own it = interpreter.make(ck, m, true);
+    defer interpreter.drop_made(move(it));
+    it->sh.reporting = true;
     if (p->text.len == 0) {
         string[1] argv = {entry};
-        interpreter.run_program(&it, p->function, argv[..]);
+        interpreter.run_program(it, p->function, argv[..]);
     } else {
-        interpreter.run_function(&it, p->function, p->values[..p->count]);
+        interpreter.run_function(it, p->function, p->values[..p->count]);
     }
-    interpreter.write_report(&it, out);
+    interpreter.write_report(it, out);
 }
 
 // Runs the passes of a `.fir` test in order, each over every function of `m` in text order. The
@@ -2385,94 +2416,102 @@ fn fir_test_entry(options* opts, string program) i32 {
         usage_error_arg("unsupported target", opts->target);
         return EXIT_USAGE;
     }
-    session.session mut s = session.create();
-    defer session.free(&s);
-    configure(&s, opts);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    configure(s, opts);
     string mut text = "";
-    if (!session.read_source(&s, opts->entry, &text)) {
+    if (!session.read_source(s, opts->entry, &text)) {
         error_path("cannot read", opts->entry, str.from_cstr(libc.strerror(sys.errno())));
         return EXIT_USAGE;
     }
-    fir_test mut t = fir_test{};
-    defer del(t.prelude.data);
-    defer del(t.passes.items);
-    read_fir_test(text, &t);
-    if (t.passes.len == 0) {
-        error("the .fir test has no '//! pass:' directive");
-        return EXIT_USAGE;
-    }
-    test_pass mut@ own passes = new(test_pass, t.passes.len);
-    defer del(passes);
-    u64 mut k = 0;
-    while (k < t.passes.len) {
-        i32 pass = fir_test_pass(containers.str_at(&t.passes, k), &passes[k]);
-        if (pass != EXIT_OK) {
-            return pass;
+    // The test ends in a block, before the session, and the output in a block of its own, before
+    // the module: the leak rule proves a `del` that no call follows, and the frees keep their
+    // order.
+    {
+        fir_test mut t = fir_test{};
+        defer del(t.prelude.data);
+        defer del(t.passes.items);
+        read_fir_test(text, &t);
+        if (t.passes.len == 0) {
+            error("the .fir test has no '//! pass:' directive");
+            return EXIT_USAGE;
         }
-        k += 1;
-    }
-    libraries mut libs = libraries{};
-    defer free_libraries(&libs);
-    i32 read = read_libraries(opts, &libs);
-    if (read != EXIT_OK) {
-        return read;
-    }
-    // The loader reads the prelude in place of the file, so a diagnostic of the prelude names
-    // the line and the column of the file. No source line is shown under it.
-    session.set_source(&s, opts->entry, strbuf.view(&t.prelude));
-    diag.set_text(session.diags(&s), true);
-    analysis mut an = analysis_create(&s);
-    defer analysis_free(&an);
-    i32 used = use_libraries(&s, opts, &libs, &an);
-    if (used != EXIT_OK) {
-        return used;
-    }
-    u64 mut i = 0;
-    while (i < opts->includes.len) {
-        modules.add_root(&an.set, containers.str_at(&opts->includes, i));
-        i += 1;
-    }
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    if (libs.len == 0) {
-        modules.set_std_dir(&an.set, std_dir(&p, opts, program));
-    }
-    bool loaded = modules.load_named(&s, &an.set, FIR_TEST_MODULE, opts->entry);
-    // the prelude is no program, so it need not define main
-    an.ck.require_main = false;
-    bool checked = check_stmt.check_program(&an.ck, &an.set);
-    if (!loaded || !checked || session.error_count(&s) > 0) {
-        return EXIT_COMPILE_ERROR;
-    }
-    if (!check_outside(&s, opts, &libs, &an)) {
-        return EXIT_COMPILE_ERROR;
-    }
-    fir_parse.prelude pre = fir_parse.prelude{modules.entry(&an.set), &an.ck};
-    fir.module mut m = fir_parse.parse_module(&s, opts->entry, text, pre);
-    defer fir.module_free(&m);
-    if (session.error_count(&s) > 0) {
-        return EXIT_COMPILE_ERROR;
-    }
-    bool mut runs = false;
-    k = 0;
-    while (k < t.passes.len) {
-        if (passes[k].kind == test_pass_kind.tp_run) {
-            runs = true;
-            i32 resolved = resolve_run(&m, &an.ck, &passes[k]);
-            if (resolved != EXIT_OK) {
-                return resolved;
+        test_pass mut@ own passes = new(test_pass, t.passes.len);
+        defer del(passes);
+        u64 mut k = 0;
+        while (k < t.passes.len) {
+            i32 pass = fir_test_pass(containers.str_at(&t.passes, k), &passes[k]);
+            if (pass != EXIT_OK) {
+                return pass;
             }
+            k += 1;
         }
-        k += 1;
+        libraries mut* own libs = libraries_make();
+        defer libraries_drop_made(move(libs));
+        i32 read = read_libraries(opts, libs);
+        if (read != EXIT_OK) {
+            return read;
+        }
+        // The loader reads the prelude in place of the file, so a diagnostic of the prelude names
+        // the line and the column of the file. No source line is shown under it.
+        session.set_source(s, opts->entry, strbuf.view(&t.prelude));
+        diag.set_text(session.diags(s), true);
+        analysis mut* own an = analysis_make(s);
+        defer analysis_drop_made(move(an));
+        i32 used = use_libraries(s, opts, libs, an);
+        if (used != EXIT_OK) {
+            return used;
+        }
+        u64 mut i = 0;
+        while (i < opts->includes.len) {
+            modules.add_root(&an->set, containers.str_at(&opts->includes, i));
+            i += 1;
+        }
+        containers.pool mut* own p = containers.pool_make();
+        defer containers.pool_drop_made(move(p));
+        if (libs->len == 0) {
+            modules.set_std_dir(&an->set, std_dir(p, opts, program));
+        }
+        bool loaded = modules.load_named(s, &an->set, FIR_TEST_MODULE, opts->entry);
+        // the prelude is no program, so it need not define main
+        an->ck.require_main = false;
+        bool checked = check_stmt.check_program(&an->ck, &an->set);
+        if (!loaded || !checked || session.error_count(s) > 0) {
+            return EXIT_COMPILE_ERROR;
+        }
+        if (!check_outside(s, opts, libs, an)) {
+            return EXIT_COMPILE_ERROR;
+        }
+        fir_parse.prelude pre = fir_parse.prelude{modules.entry(&an->set), &an->ck};
+        fir.module mut* own m = fir.module_make();
+        defer fir.module_drop_made(move(m));
+        fir_parse.parse_into(s, opts->entry, text, pre, m);
+        if (session.error_count(s) > 0) {
+            return EXIT_COMPILE_ERROR;
+        }
+        bool mut runs = false;
+        k = 0;
+        while (k < t.passes.len) {
+            if (passes[k].kind == test_pass_kind.tp_run) {
+                runs = true;
+                i32 resolved = resolve_run(m, &an->ck, &passes[k]);
+                if (resolved != EXIT_OK) {
+                    return resolved;
+                }
+            }
+            k += 1;
+        }
+        fir_verify.runtime rt = fir_verify.runtime_of(&an->ck);
+        {
+            strbuf.str_buf mut out = strbuf.create();
+            defer del(out.data);
+            run_test_passes(m, passes, &rt, &an->ck, opts->entry, &out);
+            if (!runs) {
+                fir_print.print_module(m, &out);
+            }
+            print(strbuf.view(&out));
+        }
     }
-    fir_verify.runtime rt = fir_verify.runtime_of(&an.ck);
-    strbuf.str_buf mut out = strbuf.create();
-    defer del(out.data);
-    run_test_passes(&m, passes, &rt, &an.ck, opts->entry, &out);
-    if (!runs) {
-        fir_print.print_module(&m, &out);
-    }
-    print(strbuf.view(&out));
     return EXIT_OK;
 }
 
@@ -2483,24 +2522,27 @@ fn fir_test_entry(options* opts, string program) i32 {
 fn run_entry(analysis mut* an, options* opts) i32 {
     // read before the first call that can change an owner of this function
     ast.sym* entry = gen_fir.find_main(modules.entry(&an->set)->ast)->sym;
-    fir.module mut none = fir.module_new();
-    defer fir.module_free(&none);
-    interpreter.machine mut it = interpreter.machine{};
-    interpreter.init(&it, &an->ck, &none, false);
-    defer interpreter.free(&it);
-    containers.str_vec mut argv = containers.str_create();
-    defer del(argv.items);
-    containers.str_push(&argv, opts->entry);
-    for (u64 mut i = 0; i < opts->run_args.len; i++) {
-        containers.str_push(&argv, containers.str_at(&opts->run_args, i));
+    fir.module mut* own none = fir.module_make();
+    defer fir.module_drop_made(move(none));
+    interpreter.machine mut* own it = interpreter.make(&an->ck, none, false);
+    defer interpreter.drop_made(move(it));
+    // The buffers end in a block, before the machine: the leak rule proves a `del` that no call
+    // follows, and the frees keep their order.
+    {
+        containers.str_vec mut argv = containers.str_create();
+        defer del(argv.items);
+        containers.str_push(&argv, opts->entry);
+        for (u64 mut i = 0; i < opts->run_args.len; i++) {
+            containers.str_push(&argv, containers.str_at(&opts->run_args, i));
+        }
+        it->sh.reporting = opts->fir_events;
+        interpreter.outcome o = interpreter.run_program(it, entry, containers.str_items(&argv));
+        strbuf.str_buf mut events = strbuf.create();
+        defer del(events.data);
+        shadow.write_events(&it->sh, "fort: ", &events);
+        eprint(strbuf.view(&events));
+        return run_status(&o, opts->target);
     }
-    it.sh.reporting = opts->fir_events;
-    interpreter.outcome o = interpreter.run_program(&it, entry, containers.str_items(&argv));
-    strbuf.str_buf mut events = strbuf.create();
-    defer del(events.data);
-    shadow.write_events(&it.sh, "fort: ", &events);
-    eprint(strbuf.view(&events));
-    return run_status(&o, opts->target);
 }
 
 // The status of --fir-run for the outcome `o` of a run for `target`: the exit status of the
@@ -2558,46 +2600,47 @@ fn compile_entry(options* opts, string program) i32 {
     if (!front_only && !target_allowed(opts)) {
         return EXIT_USAGE;
     }
-    libraries mut libs = libraries{};
-    defer free_libraries(&libs);
-    i32 read = read_libraries(opts, &libs);
+    // Each context that the build lends to calls lives in an allocation of its own, which its
+    // drop ends: the leak rule reads no callee, and a call changes no `own` pointer of a local.
+    libraries mut* own libs = libraries_make();
+    defer libraries_drop_made(move(libs));
+    i32 read = read_libraries(opts, libs);
     if (read != EXIT_OK) {
         return read;
     }
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    session.session mut s = session.create();
-    defer session.free(&s);
-    configure(&s, opts);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    configure(s, opts);
     // A build reads no tree after the emitter has run, so its analysis is
     // released on every path out of this function (ast.sym). The build path
     // below releases it as soon as the emitter returns and before --cc is
     // spawned. This `defer` answers for the paths that return earlier, and the
-    // flag makes exactly one of the two calls do the work.
-    analysis mut an = analysis_create(&s);
-    bool mut analysis_live = true;
-    defer analysis_release(&an, &analysis_live);
+    // move of the early release leaves it null.
+    analysis mut* own an = analysis_make(s);
+    defer analysis_drop_made(move(an));
     // Only a build with --use that writes an object or an executable uses the cache (toolchain.md
     // 2.3). --fir-stats counts what the emitter writes, which a hit does not run.
-    cached_unit mut u = cached_unit{};
-    defer free_unit(&u);
-    u.active = libs.len > 0 && !opts->check && !opts->fir && !opts->emit_ir && !opts->fir_stats;
-    i32 mut status = front_end(&s, opts, program, &libs, &an, &u);
-    bool hit = status == EXIT_OK && u.active && u.found == cache.outcome.o_hit;
+    cached_unit mut* own u = unit_make();
+    defer unit_drop_made(move(u));
+    u->active = libs->len > 0 && !opts->check && !opts->fir && !opts->emit_ir && !opts->fir_stats;
+    i32 mut status = front_end(s, opts, program, libs, an, u);
+    bool hit = status == EXIT_OK && u->active && u->found == cache.outcome.o_hit;
     // A build with --use runs the emptiness pass as --check does, and then the extern check of
     // the used libraries (toolchain.md 2.1, step 4). A whole program runs the pass in the emitter
     // or in --fir, and --fir-verify-report reports no error of the pass in either mode.
-    summary.graph mut calls = summary.graph{};
-    defer summary.free(&calls);
-    if (!hit && status == EXIT_OK && (opts->check || (libs.len > 0 && !opts->fir_report))) {
-        status = overwrite_entry(&s, &an, opts, &calls);
+    summary.graph mut* own calls = summary.make();
+    defer summary.drop_made(move(calls));
+    if (!hit && status == EXIT_OK && (opts->check || (libs->len > 0 && !opts->fir_report))) {
+        status = overwrite_entry(s, an, opts, calls);
     }
-    if (!hit && status == EXIT_OK && !check_outside(&s, opts, &libs, &an)) {
+    if (!hit && status == EXIT_OK && !check_outside(s, opts, libs, an)) {
         status = EXIT_COMPILE_ERROR;
     }
     if (opts->check && opts->json && (status == EXIT_OK || status == EXIT_COMPILE_ERROR)) {
         // the document answers for both verdicts, so it goes first
-        check_document(&s, opts, &libs, &an, &p);
+        check_document(s, opts, libs, an, p);
         return status;
     }
     if (status != EXIT_OK) {
@@ -2609,47 +2652,47 @@ fn compile_entry(options* opts, string program) i32 {
     }
     if (opts->fir_report) {
         // --fir-verify-report stops before the emitter, as --fir does
-        return fir_report_entry(&an, opts);
+        return fir_report_entry(an, opts);
     }
     if (opts->fir_run) {
         // --fir-run runs the FIR of the program in place of a build
-        return run_entry(&an, opts);
+        return run_entry(an, opts);
     }
     if (opts->fir) {
         // --fir stops before the emitter
-        return fir_entry(&s, &an, opts);
+        return fir_entry(s, an, opts);
     }
     string mut out_path = opts->output;
     if (!opts->have_output) {
-        out_path = default_output(&p, opts);
+        out_path = default_output(p, opts);
     }
     if (opts->emit_ir) {
         // -S writes the module to the output and stops, so it needs no
         // temporary.
-        return emit_module(&s, opts, &an, out_path);
+        return emit_module(s, opts, an, out_path);
     }
     string mut parent = TMP_DIR_DEFAULT;
     i32 mut failure = 0;
-    string dir = make_temp_dir(&p, &parent, &failure);
+    string dir = make_temp_dir(p, &parent, &failure);
     if (dir.len == 0) {
         error_path("cannot create a temporary directory in", parent,
                    str.from_cstr(libc.strerror(failure)));
         return EXIT_USAGE;
     }
-    string mut ir_path = join_path(&p, dir, entry_base(opts->entry), IR_SUFFIX);
+    string mut ir_path = join_path(p, dir, entry_base(opts->entry), IR_SUFFIX);
     i32 mut built = EXIT_OK;
     if (hit) {
         // the object of the entry replaces steps 4 to 6 (toolchain.md 2.1)
         ir_path = "";
     } else {
-        built = emit_module(&s, opts, &an, ir_path);
+        built = emit_module(s, opts, an, ir_path);
     }
     // Release analysis storage before fork duplicates the process page tables.
-    analysis_release(&an, &analysis_live);
-    if (libs.len > 0) {
-        built = build_entry_unit(opts, &libs, &u, built, dir, ir_path, out_path);
+    analysis_drop_made(move(an));
+    if (libs->len > 0) {
+        built = build_entry_unit(opts, libs, u, built, dir, ir_path, out_path);
         if (built == EXIT_OK) {
-            write_stats(opts, &u);
+            write_stats(opts, u);
         }
         return built;
     }
@@ -2843,15 +2886,29 @@ struct cached_unit {
     artifact.contents entry; // the files of the entry after a hit
 }
 
-fn free_unit(cached_unit mut* u) void {
-    containers.str_free(&u->cfg_keys);
-    containers.str_free(&u->cfg_values);
-    containers.str_free(&u->use_hashes);
-    strbuf.free(&u->source);
-    strbuf.free(&u->key);
-    strbuf.free(&u->dir);
-    strbuf.free(&u->entry_path);
-    artifact.free(&u->entry);
+// Frees a unit that the caller moves in. The contents of a hit hold chains, so they move into the
+// drop of their type, after the other fields.
+fn unit_drop(cached_unit mut u) void {
+    del(u.cfg_keys.items);
+    del(u.cfg_values.items);
+    del(u.use_hashes.items);
+    del(u.source.data);
+    del(u.key.data);
+    del(u.dir.data);
+    del(u.entry_path.data);
+    artifact.drop(move(u.entry));
+}
+
+// A unit that uses no cache, in an allocation of its own, for a build that lends it to calls.
+fn unit_make() cached_unit mut* own {
+    return new(cached_unit);
+}
+
+// Ends a unit of unit_make that the caller moves in.
+fn unit_drop_made(cached_unit mut* own p) void {
+    cached_unit kept = move(*p);
+    del(p);
+    unit_drop(move(kept));
 }
 
 // Fills the fields of the manifest of the unit that the key covers, except the unit line and the
@@ -3092,140 +3149,142 @@ fn library_entry(options* opts) i32 {
     if (!has_usable_target(opts)) {
         return EXIT_USAGE;
     }
-    libraries mut libs = libraries{};
-    defer free_libraries(&libs);
-    i32 read = read_libraries(opts, &libs);
-    if (read != EXIT_OK) {
-        return read;
-    }
-    tree.tree mut t = tree.tree{};
-    defer tree.free(&t);
-    i32 mut failure = 0;
-    if (!tree.walk(&t, opts->lib_name, opts->lib_root, &failure)) {
-        error_path("cannot read library root", opts->lib_root,
-                   str.from_cstr(libc.strerror(failure)));
-        return EXIT_USAGE;
-    }
-    if (tree.count(&t) == 0) {
-        eprintln("fort: error: library root '", opts->lib_root, "' holds no module");
-        return EXIT_USAGE;
-    }
-    session.session mut s = session.create();
-    defer session.free(&s);
-    configure(&s, opts);
-    diag.set_text(session.diags(&s), true);
-    session.show_sources(&s);
+    // The buffers come first, so that their `del`s run after the drops of the contexts: the leak
+    // rule proves a `del` that no call follows. Each context that the build lends to calls lives
+    // in an allocation of its own, which its drop ends.
     containers.str_vec mut paths = containers.str_create();
     defer del(paths.items);
     containers.str_vec mut files = containers.str_create();
     defer del(files.items);
     containers.str_vec mut texts = containers.str_create();
     defer del(texts.items);
-    bool listed = read_listed(&s, &t, &paths, &files, &texts);
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    string out_path = library_output(&p, opts);
+    strbuf.str_buf mut text = strbuf.create();
+    defer del(text.data);
+    strbuf.str_buf mut summary_text = strbuf.create();
+    defer del(summary_text.data);
+    libraries mut* own libs = libraries_make();
+    defer libraries_drop_made(move(libs));
+    i32 read = read_libraries(opts, libs);
+    if (read != EXIT_OK) {
+        return read;
+    }
+    tree.tree mut* own t = tree.make();
+    defer tree.drop_made(move(t));
+    i32 mut failure = 0;
+    if (!tree.walk(t, opts->lib_name, opts->lib_root, &failure)) {
+        error_path("cannot read library root", opts->lib_root,
+                   str.from_cstr(libc.strerror(failure)));
+        return EXIT_USAGE;
+    }
+    if (tree.count(t) == 0) {
+        eprintln("fort: error: library root '", opts->lib_root, "' holds no module");
+        return EXIT_USAGE;
+    }
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    configure(s, opts);
+    diag.set_text(session.diags(s), true);
+    session.show_sources(s);
+    bool listed = read_listed(s, t, &paths, &files, &texts);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    string out_path = library_output(p, opts);
     // Only a build that writes the artifact uses the cache (toolchain.md 2.3). A file that cannot
     // be read gives no source hash, and the load reports it.
-    cached_unit mut u = cached_unit{};
-    defer free_unit(&u);
-    u.active = !opts->emit_interface && !opts->emit_summaries && !opts->emit_ir
+    cached_unit mut* own u = unit_make();
+    defer unit_drop_made(move(u));
+    u->active = !opts->emit_interface && !opts->emit_summaries && !opts->emit_ir
         && !opts->compile_only && listed;
-    if (u.active) {
-        if (!hash_identity(&libs)) {
+    if (u->active) {
+        if (!hash_identity(libs)) {
             return EXIT_USAGE;
         }
-        fill_unit(opts, &libs, &u);
-        u.fields.library = opts->lib_name;
+        fill_unit(opts, libs, u);
+        u->fields.library = opts->lib_name;
         artifact.hash_texts(containers.str_items(&paths), containers.str_items(&files),
-                            containers.str_items(&texts), &u.source);
-        find_unit(opts, opts->lib_root, &u);
-        if (u.found == cache.outcome.o_hit) {
-            i32 copied = copy_entry(out_path, &u);
+                            containers.str_items(&texts), &u->source);
+        find_unit(opts, opts->lib_root, u);
+        if (u->found == cache.outcome.o_hit) {
+            i32 copied = copy_entry(out_path, u);
             if (copied == EXIT_OK) {
-                write_stats(opts, &u);
+                write_stats(opts, u);
             }
             return copied;
         }
     }
     // The build path releases the analysis before it spawns --cc, as compile_entry does, and the
-    // flag makes one of the two calls do the work.
-    analysis mut an = analysis_create(&s);
-    bool mut analysis_live = true;
-    defer analysis_release(&an, &analysis_live);
-    i32 used = use_libraries(&s, opts, &libs, &an);
+    // move of that release leaves the deferred drop null.
+    analysis mut* own an = analysis_make(s);
+    defer analysis_drop_made(move(an));
+    i32 used = use_libraries(s, opts, libs, an);
     if (used != EXIT_OK) {
         return used;
     }
-    bool loaded = modules.load_library(&s, &an.set, opts->lib_name, opts->lib_root, &t);
+    bool loaded = modules.load_library(s, &an->set, opts->lib_name, opts->lib_root, t);
     // D8.6 does not apply under --lib: a `main` of a library module is an ordinary function
-    an.ck.require_main = false;
-    bool checked = check_stmt.check_program(&an.ck, &an.set);
-    if (!loaded || !checked || session.error_count(&s) > 0) {
+    an->ck.require_main = false;
+    bool checked = check_stmt.check_program(&an->ck, &an->set);
+    if (!loaded || !checked || session.error_count(s) > 0) {
         return EXIT_COMPILE_ERROR;
     }
     // lower, verify and run the emptiness pass over each body, as --check does, with the
     // summaries, and then check the extern declarations of the used libraries (toolchain.md 2.1,
     // step 4)
-    summary.graph mut calls = summary.graph{};
-    defer summary.free(&calls);
-    i32 lowered = overwrite_entry(&s, &an, opts, &calls);
+    summary.graph mut* own calls = summary.make();
+    defer summary.drop_made(move(calls));
+    i32 lowered = overwrite_entry(s, an, opts, calls);
     if (lowered != EXIT_OK) {
         return lowered;
     }
-    if (!check_outside(&s, opts, &libs, &an)) {
+    if (!check_outside(s, opts, libs, an)) {
         return EXIT_COMPILE_ERROR;
     }
-    strbuf.str_buf mut text = strbuf.create();
-    defer del(text.data);
-    interface.write(&an.ck, &an.set, opts->lib_name, &text);
+    interface.write(&an->ck, &an->set, opts->lib_name, &text);
     if (opts->emit_interface) {
         print(strbuf.view(&text));
         return EXIT_OK;
     }
-    summary.table mut summaries = summary.table{};
-    defer summary.free_table(&summaries);
-    summary.collect(&calls, &summaries);
-    strbuf.str_buf mut summary_text = strbuf.create();
-    defer del(summary_text.data);
-    summary.write(&summaries, opts->lib_name, &summary_text);
+    summary.table mut* own summaries = summary.table_make();
+    defer summary.table_drop_made(move(summaries));
+    summary.collect(calls, summaries);
+    summary.write(summaries, opts->lib_name, &summary_text);
     if (opts->emit_summaries) {
         print(strbuf.view(&summary_text));
         return EXIT_OK;
     }
     if (opts->emit_ir) {
-        return emit_module(&s, opts, &an, out_path);
+        return emit_module(s, opts, an, out_path);
     }
-    if (!opts->compile_only && !u.active) {
+    if (!opts->compile_only && !u->active) {
         // A file of the walk that the first read refused and the parse read: the source hash
         // takes the bytes that the build parsed, and the build looked up no entry.
-        if (!hash_identity(&libs)) {
+        if (!hash_identity(libs)) {
             return EXIT_USAGE;
         }
-        u.active = true;
-        fill_unit(opts, &libs, &u);
-        u.fields.library = opts->lib_name;
-        artifact.hash_sources(&an.set, &u.source);
-        compute_key(opts, opts->lib_root, &u);
-        u.found = cache.outcome.o_absent;
+        u->active = true;
+        fill_unit(opts, libs, u);
+        u->fields.library = opts->lib_name;
+        artifact.hash_sources(&an->set, &u->source);
+        compute_key(opts, opts->lib_root, u);
+        u->found = cache.outcome.o_absent;
     }
     string mut parent = TMP_DIR_DEFAULT;
-    string dir = make_temp_dir(&p, &parent, &failure);
+    string dir = make_temp_dir(p, &parent, &failure);
     if (dir.len == 0) {
         error_path("cannot create a temporary directory in", parent,
                    str.from_cstr(libc.strerror(failure)));
         return EXIT_USAGE;
     }
-    string ir_path = join_path(&p, dir, opts->lib_name, IR_SUFFIX);
+    string ir_path = join_path(p, dir, opts->lib_name, IR_SUFFIX);
     string mut object_path = out_path;
     string mut archive_path = "";
     if (!opts->compile_only) {
-        object_path = join_path(&p, dir, opts->lib_name, OBJECT_SUFFIX);
-        archive_path = join_path(&p, dir, ARCHIVE_NAME, "");
+        object_path = join_path(p, dir, opts->lib_name, OBJECT_SUFFIX);
+        archive_path = join_path(p, dir, ARCHIVE_NAME, "");
     }
-    i32 mut built = emit_module(&s, opts, &an, ir_path);
+    i32 mut built = emit_module(s, opts, an, ir_path);
     // Release analysis storage before fork duplicates the process page tables.
-    analysis_release(&an, &analysis_live);
+    analysis_drop_made(move(an));
     if (built == EXIT_OK) {
         built = compile_library(opts, ir_path, object_path);
     }
@@ -3234,7 +3293,7 @@ fn library_entry(options* opts) i32 {
     }
     if (built == EXIT_OK && !opts->compile_only) {
         built = write_artifact(out_path, strbuf.view(&text), strbuf.view(&summary_text),
-                               archive_path, &u);
+                               archive_path, u);
     }
     string[3] mut written = {ir_path, "", archive_path};
     if (!opts->compile_only) {
@@ -3242,7 +3301,7 @@ fn library_entry(options* opts) i32 {
     }
     remove_library_temp(dir, written[..]);
     if (built == EXIT_OK) {
-        write_stats(opts, &u);
+        write_stats(opts, u);
     }
     return built;
 }

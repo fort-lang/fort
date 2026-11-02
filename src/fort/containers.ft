@@ -33,19 +33,35 @@ fn pool_create() pool {
     return pool{};
 }
 
-// Clears the pool. Repeated calls have no effect.
+// Clears the pool. Repeated calls have no effect. pool_drop holds the releases, and the move
+// leaves the zero value, the empty pool.
 fn pool_free(pool mut* p) void {
-    // The loop tests `p->head`, so no local holds the null at the end.
-    while (p->head != null) {
-        pool_block mut* own block = move(p->head);
+    pool_drop(move(*p));
+}
+
+// Frees a pool that the caller moves in: each block from the head. The test of the loop proves
+// the chain empty on its exit edge.
+fn pool_drop(pool mut p) void {
+    while (p.head != null) {
+        pool_block mut* own block = move(p.head);
         // `del` is shallow, so the tail is taken out first
         pool_block mut* own next = move(block->next);
         del(block->bytes);
         del(block);
-        p->head = move(next);
+        p.head = move(next);
     }
-    p->blocks = 0;
-    p->used = 0;
+}
+
+// An empty pool in an allocation of its own, for a function that lends the pool to calls.
+fn pool_make() pool mut* own {
+    return new(pool);
+}
+
+// Ends a pool of pool_make that the caller moves in.
+fn pool_drop_made(pool mut* own p) void {
+    pool kept = move(*p);
+    del(p);
+    pool_drop(move(kept));
 }
 
 // Adds a block of at least `least` bytes at the head of the list and makes it

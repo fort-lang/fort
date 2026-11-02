@@ -74,9 +74,14 @@ struct sources {
 
 /// Frees the texts, the paths and the pool of `store`.
 fn free_sources(sources mut* store) void {
-    strmap.free(&store->index);
-    containers.str_free(&store->texts);
-    containers.pool_free(&store->pool);
+    sources_drop(move(*store));
+}
+
+// Frees a store that the caller moves in: the index, the texts, then the pool.
+fn sources_drop(sources mut store) void {
+    del(store.index.entries);
+    del(store.texts.items);
+    containers.pool_drop(move(store.pool));
 }
 
 /// The diagnostics and output modes for one analysis. `sink{}` is an empty sink.
@@ -106,12 +111,23 @@ fn create() sink {
 }
 
 /// Removes all diagnostics and makes the sink empty.
+// drop holds the releases. The sink keeps its text mode, its mute state and its source lookup,
+// because reset uses this function.
 fn free(sink mut* s) void {
-    del(s->records);
-    containers.pool_free(&s->pool);
-    s->count = 0;
-    s->errors = 0;
-    s->file_errors = 0;
+    sink kept = move(*s);
+    s->text = kept.text;
+    s->mute_depth = kept.mute_depth;
+    s->mute_errors = kept.mute_errors;
+    s->mute_file_errors = kept.mute_file_errors;
+    s->lookup = kept.lookup;
+    s->lookup_ctx = kept.lookup_ctx;
+    drop(move(kept));
+}
+
+// Frees a sink that the caller moves in: the records, then the pool.
+fn drop(sink mut s) void {
+    del(s.records);
+    containers.pool_drop(move(s.pool));
 }
 
 /// Sets the error count to zero and removes all records.

@@ -836,7 +836,7 @@ fn each_exit_of_lowered_source_has_its_verdict() void {
 // comment gives the verdicts of each function (write_verdicts). A `pair` owns two leaves, which
 // hold no owner. A `chain` owns its nodes through `head`, so a `del` of `head` frees a node whose
 // owner can hold an allocation: a site of part 2.
-string[209] FORM_SOURCE = {
+string[265] FORM_SOURCE = {
     "struct leaf {",
     "    i32 v;",
     "}",
@@ -1058,21 +1058,85 @@ string[209] FORM_SOURCE = {
     "    use_pair(x);",
     "    use_pair(y);",
     "}",
+    // composite: a context with two chains and a leaf. Its free through a pointer: dxU0:1; the
+    // form end, whose second loop calls on the path that runs its body and kills the fact of the
+    // first chain there: dxU0:2; in an allocation that a drop by `move` ends: no local of an
+    // owning aggregate type. The drop of a chain drains it: rcP; the drop of the context moves
+    // each chain into it: rxP, and a drop that misses the second chain: rxU1:3; the drop of the
+    // allocation moves the value out: dkeptP
+    "struct ctx {",
+    "    chain c;",
+    "    chain d;",
+    "    leaf mut* own a;",
+    "}",
+    "fn free_ctx(ctx mut* x) void {",
+    "    free_chain(&x->c);",
+    "    free_chain(&x->d);",
+    "    del(x->a);",
+    "}",
+    "fn use_ctx(ctx mut* x) void {",
+    "    g();",
+    "}",
+    "fn drop_chain(chain mut c) void {",
+    "    while (c.head != null) {",
+    "        free_chain(&c);",
+    "    }",
+    "}",
+    "fn drop_ctx(ctx mut x) void {",
+    "    drop_chain(move(x.c));",
+    "    drop_chain(move(x.d));",
+    "    del(x.a);",
+    "}",
+    "fn drop_made_ctx(ctx mut* own p) void {",
+    "    ctx kept = move(*p);",
+    "    del(p);",
+    "    drop_ctx(move(kept));",
+    "}",
+    "fn composite_before() void {",
+    "    ctx mut x = ctx{};",
+    "    defer free_ctx(&x);",
+    "    use_ctx(&x);",
+    "}",
+    "fn composite_end() void {",
+    "    ctx mut x = ctx{};",
+    "    defer {",
+    "        free_ctx(&x);",
+    "        while (x.c.head != null) {",
+    "            free_chain(&x.c);",
+    "        }",
+    "        while (x.d.head != null) {",
+    "            free_chain(&x.d);",
+    "        }",
+    "        del(x.a);",
+    "    }",
+    "    use_ctx(&x);",
+    "}",
+    "fn composite_after() void {",
+    "    ctx mut* own x = new(ctx);",
+    "    defer drop_made_ctx(move(x));",
+    "    use_ctx(x);",
+    "}",
+    "fn composite_drop_before(ctx mut x) void {",
+    "    drop_chain(move(x.c));",
+    "    del(x.a);",
+    "}",
 };
 
-string[15] FORM_NAMES = {
+string[22] FORM_NAMES = {
     "del_before", "del_after", "end_before", "end_del", "end_after", "order_before", "order_after",
     "block_before", "block_after", "split_before", "split_after", "drop_before", "drop_after",
-    "allocation_before", "allocation_after",
+    "allocation_before", "allocation_after", "composite_before", "composite_end",
+    "composite_after", "drop_chain", "drop_ctx", "composite_drop_before", "drop_made_ctx",
 };
 
-string[15] FORM_VERDICTS = {
+string[22] FORM_VERDICTS = {
     "dpU0:1", "dpP", "dcU0:1", "dcP", "dcP", "dcP dpU0:3", "dpP dcP", "dcP ddU0:3", "dcP ddP",
-    "dcP dpU0:3 rtP", "dpP", "dkeptP dbodyU0:1", "dkeptP", "dxU0:1 dyU0:3", "",
+    "dcP dpU0:3 rtP", "dpP", "dkeptP dbodyU0:1", "dkeptP", "dxU0:1 dyU0:3", "", "dxU0:1",
+    "dxU0:2", "", "rcP", "rxP", "rxU1:3", "dkeptP",
 };
 
 // The sites of part 2 of each function of FORM_NAMES.
-u32[15] FORM_INNER = {0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+u32[22] FORM_INNER = {0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 // Each form ends its local where the shape before it does not, and adds no site of part 2.
 fn each_form_ends_its_local() void {

@@ -26,13 +26,32 @@ fn close(env mut* e) void {
     strbuf.free(&e->out);
 }
 
+// Releases an environment that the caller moves in, as close does. The writer is not read.
+fn drop(env mut e) void {
+    del(e.out.data);
+}
+
+// Opens an environment in an allocation of its own, which does not move: the writer points
+// into it.
+fn make() env mut* own {
+    env mut* own e = new(env);
+    open(e);
+    return e;
+}
+
+// Ends an environment of make that the caller moves in.
+fn drop_made(env mut* own p) void {
+    env kept = move(*p);
+    del(p);
+    drop(move(kept));
+}
+
 // Opens an environment, runs `body` on it, and closes it. `body` reaches the environment through
 // a pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
 fn run(fn (env mut*) void body) void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
-    body(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    body(e);
 }
 
 // What the writer has written so far.

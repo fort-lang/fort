@@ -235,11 +235,6 @@ fn records_at(record_vec* v, u64 i) record {
     return v->items[i];
 }
 
-fn records_free(record_vec mut* v) void {
-    del(v->items);
-    v->len = 0;
-}
-
 fn syms_reserve(sym_vec mut* v) void {
     if (v->len < v->items.len) {
         return;
@@ -369,10 +364,9 @@ fn gen_init(emitter mut* g, session.session mut* s, gen_options opts) void {
 }
 
 // The scalar state of an emitter, set to what a fresh one holds. bootstrap0/src/gen.c initializes
-// every field over raw storage. Here, `emitter{}` creates empty buffers and vectors. gen_free
-// empties them again. This function resets the remaining fields. This reset makes an emitter
-// reusable. An `init` after `free` must match the first `init`. A stale `failed` value would
-// suppress all later output.
+// every field over raw storage. Here, `emitter{}` creates empty buffers and vectors, and gen_free
+// leaves `emitter{}` again. gen_init resets the remaining fields with this function, so an `init`
+// after `free` matches the first `init`. A stale `failed` value would suppress all later output.
 fn reset_state(emitter mut* g) void {
     g->temps = 0;
     g->tmps = 0;
@@ -393,24 +387,45 @@ fn reset_state(emitter mut* g) void {
     }
 }
 
+// drop holds the releases. The move leaves the zero value, which is the state of `emitter{}`, so
+// a caller can initialize the emitter again. bootstrap0/src/gen.c omits this because it never
+// reuses an emitter.
 fn gen_free(emitter mut* g) void {
-    strbuf.free(&g->named);
-    strbuf.free(&g->globals);
-    strbuf.free(&g->funcs);
-    strbuf.free(&g->out);
-    strbuf.free(&g->allocas);
-    strbuf.free(&g->body);
-    strbuf.free(&g->fail);
-    records_free(&g->files);
-    records_free(&g->strs);
-    records_free(&g->enums);
-    syms_free(&g->externs);
-    syms_free(&g->declared);
-    containers.pool_free(&g->pool);
-    strbuf.free(&g->scratch);
-    // Each buffer and list is now empty. Reset the remaining state so a caller can initialize the
-    // emitter again. bootstrap0/src/gen.c omits this because it never reuses an emitter.
-    reset_state(g);
+    drop(move(*g));
+}
+
+// Frees an emitter that the caller moves in: each buffer and list, then the pool, then the
+// scratch buffer. No part of it reads the session or the checker that the emitter points to.
+fn drop(emitter mut g) void {
+    del(g.named.data);
+    del(g.globals.data);
+    del(g.funcs.data);
+    del(g.out.data);
+    del(g.allocas.data);
+    del(g.body.data);
+    del(g.fail.data);
+    del(g.files.items);
+    del(g.strs.items);
+    del(g.enums.items);
+    del(g.externs.items);
+    del(g.declared.items);
+    containers.pool_drop(move(g.pool));
+    del(g.scratch.data);
+}
+
+// An emitter over `s` in the mode `opts`, in an allocation of its own: the emitter must stay at
+// the address that gen_init fills.
+fn make(session.session mut* s, gen_options opts) emitter mut* own {
+    emitter mut* own g = new(emitter);
+    gen_init(g, s, opts);
+    return g;
+}
+
+// Ends an emitter of make that the caller moves in.
+fn drop_made(emitter mut* own p) void {
+    emitter kept = move(*p);
+    del(p);
+    drop(move(kept));
 }
 
 // Copies the scratch text and clears the scratch buffer.
