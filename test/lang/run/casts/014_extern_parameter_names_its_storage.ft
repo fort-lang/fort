@@ -1,0 +1,54 @@
+//! run
+//! stdout:
+//| b
+//| true
+//| 0
+// An argument of an `extern fn` follows each rule of a cast (D3.14), so an extern whose parameter
+// takes storage with pointer places names the type of that storage in the parameter. C then reads
+// the entries through their own type, and fort code passes them with no cast. C calls the
+// comparator with pointers to two entries, and the result has no `mut`, so C gives back no
+// writable pointer into the entries (D17.13). A read-only view may hide a pointer place, as an
+// argument of an `extern fn` too: `memcmp` reads the bytes of the entries.
+import std.libc;
+import std.str;
+
+struct entry {
+    i64 key;
+    string own name;
+}
+
+// bsearch(3) with the type of the entries, in the C library of Linux and of Darwin.
+extern fn bsearch(entry* key, entry* base, u64 n, u64 size, fn (entry*, entry*) i32 cmp) entry*;
+
+fn by_key(entry* a, entry* b) i32 {
+    if (a->key < b->key) {
+        return -1;
+    }
+    if (a->key > b->key) {
+        return 1;
+    }
+    return 0;
+}
+
+// The name of the entry at `e`. A call that takes the address of an entry can change its owner,
+// and a read of it in main after such a call is a use that D17.21 cannot prove, so the read takes
+// a pointer.
+fn name_at(entry* e) string {
+    return e->name;
+}
+
+fn main() i32 {
+    entry[3] mut items = {entry{.key = 1, .name = str.dup("a")},
+                          entry{.key = 2, .name = str.dup("b")},
+                          entry{.key = 3, .name = str.dup("c")}};
+    entry probe = entry{.key = 2};
+    entry* hit = bsearch(&probe, &items[0], 3, sizeof(entry), by_key);
+    println(name_at(hit));
+    entry missing = entry{.key = 9};
+    println(bsearch(&missing, &items[0], 3, sizeof(entry), by_key) == null);
+    println(libc.memcmp(cast(&items, u8*), cast(&items[0], u8*), sizeof(entry)));
+    del(items[0].name);
+    del(items[1].name);
+    del(items[2].name);
+    return 0;
+}

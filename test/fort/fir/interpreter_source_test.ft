@@ -16,7 +16,7 @@ import fort.fir;
 import run_env;
 
 // The cases of the group heap: `new` and `del`, `calloc` and `free`.
-string[115] HEAP = {
+string[99] HEAP = {
     "import std.libc;",
     "struct node {",
     "    i64 value;",
@@ -95,22 +95,6 @@ string[115] HEAP = {
     "    u64 second = local_address();",
     "    return second > first;",
     "}",
-    "fn twin() void {",
-    "    u8 mut* own a = new(u8);",
-    "    u8 mut* own mut b = null;",
-    "    libc.memcpy(cast(&b, u8 mut*), cast(&a, u8*), 8);",
-    "    del(a);",
-    "    del(b); // a second owner",
-    "}",
-    "fn interior() void {",
-    "    u8 mut@ own a = new(u8, 4);",
-    "    u64 inside = cast(a.ptr, u64) + 1;",
-    "    u8 mut* own mut b = null;",
-    "    libc.memcpy(cast(&b, u8 mut*), cast(&inside, u8*), 8);",
-    "    del(b); // inside an allocation",
-    "    a[0] = 1;",
-    "    del(a);",
-    "}",
     "fn push(node mut* own head, i64 v) node mut* own {",
     "    node mut* own n = new(node);",
     "    n->value = v;",
@@ -131,6 +115,122 @@ string[115] HEAP = {
     "        head = move(rest);",
     "    }",
     "    return sum;",
+    "}",
+};
+
+// The lowering of two functions of fort source that gave an owner the bits of another address
+// through an argument of `libc.memcpy`: a `mut` view of the bytes of an owner let C write them.
+// D3.14 refuses that view now, as each cast that hides a pointer place, so no fort source makes
+// such an owner, and the FIR text keeps the lowering that the source gave. `twin` gives `b` the
+// address of the allocation of `a`, and `interior` gives it an address inside an allocation.
+string[108] HEAP_LOWERED = {
+    "fn main.twin() -> void {",
+    "    let _1 (a): u8 mut* own;",
+    "    let _2 (b): u8 mut* own;",
+    "    let _3: u8 mut* own;",
+    "    let _4: u8 mut* own;",
+    "    let _5: u8 mut* own mut*;",
+    "    let _6: u8 mut*;",
+    "    let _7: u8 mut* own*;",
+    "    let _8: u8*;",
+    "    let _9: u8 mut*;",
+    "    bb0: {",
+    "        _1 = const zero u8 mut* own #80:17;",
+    "        _2 = const zero u8 mut* own #81:21;",
+    "        live(_1) #80:17;",
+    "        _3 = alloc<u8>(const u64 1) #80:21;",
+    "        check(overwrite: _1) -> bb1 #80:17;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #80:17;",
+    "        live(_2) #81:21;",
+    "        _4 = const null u8 mut* own #81:25;",
+    "        check(overwrite: _2) -> bb2 #81:21;",
+    "    }",
+    "    bb2: {",
+    "        _2 = move _4 #81:21;",
+    "        _5 = addr mut(_2) #82:22;",
+    "        _6 = cast<u8 mut*>(copy _5) #82:17;",
+    "        _7 = addr(_1) #82:41;",
+    "        _8 = cast<u8*>(copy _7) #82:36;",
+    "        _9 = call extern memcpy(copy _6, copy _8, const u64 8) #82:16;",
+    "        del(move _1) #83:5;",
+    "        del(move _2) #84:5;",
+    "        dead(_1) #85:1;",
+    "        dead(_2) #85:1;",
+    "        return #85:1;",
+    "    }",
+    "}",
+    "fn main.interior() -> void {",
+    "    let _1 (a): u8 mut@ own;",
+    "    let _2 (inside): u64;",
+    "    let _3 (b): u8 mut* own;",
+    "    let _4: u8 mut@ own;",
+    "    let _5: i64;",
+    "    let _6: bool;",
+    "    let _7: u64;",
+    "    let _8: u8 mut* own;",
+    "    let _9: u64;",
+    "    let _10: bool;",
+    "    let _11: u64;",
+    "    let _12: u8 mut* own;",
+    "    let _13: u8 mut* own mut*;",
+    "    let _14: u8 mut*;",
+    "    let _15: u64*;",
+    "    let _16: u8*;",
+    "    let _17: u8 mut*;",
+    "    let _18: u64;",
+    "    let _19: bool;",
+    "    let _20: i64;",
+    "    bb0: {",
+    "        _1 = const zero u8 mut@ own #87:17;",
+    "        _3 = const zero u8 mut* own #89:21;",
+    "        live(_1) #87:17;",
+    "        _5 = cast<i64>(const i32 4) #87:21;",
+    "        _6 = lt(copy _5, const i64 0) #87:21;",
+    "        check(copy _6, alloc_count, copy _5) -> bb1 #87:21;",
+    "    }",
+    "    bb1: {",
+    "        _7 = cast<u64>(copy _5) #87:21;",
+    "        _8 = alloc<u8>(copy _7) #87:21;",
+    "        _4 = aggregate u8 mut@ own(move _8, copy _7) #87:21;",
+    "        check(overwrite: _1) -> bb2 #87:17;",
+    "    }",
+    "    bb2: {",
+    "        _1 = move _4 #87:17;",
+    "        live(_2) #88:9;",
+    "        _9 = cast<u64>(copy _1.0) #88:18;",
+    "        _10 = add_overflows(copy _9, const u64 1) #88:35;",
+    "        check(copy _10, overflow) -> bb3 #88:35;",
+    "    }",
+    "    bb3: {",
+    "        _11 = add(copy _9, const u64 1) #88:35;",
+    "        _2 = copy _11 #88:35;",
+    "        live(_3) #89:21;",
+    "        _12 = const null u8 mut* own #89:25;",
+    "        check(overwrite: _3) -> bb4 #89:21;",
+    "    }",
+    "    bb4: {",
+    "        _3 = move _12 #89:21;",
+    "        _13 = addr mut(_3) #90:22;",
+    "        _14 = cast<u8 mut*>(copy _13) #90:17;",
+    "        _15 = addr(_2) #90:41;",
+    "        _16 = cast<u8*>(copy _15) #90:36;",
+    "        _17 = call extern memcpy(copy _14, copy _16, const u64 8) #90:16;",
+    "        del(move _3) #91:5;",
+    "        _18 = cast<u64>(const i32 0) #92:6;",
+    "        _19 = ge(copy _18, copy _1.1) #92:6;",
+    "        _20 = cast<i64>(copy _18) #92:6;",
+    "        check(copy _19, bounds, copy _20, copy _1.1) -> bb5 #92:6;",
+    "    }",
+    "    bb5: {",
+    "        _1[_18] = const u8 1 #92:10;",
+    "        del(move _1) #93:5;",
+    "        dead(_1) #94:1;",
+    "        dead(_2) #94:1;",
+    "        dead(_3) #94:1;",
+    "        return #94:1;",
+    "    }",
     "}",
 };
 
@@ -206,7 +306,7 @@ string[104] EXTERNS = {
     "}",
     "fn parses_end() f64 {",
     "    char* mut end = null;",
-    "    return libc.strtod(\"2.5\".ptr, cast(&end, void*));",
+    "    return libc.strtod(\"2.5\".ptr, &end);",
     "}",
     "fn range_error(bool single) i32 {",
     "    *libc.__errno_location() = 0;",
@@ -538,7 +638,7 @@ string[4] FAILS = {
 // address that starts no live allocation and a load after a release end the run.
 fn heap(run_env.env mut* e) void {
     run_env.check(e, HEAP[..]);
-    fir.module mut m = fir.module_new();
+    fir.module mut m = run_env.parse(e, HEAP_LOWERED[..]);
     defer fir.module_free(&m);
     u64[1] a1 = {0};
     run_env.expect_line(run_env.run_in(e, &m, "new_and_del", a1[..0]), "return i32 5");
@@ -561,8 +661,9 @@ fn heap(run_env.env mut* e) void {
     // the frame of a second call takes a new range, also after the first frame ended
     run_env.expect_line(run_env.run_in(e, &m, "two_frames", a1[..0]), "return true");
     // the second `del` frees the released allocation, in the `free` of std.rt
-    run_env.expect_line(run_env.run_in(e, &m, "twin", a1[..0]), "fault invalid release at 116:14");
-    run_env.expect_line(run_env.run_in(e, &m, "interior", a1[..0]),
+    run_env.expect_line(run_env.run_in(e, &m, "main.twin", a1[..0]),
+                        "fault invalid release at 116:14");
+    run_env.expect_line(run_env.run_in(e, &m, "main.interior", a1[..0]),
                         "fault invalid release at 116:14");
     u64[1] a3 = {0};
     run_env.expect_line(run_env.run_in(e, &m, "list_sum", a3[..1]), "return i64 0");

@@ -1,0 +1,68 @@
+//! fail
+// A cast that is an argument of an `extern fn` follows each rule of a cast, as each other cast
+// does (D3.14). C writes and reads the storage of an argument through the type of its parameter.
+// A `mut` view of bytes over a pointer place lets C write bits that no pointer wrote into it, and
+// a view that adds a pointer place gives C bits as a pointer. Parentheses, an extern call around
+// the call, a cast around the cast and a call through a function pointer change nothing. For an
+// `i32 mut* mut p`, the `memcpy` below gave `p` the bits of the integer `bits`.
+import std.libc;
+
+struct cell {
+    u64* own p;
+}
+
+struct entry {
+    i64 key;
+    string own name;
+}
+
+// A pointer with no mark to a struct that holds an owner carries the mark of the owner.
+struct link {
+    cell* p;
+}
+
+struct cb_cell {
+    fn (u64) u64 f;
+    u64* own p;
+}
+
+// C reads the cell and keeps no part of it.
+extern fn peek_cell(cell* c) u64;
+extern fn peek_link(link* l) u64;
+extern fn peek_entry(entry* e) u64;
+
+fn look(cell* c) u64 {
+    return 0;
+}
+
+fn pass(u64 n) u64 {
+    return n;
+}
+
+fn twice(u64 x) u64 {
+    return 2 * x;
+}
+
+fn main() i32 {
+    i32 x = 5;
+    u64 bits = cast(&x, u64);
+    i32 mut z = 0;
+    i32 mut* mut p = &z;
+    libc.memcpy(cast(&p, u8 mut*), cast(&bits, u8*), 8); //! error: cannot cast i32 mut* mut* to u8 mut*: a 'mut' cast hides the pointer i32 mut* at byte 0
+    u64 mut w = 0;
+    u64 a = peek_cell(cast(&w, cell*)); //! error: cannot cast u64 mut* to cell*: a cast adds the pointer u64* own at byte 0
+    u64 b = peek_cell((cast(&w, cell*))); //! error: cannot cast u64 mut* to cell*: a cast adds the pointer u64* own at byte 0
+    u64 c = pass(peek_cell(cast(&w, cell*))); //! error: cannot cast u64 mut* to cell*: a cast adds the pointer u64* own at byte 0
+    u64 d = peek_cell(cast(cast(&w, cell*), cell*)); //! error: cannot cast u64 mut* to cell*: a cast adds the pointer u64* own at byte 0
+    fn (cell*) u64 fp = look;
+    u64 f = fp(cast(&w, cell*)); //! error: cannot cast u64 mut* to cell*: a cast adds the pointer u64* own at byte 0
+    u64 g = look(cast(&w, cell*)); //! error: cannot cast u64 mut* to cell*: a cast adds the pointer u64* own at byte 0
+    u64 h = peek_link(cast(&w, link*)); //! error: cannot cast u64 mut* to link*: a cast adds the pointer cell* at byte 0
+    u64[3] mut words = {};
+    u64 i = peek_entry(cast(&words, entry*)); //! error: cannot cast u64[3] mut* to entry*: a cast adds the pointer string own at byte 8
+    entry mut e = entry{.key = 1};
+    libc.memset(cast(&e, u8 mut*), 0, 0); //! error: cannot cast entry mut* to u8 mut*: a 'mut' cast hides the pointer string own at byte 8
+    cb_cell mut k = cb_cell{.f = twice};
+    libc.memset(cast(&k, u8 mut*), 0, 0); //! error: cannot cast cb_cell mut* to u8 mut*: a 'mut' cast hides the pointer fn (u64) u64 at byte 0
+    return cast(a + b + c + d + f + g + h + i + cast(*p, u64), i32);
+}
