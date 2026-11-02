@@ -6,17 +6,28 @@
 // A directory stream is an allocation of C (D17.13, stdlib.md 2.2). `opendir` and `fdopendir`
 // give it with `own`, and `closedir` takes it with `move`. A stream that fails to open is null,
 // and the test against `null` proves it empty on that edge (D17.11), so no exit leaks it
-// (D17.20). The root directory holds `.` and `..`, so `readdir` gives two entries at least.
+// (D17.20). The root directory holds `.` and `..`, so `readdir_r` gives two entries at least.
+// `readdir_r` writes each entry into the `dirent` that fort code gives, stores the address of that
+// `dirent` into `*got`, and stores null at the end of the stream, with the result 0 each time.
 import std.libc;
 import std.str;
 
-// The count of the entries of the directory stream `d`.
+// The count of the entries of the directory stream `d`, or 0 when readdir_r gives an error or
+// stores an address other than that of `entry`.
 fn entries(void mut* d) u64 {
     u64 mut n = 0;
-    libc.dirent* mut e = libc.readdir(d);
-    while (e != null) {
+    libc.dirent mut entry = {};
+    libc.dirent* mut got = null;
+    i32 mut failure = libc.readdir_r(d, &entry, &got);
+    while (failure == 0 && got != null) {
+        if (cast(got, u64) != cast(&entry, u64) || entry.name[0] == cast(0, char)) {
+            return 0;
+        }
         n += 1;
-        e = libc.readdir(d);
+        failure = libc.readdir_r(d, &entry, &got);
+    }
+    if (failure != 0) {
+        return 0;
     }
     return n;
 }

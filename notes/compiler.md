@@ -286,8 +286,8 @@ came here.
   (`test/fir/verify/v04_cast_void_*`), and `fir.md` 4 names no row for them. FIR text that forges a
   pointer goes through the row from `u64`, or reads a slot through a pointer to another type. A
   typed extern signature or a typed handle replaces each such cast: `std.sort` sorts typed spans
-  in fort, a vector of pointers is a typed copy of `int_vec`, and `libc.readdir` gives a
-  `dirent*`.
+  in fort, a vector of pointers is a typed copy of `int_vec`, and `libc.readdir_r` writes a
+  `dirent` that the caller gives.
 - **A cast keeps each pointer place, in any view** (D3.14). After the walk of the `mut` levels,
   `check_view_places` runs `first_hidden` once more over level 1 of the target with
   `place_memo.view` set. A place of the same type at its byte in the source holds a place of the
@@ -329,6 +329,22 @@ came here.
   in a parameter its callback parameters or its levels from level 1. The error stands at the
   result or at the parameter, and the symbol fails, so its calls report nothing more
   (`check_extern_test.ft`, `fail/ffi/011` and `012`).
+- **An `extern fn` gives a typed pointer result only over arguments of its pointee** (D17.13).
+  `first_given_mut` asks `result_lacks_type` after the rule of the `mut` of the result and before
+  the parameters. A `void*` result gives no type. A typed pointer result, `own` or not, needs each
+  parameter that can carry a pointer to be a pointer whose pointee has the type of its pointee
+  with the marks aside (`gives_type_of`, `types.type_same_shape`), and a function pointer result
+  needs each such parameter to have its type (`types.type_equal`). A `void*`, a function pointer
+  and the variable tail point to no type, so beside each of them a typed result is an error. With
+  no parameter that can carry a pointer the result is storage of C, and A7 holds for it. The rule
+  of the `mut` keeps `has_param_of_type`, the identity with each mark. `given_mut.typed` picks
+  the error `C gives 'T', but a parameter can carry a pointer of another type`, and
+  `given_lacks_mut` passes it out of a function pointer type that C gives, so the rule reads the
+  result of each such type as well. The rule reads results only: a type that C stores in a level
+  of a parameter or in a field of a struct, and a type that C gives to a callback, have only A7.
+  So `std.libc` reads a directory with `readdir_r` into a `dirent` of the caller, and a `bsearch`
+  or a `gmtime_r` with typed arguments gives a `void*` (`check_extern_test.ft` REFUSED_TYPE and
+  TAKEN, `fail/ffi/013` and `014`, `run/ffi/018` and `020`, `run/casts/014`, `run/stdlib/108`).
 
 ## 5. Modules, the driver and the diagnostics
 

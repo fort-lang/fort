@@ -443,7 +443,13 @@ Sections:
   storage has. A cast from a `void*` to a `void*` that keeps or drops marks stays legal, and so
   does a cast to `u64`. So `cast(cast(&x, void*), i64*)` is the error
   `cannot cast void* to i64*: a cast never gives a type to a void*`. A cast from a `void*` to a
-  function pointer type keeps the error of the rule of the function pointers below.
+  function pointer type keeps the error of the rule of the function pointers below. The result of
+  an `extern fn` gives no type to a `void*` argument either: D17.13 refuses a typed pointer result
+  beside a `void*` parameter, so `extern fn memchr(void* s, i32 c, u64 n) i64*` is an error. That
+  rule reads results only. A type that C stores in a level of a parameter or in a field of a
+  struct, a type that C gives to a callback, and the result of an extern with no parameter that
+  can carry a pointer give no type to a `void*` only because A7 of `ownership-design.md` 5.1
+  holds (D10.7).
   **No cast makes the pointee larger or more aligned.** A cast from a typed pointer to a typed
   pointer, with any marks, needs a target pointee no larger and no more aligned than the source
   pointee. The pointees are the types that level 1 of the source and of the target reach.
@@ -725,6 +731,10 @@ Sections:
   to a larger pointee, 4 views that add or change a pointer place when the types are compared
   exactly (2 of them only drop marks and stay legal), and 19 exempt arguments of an `extern fn`, 1
   of them in `std.sort.sort_ptr`.
+  Amended 2026-11-01: an `extern fn` with a `void*` parameter and a typed pointer result gave the
+  `void*` a type with no cast. The user ruled "Result type rule" (user, 2026-11-01). D17.13 now
+  refuses such a result, and the rule of the `void*` now names that rule and the routes that only
+  A7 closes.
 
 ### D3.15 sizeof
 - owner: `type-system.md`.
@@ -1903,7 +1913,9 @@ Sections:
   and no source calls `rt.args_init`. D10.4: no pointer arithmetic. D10.6: each index and each
   span expression of a fixed array, a span or a string is in bounds. D17.13: a pointer type that
   C gives marks `mut` only where it says `own`, where a parameter of the same type marks the
-  level, or where the extern has no parameter that can carry a pointer. For C, A7 of
+  level, or where the extern has no parameter that can carry a pointer; and a typed pointer result
+  points to the pointee of each parameter that can carry a pointer, or comes from an extern with
+  no such parameter. For C, A7 of
   `ownership-design.md` 5.1 holds: C gives fort code only storage that C gave, or storage that
   fort code gave to C, with the whole pointee inside that storage, at an address aligned for the
   pointee, and with no `mut` that fort code did not give; and C writes only a level that the type
@@ -1919,9 +1931,10 @@ Sections:
   Four cases are outside the guarantee. A build with `--no-bounds-check` removes the checks of
   D10.6. A build with a standard library other than the one of the compiler (`--std-dir`, D14.1)
   runs code that these rules did not check as `std`, such as a span of a raw pointer in each
-  function. An `extern fn` declaration or C code that breaks A7, such as `memchr` declared with an
-  `i64*` result for a search of one byte, or a declaration whose parameter marks no `mut` at a
-  level that C writes, has the behavior that C gives it, and fort defines no more. And a call of an
+  function. An `extern fn` declaration or C code that breaks A7, such as
+  `memchr(i64* s, i32 c, u64 n) i64*`, whose result can name the last byte of `*s`, or a
+  declaration whose parameter marks no `mut` at a level that C writes, has the behavior that C
+  gives it, and fort defines no more. And a call of an
   `extern fn` whose arguments break the contract of the C function, such as a `char*` with no NUL
   inside its storage for `strlen` or a length past the end of a buffer for `memcpy`, has the
   behavior that C gives it (A7).
@@ -1941,6 +1954,11 @@ Sections:
   2026-10-31). D3.14, D6.9 and D17.13 now refuse each route by which fort code got such a value,
   so no program that compiles makes such an access, and the item went. The terms of the item stay
   as the terms of the guarantee, because D17.11 and D17.21 read them.
+  Amended 2026-11-01: the guarantee named the rule of the `mut` of D17.13 alone, and the example
+  of a declaration that breaks A7 was `memchr` with a `void*` parameter and an `i64*` result,
+  which the rule of the result type of D17.13 now refuses (user rulings "Result type rule",
+  2026-11-01, and "Every pointer param", 2026-11-02). The guarantee names that rule, and the
+  example has an `i64*` parameter.
 
 ### D10.8 Stack probes
 - owner: `memory-model.md`.
@@ -3219,15 +3237,68 @@ says ownership is "by convention", this section supersedes it.
   has the type of the result), `__errno_location() i32 mut*` (no parameter, so the storage is
   C's), `fdopendir(i32 fd) void mut* own`, `strtol(char* nptr, char* mut* endptr, i32 base) i64`,
   `qsort(i32 mut* base, u64 n, u64 size, fn (i32*, i32*) i32 cmp) void`, and a result with no
-  `mut`, such as `strchr(char* s, i32 c) char*` and `readdir(void mut* dir) dirent*`.
-  **The cost.** The rule refuses some C functions at their exact C type, because their result is
-  storage of C that the rule cannot tell from an argument. Each has a declaration that the rule
-  takes. A C stream or a C object that one C function opens and another closes is an allocation
-  of C: `extern fn opendir(char* path) void mut* own;` with
+  `mut`, such as `strchr(char* s, i32 c) char*`.
+  **A pointer result points to the pointee of each pointer argument.** Take the result type `R`
+  of an `extern fn`. C can give back each argument that can carry a pointer, so `R` must give each
+  such argument the type that fort code gave it. A `void*` result, with any marks, gives no type,
+  and this rule takes it. A typed pointer result `P*`, with any marks and `own` or not, is legal
+  in two cases only. Each parameter that can carry a pointer is a pointer to `P`. Or the extern
+  has no parameter that can carry a pointer, so the result is storage of C, and A7 of
+  `ownership-design.md` 5.1 holds for it. A `void*` with any marks, a function pointer and the
+  variable tail `...` point to no `P`. So beside each of them a typed pointer result is an error,
+  also a result that says `own`. A function pointer result `F` is legal when each parameter that
+  can carry a pointer has the type `F`, or when no parameter can carry a pointer. The pointee of a
+  parameter and `P` compare by identity with the marks aside (`type-system.md` 6, D6.2): each
+  `mut` and each `own` of each level is aside, and `char` and `u8` stay two types. Two function
+  pointer types compare by identity, each mark included. The rule of the `mut` above keeps the
+  identity with each mark, so a `mut` that the result adds still needs a parameter of the same
+  type. So `strchr(char mut* s, i32 c) char*` and `dlsym(void mut* handle, char* name) void*` are
+  legal, and `strchr(char* s, i32 c) char mut*` stays an error of the `mut`. The compare of D3.5,
+  which takes a `void*` as each pointer type, does not apply here. The pointee of a parameter is
+  the type that its level 1 holds. A deeper level does not count, and neither does the result or
+  a parameter type of a function pointer parameter. Else the declaration is the error
+  `extern 'memchr': C gives 'i64*', but a parameter can carry a pointer of another type`. A
+  function pointer type that C gives follows this rule for its own result too, as it follows the
+  rule of the `mut` above. The order of the errors stays: the result, then the parameters from
+  left to right. At the result, the rule of the `mut` comes first, and this rule comes next. For a
+  function pointer result, the rule of the `mut` reads the function type, this rule for its
+  result included, before this rule reads the function pointer type itself. The error stands at
+  the result, or at the parameter that names the function pointer type that C gives. This rule
+  reads results only. It reads no type that C stores in a level of a parameter or in a field of a
+  struct, and no type that C gives to a callback. For these, A7 holds (D10.7).
+  The reason: C can give back an argument (A7 of `ownership-design.md` 5.1), and a result of
+  another type gives that argument a type that fort code did not give it. Each of these forms
+  compiled, and each gave fort code a pointer that D3.14 refuses to a cast (probed).
+  `extern fn memchr(void* s, i32 c, u64 n) i64*` gave a `void*` the type `i64*`:
+  `memchr(cast(&t.x, void*), 1, 4)` read the 4 bytes after `t.x` too, as
+  `cast(cast(&t.x, void*), i64*)` would, and an `i64* own` result did the same. With an `i32* s`
+  and the same result, the pointee grows from 4 to 8 bytes. With a `u64* s` and a `u64**` result,
+  an integer becomes a pointer place. A second parameter that points to the pointee of the result
+  does not change this, because C can give back the first:
+  `strncpy(i32 mut* dst, i64* src, u64 n) i64*` gave back `dst` with the larger pointee. And
+  `extern fn memmem(void* hay, u64 hay_len, void* needle, u64 needle_len) fn (u64*) u64` gave a
+  function that fort code cast to a `void*` another function type.
+  These declarations stay legal. Each parameter that can carry a pointer points to the pointee of
+  the result in `strchr(char* s, i32 c) char*`, `strchr(char mut* s, i32 c) char*`,
+  `getcwd(char mut* buf, u64 size) char mut*`, `realpath(char* path, char mut* resolved) char*`
+  and `strdup(char* s) char mut* own`. The function pointer parameter has the type of the result
+  in `signal(i32 sig, fn (i32) void handler) fn (i32) void`. The result gives no type in
+  `memchr(void* s, i32 c, u64 n) void*` and `fopen(char* path, char* mode) void mut* own`. No
+  parameter can carry a pointer in `strerror(i32 code) char*`.
+  **The cost.** The two rules refuse some C functions at their exact C type, because their result
+  is storage of C that the rules cannot tell from an argument. Each has a declaration that the
+  rules take. A C stream or a C object that one C function opens and another closes is an
+  allocation of C: `extern fn opendir(char* path) void mut* own;` with
   `extern fn closedir(void mut* own dir) i32;`, and `fopen(char* path, char* mode) void mut* own`
   with `fclose(void mut* own f)`. A result that fort code only reads drops its `mut`:
-  `gmtime(i64* t) tm*`, or `gmtime_r(i64* t, tm mut* out) tm mut*`, whose `out` has the type of
-  the result. An out-parameter drops the `mut` of the level that it holds:
+  `strchr(char* s, i32 c) char*`. A result that points to a type that another parameter does not
+  point to gives no type, or comes through a parameter that C fills. So
+  `gmtime_r(i64* t, tm mut* out) void*` replaces `gmtime(i64* t) tm*`, and fort code reads the
+  `tm` from `out`. `readdir_r(void mut* dir, dirent mut* entry, dirent* mut* result) i32`
+  replaces `readdir(void mut* dir) dirent*`. And
+  `bsearch(entry* key, entry* base, u64 n, u64 size, fn (entry*, entry*) i32 cmp) void*` gives
+  an address that fort code compares with the address of each element. An out-parameter drops
+  the `mut` of the level that it holds:
   `strtod(char* s, char* mut* end) f64`. It keeps A7, because C writes only `*end`, the level that
   `end` marks `mut`, and the `char*` that it stores there points into `s` and marks no `mut`. A
   count at 855b512f found 3 declarations that the rule refuses: `opendir` in the two `std.libc`
@@ -3253,6 +3324,26 @@ says ownership is "by convention", this section supersedes it.
   2026-11-01 found that the `strsep` example of "The cost" broke A7: C `strsep` writes a NUL into
   the string, a level that `char* mut*` marks read-only. The coordinator ratified `strtod` as the
   example (2026-11-01).
+  Amended 2026-11-01: a pointer result could have a type that no argument had, so
+  `memchr(void* s, i32 c, u64 n) i64*` gave a `void*` a type with no cast (probed). The user ruled
+  "Result type rule" (user, 2026-11-01): a pointer result of an extern is legal only when it says
+  `own`, has the type of a pointer parameter, or the extern has no pointer parameter (C storage),
+  and a `void*` parameter with a typed result is an error. The coordinator ruled that an `own`
+  result and a `...` tail count in the clause of the `void*` (2026-11-02). A review of 2026-11-02
+  found that a parameter of the result type beside another pointer parameter let C give back the
+  other argument with the type of the result (probed). The user ruled "Every pointer param"
+  (2026-11-02): a typed pointer result is legal only when every pointer parameter has that
+  pointee type, or no parameter can carry a pointer, and a `void*` result gives no type and stays
+  legal. The rulings do not say how a function pointer counts, so the text takes the strict
+  reading: a function pointer parameter points to no type, a function pointer result needs its
+  type in each parameter that can carry a pointer, and the rule now reads the result of a function
+  pointer type that C gives. A count at e872df57 over `src`, `std`, `test/fort`, `test/lsp`,
+  `test/lang` and `test/library`, on both targets, found 5 declarations that the first text refused:
+  `readdir` and `mkdtemp` in the two `std.libc` modules, and `gmtime` in a run test. The source text
+  of a suite held 1 more. `readdir` became `readdir_r`, `mkdtemp` says `char mut*`, and the run test
+  keeps `gmtime_r` only. A count at 20d903f6 found 2 more declarations that this text refuses,
+  `bsearch` and `gmtime_r` in run tests, which now give a `void*`, and 5 in the source text of
+  suites. It found none in `src` and `std`.
 
 ### D17.14 What ownership does not track
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

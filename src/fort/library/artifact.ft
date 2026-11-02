@@ -406,6 +406,25 @@ fn is_link(string path) bool {
     return libc.readlink(c_path.ptr, &buf[0], LINK_PROBE_CAP) >= 0;
 }
 
+// Appends the name of each entry of the directory stream `stream` but `.` and `..` to `names`,
+// each ended by a NUL. Returns 0 at the end of the stream, and the error number that readdir_r(3)
+// gives after an error. glibc stores null into `got` after an error, and Darwin leaves it, so the
+// loop tests the error number first. The caller keeps `names`, so it is no local owner here.
+fn entry_names(void mut* stream, strbuf.str_buf mut* names) i32 {
+    libc.dirent mut entry = {};
+    libc.dirent* mut got = null;
+    i32 mut failure = libc.readdir_r(stream, &entry, &got);
+    while (failure == 0 && got != null) {
+        string name = str.from_cstr(&entry.name[0]);
+        if (name != "." && name != "..") {
+            strbuf.append(names, name);
+            strbuf.push(names, '\0');
+        }
+        failure = libc.readdir_r(stream, &entry, &got);
+    }
+    return failure;
+}
+
 // Makes the directory `path` when it does not exist and removes each entry in it, so a file of an
 // older build does not stay. A `path` that is a symbolic link is refused (ELOOP), so the writer
 // removes nothing outside the artifact. An entry that is a directory must be empty. The writer
@@ -438,23 +457,11 @@ fn make_empty_dir(string path, strbuf.str_buf mut* failed, i32 mut* error) bool 
         strbuf.append(failed, path);
         return false;
     }
-    // The names are copied out before any removal, each ended by a NUL, because a removal while
-    // readdir(3) walks the directory can make it skip an entry. errno is 0 before each readdir(3),
-    // so it is 0 after the last one at the end and the error number after an error.
+    // The names are copied out before any removal, because a removal while readdir_r(3) walks the
+    // directory can make it skip an entry.
     strbuf.str_buf mut names = strbuf.create();
     defer del(names.data);
-    *libc.errno_slot() = 0;
-    libc.dirent* mut e = libc.readdir(stream);
-    while (e != null) {
-        string name = str.from_cstr(&e->name[0]);
-        if (name != "." && name != "..") {
-            strbuf.append(&names, name);
-            strbuf.push(&names, '\0');
-        }
-        *libc.errno_slot() = 0;
-        e = libc.readdir(stream);
-    }
-    i32 failure = sys.errno();
+    i32 failure = entry_names(stream, &names);
     if (failure != 0) {
         libc.closedir(move(stream));
         *error = failure;

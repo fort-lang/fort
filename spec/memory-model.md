@@ -1010,10 +1010,11 @@ each index and each span of a fixed array, a span or a string is checked (D10.6)
 span or a string is legal only where no fort code loads or stores through it, so `&s[0]`, which is
 checked, names an element (D3.5). A pointer type that C gives marks `mut` only where it says
 `own`, where a parameter of the same type marks the level, or where the extern has no parameter
-that can carry a pointer (D17.13). C gives fort code only storage that C gave, or storage that
-fort code gave to C, with the whole pointee inside it (A7 of `ownership-design.md` 5.1). So a read
-or a write of a local goes through a value that derives from an address of that local that its run
-took, and fort code reaches a frame of a C
+that can carry a pointer, and a typed pointer result points to the pointee of each parameter that
+can carry a pointer, or comes from an extern with no such parameter (D17.13). C gives fort code only
+storage that C gave, or storage that fort code gave to C, with the whole pointee inside it (A7 of
+`ownership-design.md` 5.1). So a read or a write of a local goes through a value that derives from
+an address of that local that its run took, and fort code reaches a frame of a C
 function, or a byte of the allocator outside each live allocation, only through a pointer that C
 gave to that storage. A build with `--no-bounds-check` is outside this guarantee (D10.6), and so
 are an `extern fn` declaration or C code that breaks A7 and a call of an `extern fn` whose

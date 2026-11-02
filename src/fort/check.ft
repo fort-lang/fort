@@ -4903,12 +4903,14 @@ fn extern_legal(types.node* t) bool {
 
 // ---- the pointers that C gives (D17.13) ----------------------------------------------------
 
-// A pointer type that C gives to fort code with a `mut` that no parameter of its type has, and
-// where the signature names it: 0 for the result, and `k + 1` for parameter `k`. A null `ty` is
-// none.
+// A pointer type that C gives to fort code and that the rules refuse, and where the signature
+// names it: 0 for the result, and `k + 1` for parameter `k`. `typed` holds for a result that a
+// parameter can give another type, and not for a `mut` that no parameter of its type has. A null
+// `ty` is none.
 struct given_mut {
     types.node* ty;
     u64 at;
+    bool typed;
 }
 
 // The first pointer type that C gives in a call of a function of the type `f`, with a variable
@@ -4920,7 +4922,8 @@ struct given_mut {
 // parameter marks that level `mut`, because C can store a pointer there. A fixed array adds no
 // level (D5.2), and the rule reads no field of a struct. The result comes first, and then the
 // parameters in order. A function pointer type that C gives runs C when fort code calls it, so a
-// call through it follows the same rule.
+// call through it follows the same rules. After the rule of the `mut` of the result, the result
+// meets the rule of the result type (result_lacks_type).
 fn first_given_mut(types.node* f, bool tail) given_mut {
     // a pointer, a `void*`, a function pointer and the variable tail can carry a pointer
     bool mut carries = tail;
@@ -4931,31 +4934,35 @@ fn first_given_mut(types.node* f, bool tail) given_mut {
         }
         i += 1;
     }
-    types.node* r = given_lacks_mut(f, carries, f->elem);
-    if (r != null) {
-        return given_mut{.ty = r, .at = 0};
+    given_mut r = given_lacks_mut(f, carries, f->elem);
+    if (r.ty != null) {
+        return r;
+    }
+    if (result_lacks_type(f, tail)) {
+        return given_mut{.ty = f->elem, .typed = true};
     }
     i = 0;
     while (i < f->params.len) {
         types.node* p = f->params[i];
-        types.node* mut found = null;
+        given_mut mut found = given_mut{};
         if (p->kind == types.type_kind.k_fn) {
             u64 mut j = 0;
-            while (found == null && j < p->params.len) {
+            while (found.ty == null && j < p->params.len) {
                 found = given_lacks_mut(f, carries, p->params[j]);
                 j += 1;
             }
         }
         types.node* mut cur = p;
-        while (found == null && types.has_target_level(cur)) {
+        while (found.ty == null && types.has_target_level(cur)) {
             types.node* held = types.behind_arrays(cur->elem);
             if (cur->is_mut && types.type_is_pointer_place(held)) {
                 found = given_lacks_mut(f, carries, held);
             }
             cur = held;
         }
-        if (found != null) {
-            return given_mut{.ty = found, .at = i + 1};
+        if (found.ty != null) {
+            found.at = i + 1;
+            return found;
         }
         i += 1;
     }
@@ -4964,23 +4971,72 @@ fn first_given_mut(types.node* f, bool tail) given_mut {
 
 // For the type `g` that C gives in a call of a function of the type `f`: `g` when it marks a level
 // `mut`, does not say `own` and has no fixed parameter of its type in `f`, and `carries` says that
-// a parameter of `f` can carry a pointer. For a function pointer type, the first such type of a
-// call through it. Null otherwise.
-fn given_lacks_mut(types.node* f, bool carries, types.node* g) types.node* {
+// a parameter of `f` can carry a pointer. For a function pointer type, the first type that the
+// rules refuse in a call through it. None otherwise. The caller sets the position.
+fn given_lacks_mut(types.node* f, bool carries, types.node* g) given_mut {
     if (g->kind == types.type_kind.k_fn) {
-        return first_given_mut(g, false).ty;
+        given_mut inner = first_given_mut(g, false);
+        return given_mut{.ty = inner.ty, .typed = inner.typed};
     }
     if (!carries || (types.type_is_reference(g) && g->is_own) || !marks_a_level_mut(g)) {
-        return null;
+        return given_mut{};
+    }
+    if (has_param_of_type(f, g)) {
+        return given_mut{};
+    }
+    return given_mut{.ty = g};
+}
+
+// Whether the result of a function of the type `f`, with a variable tail when `tail` holds, which
+// C gives, breaks the rule of the result type (D17.13). C can give back each argument (A7 of
+// ownership-design.md 5.1), and a result of another type gives that argument a type that fort code
+// did not give it, as a cast from a `void*` to a typed pointer would (D3.14). A `void*` result
+// gives no type. A typed pointer result, `own` or not, needs each parameter that can carry a
+// pointer to point to its pointee type, and a function pointer result needs each such parameter
+// to have its type (gives_type_of). The variable tail can carry a pointer of each type. With no
+// parameter that can carry a pointer, the result is storage of C.
+fn result_lacks_type(types.node* f, bool tail) bool {
+    types.node* g = f->elem;
+    if (g->kind == types.type_kind.k_voidptr || !types.type_is_pointer_place(g)) {
+        return false;
+    }
+    if (tail) {
+        return true;
     }
     u64 mut i = 0;
     while (i < f->params.len) {
-        if (types.type_equal(f->params[i], g)) {
-            return null;
+        types.node* p = f->params[i];
+        if (types.type_is_pointer_place(p) && !gives_type_of(p, g)) {
+            return true;
         }
         i += 1;
     }
-    return g;
+    return false;
+}
+
+// Whether C, when it gives back an argument of the parameter type `p` as the result type `g`,
+// gives it the type that fort code gave it. For a typed pointer result, `p` is a pointer, and its
+// pointee has the type of the pointee of `g` with each `mut` and `own` aside
+// (`types.type_same_shape`); `char` and `u8` stay two types, and a `void*` and a function pointer
+// point to no type. For a function pointer result, `p` has the type `g`, each mark included.
+fn gives_type_of(types.node* p, types.node* g) bool {
+    if (g->kind == types.type_kind.k_fn) {
+        return types.type_equal(p, g);
+    }
+    return p->kind == types.type_kind.k_ptr && types.type_same_shape(p->elem, g->elem);
+}
+
+// Whether a fixed parameter of the function type `f` has the type `g`: type identity, with the
+// `mut` and the `own` of each level, so `char` and `u8`, and `own` and no `own`, are other types.
+fn has_param_of_type(types.node* f, types.node* g) bool {
+    u64 mut i = 0;
+    while (i < f->params.len) {
+        if (types.type_equal(f->params[i], g)) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
 }
 
 // Whether the type `t` marks a level `mut`: level `k` is the storage that the `k`-th reference of
@@ -4998,14 +5054,19 @@ fn marks_a_level_mut(types.node* t) bool {
 }
 
 // Reports that the extern `name`, declared by `decl`, gives the type of `g` with a `mut` that no
-// parameter of that type has, at the result or at the parameter that names it (D17.13).
+// parameter of that type has, or as a result that a parameter can give another type, at the
+// result or at the parameter that names it (D17.13).
 fn report_given_mut(checker mut* ck, ast.node* decl, string name, given_mut g) void {
     check_msg_begin(ck);
     msg_str(ck, "extern ");
     msg_quote(ck, name);
     msg_str(ck, ": C gives '");
     check_msg_type(ck, g.ty);
-    msg_str(ck, "' with a 'mut' that no parameter of that type has");
+    if (g.typed) {
+        msg_str(ck, "', but a parameter can carry a pointer of another type");
+    } else {
+        msg_str(ck, "' with a 'mut' that no parameter of that type has");
+    }
     diag.loc mut at = decl->a->loc;
     if (g.at > 0) {
         at = param_at(decl, g.at - 1)->loc;

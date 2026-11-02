@@ -1,18 +1,21 @@
 {
  "comment": [
-  "The table of the rule of D17.13 for the pointers that C gives: an `extern fn` declaration names",
+  "The table of the rules of D17.13 for the pointers that C gives: an `extern fn` declaration names",
   "the result, each parameter type of a function pointer parameter, and each pointer that a level",
   "of a parameter holds where the parameter marks that level `mut`, through fixed arrays. Such a",
   "type marks a level `mut` only where it says `own`, where a fixed parameter of the same type has",
   "the mark, or where no parameter can carry a pointer; a function pointer type that C gives",
-  "follows the same rule. The rows cover first_given_mut, given_lacks_mut, marks_a_level_mut and",
-  "report_given_mut of src/fort/check.ft, and the call in resolve_fn. Each row breaks one part of",
-  "the rule. The stages are the ffi fail corpus of test/lang, whose tests pin each message, and",
-  "check_extern_test.ft, which pins each position and each declaration that the rule takes. The",
-  "table runs in the VM: pass a --runner that runs tools/vm run in one slot and then syncs, as",
-  "notes/environment.md says. The md5 guard reads the product compiler that the build links. Put a",
-  "row that an earlier run caught first, because the first round of a run in the VM can read stale",
-  "(notes/testing.md)."
+  "follows the same rule. A `void*` result gives no type; a typed pointer result, `own` or not,",
+  "needs each parameter that can carry a pointer to point to its pointee with the marks aside, and",
+  "a function pointer result needs its type in each such parameter (the rule of the result type).",
+  "The rows cover first_given_mut, given_lacks_mut, result_lacks_type, gives_type_of,",
+  "has_param_of_type, marks_a_level_mut and report_given_mut of src/fort/check.ft, and the call in",
+  "resolve_fn. Each row breaks one part of the rules. The stages are the ffi fail corpus of",
+  "test/lang, whose tests pin each message, and check_extern_test.ft, which pins each position and",
+  "each declaration that the rules take. The table runs in the VM: pass a --runner that runs",
+  "tools/vm run in one slot and then syncs, as notes/environment.md says. The md5 guard reads the",
+  "product compiler that the build links. Put a row that an earlier run caught first, because the",
+  "first round of a run in the VM can read stale (notes/testing.md)."
  ],
  "sources": [
   "src/fort/check.ft"
@@ -33,15 +36,15 @@
   {
    "decision": "D17.13-result",
    "file": "src/fort/check.ft",
-   "old": "    types.node* r = given_lacks_mut(f, carries, f->elem);",
-   "new": "    types.node* r = null;",
+   "old": "    given_mut r = given_lacks_mut(f, carries, f->elem);",
+   "new": "    given_mut r = given_mut{};",
    "what": "the result of an extern is no type that C gives"
   },
   {
    "decision": "D17.13-callback",
    "file": "src/fort/check.ft",
    "old": "                found = given_lacks_mut(f, carries, p->params[j]);",
-   "new": "                found = null;",
+   "new": "                found = given_mut{};",
    "what": "a parameter type of a function pointer parameter is no type that C gives"
   },
   {
@@ -61,8 +64,8 @@
   {
    "decision": "D17.13-held-deeper",
    "file": "src/fort/check.ft",
-   "old": "        while (found == null && types.has_target_level(cur)) {",
-   "new": "        while (found == null && types.has_target_level(cur) && cur == p) {",
+   "old": "        while (found.ty == null && types.has_target_level(cur)) {",
+   "new": "        while (found.ty == null && types.has_target_level(cur) && cur == p) {",
    "what": "the rule reads level 1 of a parameter alone"
   },
   {
@@ -110,15 +113,15 @@
   {
    "decision": "D17.13-fn-given",
    "file": "src/fort/check.ft",
-   "old": "        return first_given_mut(g, false).ty;",
-   "new": "        return null;",
+   "old": "        given_mut inner = first_given_mut(g, false);",
+   "new": "        given_mut inner = given_mut{};",
    "what": "a function pointer type that C gives follows no rule"
   },
   {
    "decision": "D17.13-fn-own-params",
    "file": "src/fort/check.ft",
-   "old": "        return first_given_mut(g, false).ty;",
-   "new": "        return first_given_mut(g, true).ty;",
+   "old": "        given_mut inner = first_given_mut(g, false);",
+   "new": "        given_mut inner = first_given_mut(g, true);",
    "what": "a function pointer type that C gives has a variable tail"
   },
   {
@@ -159,9 +162,100 @@
   {
    "decision": "D17.13-callback-first",
    "file": "src/fort/check.ft",
-   "old": "            while (found == null && j < p->params.len) {",
+   "old": "            while (found.ty == null && j < p->params.len) {",
    "new": "            while (j < p->params.len) {",
    "what": "a later parameter of a callback clears the type that an earlier one gave"
+  },
+  {
+   "decision": "D17.13-type",
+   "file": "src/fort/check.ft",
+   "old": "    if (result_lacks_type(f, tail)) {",
+   "new": "    if (false) {",
+   "what": "a typed pointer result needs no parameter of its pointee"
+  },
+  {
+   "decision": "D17.13-mut-first",
+   "file": "src/fort/check.ft",
+   "old": "    if (r.ty != null) {",
+   "new": "    if (r.ty != null && !result_lacks_type(f, tail)) {",
+   "what": "the rule of the result type reports before the rule of the `mut` of the result"
+  },
+  {
+   "decision": "D17.13-typed-pass",
+   "file": "src/fort/check.ft",
+   "old": "        return given_mut{.ty = inner.ty, .typed = inner.typed};",
+   "new": "        return given_mut{.ty = inner.ty};",
+   "what": "a function pointer type that C gives reports its result type as a `mut`"
+  },
+  {
+   "decision": "D17.13-typed-text",
+   "file": "src/fort/check.ft",
+   "old": "    if (g.typed) {",
+   "new": "    if (false) {",
+   "what": "the rule of the result type gives the text of the rule of the `mut`"
+  },
+  {
+   "decision": "D17.13-type-at",
+   "file": "src/fort/check.ft",
+   "old": "        return given_mut{.ty = f->elem, .typed = true};",
+   "new": "        return given_mut{.ty = f->elem, .at = 1, .typed = true};",
+   "what": "the error of the result type stands at the first parameter"
+  },
+  {
+   "decision": "D17.13-type-void-result",
+   "file": "src/fort/check.ft",
+   "old": "    if (g->kind == types.type_kind.k_voidptr || !types.type_is_pointer_place(g)) {",
+   "new": "    if (!types.type_is_pointer_place(g)) {",
+   "what": "a `void*` result needs each parameter to point to its pointee"
+  },
+  {
+   "decision": "D17.13-type-fn",
+   "file": "src/fort/check.ft",
+   "old": "    if (g->kind == types.type_kind.k_voidptr || !types.type_is_pointer_place(g)) {",
+   "new": "    if (g->kind == types.type_kind.k_voidptr || !types.type_is_reference(g)) {",
+   "what": "a function pointer result is no pointer result"
+  },
+  {
+   "decision": "D17.13-type-own",
+   "file": "src/fort/check.ft",
+   "old": "    if (g->kind == types.type_kind.k_voidptr || !types.type_is_pointer_place(g)) {",
+   "new": "    if (g->kind == types.type_kind.k_voidptr || !types.type_is_pointer_place(g) || g->is_own) {",
+   "what": "a typed result that says `own` needs no parameter of its pointee"
+  },
+  {
+   "decision": "D17.13-type-tail",
+   "file": "src/fort/check.ft",
+   "old": "    if (tail) {\n        return true;\n    }",
+   "new": "    if (false) {\n        return true;\n    }",
+   "what": "the variable tail carries no pointer of another type"
+  },
+  {
+   "decision": "D17.13-type-every",
+   "file": "src/fort/check.ft",
+   "old": "        if (types.type_is_pointer_place(p) && !gives_type_of(p, g)) {",
+   "new": "        if (types.type_is_reference(p) && !gives_type_of(p, g)) {",
+   "what": "a function pointer parameter carries no pointer of another type"
+  },
+  {
+   "decision": "D17.13-type-pointee",
+   "file": "src/fort/check.ft",
+   "old": "    return p->kind == types.type_kind.k_ptr && types.type_same_shape(p->elem, g->elem);",
+   "new": "    return p->kind != types.type_kind.k_fn;",
+   "what": "each data pointer, a `void*` included, points to the pointee of the result"
+  },
+  {
+   "decision": "D17.13-type-marks",
+   "file": "src/fort/check.ft",
+   "old": "    return p->kind == types.type_kind.k_ptr && types.type_same_shape(p->elem, g->elem);",
+   "new": "    return p->kind == types.type_kind.k_ptr && types.type_equal(p->elem, g->elem);",
+   "what": "the pointees compare with each mark"
+  },
+  {
+   "decision": "D17.13-type-fn-exact",
+   "file": "src/fort/check.ft",
+   "old": "        return types.type_equal(p, g);",
+   "new": "        return p->kind == types.type_kind.k_fn;",
+   "what": "each function pointer parameter has the type of a function pointer result"
   }
  ]
 }

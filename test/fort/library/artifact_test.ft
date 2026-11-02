@@ -684,15 +684,15 @@ fn entries(string path, strbuf.str_buf mut* out) string {
     strbuf.str_buf mut names = strbuf.create();
     defer strbuf.free(&names);
     u64 mut count = 0;
-    libc.dirent* mut ent = libc.readdir(d);
-    while (ent != null) {
-        string name = str.from_cstr(&ent->name[0]);
+    libc.dirent mut entry = {};
+    libc.dirent* mut got = null;
+    while (libc.readdir_r(d, &entry, &got) == 0 && got != null) {
+        string name = str.from_cstr(&entry.name[0]);
         if (name != "." && name != "..") {
             strbuf.append(&names, name);
             strbuf.push(&names, '\n');
             count += 1;
         }
-        ent = libc.readdir(d);
     }
     libc.closedir(move(d));
     // a selection over the lines: the next name in byte order, `count` times
@@ -1025,6 +1025,51 @@ fn a_stale_temporary_file_of_this_pid_does_not_stop_the_write() void {
     assert(!exists("stale_temp.flib/manifest"));
 }
 
+// The descriptor of a directory stream (dirent.h), in the C library of Linux and of Darwin.
+extern fn dirfd(void mut* dir) i32;
+
+// The errno value of a closed descriptor, 9 on Linux and on Darwin.
+i32 EBADF = 9;
+
+// Whether the names in the buffer at `b` each end in a NUL, with `.` and `..` left out, and the
+// count of their bytes. A call that takes the address of a buffer can vacate its data, and a read
+// of it in the caller after such a call is a use that D17.21 cannot prove, so each read takes a
+// pointer in a frame of its own.
+fn names_end_in_a_nul(strbuf.str_buf* b) bool {
+    string all = strbuf.view(b);
+    return all.len > 0 && all[all.len - 1] == '\0' && !str.starts_with(all, ".\0")
+        && !str.starts_with(all, "..\0");
+}
+
+fn names_len(strbuf.str_buf* b) u64 {
+    return strbuf.view(b).len;
+}
+
+// entry_names reads each name of a directory but `.` and `..`, each ended by a NUL, and gives 0 at
+// the end of the stream. The root directory holds one name at least.
+fn the_names_of_a_directory_end_in_a_nul_each() void {
+    void mut* own d = libc.opendir("/".ptr);
+    assert(d != null);
+    strbuf.str_buf mut names = strbuf.create();
+    defer strbuf.free(&names);
+    i32 failure = artifact.entry_names(d, &names);
+    libc.closedir(move(d));
+    assert(failure == 0 && names_end_in_a_nul(&names));
+}
+
+// readdir_r(3) gives an error as its result, and entry_names gives it back to make_empty_dir: a
+// stream whose descriptor is closed gives EBADF on glibc and on Darwin, and no name.
+fn a_read_error_of_the_stream_is_the_failure_of_the_names() void {
+    void mut* own d = libc.opendir("/".ptr);
+    assert(d != null);
+    assert(libc.close(dirfd(d)) == 0);
+    strbuf.str_buf mut names = strbuf.create();
+    defer strbuf.free(&names);
+    i32 failure = artifact.entry_names(d, &names);
+    libc.closedir(move(d));
+    assert(failure == EBADF && names_len(&names) == 0);
+}
+
 fn a_directory_in_summaries_that_holds_a_file_stops_the_write() void {
     make_dir("deep.flib");
     make_dir("deep.flib/summaries");
@@ -1289,6 +1334,8 @@ fn main() i32 {
     a_directory_at_the_summary_file_stops_the_write_before_any_file();
     a_link_at_the_temporary_name_of_the_summary_file_is_not_written_through();
     the_failed_path_is_cleared_by_a_write_that_succeeds();
+    the_names_of_a_directory_end_in_a_nul_each();
+    a_read_error_of_the_stream_is_the_failure_of_the_names();
     println("directory ok");
     println("ok");
     return 0;

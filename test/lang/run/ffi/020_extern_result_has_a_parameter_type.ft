@@ -1,0 +1,61 @@
+//! run
+//! stdout:
+//| 2 true
+//| bc true
+//| b 2
+//| ab 0
+//| true true
+//| true true
+//| No such file or directory
+// The declarations that the rule of the result type takes (D17.13). A `void*` result gives no
+// type: `memchr` gives back a `void*` into its argument. A typed result points to the pointee of
+// each parameter that can carry a pointer, with the marks aside: `strchr` gives a `char*` into
+// its `char*` argument, or null; `strrchr` gives a `char*` into its `char mut*` argument; and
+// `strncpy` gives back `dst`, and its `src` points to `char` too. A function pointer result of the
+// type of the function pointer parameter: `signal` gives back the handler before the call.
+// `mkdtemp` gives back its `char mut*` template. And `strerror` has no parameter that can carry a
+// pointer, so its `char*` is storage of C (A7). Each function is in the C library of Linux and of
+// Darwin, and SIGWINCH is 28 on both.
+import std.libc;
+import std.str;
+
+extern fn memchr(void* s, i32 c, u64 n) void*;
+extern fn strchr(char* s, i32 c) char*;
+extern fn strrchr(char mut* s, i32 c) char*;
+extern fn strncpy(char mut* dst, char* src, u64 n) char mut*;
+extern fn signal(i32 sig, fn (i32) void handler) fn (i32) void;
+
+i32 SIGWINCH = 28;
+
+fn on_resize(i32 sig) void {
+}
+
+fn main() i32 {
+    u8[4] bytes = {1, 2, 3, 4};
+    void* at = memchr(cast(&bytes, void*), 3, 4);
+    println(cast(at, u64) - cast(&bytes, u64), " ", memchr(cast(&bytes, void*), 9, 4) == null);
+
+    char[4] abc = {'a', 'b', 'c', cast(0, char)};
+    char* found = strchr(&abc[0], 98);
+    println(str.from_cstr(found), " ", strchr(&abc[0], 122) == null);
+
+    char[4] mut cab = {'b', 'a', 'b', cast(0, char)};
+    char* last = strrchr(&cab[0], 98);
+    println(str.from_cstr(last), " ", cast(last, u64) - cast(&cab[0], u64));
+    char[3] two = {'a', 'b', cast(0, char)};
+    char mut* copied = strncpy(&cab[0], &two[0], 3);
+    println(str.from_cstr(copied), " ", cast(copied, u64) - cast(&cab[0], u64));
+
+    fn (i32) void handler = on_resize;
+    fn (i32) void before = signal(SIGWINCH, handler);
+    fn (i32) void again = signal(SIGWINCH, handler);
+    println(before == null, " ", again == handler);
+
+    char mut@ own tmpl = str.to_cstr("dir_XXXXXX");
+    defer del(tmpl);
+    char mut* made = libc.mkdtemp(&tmpl[0]);
+    println(cast(made, u64) == cast(&tmpl[0], u64), " ", libc.rmdir(&tmpl[0]) == 0);
+
+    println(str.from_cstr(libc.strerror(2)));
+    return 0;
+}

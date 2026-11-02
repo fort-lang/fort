@@ -6,9 +6,10 @@
 // An argument of an `extern fn` follows each rule of a cast (D3.14), so an extern whose parameter
 // takes storage with pointer places names the type of that storage in the parameter. C then reads
 // the entries through their own type, and fort code passes them with no cast. C calls the
-// comparator with pointers to two entries, and the result has no `mut`, so C gives back no
-// writable pointer into the entries (D17.13). A read-only view may hide a pointer place, as an
-// argument of an `extern fn` too: `memcmp` reads the bytes of the entries.
+// comparator with pointers to two entries. The comparator is a function pointer, which points to
+// no type, so the result is a `void*` (D17.13): fort code finds the entry from its address, with
+// an index that it checks. A read-only view may hide a pointer place, as an argument of an
+// `extern fn` too: `memcmp` reads the bytes of the entries.
 import std.libc;
 import std.str;
 
@@ -18,7 +19,7 @@ struct entry {
 }
 
 // bsearch(3) with the type of the entries, in the C library of Linux and of Darwin.
-extern fn bsearch(entry* key, entry* base, u64 n, u64 size, fn (entry*, entry*) i32 cmp) entry*;
+extern fn bsearch(entry* key, entry* base, u64 n, u64 size, fn (entry*, entry*) i32 cmp) void*;
 
 fn by_key(entry* a, entry* b) i32 {
     if (a->key < b->key) {
@@ -42,8 +43,9 @@ fn main() i32 {
                           entry{.key = 2, .name = str.dup("b")},
                           entry{.key = 3, .name = str.dup("c")}};
     entry probe = entry{.key = 2};
-    entry* hit = bsearch(&probe, &items[0], 3, sizeof(entry), by_key);
-    println(name_at(hit));
+    void* hit = bsearch(&probe, &items[0], 3, sizeof(entry), by_key);
+    u64 at = (cast(hit, u64) - cast(&items[0], u64)) / sizeof(entry);
+    println(name_at(&items[at]));
     entry missing = entry{.key = 9};
     println(bsearch(&missing, &items[0], 3, sizeof(entry), by_key) == null);
     println(libc.memcmp(cast(&items, u8*), cast(&items[0], u8*), sizeof(entry)));

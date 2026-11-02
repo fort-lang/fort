@@ -281,7 +281,8 @@ extern fn realpath(char* path, char mut* resolved) char*;
 
 // <dirent.h>: a directory stream is an allocation of C that closedir frees. `dirent` is the
 // x86-64 glibc layout of `struct dirent` (std/darwin/libc.ft holds the Mac layout); only `kind`
-// and `name` are read. readdir gives null at the end of the stream and on an error.
+// and `name` are read. readdir_r writes the next entry into `*entry`, stores `entry`, or null at
+// the end of the stream, into `*result`, and gives 0, or the error number after an error.
 struct dirent {
     u64 ino;
     i64 off;
@@ -291,7 +292,7 @@ struct dirent {
 }
 extern fn opendir(char* path) void mut* own;
 extern fn fdopendir(i32 fd) void mut* own;
-extern fn readdir(void mut* dir) dirent*;
+extern fn readdir_r(void mut* dir, dirent mut* entry, dirent* mut* result) i32;
 extern fn closedir(void mut* own dir) i32;
 
 // The size of the buffer that realpath(3) writes, the terminating zero included.
@@ -304,7 +305,7 @@ i32 R_OK = 4;
 extern fn strerror(i32 code) char*;
 extern fn strtod(char* s, char* mut* end) f64;
 extern fn strtof(char* s, char* mut* end) f32;
-extern fn mkdtemp(char mut* tmpl) char*;
+extern fn mkdtemp(char mut* tmpl) char mut*;
 extern fn setenv(char* name, char* value, i32 overwrite) i32;
 extern fn unsetenv(char* name) i32;
 extern fn access(char* path, i32 mode) i32;
@@ -363,10 +364,15 @@ is what the runtime calls after a runtime error (D11.4). `std.libc` declares no 
 comparator reads each element through a cast from a `void*`, which no cast allows (D3.14), and
 `std.sort` sorts typed spans in fort (2.10). A directory stream of `opendir` and `fdopendir` is an
 allocation of C, so each result says `own`, and `closedir` takes it with `move`; a `del` of it
-frees the memory and leaves the descriptor open. `readdir` gives a typed `dirent*`, a view of
-storage of C that the next `readdir` of the stream can change, or null at the end of the stream
-and on an error. `__errno_location` has no pointer parameter, so its `i32 mut*` result names
-storage of C and stays legal (D17.13).
+frees the memory and leaves the descriptor open. `readdir_r` writes each entry into a `dirent`
+that the caller gives. `readdir` gives storage of C as a `dirent*`, and its stream is a
+`void mut*`, so D17.13 refuses a typed result beside it, `own` or not. A declaration that gives the
+stream the type `dirent*` breaks A7 of `ownership-design.md` 5.1, and fort defines no more for it
+(D10.7). glibc skips a name longer than 255 bytes and then gives ENAMETOOLONG at the end of the
+stream, so a caller reports such a directory as an error.
+`mkdtemp` gives back its template, so its result has the type `char mut*` of the template.
+`__errno_location` has no pointer parameter, so its `i32 mut*` result names storage of C and
+stays legal (D17.13).
 Ownership: `malloc`, `calloc` and `free` carry it in their types, so a
 `calloc` result is released like a `malloc` one and not dropped; every other extern here takes
 and returns views, and the library wraps every ownership-bearing call below.
