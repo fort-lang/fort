@@ -261,10 +261,9 @@ came here.
   linear:** two arrays whose elements meet at many offsets cost one step for each offset, so the
   walk stops after `POINTER_WORK_LIMIT` (65536) steps and the cast is an error with a note. The
   casts of the five trees take 10 steps or fewer; `fail/casts/027` passes the limit on purpose,
-  and a check that stops there takes 0.2 s and 18 MB. `ck->extern_arg` is the argument of the
-  `extern fn` call that the checker checks, and `check_call` gives the outer value back after its
-  arguments. So an extern call in the operand of an exempt cast keeps the exemption
-  (`run/casts/014`).
+  and a check that stops there takes 0.2 s and 18 MB. A cast that is an argument of an `extern fn`
+  call meets each rule of a cast: the checker has no exemption and no mark of such an argument
+  (`fail/casts/033`, `run/casts/014` and `018`).
 - **A cast makes no pointer from an integer and no larger pointee** (D3.14). `check_cast` asks
   `types.type_cast_makes_pointer` before the matrix, so an integer source of each width reports
   the rule before an added `mut` or `own`. A `char`, a `bool`, an enum and a float keep the report
@@ -289,13 +288,10 @@ came here.
   (`mark_step` answers MARK_SOME). The walk reads none of its parameters and not its result, so
   no cycle passes through a function type. A cast to a function pointer type from another type
   (the matrix allows only `void*`) is the error of `report_function_pointer`, with no byte. The
-  test stands at the top of `check_pointer_places`, before the exemption of an `extern` argument.
+  test stands at the top of `check_pointer_places`.
   C calls a function as the type of its parameter says (`fail/casts/036` to `038` and `040`,
-  `run/casts/017`). Under the exemption, `check_view_places` walks with `place_memo.fn_only`.
-  There a mark is a function pointer alone, and a reference marked `mut` or `own` leads on to
-  what it reaches. That walk keeps its answer in `types.layout.fn_mark`, apart from
-  `layout.mark`, and counts against the same POINTER_WORK_LIMIT (`fail/casts/041` to `043`,
-  `run/casts/018`). `walk_marks` is Tarjan's algorithm over the structs, with explicit stacks
+  `run/casts/017`). An argument of an `extern fn` meets the same walks (`fail/casts/041` to
+  `043`). `walk_marks` is Tarjan's algorithm over the structs, with explicit stacks
   (`place_memo.frames` and `entered`), so a chain of 65600 structs needs no deep recursion. A
   struct keeps its answer in `types.layout.mark` for the life of the checker: MARK_SOME on the path
   to a mark, MARK_NONE for each struct of a set of structs that reach each other once the walk
@@ -310,6 +306,20 @@ came here.
   with no declaration. `scope.binding.module` is `k + 1` for module `k` of the set
   (`check.module_of`, `modules.read_at`), and the source lookup of `diag` takes the `diag.sources`
   that the session embeds.
+- **An `extern fn` declaration gives no `mut` that no argument had** (D17.13). `resolve_fn` asks
+  `first_given_mut` after it makes the type of an `extern fn`, before the comparison of D9.8, so a
+  declaration that a library holds back meets the rule too. The types that C gives are the result,
+  each parameter type of a function pointer parameter, and each pointer place that a level of a
+  parameter holds where the parameter marks that level `mut`. The walk of the levels goes through
+  fixed arrays (D5.2) and stops at a struct, whose fields the rule does not read. Such a type that
+  marks a level `mut` and whose outermost reference is not `own` needs a fixed parameter of the
+  same type (`types.type_equal`: `char` and `u8`, and `own` and no `own`, are other types), unless
+  no fixed parameter is a pointer place and the extern has no variable tail. A function pointer
+  type that C gives goes through `first_given_mut` itself, with its own parameters, and the error
+  names the type inside it. The order is the result, then the parameters from left to right, and
+  in a parameter its callback parameters or its levels from level 1. The error stands at the
+  result or at the parameter, and the symbol fails, so its calls report nothing more
+  (`check_extern_test.ft`, `fail/ffi/011` and `012`).
 
 ## 5. Modules, the driver and the diagnostics
 
