@@ -2,16 +2,16 @@
 //! stdout:
 //| hey 3
 //| 7 true
-//| 1 true
+//| true true
 // The result of a cast is own exactly when its target type says own (D3.14, D17.3): an own
 // source cast to a non-own target lends a view, an own rvalue cast to an own target carries
 // the allocation, and an own lvalue cast to an own target has to be moved (D17.5). own in an
 // extern signature records the C convention and is erased (D17.13).
-// These three are `std.libc`'s declarations, `own` included: every closure
+// These two are `std.libc`'s declarations, `own` included: every closure
 // holds `std.rt`, which imports `std.libc`, so a program that declares a libc
-// symbol itself must agree with it (D9.8, D9.10, D17.13).
+// symbol itself must agree with it (D9.8, D9.10, D17.13). No cast gives a type
+// to the `void*` that malloc gives (D3.14), so the block stays a `void*`.
 extern fn malloc(u64 size) void mut* own;
-extern fn calloc(u64 n, u64 size) void mut* own;
 extern fn free(void* own p) void;
 
 fn main() i32 {
@@ -21,16 +21,15 @@ fn main() i32 {
     buf[2] = 121;
     string text = cast(buf, string);          // lends: buf still owns the bytes
     println(text, " ", text.len);
-    i32 mut* own p = cast(calloc(1, sizeof(i32)), i32 mut* own);   // carries calloc's own
+    i32 mut* own p = cast(new(i64), i32 mut* own);   // an own rvalue: carries the allocation
     *p = 7;
     i32 seen = *p;
     del(p);                                   // the same allocator as free (D10.3)
     println(seen, " ", p == null);
-    u8 mut* own raw = cast(malloc(1), u8 mut* own);   // void mut* own rvalue: stays own
-    *raw = 1;
-    u8 first = *raw;
+    void mut* own raw = malloc(1);            // void mut* own rvalue: stays own
+    bool got = raw != null;
     free(cast(move(raw), void* own));         // an own lvalue is moved into the cast
-    println(first, " ", raw == null);
+    println(got, " ", raw == null);
     del(buf);
     return 0;
 }

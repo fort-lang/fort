@@ -1,55 +1,102 @@
-/// Sorts arrays in place through libc.qsort.
-/// The element type must permit bytewise moves because C moves raw bytes.
-import std.libc;
+/// Sorts typed spans in place, in fort, with no C call (stdlib.md 2.10).
+/// fort has no generics, so this module is a pattern: to sort another element type, copy sort_i64
+/// and replace `i64` with that type and the prefix with its own. The comparator then reads two
+/// elements through typed pointers, and no cast gives a type to a `void*` (D3.14).
 
-/// Orders n elements of elem_size bytes at base. The order is not stable.
-/// Panics for zero elem_size, a null comparator, or a null base when n is not zero.
-/// The function validates these arguments before it returns early for n below 2.
-fn sort(void mut* base, u64 n, u64 elem_size, fn (void*, void*) i32 cmp) void {
-    if (elem_size == 0) {
-        panic("sort.sort: element size is zero");
-    }
+/// Orders the elements of items so that cmp answers zero or less for each adjacent pair.
+/// The order is not stable. Panics for a null comparator, also for a span of 0 or 1 elements.
+fn sort_i64(i64 mut@ items, fn (i64*, i64*) i32 cmp) void {
+    // The test comes before the count: a call of a null function pointer is undefined (D3.10).
     if (cmp == null) {
-        panic("sort.sort: null comparator");
+        panic("sort.sort_i64: null comparator");
     }
-    if (n > 0 && base == null) {
-        panic("sort.sort: null base");
+    // A heap sort. The heap is items[..end]: no element of it sorts after its parent at `2k + 1`
+    // and `2k + 2`. First each parent from the last one down goes into place, and the heap grows
+    // to the whole span. Then the root, which no element sorts after, goes to the end, and the
+    // heap shrinks by one. The sort only exchanges two elements, so each element stays in the span
+    // once, whatever the comparator answers.
+    u64 mut start = items.len / 2;
+    u64 mut end = items.len;
+    while (end > 1) {
+        if (start > 0) {
+            start -= 1;
+        } else {
+            end -= 1;
+            i64 last = items[end];
+            items[end] = items[0];
+            items[0] = last;
+        }
+        // Move the element at `start` down until no child sorts after it. A child `2k + 1` exists
+        // when `k < end / 2`, and then `2k + 1 < end`, so the sum cannot wrap.
+        u64 mut at = start;
+        while (at < end / 2) {
+            u64 mut child = 2 * at + 1;
+            if (child + 1 < end && cmp(&items[child], &items[child + 1]) < 0) {
+                child += 1;
+            }
+            if (cmp(&items[at], &items[child]) >= 0) {
+                break;
+            }
+            i64 parent = items[at];
+            items[at] = items[child];
+            items[child] = parent;
+            at = child;
+        }
     }
-    if (n < 2) {
-        return;
-    }
-    libc.qsort(base, n, elem_size, cmp);
 }
 
-fn sort_i64(i64 mut@ items, fn (void*, void*) i32 cmp) void {
-    sort(cast(items.ptr, void mut*), items.len, sizeof(i64), cmp);
-}
-
-fn sort_u64(u64 mut@ items, fn (void*, void*) i32 cmp) void {
-    sort(cast(items.ptr, void mut*), items.len, sizeof(u64), cmp);
+/// Orders the elements of items so that cmp answers zero or less for each adjacent pair.
+/// The order is not stable. Panics for a null comparator, also for a span of 0 or 1 elements.
+fn sort_u64(u64 mut@ items, fn (u64*, u64*) i32 cmp) void {
+    // a copy of sort_i64 with the element type u64
+    if (cmp == null) {
+        panic("sort.sort_u64: null comparator");
+    }
+    u64 mut start = items.len / 2;
+    u64 mut end = items.len;
+    while (end > 1) {
+        if (start > 0) {
+            start -= 1;
+        } else {
+            end -= 1;
+            u64 last = items[end];
+            items[end] = items[0];
+            items[0] = last;
+        }
+        u64 mut at = start;
+        while (at < end / 2) {
+            u64 mut child = 2 * at + 1;
+            if (child + 1 < end && cmp(&items[child], &items[child + 1]) < 0) {
+                child += 1;
+            }
+            if (cmp(&items[at], &items[child]) >= 0) {
+                break;
+            }
+            u64 parent = items[at];
+            items[at] = items[child];
+            items[child] = parent;
+            at = child;
+        }
+    }
 }
 
 /// Compares two i64 elements in ascending order without subtraction overflow.
-fn cmp_i64(void* a, void* b) i32 {
-    i64 x = *cast(a, i64*);
-    i64 y = *cast(b, i64*);
-    if (x < y) {
+fn cmp_i64(i64* a, i64* b) i32 {
+    if (*a < *b) {
         return -1;
     }
-    if (x > y) {
+    if (*a > *b) {
         return 1;
     }
     return 0;
 }
 
 /// Compares two u64 elements in ascending order.
-fn cmp_u64(void* a, void* b) i32 {
-    u64 x = *cast(a, u64*);
-    u64 y = *cast(b, u64*);
-    if (x < y) {
+fn cmp_u64(u64* a, u64* b) i32 {
+    if (*a < *b) {
         return -1;
     }
-    if (x > y) {
+    if (*a > *b) {
         return 1;
     }
     return 0;

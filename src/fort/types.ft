@@ -1115,12 +1115,30 @@ fn type_cast_makes_pointer(node* dst, node* src) bool {
     return type_is_int(src) && (is_ptr_like(dst) || dst->kind == type_kind.k_fn);
 }
 
+/// Whether a cast from `src` to `dst` gives a type to a `void*`: `src` is a `void*`, with any
+/// marks, and `dst` is a typed pointer, with any marks. No such cast is legal (D3.14). The matrix
+/// refuses it, and `check_cast` names the rule before the matrix. A `void*` holds no type and no
+/// size, so a typed pointer from it could reach more storage than the address has.
+fn type_cast_gives_type(node* dst, node* src) bool {
+    return src->kind == type_kind.k_voidptr && dst->kind == type_kind.k_ptr;
+}
+
+/// Whether a cast from `src` to `dst` makes a function pointer from a `void*`: `src` is a `void*`,
+/// with any marks, and `dst` is a function pointer type. No such cast is legal (D3.14). The matrix
+/// refuses it, so FIR verification (V4) does too, and `check_cast` reports the function pointer
+/// that the cast adds, at the place that D3.14 gives that rule.
+fn type_cast_makes_function(node* dst, node* src) bool {
+    return src->kind == type_kind.k_voidptr && dst->kind == type_kind.k_fn;
+}
+
 /// Tests the cast matrix for two types.
 /// The checker handles value category, `move`, and binding-level `mut` rules.
 /// The matrix admits casts that add `own`. `check_cast` refuses them after this check (D3.14),
 /// so a caller must not trust the matrix alone. The matrix admits a `u64` to a pointer and to a
 /// `void*` too, which `check_cast` refuses before this check (type_cast_makes_pointer). FIR text
-/// that forges a pointer on purpose, a test of `fir.shadow`, keeps the row.
+/// that forges a pointer on purpose, a test of `fir.shadow`, keeps the row. The matrix refuses a
+/// `void*` to a typed pointer and to a function pointer type, so FIR verification (V4) refuses
+/// both too.
 fn type_cast_allowed(node* dst, node* src) bool {
     if (dst->kind == type_kind.k_error || src->kind == type_kind.k_error) {
         return true;
@@ -1148,10 +1166,12 @@ fn type_cast_allowed(node* dst, node* src) bool {
         return scalar_cast_allowed(dst, src);
     }
     if (is_ptr_like(src)) {
-        // A pointer converts to another pointer or to `u64`. The matrix admits a `void*` to a
-        // function pointer type, and check.check_pointer_places refuses it (D3.14).
-        return is_ptr_like(dst) || is_u64(dst) ||
-               (src->kind == type_kind.k_voidptr && dst->kind == type_kind.k_fn);
+        // A pointer converts to another pointer or to `u64`, and a `void*` to no typed pointer
+        // (type_cast_gives_type) and to no function pointer type (type_cast_makes_function).
+        if (type_cast_gives_type(dst, src)) {
+            return false;
+        }
+        return is_ptr_like(dst) || is_u64(dst);
     }
     if (is_u64(src)) {
         // the row that FIR text keeps; check_cast refuses it (type_cast_makes_pointer)

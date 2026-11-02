@@ -1,0 +1,62 @@
+//! run
+//! stdout:
+//| true true true
+//| true true
+//| true true
+//| true true
+//| 2 true true
+//| true true
+// The casts of a `void*` that the rule of a typed `void*` leaves legal (D3.14). Any pointer and a
+// function pointer cast to `void*`. A `void*` casts to a `void*` that keeps or drops its marks,
+// `mut` and `own`, and to `u64`. A span of `void mut*` slots drops the mark of its slots. The
+// `void*` keeps the address, and it compares with `null` and with another `void*`. No cast takes
+// it back to a typed pointer (fail/casts/047), so a typed pointer stays where the program holds
+// one.
+struct pair {
+    i32 a;
+    i32 b;
+}
+
+fn twice(u64 n) u64 {
+    return n + n;
+}
+
+fn main() i32 {
+    pair mut p = pair{1, 2};
+    pair mut* at = &p;
+    void* v = cast(at, void*);
+    void mut* w = cast(at, void mut*);
+    void* same = cast(v, void*);
+    println(cast(v, u64) == cast(at, u64), " ", v == same, " ", cast(w, void*) == v);
+
+    // A cast drops `mut` behind the `void*`, and the identity cast keeps it.
+    void mut* kept = cast(w, void mut*);
+    void* dropped = cast(w, void*);
+    println(kept == w, " ", dropped == v);
+
+    // An owning `void*` keeps its `own` through a moved cast, drops its `mut`, and lends a view.
+    void mut* own block = cast(new(i64), void mut* own);
+    void* own moved = cast(move(block), void* own);
+    void* lent = cast(moved, void*);
+    println(block == null, " ", cast(lent, u64) == cast(moved, u64));
+    del(moved);
+
+    // A function pointer goes to `void*` and compares by identity.
+    fn (u64) u64 f = twice;
+    void* code = cast(f, void*);
+    println(code == cast(twice, void*), " ", code != null);
+
+    // A span of `void mut*` slots drops the mark of its slots, behind a read-only level 1, or
+    // the mark of the span alone. No cast takes it to `void* mut@` (D3.14).
+    void mut*[2] mut slots = {w, null};
+    void*@ seen = cast(slots[..], void*@);
+    void mut*@ kept_slots = cast(slots[..], void mut*@);
+    println(seen.len, " ", seen[0] == v, " ", kept_slots[0] == w);
+
+    // A `void*` and a `void* own` give their address as a `u64`.
+    void* own other = cast(new(u8), void* own);
+    u64 bits = cast(other, u64);
+    println(bits != 0, " ", cast(cast(other, void*), u64) == bits);
+    del(other);
+    return 0;
+}

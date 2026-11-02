@@ -1,0 +1,64 @@
+//! fail
+// No cast gives a type to a `void*` (D3.14). A `void*` holds no type and no size, so a typed
+// pointer from it could reach more storage than the address has: for an `i32 x`,
+// `*cast(cast(&x, void*), i64*)` read the 4 bytes after `x`. The rule takes a `void*` with any
+// marks to a typed pointer with any marks, whatever the size of the pointee: a struct, a pointer,
+// a fixed array, a span, a function pointer and a `void*` as a pointee too. It comes before the
+// `mut` and the `own` that the cast adds, and an argument of an `extern fn` gets no exemption. A
+// `void*` to a `void*` keeps the rules of `mut` and `own`, a `void*` to a function pointer type
+// keeps the error of a function pointer, a `void*` to a span keeps the error of the matrix, and a
+// `void*` deeper than level 1 is the rule of the pointer places of a view.
+struct pair {
+    i32 a;
+    i32 b;
+}
+
+struct holder {
+    u64 count;
+    void* any;
+}
+
+// C reads `n` bytes at `p` and keeps no part of it.
+extern fn peek_words(u64* p, u64 n) u64;
+
+// C keeps this storage and frees it itself.
+extern fn shared_block() void mut*;
+
+fn main() i32 {
+    i32 mut x = 1;
+    void* v = cast(&x, void*);
+    i64* wide = cast(v, i64*); //! error: cannot cast void* to i64*: a cast never gives a type to a void*
+    i32* same = cast(v, i32*); //! error: cannot cast void* to i32*: a cast never gives a type to a void*
+    u8* small = cast(v, u8*); //! error: cannot cast void* to u8*: a cast never gives a type to a void*
+    void mut* w = cast(&x, void mut*);
+    i32 mut* kept = cast(w, i32 mut*); //! error: cannot cast void mut* to i32 mut*: a cast never gives a type to a void*
+    i32* dropped = cast(w, i32*); //! error: cannot cast void mut* to i32*: a cast never gives a type to a void*
+    i32 mut* added = cast(v, i32 mut*); //! error: cannot cast void* to i32 mut*: a cast never gives a type to a void*
+    i32* own owner = cast(v, i32* own); //! error: cannot cast void* to i32* own: a cast never gives a type to a void*
+    void mut* own block = cast(new(i64), void mut* own);
+    i64 mut* own back = cast(move(block), i64 mut* own); //! error: cannot cast void mut* own to i64 mut* own: a cast never gives a type to a void*
+    pair* p = cast(v, pair*); //! error: cannot cast void* to pair*: a cast never gives a type to a void*
+    void** slot = cast(v, void**); //! error: cannot cast void* to void**: a cast never gives a type to a void*
+    i32[4]* four = cast(v, i32[4]*); //! error: cannot cast void* to i32[4]*: a cast never gives a type to a void*
+    i32@* span_at = cast(v, i32@*); //! error: cannot cast void* to i32@*: a cast never gives a type to a void*
+    (fn () void)* code_at = cast(v, (fn () void)*); //! error: cannot cast void* to (fn () void)*: a cast never gives a type to a void*
+    i32* nested = (cast((v), i32*)); //! error: cannot cast void* to i32*: a cast never gives a type to a void*
+    i32* twice = cast(cast(v, i32*), i32*); //! error: cannot cast void* to i32*: a cast never gives a type to a void*
+    i64* grown = cast(cast(&x, void*), i64*); //! error: cannot cast void* to i64*: a cast never gives a type to a void*
+    u64 seen = peek_words(cast(v, u64*), 0); //! error: cannot cast void* to u64*: a cast never gives a type to a void*
+    u64 mut* from_c = cast(shared_block(), u64 mut*); //! error: cannot cast void mut* to u64 mut*: a cast never gives a type to a void*
+    holder h = holder{.count = 1, .any = v};
+    i32* field = cast(h.any, i32*); //! error: cannot cast void* to i32*: a cast never gives a type to a void*
+    void*[2] slots = {v, v};
+    i32* element = cast(slots[1], i32*); //! error: cannot cast void* to i32*: a cast never gives a type to a void*
+    // The boundaries of the rule: a `void*` target, the function pointer, the span and a deeper
+    // level. A `void*` target keeps the rules of `mut` and `own`.
+    void mut* marked = cast(v, void mut*); //! error: cannot cast void* to void mut*: a cast never adds 'mut'
+    void* own owned = cast(v, void* own); //! error: cannot cast void* to void* own: a cast never adds 'own'
+    fn () void f = cast(v, fn () void); //! error: cannot cast void* to fn () void: a cast adds the function pointer fn () void
+    i32@ s = cast(v, i32@); //! error: cannot cast void* to i32@
+    void mut* mut deep = w;
+    i32 mut** under = cast(&deep, i32 mut**); //! error: cannot cast void mut* mut* to i32 mut**: a cast adds the pointer i32 mut* at byte 0
+    del(block);
+    return 0;
+}

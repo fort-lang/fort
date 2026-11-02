@@ -39,20 +39,72 @@ fn emit_mov(i32 fd) bool {
 // stdlib.md 2.7.
 struct node { i64 value; }
 
+// A vector of views of nodes: a typed copy of int_vec with the slot type node mut*.
+struct node_vec {
+    node mut* mut@ own items;
+    u64 len;
+}
+
+// The typed copy of int_free, int_reserve, int_push and int_pop, which the document names and
+// does not show: `i64` is `node mut*` and the prefix `int_` is `node_`.
+fn node_free(node_vec mut* v) void {
+    del(v->items);
+    v->len = 0;
+}
+
+fn node_reserve(node_vec mut* v, u64 extra) void {
+    if (extra > vec.U64_MAX - v->len) {
+        panic("node_reserve: capacity overflow");
+    }
+    u64 need = v->len + extra;
+    if (need <= v->items.len) {
+        return;
+    }
+    u64 mut cap = 16;
+    if (need > cap) {
+        cap = need;
+    }
+    if (v->items.len <= vec.U64_MAX / 2 && v->items.len * 2 > cap) {
+        cap = v->items.len * 2;
+    }
+    node mut* mut@ own bigger = new(node mut*, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+fn node_push(node_vec mut* v, node mut* n) void {
+    node_reserve(v, 1);
+    v->items[v->len] = n;
+    v->len += 1;
+}
+
+fn node_pop(node_vec mut* v) node mut* {
+    if (v->len == 0) {
+        panic("node_pop: empty");
+    }
+    v->len -= 1;
+    return v->items[v->len];
+}
+
 // A read through a pointer parameter: the owner is no local owner here (D17.21).
 fn value_of(node* p) i64 {
     return p->value;
 }
 
 fn demo() i64 {
-    vec.ptr_vec mut stack = vec.ptr_create();
-    defer vec.ptr_free(&stack);
+    node_vec mut stack = node_vec{};
+    defer node_free(&stack);
     node mut* own n = new(node);              // new lands in an own place (D17.3, D17.8)
     defer del(n);
     n->value = 7;
-    vec.ptr_push(&stack, cast(n, void mut*));     // lends n; the vector never frees it
-    node* top = cast(vec.ptr_pop(&stack), node*);
-    return value_of(top);   // top->value here could read stack after the call (D17.21)
+    node_push(&stack, n);                     // lends n; the vector never frees it
+    node mut* top = node_pop(&stack);         // the type that went in comes back
+    return value_of(top);
 }
 
 // stdlib.md 2.8.

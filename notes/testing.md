@@ -31,7 +31,8 @@ bullet at a time and without a rewrite.
   `fir-run-tests`), `long-imports` (`tools/long_imports.py --check`, which fails on a short
   import of a compiler module), `long_imports_selftest` and `lang_harness_selftest` (the tool
   and the `--use` and `--cache-dir` options of `run_tests.py`), `highlight_selftest`,
-  `extension_selftest`, `panic_coverage`, `panic_coverage_selftest` and one
+  `extension_selftest`, `fort_lint_std` (`tools/fort_lint.py` over one module of `std/` and over
+  the modules of both targets), `panic_coverage`, `panic_coverage_selftest` and one
   `mutation_anchors_<table>` test for each table in `tools/mutations`, and the three `mutate_`
   tests of `--check` over the fixture `test/mutate/strict_table.json`;
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fir-run`,

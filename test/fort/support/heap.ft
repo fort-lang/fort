@@ -53,9 +53,12 @@ $if ($cfg(target_os) == "macos") {
 
     // The first field of malloc_introspection_t. The enumerator takes the
     // task, a context, a type mask, the zone address, a reader (null reads
-    // this process) and the recorder it calls with each batch of ranges.
+    // this process) and the recorder it calls with each batch of ranges. C
+    // types the context as a `void*` and gives it to the recorder as it is,
+    // so this declaration names the total that it points at: no cast gives a
+    // type to a `void*` (D3.14).
     struct introspection {
-        fn (u32, void mut*, u32, u64, void*, fn (u32, void mut*, u32, range*, u32) void) i32
+        fn (u32, u64 mut*, u32, u64, void*, fn (u32, u64 mut*, u32, range*, u32) void) i32
             enumerator;
     }
 
@@ -87,8 +90,7 @@ $if ($cfg(target_os) == "macos") {
 
     // Adds the size of each range to the total the context points at. The
     // zones are locked while it runs, so it allocates nothing.
-    fn record(u32 task, void mut* total, u32 kind, range* ranges, u32 count) void {
-        u64 mut* sum = cast(total, u64 mut*);
+    fn record(u32 task, u64 mut* sum, u32 kind, range* ranges, u32 count) void {
         for (range r : ranges[0..cast(count, u64)]) {
             *sum += r.size;
         }
@@ -107,8 +109,8 @@ $if ($cfg(target_os) == "macos") {
             while (range_index < range_values.len) {
                 zone* z = range_values[range_index];
                 range_index += 1;
-                assert(z->introspect->enumerator(task, cast(&total, void mut*), PTR_IN_USE,
-                                                 cast(z, u64), reader, record) == 0);
+                assert(z->introspect->enumerator(task, &total, PTR_IN_USE, cast(z, u64), reader,
+                                                 record) == 0);
             }
         }
         return total;

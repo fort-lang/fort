@@ -1,12 +1,16 @@
 //! fail
 import std.sort;
 
-// The typed entries of stdlib.md 2.10 take a T mut@, and that is the
-// property they add over the core sort: a sort writes its elements, and the
-// core entry takes a void mut*, which says that the bytes may be written and
-// nothing about how many or how wide (D3.11). These are the diagnostics that
-// make the difference real. The last one is the core entry, which took an
-// immutable span's .ptr until a cast stopped adding the mark (D3.14).
+// The typed entries of stdlib.md 2.10 take a T mut@: a sort writes its
+// elements. These are the diagnostics that make the property real. The
+// comparator is typed too, `fn (T*, T*) i32`, so a comparator of another
+// element type, and one that reads a `void*`, are refused at the call: no cast
+// gives a type to a `void*` (D3.14), so no comparator of `void*` can read an
+// element.
+fn by_bytes(void* a, void* b) i32 {
+    return 0;
+}
+
 fn main() i32 {
     // An array declared without mut yields an immutable span (D5.2).
     i64[3] fixed = {3, 1, 2};
@@ -18,10 +22,9 @@ fn main() i32 {
     u64@ view_u = us[..];
     sort.sort_u64(view_u, sort.cmp_u64);      //! error: the argument expects u64 mut@, not u64@
 
-    // The core entry took the same three arrays through cast(.ptr, void mut*)
-    // and compiled, which is why stdlib.md 2.10 told a caller to prefer the
-    // typed entries. The .ptr of an immutable span is an immutable pointer, and
-    // a cast never adds the mark, so the core entry now refuses them too.
-    sort.sort(cast(fixed[..].ptr, void mut*), fixed.len, sizeof(i64), sort.cmp_i64); //! error: cannot cast i64* to void mut*: a cast never adds 'mut'
+    // The comparator names the element type of its entry.
+    i64[3] mut xs = {3, 1, 2};
+    sort.sort_i64(xs[..], sort.cmp_u64);      //! error: the argument expects fn (i64*, i64*) i32, not fn (u64*, u64*) i32
+    sort.sort_i64(xs[..], by_bytes);          //! error: the argument expects fn (i64*, i64*) i32, not fn (void*, void*) i32
     return 0;
 }

@@ -7,20 +7,52 @@
 //| 16
 import std.sort;
 
-// The core sort of stdlib.md 2.10 over a struct array, which is the case that
-// needs the untyped entry: there is no generic span type, so an arbitrary
-// element type reaches the sort as an address, a count and a size (D3.15).
+// A struct array sorted through the pattern of stdlib.md 2.10: there is no generic span type, so
+// an element type of the caller gets a typed copy of sort.sort_i64. The comparator reads each
+// element through a typed pointer, with no cast (D3.14).
 
 struct point {
     i64 x;
     i64 y;
 }
 
+// The copy of sort.sort_i64 for point, which the document names and does not show: `i64` is
+// `point` and the prefix is `point_`.
+fn point_sort(point mut@ items, fn (point*, point*) i32 cmp) void {
+    if (cmp == null) {
+        panic("point_sort: null comparator");
+    }
+    u64 mut start = items.len / 2;
+    u64 mut end = items.len;
+    while (end > 1) {
+        if (start > 0) {
+            start -= 1;
+        } else {
+            end -= 1;
+            point last = items[end];
+            items[end] = items[0];
+            items[0] = last;
+        }
+        u64 mut at = start;
+        while (at < end / 2) {
+            u64 mut child = 2 * at + 1;
+            if (child + 1 < end && cmp(&items[child], &items[child + 1]) < 0) {
+                child += 1;
+            }
+            if (cmp(&items[at], &items[child]) >= 0) {
+                break;
+            }
+            point parent = items[at];
+            items[at] = items[child];
+            items[child] = parent;
+            at = child;
+        }
+    }
+}
+
 // The worked example of stdlib.md 2.10, copied from the section so that the
 // specification's own sample code is held against the library it describes.
-fn by_x(void* a, void* b) i32 {
-    point* p = cast(a, point*);
-    point* q = cast(b, point*);
+fn by_x(point* p, point* q) i32 {
     if (p->x < q->x) {
         return -1;
     }
@@ -31,16 +63,14 @@ fn by_x(void* a, void* b) i32 {
 }
 
 fn order(point mut@ ps, i64 mut@ xs) void {
-    sort.sort(cast(ps.ptr, void mut*), ps.len, sizeof(point), by_x);
+    point_sort(ps, by_x);                 // the copy of sort_i64 for point
     sort.sort_i64(xs, sort.cmp_i64);
 }
 
 // by_x alone ties two points with the same x, and a tie has no specified
 // order, so a test that prints both keys needs a total order: x first, then y.
-fn by_x_then_y(void* a, void* b) i32 {
-    point* p = cast(a, point*);
-    point* q = cast(b, point*);
-    i32 first = by_x(a, b);
+fn by_x_then_y(point* p, point* q) i32 {
+    i32 first = by_x(p, q);
     if (first != 0) {
         return first;
     }
@@ -63,6 +93,10 @@ fn show(point@ ps) void {
     println("");
 }
 
+fn down_i64(i64* a, i64* b) i32 {
+    return sort.cmp_i64(b, a);
+}
+
 fn main() i32 {
     point[3] mut ps = {point{3, 0}, point{1, 0}, point{2, 0}};
     i64[4] mut xs = {5, -1, 2, -3};
@@ -71,20 +105,16 @@ fn main() i32 {
     println(xs[0], " ", xs[1], " ", xs[2], " ", xs[3]);
 
     point[5] mut qs = {point{2, 7}, point{1, 9}, point{3, 1}, point{1, 2}, point{2, 0}};
-    sort.sort(cast(qs[..].ptr, void mut*), qs.len, sizeof(point), by_x_then_y);
+    point_sort(qs[..], by_x_then_y);
     show(qs[..]);
 
-    // n is a count and not a length: a caller may order a prefix and leave the
-    // rest of the array where it is.
+    // A caller orders a prefix through a span of it and leaves the rest of the
+    // array where it is.
     i64[5] mut head = {4, 9, 1, 2, 3};
-    sort.sort(cast(head[..].ptr, void mut*), 2, sizeof(i64), down_i64);
+    sort.sort_i64(head[0..2], down_i64);
     println(head[0], " ", head[1], " ", head[2], " ", head[3], " ", head[4]);
 
     // The element size is the type's, and the struct is two i64 (D3.8).
     println(sizeof(point));
     return 0;
-}
-
-fn down_i64(void* a, void* b) i32 {
-    return sort.cmp_i64(b, a);
 }

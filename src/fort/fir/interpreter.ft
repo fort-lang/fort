@@ -44,6 +44,10 @@ u64 FIRST_ADDRESS = 65536;
 u64 REGION_ALIGN = 16;
 u64 REGION_GAP = 16;
 
+// The least region, in bytes, that asks calloc of the C library before `new` makes its storage:
+// 1 MiB (make_region).
+u64 REGION_PROBE = 1048576;
+
 // The size of a pointer, and the offset of the length in a span header.
 u64 WORD = 8;
 
@@ -127,12 +131,12 @@ enum region_kind {
     rk_slot, // storage of the run: errno, the slot of `oracle_keep`, the arguments of `main`
 }
 
-// One range of the address space. `bytes` is its storage in the compiler: null for a function,
-// and null after the region ends. `routine` is the routine of a function.
+// One range of the address space. `bytes` is its storage in the compiler: empty for a function,
+// and empty after the region ends. `routine` is the routine of a function.
 struct region {
     u64 base;
     u64 size;
-    u8 mut* own bytes;
+    u8 mut@ own bytes;
     region_kind kind;
     bool live;
     bool readonly;
@@ -420,21 +424,29 @@ fn align_up(u64 v, u64 align) u64 {
 }
 
 // Makes a region of `size` zero bytes at the next free address and returns its base. The return
-// is 0 when the compiler has no storage for the bytes.
+// is 0 when the compiler has no storage for the bytes: calloc of the C library refuses them. A
+// span holds the bytes, and `new` aborts where calloc gives null. No span of the block of calloc
+// exists (D6.9), and no cast gives it a type (D3.14). So a region of REGION_PROBE bytes or more
+// asks calloc first, and that block goes at once; a program asks a size that large to see the
+// refusal. A smaller region takes `new` alone: a host with no storage for it stops the compiler
+// at each other `new` as well.
 fn make_region(machine mut* it, region_kind kind, u64 size, bool readonly) u64 {
     u64 base = align_up(it->next, REGION_ALIGN);
     u64 mut room = size;
     if (room == 0) {
         room = 1;
     }
-    u8 mut* own mut bytes = null;
+    u8 mut@ own mut bytes = {};
     if (kind != region_kind.rk_code) {
-        void mut* own p = libc.calloc(1, room);
-        if (p == null) {
-            del(p); // frees nothing: the test finds p null (D17.11 gen rule 6, D17.20)
-            return 0;
+        if (room >= REGION_PROBE) {
+            void mut* own p = libc.calloc(1, room);
+            bool refused = p == null;
+            libc.free(move(p));
+            if (refused) {
+                return 0;
+            }
         }
-        bytes = cast(move(p), u8 mut* own);
+        bytes = new(u8, room);
     }
     region_vec mut* v = &it->regions;
     if (v->len == v->items.len) {
@@ -472,7 +484,7 @@ fn region_at(machine* it, u64 addr) u64 {
 
 // Whether the live region `r` holds the `len` bytes at `addr`.
 fn has_range(region* r, u64 addr, u64 len) bool {
-    if (!r->live || r->bytes == null || addr < r->base) {
+    if (!r->live || r->bytes.len == 0 || addr < r->base) {
         return false;
     }
     u64 at = addr - r->base;

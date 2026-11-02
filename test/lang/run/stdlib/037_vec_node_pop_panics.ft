@@ -1,0 +1,71 @@
+//! run
+//! abort
+//! stderr: node_pop: empty
+//! stdout:
+//| 1 10
+//| 0 16
+//| 10
+// Popping what is not there is a violated precondition, so the typed copy of int_pop panics as
+// int_pop does (D13.3, stdlib.md 2.7). The boundary is the last element: the vector that still
+// holds it answers, and the same vector one pop later does not, even though its storage is
+// untouched.
+struct node { i64 value; }
+
+// The typed copy of int_vec with the slot type node mut*, cut to what the test calls.
+struct node_vec {
+    node mut* mut@ own items;
+    u64 len;
+}
+
+fn node_free(node_vec mut* v) void {
+    del(v->items);
+    v->len = 0;
+}
+
+fn node_push(node_vec mut* v, node mut* n) void {
+    if (v->len == v->items.len) {
+        // the first push takes the floor of 16 slots, and the test pushes one node
+        node mut* mut@ own bigger = new(node mut*, 16);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = n;
+    v->len += 1;
+}
+
+fn node_pop(node_vec mut* v) node mut* {
+    if (v->len == 0) {
+        panic("node_pop: empty");
+    }
+    v->len -= 1;
+    return v->items[v->len];
+}
+
+// A read through a pointer: the owner is no local owner here (D17.21).
+fn value_at(node_vec* v, u64 k) i64 {
+    return v->items[k]->value;
+}
+
+// A read through a pointer: the owner is no local owner here (D17.21).
+fn value_of(node* n) i64 {
+    return n->value;
+}
+
+fn main() i32 {
+    node_vec mut v = node_vec{};
+    defer node_free(&v);
+    node mut only = {10};
+    node_push(&v, &only);
+    println(v.len, " ", value_at(&v, 0));
+    node* last = node_pop(&v);
+    println(v.len, " ", v.items.len);
+    println(value_of(last));
+    node* none = node_pop(&v);
+    println(value_of(none));
+    return 0;
+}

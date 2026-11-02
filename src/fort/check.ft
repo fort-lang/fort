@@ -3121,17 +3121,16 @@ fn cover_of(types.node* u, u64 at, u64 len) target_part {
 // (D3.14). The walk stops at the first pointer place that the other view does not hold, so a run
 // that holds each one is the one result that it reads twice. A key names a run and a part by the
 // addresses of their types, so a memo lives for one cast. `work` counts the calls of first_hidden;
-// past POINTER_WORK_LIMIT, `over` holds and the walk stops. With `marked`, the walk reads only the
-// places that carry a mark (carries_mark), whose walk counts against the same limit. With
-// `view`, the other view also holds a place that carries no mark where it holds a place of a type
-// that differs only by the `mut` and `own` marks that the place drops.
+// past POINTER_WORK_LIMIT, `over` holds and the walk stops. With `view`, the other view also holds
+// a place that carries no mark (carries_mark) where it holds a place of a type that differs only
+// by the `mut` and `own` marks that the place drops; the walk of the marks counts against the same
+// limit.
 struct place_memo {
     strmap.str_map held;
     containers.pool keys; // the text of each key of `held`, which keeps no copy
     strbuf.str_buf text;
     u64 work;
     bool over;
-    bool marked;
     bool view;
     // carries_mark: the walk met a struct whose layout waits, so a "no mark" answer is not final
     bool uncertain;
@@ -3384,10 +3383,6 @@ fn first_hidden(place_memo mut* m, types.node* t, u64 count, u64 at, types.node*
     if (types.type_pointer_count(t) == 0) {
         return false;
     }
-    if (m->marked && !carries_mark(m, t)) {
-        // past the limit the walk proves nothing, and first_hidden answers true with no place
-        return m->over;
-    }
     m->work += 1;
     if (m->work > POINTER_WORK_LIMIT) {
         m->over = true;
@@ -3497,7 +3492,6 @@ fn hidden_in_part(place_memo mut* m, types.node* t, u64 count, u64 at, types.nod
 // the place itself, or the places of its elements and of its fields in order.
 fn hidden_in_copy(place_memo mut* m, types.node* t, u64 at, types.node* u, pointer_place mut* out)
     bool {
-    // with `m->marked`, first_hidden calls this only for a `t` that carries a mark
     if (types.type_is_pointer_place(t)) {
         *out = pointer_place{.ty = t, .at = at};
         return true;
@@ -3585,10 +3579,10 @@ fn report_pointer_limit(checker mut* ck, ast.node* n, types.node* src, types.nod
 // a store can write any bits into a pointer slot of the source, and the source can read bits that
 // no pointer wrote. Then check_view_places reads each pointer place of level 1. A cast to a
 // function pointer type from another type is an error: a call through it runs a function with
-// arguments that its parameter types do not describe. The matrix gives such a cast one source, a
-// `void*`, which reaches no type. A cast that is an argument of an `extern fn` call follows each
-// rule, as each other cast does: C writes and reads the storage of an argument through the type of
-// its parameter. Returns whether it reported.
+// arguments that its parameter types do not describe. check_cast lets one such cast past the
+// matrix, from a `void*`, which reaches no type. A cast that is an argument of an `extern fn` call
+// follows each rule, as each other cast does: C writes and reads the storage of an argument
+// through the type of its parameter. Returns whether it reported.
 fn check_pointer_places(checker mut* ck, ast.node* n, types.node* src, types.node* dst) bool {
     if (dst->kind == types.type_kind.k_fn && !types.type_equal(src, dst)) {
         report_function_pointer(ck, n, src, dst);
@@ -3673,28 +3667,26 @@ fn check_pointer_places(checker mut* ck, ast.node* n, types.node* src, types.nod
 // with no mark needs a place of the same type or of a type that differs only by the `mut` and
 // `own` marks that it drops. Through it the result reads storage whose address the program does
 // not hold. A place of the same type reaches the same types, and a drop of marks keeps the types
-// that a place reaches, so level 1 answers for each deeper level. The storage of a `void*` holds
-// no pointer place at level 1, so each place of the target that the rule reads is added; for a
-// `void*` source the rule reads only the places that carry a mark. A struct with no layout is in
-// error, which has reported, or waits in a module-level initializer, which D4.6 refuses, so the
-// rule reads nothing then. Returns whether it reported.
+// that a place reaches, so level 1 answers for each deeper level. An integer and a `string` reach
+// no level, so each place of the target that the rule reads is added. check_cast refuses each
+// `void*` source with a typed target before this rule (D3.14), so no source here is a `void*`. A
+// struct with no layout is in error, which has reported, or waits in a module-level initializer,
+// which D4.6 refuses, so the rule reads nothing then. Returns whether it reported.
 fn check_view_places(checker mut* ck, ast.node* n, types.node* src, types.node* dst) bool {
     if (!types.has_target_level(dst) || dst->kind == types.type_kind.k_voidptr) {
         return false;
     }
     types.node* dp = dst->elem;
-    // an integer, a `string` and the storage of a `void*` hold no pointer place
+    // An integer and a `string` reach no level, so they hold no pointer place. check_cast refuses
+    // a `void*` source with a target that reaches a level, so the source is no `void*` here.
     types.node* mut sp = null;
-    if (types.has_target_level(src) && src->kind != types.type_kind.k_voidptr) {
+    if (types.has_target_level(src)) {
         sp = src->elem;
     }
     if (!has_layout(dp) || (sp != null && !has_layout(sp))) {
         return false;
     }
-    // A `void*` source keeps the walk of the places that carry a mark until the checker refuses
-    // each cast of a `void*` to a typed pointer.
-    bool view = src->kind != types.type_kind.k_voidptr;
-    place_memo mut m = place_memo{.marked = !view, .view = view};
+    place_memo mut m = place_memo{.view = true};
     defer {
         memo_free(&m);
         // The leak rule reads no callee: after the calls, the test of a loop proves each chain
@@ -3790,7 +3782,20 @@ fn check_cast(checker mut* ck, ast.node mut* n, expr mut* out) void {
         check_msg_end(ck, n->loc);
         return;
     }
-    if (!types.type_cast_allowed(target.ty, a.ty)) {
+    if (types.type_cast_gives_type(target.ty, a.ty)) {
+        // A rule of the first group, as the pointer from an integer is: before a `mut` or an `own`
+        // that the cast adds. A `void*` holds no type and no size. The matrix refuses the pair
+        // too, so the test stands before it to name the rule.
+        msg_cannot_cast(ck, a.ty, target.ty);
+        msg_str(ck, ": a cast never gives a type to a void*");
+        check_msg_end(ck, n->loc);
+        return;
+    }
+    // The matrix refuses a `void*` to a function pointer type, and check_pointer_places reports
+    // the function pointer that the cast adds, after the rules of `mut`, `own` and the pointee, as
+    // D3.14 orders them.
+    if (!types.type_cast_allowed(target.ty, a.ty)
+        && !types.type_cast_makes_function(target.ty, a.ty)) {
         msg_cannot_cast(ck, a.ty, target.ty);
         if (types.type_cast_adds_mut(target.ty, a.ty)
             && types.type_cast_allowed(types.type_without_mut(&ck->types, target.ty), a.ty)) {

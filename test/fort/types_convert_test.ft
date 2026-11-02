@@ -339,12 +339,13 @@ fn casts_among_pointers_and_u64() void {
     assert(castable(&e, "node mut* own", "node mut*"));
     assert(castable(&e, "node*", "node mut* own"));     // lends
     assert(castable(&e, "void*", "node*"));
-    assert(castable(&e, "node*", "void*"));
     assert(castable(&e, "void* own", "void*"));
-    // A `mut` the source carries reaches the level a `void*` names, in both
-    // directions, and a cast that only drops it is allowed as well.
+    // A `mut` the source carries reaches the level a `void*` names, and a cast
+    // that only drops it is allowed as well. No cast takes a `void*` back to a
+    // typed pointer, with the mark or without it (D3.14).
     assert(castable(&e, "void mut*", "node mut*"));
-    assert(castable(&e, "node mut*", "void mut*"));
+    assert(!castable(&e, "node*", "void*"));
+    assert(!castable(&e, "node mut*", "void mut*"));
     assert(castable(&e, "void*", "void mut*"));
     assert(castable(&e, "node*", "node mut*"));
     assert(castable(&e, "u64", "node*"));
@@ -379,7 +380,7 @@ fn casts_among_pointers_and_u64() void {
     assert(!castable(&e, "node mut*", "u64"));
 }
 
-fn casts_of_function_pointers_go_through_voidptr() void {
+fn a_function_pointer_casts_to_voidptr_and_not_back() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
     defer types_env.free(&e);
@@ -389,7 +390,11 @@ fn casts_of_function_pointers_go_through_voidptr() void {
     types.node* g = types_env.fn1(&e, i64t, i32t);
     types.node* vp = types_env.type_of(&e, "void*");
     assert(types.type_cast_allowed(vp, f));
-    assert(types.type_cast_allowed(f, vp));
+    // No cast makes a function pointer from a `void*` (D3.14), so the matrix and FIR
+    // verification refuse it; check_cast reports the function pointer that it adds.
+    assert(!types.type_cast_allowed(f, vp));
+    assert(types.type_cast_makes_function(f, vp));
+    assert(!types.type_cast_makes_function(vp, f));
     assert(types.type_cast_allowed(f, f));
     assert(!types.type_cast_allowed(g, f));
     assert(!types.type_cast_allowed(types.type_prim(&e.tt, prim.prim_kind.prim_u64), f));
@@ -476,8 +481,8 @@ fn casts_of_spans_change_only_the_marks() void {
     assert(castable(&e, "u8@", "u8@ own"));
     assert(castable(&e, "i32@", "i32 mut@"));
     assert(castable(&e, "node mut* mut@", "node mut* own mut@ own"));
-    // The route that a caller of `std.sort_ptr` took. The drop at level 2 behind a
-    // mutable level 1, which the implicit conversion refuses and the cast makes.
+    // The drop at level 2 behind a mutable level 1, which the implicit
+    // conversion refuses and the matrix admits; check_cast refuses it (D3.14).
     assert(castable(&e, "node* mut@", "node mut* mut@"));
     assert(!assignable(&e, "node* mut@", "node mut* mut@"));
     assert(!castable(&e, "node*@", "point*@"));
@@ -509,12 +514,16 @@ fn a_cast_never_adds_mut() void {
     assert(castable(&e, "node* mut*", "node mut* mut*"));
     assert(!castable(&e, "node mut* mut@", "node* mut@"));
     assert(castable(&e, "node* mut@", "node mut* mut@"));
-    // `void*` is a source like any other, so the two casts of
-    // `cast(cast(p, void*), u8 mut*)` refuse the second one. A `void mut*`
-    // carries the mark and the same cast compiles.
+    // The two casts of `cast(cast(p, void*), u8 mut*)` refuse the second one.
+    // A `void*` is a source like any other for the walk of `mut`, and no cast
+    // gives a type to a `void*` at all, with the mark or without it (D3.14).
     assert(!castable(&e, "u8 mut*", "void*"));
-    assert(castable(&e, "u8 mut*", "void mut*"));
-    assert(castable(&e, "u8*", "void*"));
+    assert(types.type_cast_adds_mut(types_env.type_of(&e, "u8 mut*"),
+                                    types_env.type_of(&e, "void*")));
+    assert(!castable(&e, "u8 mut*", "void mut*"));
+    assert(!types.type_cast_adds_mut(types_env.type_of(&e, "u8 mut*"),
+                                     types_env.type_of(&e, "void mut*")));
+    assert(!castable(&e, "u8*", "void*"));
     // An integer, a `string` and a function pointer name no level at all, so a
     // target that marks one adds it.
     assert(!castable(&e, "u8 mut*", "u64"));
@@ -681,15 +690,18 @@ fn the_matrix_admits_own_at_any_reference() void {
     types_env.init(&e);
     defer types_env.free(&e);
     // Each target below changes the `own` alone: every `mut` of the target
-    // stands in the source. `cast(libc.malloc(n), u8 mut* own)` compiles because
-    // `malloc` answers `void mut* own`, so the cast carries the `own`.
+    // stands in the source. No cast gives a type to the `void mut* own` that
+    // `malloc` answers (D3.14), so a cast of it carries the `own` to a `void*`
+    // alone.
     assert(castable(&e, "u8 mut@ own", "u8 mut@"));
     assert(castable(&e, "u8 mut@ own mut*", "u8 mut@ mut*"));
     assert(castable(&e, "node mut* own mut@ own", "node mut* mut@"));
     assert(castable(&e, "node mut* mut@", "node mut* own mut@ own"));
     assert(castable(&e, "void* own", "u64"));
-    assert(castable(&e, "u8 mut* own", "void mut*"));
-    assert(castable(&e, "u8* own", "void*"));
+    assert(castable(&e, "void* own", "void mut* own"));
+    assert(castable(&e, "void mut* own", "node mut*"));
+    assert(!castable(&e, "u8 mut* own", "void mut* own"));
+    assert(!castable(&e, "u8 mut* own", "void mut*"));
     assert(!castable(&e, "u8 mut@ own", "u8@"));
     assert(!castable(&e, "u8 mut* own", "void*"));
 }
@@ -762,6 +774,76 @@ fn no_cast_makes_a_pointer_from_an_integer() void {
     }
     assert(pairs == INTEGER_POINTER_PAIRS);
     assert(admitted == MATRIX_INTEGER_POINTER_ROWS);
+}
+
+// Whether `t` is a `void*`, with any marks.
+fn is_void_pointer(types.node* t) bool {
+    return t->kind == types.type_kind.k_voidptr;
+}
+
+// Whether `t` is a typed pointer, with any marks.
+fn is_typed_pointer(types.node* t) bool {
+    return t->kind == types.type_kind.k_ptr;
+}
+
+// Whether `t` is a function pointer type.
+fn is_function_pointer(types.node* t) bool {
+    return t->kind == types.type_kind.k_fn;
+}
+
+// The ordered pairs of the sample table whose source is a `void*` and whose target is a typed
+// pointer: the 4 `void*` samples and 7 typed pointers.
+u64 VOID_TYPED_PAIRS = 28;
+
+// The ordered pairs of the sample table whose source is a `void*` and whose target is a function
+// pointer type: the 4 `void*` samples and 3 function pointer types.
+u64 VOID_FUNCTION_PAIRS = 12;
+
+// No cast gives a type to a `void*` (D3.14). The rule is a universal one, so the test walks each
+// sample source to each sample target. type_cast_gives_type holds exactly for a `void*` source,
+// with any marks, and a typed pointer target, with any marks, and type_cast_makes_function holds
+// exactly for a `void*` source and a function pointer target. The matrix admits no such pair: so
+// check_cast refuses each one, and FIR verification (V4) does as well. The counts hold the table
+// to the rule, so a table that stops naming a `void*`, a typed pointer or a function pointer type
+// goes red.
+fn no_cast_gives_a_type_to_a_void() void {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node*[35] mut samples = {};
+    u64 n = sample_types(&e, samples[..]);
+    assert(n == SAMPLES_MAX);
+    u64 mut pairs = 0;
+    u64 mut functions = 0;
+    u64 mut d = 0;
+    while (d < n) {
+        types.node* dst = samples[d];
+        u64 mut s = 0;
+        while (s < n) {
+            types.node* src = samples[s];
+            bool named = is_void_pointer(src) && is_typed_pointer(dst);
+            if (types.type_cast_gives_type(dst, src) != named) {
+                fail_pair(&e, src, " has the wrong rule name for a cast to ", dst);
+            }
+            bool code = is_void_pointer(src) && is_function_pointer(dst);
+            if (types.type_cast_makes_function(dst, src) != code) {
+                fail_pair(&e, src, " has the wrong function rule for a cast to ", dst);
+            }
+            if (named) {
+                pairs += 1;
+            }
+            if (code) {
+                functions += 1;
+            }
+            if ((named || code) && types.type_cast_allowed(dst, src)) {
+                fail_pair(&e, src, " gives a type in the matrix to ", dst);
+            }
+            s += 1;
+        }
+        d += 1;
+    }
+    assert(pairs == VOID_TYPED_PAIRS);
+    assert(functions == VOID_FUNCTION_PAIRS);
 }
 
 fn every_scalar_pair_follows_the_d3_14_matrix() void {
@@ -959,7 +1041,7 @@ fn main() i32 {
     casts_among_numbers_bool_char_and_enums();
     casts_refused_among_scalars();
     casts_among_pointers_and_u64();
-    casts_of_function_pointers_go_through_voidptr();
+    a_function_pointer_casts_to_voidptr_and_not_back();
     casts_within_the_string_family();
     a_span_cast_never_launders_a_signature_or_an_owner();
     casts_of_spans_change_only_the_marks();
@@ -976,6 +1058,7 @@ fn main() i32 {
     println("further ok");
     every_scalar_pair_follows_the_d3_14_matrix();
     no_cast_makes_a_pointer_from_an_integer();
+    no_cast_gives_a_type_to_a_void();
     every_implicit_conversion_is_also_a_cast();
     clearing_every_mark_of_a_type();
     no_conversion_and_no_cast_adds_mut();

@@ -40,6 +40,12 @@ enum color {
 
 rt.enum_member[2] mut table = {};
 
+// bcmp(3) and bcopy(3) read and write the bytes of a block through a `void*`.
+// No cast gives a type to a `void*` (D3.14), so the test gives the block of
+// alloc to C as it is.
+extern fn bcmp(void* a, void* b, u64 n) i32;
+extern fn bcopy(void* source, void mut* destination, u64 n) void;
+
 fn both_i64(i64 v) void {
     print(v, " ");
     rt.flush(1);
@@ -128,19 +134,17 @@ fn main(string@ argv) i32 {
 
     // alloc still zeroes its block and still never answers null. free still
     // releases what alloc made (D10.2, D10.3). The result is void mut* own in
-    // this mode as in the other, so the cast below carries the mark rather
-    // than adding one (D3.11, toolchain.md 5.1).
+    // this mode as in the other, so bcopy writes the block through it
+    // (D3.11, toolchain.md 5.1).
     u64 n = 32;
     void mut* own block = rt.alloc(1, n, "modes.ft".ptr, 1, 1);
-    u8 mut@ bytes = cast(block, u8 mut*)[0..n];
-    bool mut zeroed = true;
-    for (u64 mut i = 0; i < n; i++) {
-        if (bytes[i] != 0) {
-            zeroed = false;
-        }
-    }
-    bytes[n - 1] = 5;
-    println(block != null, " ", zeroed, " ", bytes[n - 1] == 5);
+    u8[32] mut seen = {};
+    bool zeroed = bcmp(block, cast(&seen, void*), n) == 0;
+    seen[n - 1] = 5;
+    bcopy(cast(&seen, void*), block, n);
+    seen[n - 1] = 0;
+    bcopy(block, cast(&seen, void mut*), n);
+    println(block != null, " ", zeroed, " ", seen[n - 1] == 5);
     rt.free(move(block));
 
     // args_init and args answer with the span main was given. The first manual

@@ -1,0 +1,82 @@
+//! run
+//! stdout:
+//| empty is not an error
+//| 7
+//| 1 2
+//| 2 1
+//| 0 1 18446744073709551615
+//| -9223372036854775808 -1 0 9223372036854775807
+//| 1 2 3
+//| 64 sorted, sum 19110, last 18446744073709551615
+import std.sort;
+
+// A span carries its length (D3.5), so the sort has no base and no count to
+// check. The zero value of a span is {null, 0}, and a sort of it orders
+// nothing and reads no element. One element is sorted already, and two
+// elements are the shortest span with a pair to order (stdlib.md 2.10).
+//
+// cmp_u64 compares unsigned, so it orders 0xFFFFFFFFFFFFFFFF last, and cmp_i64
+// orders the least i64 first and the greatest last. sort_u64 also gets its
+// greatest element last: in the right child of the root of three, and at the
+// end of a long span, where each step of the heap runs.
+
+fn down(i64* a, i64* b) i32 {
+    return sort.cmp_i64(b, a);
+}
+
+fn main() i32 {
+    i64 mut@ empty = {};
+    sort.sort_i64(empty, sort.cmp_i64);
+    u64 mut@ none = {};
+    sort.sort_u64(none, sort.cmp_u64);
+    println("empty is not an error");
+
+    i64[1] mut one = {7};
+    sort.sort_i64(one[..], sort.cmp_i64);
+    println(one[0]);
+
+    i64[2] mut two = {2, 1};
+    sort.sort_i64(two[..], sort.cmp_i64);
+    println(two[0], " ", two[1]);
+    sort.sort_i64(two[..], down);
+    println(two[0], " ", two[1]);
+
+    u64[3] mut words = {18446744073709551615, 1, 0};
+    sort.sort_u64(words[..], sort.cmp_u64);
+    println(words[0], " ", words[1], " ", words[2]);
+
+    i64 least = -9223372036854775807 - 1;
+    i64[4] mut signed = {9223372036854775807, -1, least, 0};
+    sort.sort_i64(signed[..], sort.cmp_i64);
+    println(signed[0], " ", signed[1], " ", signed[2], " ", signed[3]);
+
+    u64[3] mut rising = {1, 2, 3};
+    sort.sort_u64(rising[..], sort.cmp_u64);
+    println(rising[0], " ", rising[1], " ", rising[2]);
+
+    // The check of a long span is the whole contract: each adjacent pair is
+    // ordered, the sum of the 63 small words says that no element went or came
+    // twice, and the greatest word stays last.
+    u64[64] mut many = {};
+    for (u64 mut i = 0; i < 63; i += 1) {
+        many[i] = (i * 37 + 11) % 641;
+    }
+    many[63] = 18446744073709551615;
+    sort.sort_u64(many[..], sort.cmp_u64);
+    bool mut ordered = true;
+    u64 mut sum = 0;
+    for (u64 mut i = 0; i < 64; i += 1) {
+        if (i < 63) {
+            sum += many[i];
+        }
+        if (i > 0 && many[i - 1] > many[i]) {
+            ordered = false;
+        }
+    }
+    if (ordered) {
+        println("64 sorted, sum ", sum, ", last ", many[63]);
+    } else {
+        println("64 out of order, sum ", sum, ", last ", many[63]);
+    }
+    return 0;
+}

@@ -1,0 +1,107 @@
+//! run
+//! stdout:
+//| 0 0
+//| 1 16 10
+//| 3 16 10 20 30
+//| 30 2
+//| 20 1
+//| 10 0 16
+//| 1 16 40
+import std.vec;
+
+// A vector of pointers is a typed copy of int_vec (stdlib.md 2.7). node_push appends and node_pop
+// removes from the same end, so the vector is a stack, and the type that went in comes back: no
+// cast gives a type to a `void*` (D3.14), so a vector of `void*` could give no `node*` back.
+struct node { i64 value; }
+
+// The typed copy of int_vec with the slot type node mut*: `i64` is `node mut*` and the prefix
+// `int_` is `node_`.
+struct node_vec {
+    node mut* mut@ own items;
+    u64 len;
+}
+
+fn node_free(node_vec mut* v) void {
+    del(v->items);
+    v->len = 0;
+}
+
+fn node_reserve(node_vec mut* v, u64 extra) void {
+    if (extra > vec.U64_MAX - v->len) {
+        panic("node_reserve: capacity overflow");
+    }
+    u64 need = v->len + extra;
+    if (need <= v->items.len) {
+        return;
+    }
+    u64 mut cap = 16;
+    if (need > cap) {
+        cap = need;
+    }
+    if (v->items.len <= vec.U64_MAX / 2 && v->items.len * 2 > cap) {
+        cap = v->items.len * 2;
+    }
+    node mut* mut@ own bigger = new(node mut*, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        bigger[i] = v->items[i];
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+fn node_push(node_vec mut* v, node mut* n) void {
+    node_reserve(v, 1);
+    v->items[v->len] = n;
+    v->len += 1;
+}
+
+fn node_pop(node_vec mut* v) node mut* {
+    if (v->len == 0) {
+        panic("node_pop: empty");
+    }
+    v->len -= 1;
+    return v->items[v->len];
+}
+
+// A read through a pointer: the owner is no local owner here (D17.21).
+fn value_at(node_vec* v, u64 k) i64 {
+    return v->items[k]->value;
+}
+
+// A read through a pointer: the owner is no local owner here (D17.21).
+fn value_of(node* n) i64 {
+    return n->value;
+}
+
+fn main() i32 {
+    node_vec mut v = node_vec{};
+    defer node_free(&v);
+    println(v.len, " ", v.items.len);
+
+    node mut a = {10};
+    node mut b = {20};
+    node mut c = {30};
+    node_push(&v, &a);
+    println(v.len, " ", v.items.len, " ", value_at(&v, 0));
+    node_push(&v, &b);
+    node_push(&v, &c);
+    println(v.len, " ", v.items.len, " ", value_at(&v, 0), " ",
+            value_at(&v, 1), " ", value_at(&v, 2));
+
+    // Each pop hands back the last pointer pushed and shortens the vector by
+    // one without touching the capacity.
+    node mut* third = node_pop(&v);
+    println(value_of(third), " ", v.len);
+    node* second = node_pop(&v);
+    println(value_of(second), " ", v.len);
+    node* first = node_pop(&v);
+    println(value_of(first), " ", v.len, " ", v.items.len);
+
+    // The emptied vector still holds its slots and accepts a new element.
+    node mut d = {40};
+    node_push(&v, &d);
+    println(v.len, " ", v.items.len, " ", value_at(&v, 0));
+    return 0;
+}
