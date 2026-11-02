@@ -50,13 +50,28 @@ fn create(u64 cap) index {
     return move(ix);
 }
 
-fn free_index(index mut* ix) void {
-    for (u64 mut i = 0; i < ix->count; i++) {
-        vec.int_free(&ix->postings[i].lines);
+// Frees an index that the caller moves in: the lines of each posting, the postings, then the
+// words.
+fn drop(index mut ix) void {
+    for (u64 mut i = 0; i < ix.count; i++) {
+        del(ix.postings[i].lines.items);
     }
-    del(ix->postings);
-    strmap.free(&ix->words);
-    ix->count = 0;
+    del(ix.postings);
+    del(ix.words.entries);
+}
+
+// An index in an allocation of its own, for main, which lends it to calls.
+fn make(u64 cap) index mut* own {
+    index mut* own ix = new(index);
+    *ix = create(cap);
+    return ix;
+}
+
+// Ends an index of make that the caller moves in.
+fn drop_made(index mut* own p) void {
+    index kept = move(*p);
+    del(p);
+    drop(move(kept));
 }
 
 // `word` must outlive the index; the caller keeps every word in one buffer.
@@ -223,34 +238,34 @@ fn main(string@ args) i32 {
         return 2;
     }
     strbuf.str_buf mut source = strbuf.create();
-    defer strbuf.free(&source);
+    defer del(source.data);
     if (!io.read_file(args[1], &source)) {
         return 1;
     }
     string text = strbuf.view(&source);
 
-    index mut ix = create(64);
-    defer free_index(&ix);
+    index mut* own ix = make(64);
+    defer drop_made(move(ix));
 
-    index_text(&ix, text);
+    index_text(ix, text);
 
-    println("lines=", ix.line_count, " distinct=", ix.count, " map=",
-            strmap.count(&ix.words));
+    println("lines=", ix->line_count, " distinct=", ix->count, " map=",
+            strmap.count(&ix->words));
 
-    show_dictionary(&ix);
+    show_dictionary(ix);
 
-    show_postings(&ix, "the");
-    show_postings(&ix, "fox");
-    show_postings(&ix, "quick");
-    show_postings(&ix, "cat");
+    show_postings(ix, "the");
+    show_postings(ix, "fox");
+    show_postings(ix, "quick");
+    show_postings(ix, "cat");
 
-    conjunction(&ix, QUERY_A[0..QUERY_A.len]);
-    conjunction(&ix, QUERY_B[0..QUERY_B.len]);
-    conjunction(&ix, QUERY_C[0..QUERY_C.len]);
-    conjunction(&ix, QUERY_D[0..QUERY_D.len]);
+    conjunction(ix, QUERY_A[0..QUERY_A.len]);
+    conjunction(ix, QUERY_B[0..QUERY_B.len]);
+    conjunction(ix, QUERY_C[0..QUERY_C.len]);
+    conjunction(ix, QUERY_D[0..QUERY_D.len]);
 
     // The totals must agree with a second pass that shares no state.
-    u64 total = total_occurrences(&ix);
+    u64 total = total_occurrences(ix);
     u64 words_seen = count_words(text);
     println("occurrences=", total, " words=", words_seen, " agree=", total == words_seen);
     return 0;

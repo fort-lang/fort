@@ -107,9 +107,19 @@ fn rehash(map mut* fresh, entry@ slots) void {
 }
 
 fn map_free(map mut* m) void {
-    del(m->slots);
-    m->count = 0;
-    m->tombstones = 0;
+    map_drop(move(*m));
+}
+
+// Frees a map that the caller moves in.
+fn map_drop(map mut m) void {
+    del(m.slots);
+}
+
+// Ends a map in an allocation that the caller moves in.
+fn map_drop_made(map mut* own p) void {
+    map kept = move(*p);
+    del(p);
+    map_drop(move(kept));
 }
 
 fn map_put(map mut* m, string key, i64 value) void {
@@ -162,42 +172,42 @@ fn sum_values(map* m) i64 {
 
 fn main() i32 {
     println(fnv1a(""), " ", fnv1a("a"));
-    map mut m = {};
-    map_init(&m, 4);
-    defer map_free(&m);
+    map mut* own m = new(map);
+    defer map_drop_made(move(m));
+    map_init(m, 4);
     for (u64 mut i = 0; i < WORDS.len; i++) {
-        map_put(&m, WORDS[i], cast(i, i64) * 10);
+        map_put(m, WORDS[i], cast(i, i64) * 10);
     }
-    println("count=", m.count, " cap=", m.slots.len);
+    println("count=", m->count, " cap=", m->slots.len);
     i64 mut v = 0;
     i32 mut found = 0;
     i32 mut missing = 0;
     for (string w : WORDS) {
-        if (map_get(&m, w, &v)) {
+        if (map_get(m, w, &v)) {
             found++;
         } else {
             missing++;
         }
     }
-    map_get(&m, "alpha", &v);
+    map_get(m, "alpha", &v);
     i64 a = v;
-    map_get(&m, "delta", &v);
+    map_get(m, "delta", &v);
     i64 d = v;
-    map_get(&m, "kilo", &v);
+    map_get(m, "kilo", &v);
     println("alpha=", a, " delta=", d, " kilo=", v, " found=", found, " missing=", missing);
-    println(map_del(&m, "delta"), " ", map_del(&m, "echo"), " ", map_del(&m, "kilo"), " ",
-            map_del(&m, "zulu"));
-    println("count=", m.count, " tombstones=", m.tombstones);
-    bool d1 = map_get(&m, "delta", &v);
-    bool d2 = map_get(&m, "zulu", &v);
-    bool d3 = map_get(&m, "juliet", &v);
+    println(map_del(m, "delta"), " ", map_del(m, "echo"), " ", map_del(m, "kilo"), " ",
+            map_del(m, "zulu"));
+    println("count=", m->count, " tombstones=", m->tombstones);
+    bool d1 = map_get(m, "delta", &v);
+    bool d2 = map_get(m, "zulu", &v);
+    bool d3 = map_get(m, "juliet", &v);
     println(d1, " ", d2, " ", d3, " ", v);
-    map_put(&m, "delta", 300);
-    map_put(&m, "alpha", 5);
-    map_get(&m, "delta", &v);
-    println("count=", m.count, " tombstones=", m.tombstones, " delta=", v);
-    println("sum=", sum_values(&m));
-    map_free(&m);
-    println("freed cap=", m.slots.len, " count=", m.count);
+    map_put(m, "delta", 300);
+    map_put(m, "alpha", 5);
+    map_get(m, "delta", &v);
+    println("count=", m->count, " tombstones=", m->tombstones, " delta=", v);
+    println("sum=", sum_values(m));
+    map_free(m);
+    println("freed cap=", m->slots.len, " count=", m->count);
     return 0;
 }
