@@ -7,41 +7,44 @@
 //
 // The heap sees one. Many runs of one command line ask for the same blocks
 // in the same order. A run that gives the blocks back leaves the heap where
-// it was. A run that keeps one block moves a view of the heap by the leaked
-// bytes of each round. support/heap.ft gives the three views of each target.
+// it was. A run that keeps one block adds the bytes of that block to the heap
+// in each round.
 //
-// The probe watches the system view and the block view, because each is blind
-// to what the other sees. The system view does not move for a leak that the
-// allocator serves out of a free chunk it already holds. The address of a fresh
-// block does not show a large leak. Without `analysis_free`, the address probe
-// read 0 while the system view moved by megabytes.
+// The probe holds the live view of support/heap.ft and no other view. The
+// live view counts the bytes of each block that the allocator does not hold as
+// free, and the bytes of each mmap block. A kept block is in that count,
+// whatever its size and wherever the allocator put it. So the view moves by
+// the kept bytes of a round times the rounds between the two samples.
 //
-// The live view counts the bytes of the blocks that the allocator does not
-// hold as free, so a leaked block is in it (support/heap.ft says what else
-// is). On Linux it saw a deleted `strbuf.free(&g->globals)` and
-// `strbuf.free(&g->scratch)` in gen.gen_free that the break did not see
-// (support/heap.ft gives the distances). The probe keeps the two other views,
-// and the answer is the largest of the three distances.
+// With nothing kept, the view rises in the first rounds and then stops. The
+// rise is above BOUND, so the early sample must come after the last move.
+// At b6676ced, e0080544 and bda63b82 the checked mode under glibc 2.43 rose
+// by 4928 bytes in 29 moves, and the last move came at round 698. Its early
+// sample comes at round 2000, 1302 rounds later. Under glibc 2.39 the emitter
+// mode rose by up to 27312 bytes, and the last move came by round 10. Its
+// early sample comes at round 400. Each other mode stopped by round 266. A
+// change that makes the rise go on past the early sample fails a probe with
+// nothing kept. The cause of the rise is read in glibc, not measured: the
+// view counts the free blocks in the thread cache of glibc, and the first
+// rounds fill that cache.
 //
-// The views are necessary and not sufficient. A round must also be large
-// enough for the release that it claims to witness. A deleted `del(ck->syms)`
-// leaks about 144 bytes for each analysis. A small round count can stay
-// inside the 132 KB that glibc gives a process at startup. The system view
-// and the block view then do not move. ROUNDS is 4000 so the
-// smallest release becomes visible. A new release gets the same standard:
-// delete it, watch the test go red, and increase ROUNDS until the
-// test goes red.
+// The probe does not hold the system view or the block view. The system view
+// moves when a change moves only the order or the size of the allocations.
+// Under glibc 2.43 the program break of the emitter mode changed between two
+// values 1896448 bytes apart from one round to the next, with nothing kept.
+// glibc gave the top of the heap back to the system after some rounds and
+// kept it after others. A tree in which gen.gen_main released four argument
+// lists at its exit put the early round in one state and the 16 late rounds
+// in the other, and the emitter probe failed with a live distance of 0. A
+// tree that added one 8-byte field to types.layout did the same. The block
+// view moves with nothing kept: in the checked mode under glibc 2.43 it read
+// 400 bytes at each of the three trees.
+// Each release that those two views saw, the live view sees (below).
 //
-// The system view does not see a leak of a block above 128 KB while the
-// round frees no other block of that size. glibc serves such an allocation by
-// mmap, so the break does not move. Such a large round also makes the block
-// view unsuitable. The emitter module was 155159 bytes at b0606efa, and
-// the emitter test did not see a deleted release of its module buffer. The
-// closure mode emits about two kilobytes and was the witness of that release.
-// So a release is held by the mode whose round keeps it inside the heap. The
-// live view counts the mmap blocks too. On the tree that added the live view,
-// that deletion moved the break and the live view of the emitter test by
-// 109043712 bytes under glibc 2.39 and 2.43.
+// The view is necessary and not sufficient. A round must also reach the
+// allocations of the release that it claims to witness. A deletion of a
+// release that a round never reaches moves nothing. Each test file gives the
+// program of its round, and names the releases that it is the witness of.
 //
 // Each mode of the driver is a test file of its own, and this module is what
 // those files share. One mode in each program keeps every program below the
@@ -49,12 +52,21 @@
 // program also prevents an earlier mode from fragmenting its heap. The loop
 // is the first action because the probe measures allocator behavior.
 //
-// The six modes contained 46 measured releases on T-118's tree. Deleting 45 of
-// them made at least one test fail. `slots_free` in gen.gen_free failed only
-// when the call in gen.function_begin was also absent, so that pair was one
-// measurement. T-255 deleted `slots_free`, `scopes_free` and the release of
-// `defers` with the direct path. The 43 releases that remain each made a test
-// fail then, and T-255 did not measure them again.
+// At b6676ced, 57 releases on the paths of the six modes were deleted one at
+// a time: each deletion was compiled into the six probes, and each probe ran
+// under glibc 2.39 and 2.43. The compiler refused one deletion
+// (`del(s)` in check.check_free). 49 deletions made at least one probe fail,
+// and the live view moved by 24032 bytes or more in each failing probe. These
+// are the same probes that the largest of the system, block and live
+// distances failed. 7 deletions moved no probe. 5 of them delete a release
+// that a second call makes again: the direct call of `analysis_release` in
+// driver.compile_entry, which its deferred call covers, and `index.free(&ix)`
+// and the three releases in index.free, which the deferred block of
+// driver.check_document covers. 2 have no witness: `syms_free(&g->declared)`
+// in gen.gen_free and `del(ck->sized)` in check.check_free are the only
+// releases of their blocks, but no round fills those blocks. The emitter
+// fills `declared` only for the bodiless functions of an interface module,
+// and the checker fills `sized` only for an array whose layout is pending.
 //
 // This module uses no function-pointer dispatch table. A repeated analysis
 // must not grow the heap.
@@ -70,81 +82,43 @@ import std.sys;
 
 // The rounds of a front-end mode, and the distance in bytes that fails it.
 //
-// A leak of about 144 bytes per round needs about nine
-// hundred rounds to exceed the process's initial heap. The early
-// sample comes at half the rounds. The count is therefore well above twice
-// nine hundred.
+// The live view of each mode rises in its first rounds with nothing kept (see
+// above). The early sample comes at half the rounds, round 2000 here, 1302
+// rounds after the last such move that was measured. The rounds then make a
+// small leak large: a leak of 32 bytes, the smallest block of glibc, moves the
+// view by 64000 bytes over the 2000 rounds between the samples, more than 15
+// times BOUND.
 u64 ROUNDS = 4000;
 u64 BOUND = 4096;
 
-// How many of the last rounds the probe holds against the early round. The
-// allocator does not hand a round the same small block every time: over the
-// emitter program the address runs through a cycle of eight. So two late
-// samples did not find one round in step with the early round and the probe
-// read 26512 with nothing leaked. Sixteen covers that cycle two times. A leak
-// moves every sample, so the smallest distance costs nothing.
+// How many of the last rounds the probe holds against the early round. A leak
+// moves the live view in every late round, so the smallest distance costs
+// nothing. It keeps a late round in which the thread cache of glibc holds one
+// block more or less than at the early round from failing the probe.
 u64 LATE_SAMPLES = 16;
 
 // The exit status that a refused program leaves. The mode that compiles a
 // refused program asserts this status of its first round.
 i32 EXIT_COMPILE_ERROR = 1;
 
-// Measures a front-end mode over ROUNDS iterations, with every view on.
+// Measures a front-end mode over ROUNDS iterations.
 fn measure(string@ args) u64 {
-    return measure_rounds(args, ROUNDS, true);
+    return measure_rounds(args, ROUNDS);
 }
 
-// The same over a round count of its own, and with the block view under a
-// switch. The emitter mode compiles a much larger program. This
-// mode needs fewer rounds. Its program makes each watched
-// release use one round allocation instead of one block allocation.
-//
-// The block view is off for the emitter mode, and the reason is a
-// measurement. A round that allocates a hundred kilobytes and gives it back
-// leaves the heap with free chunks of every size. So the address that a
-// 32-byte probe gets lands where one of those chunks starts. It moved through
-// a range of 450 KB over rounds that leaked nothing, and no window or cycle
-// makes it repeat. The system view and the live view answer for that mode.
-// The smallest release that the emitter test is the only witness of is
-// `strbuf.free(&g->scratch)`. Its deletion moved the live view by 19360
-// bytes under glibc 2.43, and the break by 0 bytes. The block view remains
-// enabled for four front-end modes. It is off for the index mode too: under
-// glibc 2.43 its address jumps among positions far apart, and the live view
-// sees each of the six index releases (driver_lifetime_index_test.ft).
-fn measure_rounds(string@ args, u64 rounds, bool watch_block) u64 {
-    return measure_status(args, rounds, watch_block, 0);
+// The same over a round count of its own. The emitter mode and the index mode
+// compile larger programs, so fewer rounds reach the same bound.
+fn measure_rounds(string@ args, u64 rounds) u64 {
+    return measure_status(args, rounds, 0);
 }
 
 // The same, for a mode whose command line ends in a diagnostic: the program
 // of the checked mode is refused by the checker. So its rounds exit 1 and a
-// round that exits 0 is the broken one.
-fn measure_status(string@ args, u64 rounds, bool watch_block, i32 want_status) u64 {
-    distances d = measure_views(args, rounds, watch_block, want_status);
-    // A move of any view is a leak, so the answer is the largest distance.
-    u64 mut most = d.system;
-    if (d.block > most) {
-        most = d.block;
-    }
-    if (d.live > most) {
-        most = d.live;
-    }
-    return most;
-}
-
-// The distance of each view between the early round and the late rounds.
-struct distances {
-    u64 system;
-    u64 block;
-    u64 live;
-}
-
-// Runs the rounds and gives the distance of each view. measure_status
-// holds the largest one against BOUND.
-fn measure_views(string@ args, u64 rounds, bool watch_block, i32 want_status) distances {
+// round that exits 0 is the broken one. The result is the distance of the
+// live view between the early round and the nearest of the late rounds.
+fn measure_status(string@ args, u64 rounds, i32 want_status) u64 {
     u64 mut early = 0;
-    u64 mut early_block = 0;
-    u64 mut early_live = 0;
-    distances mut d = {};
+    u64 mut least = 0;
     bool mut sampled = false;
     u64 mut i = 0;
     while (i < rounds) {
@@ -165,32 +139,19 @@ fn measure_views(string@ args, u64 rounds, bool watch_block, i32 want_status) di
             assert(status == want_status);
         }
         if (i == rounds / 2) {
-            early = heap.system_view();
-            early_live = heap.live_view();
-            early_block = heap.block_view();
+            early = heap.live_view();
         }
         if (i + LATE_SAMPLES >= rounds) {
-            u64 system_now = heap.distance(heap.system_view(), early);
-            u64 live_now = heap.distance(heap.live_view(), early_live);
-            u64 mut block_now = 0;
-            if (watch_block) {
-                block_now = heap.distance(heap.block_view(), early_block);
-            }
-            if (!sampled || system_now < d.system) {
-                d.system = system_now;
-            }
-            if (!sampled || block_now < d.block) {
-                d.block = block_now;
-            }
-            if (!sampled || live_now < d.live) {
-                d.live = live_now;
+            u64 now = heap.distance(heap.live_view(), early);
+            if (!sampled || now < least) {
+                least = now;
             }
             sampled = true;
         }
         i += 1;
     }
-    assert(early != 0 && early_block != 0 && early_live != 0 && sampled);
-    return d;
+    assert(early != 0 && sampled);
+    return least;
 }
 
 fn write_file(string path, string text) void {

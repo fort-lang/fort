@@ -406,19 +406,33 @@ bullet at a time and without a rewrite.
   (`the_blocks_a_node_owns_are_released_with_it` in `test/fort/types_table_test.ft`, T-032).
   Verify such a witness by deleting the `del` it covers and watching it go red; two of them in
   `types.ft` had no witness at all until that was measured.
-  **An allocator probe needs two views, because each is blind to what the other sees** (T-034), and
-  both of them can miss a leaked block above 128 KB (section 4 of this file). They do not always
-  miss it: a deleted `strbuf.free(&g->out)` moved the break of `driver_lifetime_emitter_test.ft`
-  by 109043712 bytes. **The lifetime probes add a third view, the live view.** On Linux it is
-  `uordblks + hblkhd` of glibc's `mallinfo2(3)`, so it counts the mmap blocks. On macOS it is the
-  system view. On Linux it also counts the free blocks in the thread cache of glibc. So it does
-  not see the release of a small block while that cache has space: `test/fort/heap_test.ft`
-  measures what it sees. The break of `driver_lifetime_emitter_test.ft` did not move for a
-  deleted `strbuf.free(&g->scratch)` under glibc 2.39 or 2.43. It did not move for a deleted
-  `strbuf.free(&g->globals)` under 2.39. The live view moved by 19360 to 77984 bytes for these
-  deletions. With nothing deleted, it read 0 for each of the six probes. D9.8 excludes a struct
-  result from an `extern`. So `test/fort/support/heap.ft` declares `mallinfo2` with the hidden
-  result pointer of the x86-64 System V ABI.
+  **An allocator probe without the live view needs two views, because each is blind to what the
+  other sees** (T-034), and both of them can miss a leaked block above 128 KB (section 4 of this
+  file). They do not always miss it: a deleted `strbuf.free(&g->out)` moved the break of
+  `driver_lifetime_emitter_test.ft` by 109043712 bytes. **The lifetime probes hold a third view
+  alone, the live view.** On Linux it is `uordblks + hblkhd` of glibc's `mallinfo2(3)`, so it counts
+  the mmap blocks. On macOS it is the system view. On Linux it also counts the free blocks in the
+  thread cache of glibc. So it does not see the release of a small block while that cache has space:
+  `test/fort/heap_test.ft` measures what it sees. A block that every round keeps is never in that
+  cache, so the view moves by the kept bytes times the rounds between the samples. At b6676ced, 57
+  deletions of a release on the paths of the six probes ran one at a time under glibc 2.39 and 2.43.
+  The compiler refused one. The live view alone held red each of the 49 deletions that the largest
+  of the three views held red, in the same probes, and moved by 24032 bytes or more. The other 7
+  deletions left every view below `lifetime.BOUND`. 5 of them delete a release that a second call
+  makes again. 2 are the only releases of blocks that no probe round fills:
+  `syms_free(&g->declared)` and `del(ck->sized)`, so they have no witness.
+  `test/fort/support/lifetime.ft` names the 7 and says why for each. The break did not move for a
+  deleted `strbuf.free(&g->scratch)` or `strbuf.free(&g->globals)` under glibc 2.39 or 2.43, and the
+  live view moved by 24032 to 76848 bytes. With nothing deleted, the live view read 0 for each of
+  the six probes at three trees under both glibc versions. **The early sample must come after the
+  live view stops rising.** With nothing kept, the view rises in the first rounds by more than
+  `lifetime.BOUND`: the checked mode under glibc 2.43 rose by 4928 bytes, and its last move came at
+  round 698, 1302 rounds before its early sample at round 2000. The emitter mode under glibc 2.39
+  rose by up to 27312 bytes by round 10, and its early sample comes at round 400. A change that
+  makes the rise go on past the early sample fails a probe with nothing kept. The cause is read in
+  glibc and not measured: the first rounds fill the thread cache that the view counts. D9.8 excludes
+  a struct result from an `extern`. So `test/fort/support/heap.ft` declares `mallinfo2` with the
+  hidden result pointer of the x86-64 System V ABI.
   The address a round is handed catches a leak the allocator serves out of its own free chunks --
   a 64-byte vector -- and misses a large one, because a small probe block still comes back at the
   same address while the heap has grown: with `defer analysis_free` deleted in the driver the
@@ -448,12 +462,18 @@ bullet at a time and without a rewrite.
   `libc6_<version>_amd64.deb`, link `lib` and `lib64` to `usr/lib` and
   `usr/lib64`, and pass `--runner "qemu-x86_64-static -L <root>"` to `run_tests.py`. Running its
   loader directly moves the start of the break and made a probe red on the base tree too.
-  **A release that moves on the path of a lifetime probe can move the break under glibc 2.43.**
-  `gen.gen_main` freed its four argument lists at its exit, not after each call: the emitter probe
-  measured a system distance of 1896448 bytes and a live distance of 0 under glibc 2.43, and 0 under
-  2.39 and on macOS (PR 204). So before the hand-off of a change that moves a release on such a
-  path, run the six `driver_lifetime_*` probes under the glibc 2.43 runner above. A block around
-  each buffer keeps the release where it was.
+  **The break of a lifetime probe is no verdict under glibc 2.43, so the probes do not read it.**
+  With nothing kept, the break of the emitter mode changed between two values about 1.9 MB apart
+  from one round to the next: glibc gave the top of the heap back to the system after some rounds
+  and not after others. A change of the order or of the size of the allocations moved which value
+  the early round and the last sixteen rounds read. `gen.gen_main` freed its four argument lists
+  at its exit (PR 204), and bda63b82 added one `u64` field to `types.layout` (PR 208). The
+  emitter probe then measured a system distance of 1896448 and 1912832 bytes and a live distance
+  of 0 under glibc 2.43, and 0 under 2.39. In e0080544, 330 of the last 400 rounds read the high
+  value, so a later early sample does not help. Since then `test/fort/support/lifetime.ft` holds
+  the live view alone, and both trees pass under glibc 2.39 and 2.43. A probe that holds the break
+  or the address of a block can meet the same false failure. Where the live view is available,
+  hold it instead.
   On macOS the address of a buffer is no view of the heap: the allocator serves a block from a
   per-CPU magazine, so `heap.ADDRESS_IS_A_VIEW` in `test/fort/support/heap.ft` is false there,
   `fir_env.address_moved` answers 0, and each probe that samples an address asserts on it only
