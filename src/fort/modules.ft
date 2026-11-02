@@ -1485,37 +1485,38 @@ fn create() module_set {
 
 // Releases every module, its namespace and the shared arena; the set is empty
 // and usable afterwards. Every string it handed out dies here, the sources
-// excepted: those belong to the session that read them.
+// excepted: those belong to the session that read them. drop holds the releases,
+// and the move leaves the zero value, the empty set.
 fn free(module_set mut* set) void {
+    drop(move(*set));
+}
+
+// Frees a set that the caller moves in, in the order that free gives. Each field that holds a
+// chain moves into the drop of its type, or this function drains it: the set holds four chains,
+// and the leak rule proves a chain of a local only when no call follows the proof.
+fn drop(module_set mut set) void {
     // `del` is shallow. So each object moves out whole before its `del`, and its owners are
     // freed after it.
-    while (set->modules.last != null) {
-        module mut* own m = move(set->modules.last);
+    while (set.modules.last != null) {
+        module mut* own m = move(set.modules.last);
         module kept = move(*m);
         del(m);
-        set->modules.last = move(kept.made_before);
+        set.modules.last = move(kept.made_before);
         scope.drop(move(kept.names));
     }
-    del(set->modules.items);
-    set->modules.len = 0;
-    del(set->order.items);
-    set->order.len = 0;
-    del(set->stack.items);
-    set->stack.len = 0;
-    containers.str_free(&set->roots);
-    strmap.free(&set->by_path);
-    strmap.free(&set->by_real);
-    ast.ast_arena_free(&set->arena);
-    strbuf.free(&set->msg);
-    set->entry_dir = "";
-    set->std_dir = "";
-    set->cwd = "";
-    set->stopped = false;
-    while (set->used.last != null) {
-        used_library mut* own lib = move(set->used.last);
+    del(set.modules.items);
+    del(set.order.items);
+    del(set.stack.items);
+    del(set.roots.items);
+    del(set.by_path.entries);
+    del(set.by_real.entries);
+    ast.arena_drop(move(set.arena));
+    del(set.msg.data);
+    while (set.used.last != null) {
+        used_library mut* own lib = move(set.used.last);
         used_library kept = move(*lib);
         del(lib);
-        set->used.last = move(kept.made_before);
+        set.used.last = move(kept.made_before);
         del(kept.toks.items);
         del(kept.paths.items);
         del(kept.sections.entries);
@@ -1524,18 +1525,12 @@ fn free(module_set mut* set) void {
         del(kept.lines.items);
         del(kept.offsets.items);
     }
-    del(set->used.items);
-    set->used.len = 0;
-    set->outside = false;
-    del(set->outside_order.items);
-    set->outside_order.len = 0;
-    del(set->outside_listed.items);
-    set->outside_listed.len = 0;
-    set->library = "";
-    set->library_root = "";
-    strmap.free(&set->listed);
-    containers.str_free(&set->listed_files);
-    containers.pool_free(&set->pool);
+    del(set.used.items);
+    del(set.outside_order.items);
+    del(set.outside_listed.items);
+    del(set.listed.entries);
+    del(set.listed_files.items);
+    containers.pool_drop(move(set.pool));
 }
 
 /// Appends a `-I` search root.

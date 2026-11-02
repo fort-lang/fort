@@ -63,25 +63,24 @@ fn init(scope mut* s, scope_kind kind, scope mut* parent) void {
     s->parent = parent;
 }
 
-// Clears the bindings and index.
+// Clears the bindings and index. drop holds the releases; the scope keeps its kind and parent.
 fn free(scope mut* s) void {
+    scope kept = move(*s);
+    s->kind = kept.kind;
+    s->parent = kept.parent;
+    drop(move(kept));
+}
+
+// Frees a scope that the caller moves in: each binding, the bindings, then the index.
+fn drop(scope mut s) void {
     u64 mut i = 0;
-    while (i < s->len) {
-        binding mut* own b = move(s->items[i]);
+    while (i < s.len) {
+        binding mut* own b = move(s.items[i]);
         del(b);
         i += 1;
     }
-    del(s->items);
-    s->len = 0;
-    strmap.free(&s->index);
-}
-
-// Frees a scope that the caller moves in, as free does.
-fn drop(scope mut s) void {
-    free(&s);
-    // The leak rule reads no callee, so each owner takes a `del` after the call.
-    del(s.index.entries);
     del(s.items);
+    del(s.index.entries);
 }
 
 // Ensures room for one more binding, growing to the largest of ITEMS_MIN_CAP

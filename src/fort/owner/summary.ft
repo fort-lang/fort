@@ -225,19 +225,33 @@ struct graph {
 
 /// Releases the graph. The graph is empty and usable afterwards.
 fn free(graph mut* g) void {
-    containers.pool_free(&g->texts);
-    strmap.free(&g->index);
-    del(g->nodes.items);
-    g->nodes.len = 0;
-    del(g->calls.items);
-    g->calls.len = 0;
-    vec.int_free(&g->targets);
-    vec.int_free(&g->members);
-    del(g->components.items);
-    g->components.len = 0;
-    free_lines(&g->arena);
-    free_lines(&g->found);
-    free_lines(&g->merged);
+    drop(move(*g));
+}
+
+// Frees a graph that the caller moves in: the pool of the texts, the index, then each vector.
+fn drop(graph mut g) void {
+    containers.pool_drop(move(g.texts));
+    del(g.index.entries);
+    del(g.nodes.items);
+    del(g.calls.items);
+    del(g.targets.items);
+    del(g.members.items);
+    del(g.components.items);
+    del(g.arena.items);
+    del(g.found.items);
+    del(g.merged.items);
+}
+
+// An empty graph in an allocation of its own, for a function that lends the graph to calls.
+fn make() graph mut* own {
+    return new(graph);
+}
+
+// Ends a graph of make that the caller moves in.
+fn drop_made(graph mut* own p) void {
+    graph kept = move(*p);
+    del(p);
+    drop(move(kept));
 }
 
 fn push_node(node_vec mut* v, node n) void {
@@ -729,10 +743,27 @@ struct table {
 
 /// Releases the table. The table is empty and usable afterwards.
 fn free_table(table mut* t) void {
-    containers.pool_free(&t->texts);
-    containers.str_free(&t->symbols);
-    vec.int_free(&t->ends);
-    free_lines(&t->lines);
+    table_drop(move(*t));
+}
+
+// Frees a table that the caller moves in: the pool of the texts, then each vector.
+fn table_drop(table mut t) void {
+    containers.pool_drop(move(t.texts));
+    del(t.symbols.items);
+    del(t.ends.items);
+    del(t.lines.items);
+}
+
+// An empty table in an allocation of its own, for a function that lends the table to calls.
+fn table_make() table mut* own {
+    return new(table);
+}
+
+// Ends a table of table_make that the caller moves in.
+fn table_drop_made(table mut* own p) void {
+    table kept = move(*p);
+    del(p);
+    table_drop(move(kept));
 }
 
 /// The count of the entries.

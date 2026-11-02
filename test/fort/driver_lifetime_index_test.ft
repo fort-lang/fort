@@ -19,16 +19,17 @@ import std.strbuf;
 // index. At b6676ced the deletion of `defer del(doc.data)` moved the live view
 // by 31727168 bytes under glibc 2.39 and 2.43, and the deletion of
 // `defer del(files.items)` moved it by 131104 bytes or more. index.free
-// releases the record span, the type spelling pool and the spelling buffer.
-// The deferred block of driver.check_document releases each of the three
-// again after index.free. So the deletion of `index.free(&ix)`, or of one
-// release in index.free, keeps nothing and moved no probe.
+// released the record span, the type spelling pool and the spelling buffer,
+// and the deferred block of driver.check_document released each of the three
+// again, so the deletion of one release in index.free moved no probe. Now
+// driver.check_document holds its index in an allocation of index.make, and
+// `index.drop_made` reaches index.drop, which makes each of the three
+// releases once: the deletion of each turns this test red.
 //
 // The width was chosen to make two small releases visible: the file list and
 // the spelling buffer. Each record carries a long type spelling. At b6676ced
 // the deletion of the file list moved the live view by 131104 bytes or more.
-// The spelling buffer has no witness here: the deferred block releases it
-// again, so the deletion of `strbuf.free(&ix->msg)` moved no probe.
+// The deletion of `del(ix.msg.data)` from index.drop turns this test red.
 //
 // The width was 27 and not 40 for the system view, which does not see a block
 // that glibc serves by mmap. The driver.write_document buffer holds the
@@ -59,8 +60,8 @@ fn main() i32 {
 // long spelling also grows the spelling buffer.
 //
 // This test is the only witness of `defer del(doc.data)` in
-// driver.write_document and of `defer del(files.items)` in
-// driver.check_document.
+// driver.write_document, of `defer del(files.items)` in
+// driver.check_document, and of the three releases of index.drop.
 //
 // The width is what makes the file list visible. A file list of one name and
 // a buffer that holds one spelling are a few hundred bytes in each round. So

@@ -172,33 +172,27 @@ fn local_count(func* f) u32 {
 }
 
 /// Releases every vector of the function and leaves it empty.
+// func_drop holds the releases. The function keeps its symbol, its type and its table.
 fn func_free(func mut* f) void {
-    del(f->locals.items);
-    f->locals.len = 0;
-    del(f->projs.items);
-    f->projs.len = 0;
-    del(f->ops.items);
-    f->ops.len = 0;
-    del(f->arms.items);
-    f->arms.len = 0;
-    u64 mut i = 0;
-    while (i < f->blocks.len) {
-        del(f->blocks.items[i].statements.items);
-        f->blocks.items[i].statements.len = 0;
-        i += 1;
-    }
-    del(f->blocks.items);
-    f->blocks.len = 0;
+    func kept = move(*f);
+    f->sym = kept.sym;
+    f->ty = kept.ty;
+    f->tt = kept.tt;
+    func_drop(move(kept));
 }
 
-/// Frees the vectors of a function value that the caller moves in, as func_free does.
+/// Frees the vectors of a function value that the caller moves in: the locals, the projections,
+/// the operands, the arms, the statements of each block, then the blocks.
 fn func_drop(func mut f) void {
-    func_free(&f);
-    // The leak rule reads no callee, so each owner takes a `del` after the call.
     del(f.locals.items);
     del(f.projs.items);
     del(f.ops.items);
     del(f.arms.items);
+    u64 mut i = 0;
+    while (i < f.blocks.len) {
+        del(f.blocks.items[i].statements.items);
+        i += 1;
+    }
     del(f.blocks.items);
 }
 
@@ -2129,16 +2123,29 @@ fn module_extern_at(module* m, u64 i) ast.sym* {
 
 /// Releases every function of `m` and the three vectors, and leaves the module empty.
 fn module_free(module mut* m) void {
+    module_drop(move(*m));
+}
+
+// Frees a module that the caller moves in: each function, then the three vectors.
+fn module_drop(module mut m) void {
     u64 mut i = 0;
-    while (i < m->funcs.len) {
-        func_free(&m->funcs.items[i]);
+    while (i < m.funcs.len) {
+        func_drop(move(m.funcs.items[i]));
         i += 1;
     }
-    del(m->funcs.items);
-    m->funcs.len = 0;
-    del(m->globals.items);
-    m->globals.len = 0;
-    del(m->externs.items);
-    m->externs.len = 0;
-    m->main = null;
+    del(m.funcs.items);
+    del(m.globals.items);
+    del(m.externs.items);
+}
+
+// An empty module in an allocation of its own, for a function that lends the module to calls.
+fn module_make() module mut* own {
+    return new(module);
+}
+
+// Ends a module of module_make that the caller moves in.
+fn module_drop_made(module mut* own p) void {
+    module kept = move(*p);
+    del(p);
+    module_drop(move(kept));
 }

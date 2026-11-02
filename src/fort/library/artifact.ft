@@ -725,20 +725,25 @@ struct contents {
 
 /// Releases the contents. The value is empty and usable afterwards.
 fn free(contents mut* c) void {
-    c->fields = manifest{};
-    c->key = "";
-    strbuf.free(&c->text);
-    strbuf.free(&c->interface);
-    strbuf.free(&c->summaries);
-    summary.free_table(&c->ownership);
-    strbuf.free(&c->archive);
-    strbuf.free(&c->object);
-    containers.pool_free(&c->values);
-    containers.str_free(&c->cfg_keys);
-    containers.str_free(&c->cfg_values);
-    containers.str_free(&c->cc_args);
-    containers.str_free(&c->use_names);
-    containers.str_free(&c->use_hashes);
+    drop(move(*c));
+}
+
+// Frees the contents that the caller moves in. The ownership summaries and the decoded values
+// each hold a chain, so each moves into the drop of its type: the leak rule proves a chain of a
+// local only when no call follows the proof.
+fn drop(contents mut c) void {
+    del(c.text.data);
+    del(c.interface.data);
+    del(c.summaries.data);
+    summary.table_drop(move(c.ownership));
+    del(c.archive.data);
+    del(c.object.data);
+    containers.pool_drop(move(c.values));
+    del(c.cfg_keys.items);
+    del(c.cfg_values.items);
+    del(c.cc_args.items);
+    del(c.use_names.items);
+    del(c.use_hashes.items);
 }
 
 // The value of the hex digit `ch` in the form of a value, 0 to 15, or -1 for another byte: the

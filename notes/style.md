@@ -216,8 +216,10 @@ Words (the glossary: one word has one meaning in all of the compiler):
 
 12. `make` allocates and returns a value (not `create`; `new` is a keyword). `init` fills storage
     that the caller owns. `free` ends a value from `make` or `init` (not `destroy` or `deinit`).
-    `drop` ends a value or an allocation that the caller moves in. `find` searches and can fail (not
-    `lookup`, `locate` or `search`). `work` is the W amount (not `cost` or `price`); `charge` takes
+    `drop` ends a value or an allocation that the caller moves in. When one type has both,
+    `drop` ends the value and `drop_made` ends the allocation that `make` returns
+    (`session.drop`, `session.drop_made`). `find` searches and can fail (not `lookup`, `locate` or
+    `search`). `work` is the W amount (not `cost` or `price`); `charge` takes
     W (not `spend`). `release` is only the ownership term: the program gives up storage.
     (+) `index.free(ix)`. (-) `diag.create()`; use `diag.make()` (invented).
 13. Abbreviations come from a closed list: `ast`, `fir`, `llvm`, `lsp`, `rpc`, `json`, `uri`.

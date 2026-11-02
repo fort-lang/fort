@@ -283,13 +283,19 @@ fn runtime_function(check.checker* ck, string name) ast.sym* {
 
 /// Releases every vector of `it`.
 fn free(machine mut* it) void {
-    for (u64 mut i = 0; i < it->regions.len; i++) {
-        del(it->regions.items[i].bytes);
+    drop(move(*it));
+}
+
+// Frees a machine that the caller moves in: the bytes of each region, the lowered function and
+// the offsets of each routine, the frames, the four maps, the two buffers, the scratch and the
+// shadow state. No part of it reads the checker or the module that the machine points to.
+fn drop(machine mut it) void {
+    for (u64 mut i = 0; i < it.regions.len; i++) {
+        del(it.regions.items[i].bytes);
     }
-    del(it->regions.items);
-    it->regions.len = 0;
-    for (u64 mut i = 0; i < it->routines.len; i++) {
-        routine mut* r = &it->routines.items[i];
+    del(it.regions.items);
+    for (u64 mut i = 0; i < it.routines.len; i++) {
+        routine mut* r = &it.routines.items[i];
         if (r->lowered != null) {
             // `del` is shallow: the function moves out whole, and its vectors go after it.
             fir.func mut* own lowered = move(r->lowered);
@@ -299,18 +305,35 @@ fn free(machine mut* it) void {
         }
         del(r->offsets);
     }
-    del(it->routines.items);
-    it->routines.len = 0;
-    del(it->frames.items);
-    it->frames.len = 0;
-    free_map(&it->syms);
-    free_map(&it->globals);
-    free_map(&it->data);
-    free_map(&it->tables);
-    strbuf.free(&it->out);
-    strbuf.free(&it->err);
-    del(it->scratch);
-    shadow.free(&it->sh);
+    del(it.routines.items);
+    del(it.frames.items);
+    del(it.syms.keys);
+    del(it.syms.values);
+    del(it.globals.keys);
+    del(it.globals.values);
+    del(it.data.keys);
+    del(it.data.values);
+    del(it.tables.keys);
+    del(it.tables.values);
+    del(it.out.data);
+    del(it.err.data);
+    del(it.scratch);
+    shadow.drop(move(it.sh));
+}
+
+// A machine over the checker `ck` and the module `m`, in an allocation of its own, for a
+// function that lends the machine to calls (init gives the other arguments).
+fn make(check.checker mut* ck, fir.module* m, bool capture) machine mut* own {
+    machine mut* own it = new(machine);
+    init(it, ck, m, capture);
+    return it;
+}
+
+// Ends a machine of make that the caller moves in.
+fn drop_made(machine mut* own p) void {
+    machine kept = move(*p);
+    del(p);
+    drop(move(kept));
 }
 
 // ---- the end of a run -------------------------------------------------------------------------
@@ -409,12 +432,6 @@ fn put_key(map mut* x, u64 key, u64 value) void {
     x->keys[at] = key;
     x->values[at] = value;
     x->len += 1;
-}
-
-fn free_map(map mut* x) void {
-    del(x->keys);
-    del(x->values);
-    x->len = 0;
 }
 
 // ---- regions ----------------------------------------------------------------------------------

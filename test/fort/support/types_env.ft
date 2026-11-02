@@ -118,20 +118,40 @@ fn free(env mut* e) void {
     e->nnamed = 0;
 }
 
+// Releases an environment that the caller moves in, in the order of free.
+fn drop(env mut e) void {
+    del(e.buf.data);
+    types.table_drop(move(e.tt));
+}
+
+// An environment in an allocation of its own, for a function that lends it to calls. The nodes of
+// the environment point into its table.
+fn make() env mut* own {
+    env mut* own e = new(env);
+    init(e);
+    return e;
+}
+
+// Ends an environment of make that the caller moves in.
+fn drop_made(env mut* own p) void {
+    env kept = move(*p);
+    del(p);
+    drop(move(kept));
+}
+
 // Makes an environment, runs `body` on it, and releases it. `body` reaches the environment through
 // a pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
 fn run(fn (env mut*) void body) void {
-    env mut e = env{};
-    init(&e);
-    defer free(&e);
-    body(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    body(e);
 }
 
 // Makes a `types.table`, runs `body` on it, and releases it, for the reason of run.
 fn run_table(fn (types.table mut*) void body) void {
-    types.table mut tt = types.table{};
-    defer types.type_table_free(&tt);
-    body(&tt);
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
+    body(tt);
 }
 
 // `fn ret()`, `fn ret(p0)` and `fn ret(p0, p1)`, which the reader cannot

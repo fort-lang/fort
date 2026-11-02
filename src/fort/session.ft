@@ -31,6 +31,30 @@ fn free(session mut* s) void {
     containers.str_free(&s->config_values);
 }
 
+// Frees a session that the caller moves in, in the order of free. Each field moves into the drop
+// of its type: the sink and the store each hold a chain, and the leak rule proves a chain of a
+// local only when no call follows the proof.
+fn drop(session mut s) void {
+    diag.drop(move(s.diags));
+    diag.sources_drop(move(s.files));
+    del(s.config.entries);
+    del(s.config_values.items);
+}
+
+// An empty session in an allocation of its own, for a function that lends the session to calls.
+// The allocation does not move, so the sink can point into it (show_sources).
+fn make() session mut* own {
+    return new(session);
+}
+
+// Ends a session of make that the caller moves in. The value moves out before the `del` of the
+// allocation, and drop frees it: no part of the drop reads the context of the sink.
+fn drop_made(session mut* own p) void {
+    session kept = move(*p);
+    del(p);
+    drop(move(kept));
+}
+
 // Adds one configuration pair. Panics when the key already exists.
 fn config_set(session mut* s, string key, string value) void {
     if (strmap.has(&s->config, key)) {

@@ -190,9 +190,9 @@ fn dataflow_new(u32 count, join_kind join, fn (fir.func*, u32, bits mut*) void t
     return d;
 }
 
-/// A dataflow as dataflow_new makes it, in an allocation that dataflow_drop frees. A function that
-/// holds two dataflows to its end holds them so, because the leak rule reads no callee: a call
-/// that frees the one would come after the `del` of each owner of the other.
+/// A dataflow as dataflow_new makes it, in an allocation that dataflow_drop_made frees. A function
+/// that holds two dataflows to its end holds them so, because the leak rule reads no callee: a
+/// call that frees the one would come after the `del` of each owner of the other.
 fn dataflow_make(u32 count, join_kind join, fn (fir.func*, u32, bits mut*) void transfer)
     dataflow mut* own {
     dataflow mut* own d = new(dataflow);
@@ -201,14 +201,24 @@ fn dataflow_make(u32 count, join_kind join, fn (fir.func*, u32, bits mut*) void 
 }
 
 /// Frees a dataflow that dataflow_make made, and its allocation.
-fn dataflow_drop(dataflow mut* own d) void {
-    dataflow_free(d);
-    // The leak rule reads no callee, so each owner takes a `del` after the call.
-    del(d->entry.words);
-    del(d->init.words);
-    del(d->ins);
-    del(d->outs);
-    del(d);
+fn dataflow_drop_made(dataflow mut* own p) void {
+    dataflow kept = move(*p);
+    del(p);
+    dataflow_drop(move(kept));
+}
+
+// Frees a dataflow that the caller moves in: the sets of each block, then `entry` and `init`.
+fn dataflow_drop(dataflow mut d) void {
+    u64 mut b = 0;
+    while (b < d.ins.len) {
+        bits_free(&d.ins[b]);
+        bits_free(&d.outs[b]);
+        b += 1;
+    }
+    del(d.ins);
+    del(d.outs);
+    del(d.entry.words);
+    del(d.init.words);
 }
 
 // Releases the sets of each block that dataflow_forward wrote.
@@ -223,10 +233,15 @@ fn results_free(dataflow mut* d) void {
     del(d->outs);
 }
 
+// dataflow_drop holds the releases. The dataflow keeps its count, its join, its transfer and its
+// steps.
 fn dataflow_free(dataflow mut* d) void {
-    results_free(d);
-    bits_free(&d->entry);
-    bits_free(&d->init);
+    dataflow kept = move(*d);
+    d->count = kept.count;
+    d->join = kept.join;
+    d->transfer = kept.transfer;
+    d->steps = kept.steps;
+    dataflow_drop(move(kept));
 }
 
 /// The entry of `edge_to` of dataflow_forward_edges for a block whose edge set reaches no block.
