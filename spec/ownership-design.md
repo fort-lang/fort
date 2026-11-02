@@ -491,18 +491,24 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   storage that fort code gave to C (an argument, a callback result, or a value that fort code
   stored where C reads it). The whole pointee of its type, from the byte that it names, lies
   inside that storage, the address is aligned for the pointee (D3.1), and the pointer marks no
-  `mut` that the pointer of fort code lacked. So `extern fn memchr(void* s, i32 c, u64 n) i64*`
-  breaks A7 for a search of one byte. C reads and writes only the storage that its arguments name,
-  as the contract of the C function says: a C string ends in a NUL inside its storage, and a length
-  fits its buffer. C writes a pointer place of a struct only where the contract of the C function
-  writes it, as `recvmsg` writes the fields of its `struct msghdr`. C writes only a level that the
-  type of its parameter marks `mut`: with
+  `mut` that the pointer of fort code lacked. So `extern fn memchr(i64* s, i32 c, u64 n) i64*`
+  breaks A7 when C finds a byte of `*s` other than the first: the address is then not aligned for
+  an `i64`, and when `*s` is the last element of its storage, the pointee passes its end. D17.13
+  refuses the form with a `void* s`. C reads and writes only the storage that its arguments
+  name, as the contract of the C function says: a C string ends in a NUL inside its storage, and
+  a length fits its buffer. C writes a pointer place of a struct only where the contract of the C
+  function writes it, as `recvmsg` writes the fields of its `struct msghdr`. C writes only a level
+  that the type of its parameter marks `mut`: with
   `strtod(char* s, void* end)`, C writes `*end`, and the declaration breaks A7. The user ruled this
   growth with "(A) Close R1-R7" (2026-10-31), and the coordinator ratified the out-parameter and
   the alignment on 2026-11-01. D17.13 gives its compile-time part for `mut`: a pointer type that
   C gives, a result, a parameter of a callback or a pointer that a `mut` level of a parameter holds,
   marks `mut` only where it says `own`, where a parameter of the same type marks the level, or
   where the extern has no parameter that can carry a pointer (`...` and a function pointer count).
+  It gives its compile-time part for the type of a result too: a typed pointer result points to
+  the pointee of each parameter that can carry a pointer, or comes from an extern with no such
+  parameter. A `void*` result gives no type. A type that C stores in a level of a parameter or in
+  a field of a struct, and a type that C gives to a callback, have only A7.
   D10.7 names an extern declaration or C code that breaks A7 as outside its guarantee. A7 also asks
   that a function pointer that C gives to fort code names a function of its type. No cast gives a
   function pointer another type, as an argument of an `extern fn` too (D3.14), so fort gives C no
@@ -523,10 +529,11 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   source calls `rt.args_init`. The `.ptr` of a span is legal only where no fort code loads or
   stores through it (D3.5). A pointer type that C gives marks `mut` only where it says `own`,
   where a parameter of the same type marks the level, or where the extern has no parameter that
-  can carry a pointer (D17.13). With A7 for C, a pointer that fort code holds is `null`, a value
-  that derives from an address and keeps its whole pointee inside the object of that address, or
-  a dangling pointer. So A8 holds for each program that compiles, in a build without
-  `--no-bounds-check`, and keeps A1 and A7, for a `del` too.
+  can carry a pointer, and a typed pointer result points to the pointee of each parameter that can
+  carry a pointer, or comes from an extern with no such parameter (D17.13). With A7 for C, a
+  pointer that fort code holds is `null`, a value that derives from an address and keeps its whole
+  pointee inside the object of that address, or a dangling pointer. So A8 holds for each program
+  that compiles, in a build without `--no-bounds-check`, and keeps A1 and A7, for a `del` too.
   Rules (b) and (e) of V1 need A8 for such a read. Without A8 the
   read can name a local that is not memory, and it is then no use (5.5 rule (b)) and no borrow
   (lemma (ii)). Refinement R6 needs A8 for each local (section 7). Rules (a) and (c), and kill rule

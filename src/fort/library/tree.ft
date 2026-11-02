@@ -144,24 +144,20 @@ fn add(tree mut* t, string prefix, string base, string file) void {
     containers.str_push(&t->files, containers.pool_intern(&t->pool, file));
 }
 
-// The next entry of the directory stream `stream`, or null at the end or after an error. errno is
-// 0 before the call, so it is 0 after it at the end and the error number after an error.
-fn next_entry(void mut* stream) libc.dirent* {
-    *libc.errno_slot() = 0;
-    return libc.readdir(stream);
-}
-
 // Reads each entry of the directory stream `stream` of `dir`, and adds the name of each module file
 // to `files` and the name of each subdirectory that can hold modules to `dirs`, interned in
 // `scratch`. `b` is the scratch buffer of the paths. The caller keeps the four, so they are no
-// local owners here.
+// local owners here. Returns 0 at the end of the stream, and the error number that readdir_r(3)
+// gives after an error.
 fn list_entries(void mut* stream, string dir, strbuf.str_buf mut* b, containers.pool mut* scratch,
-                containers.str_vec mut* dirs, containers.str_vec mut* files) void {
-    libc.dirent* mut e = next_entry(stream);
-    while (e != null) {
-        string name = str.from_cstr(&e->name[0]);
+                containers.str_vec mut* dirs, containers.str_vec mut* files) i32 {
+    libc.dirent mut entry = {};
+    libc.dirent* mut got = null;
+    i32 mut failure = libc.readdir_r(stream, &entry, &got);
+    while (failure == 0 && got != null) {
+        string name = str.from_cstr(&entry.name[0]);
         if (name != "." && name != "..") {
-            u8 kind = kind_of(join(b, dir, name), e->kind);
+            u8 kind = kind_of(join(b, dir, name), entry.kind);
             if (kind == libc.DT_DIR && is_segment(name)) {
                 containers.str_push(dirs, containers.pool_intern(scratch, name));
             } else if (kind == libc.DT_REG && name.len > MODULE_SUFFIX.len
@@ -170,8 +166,9 @@ fn list_entries(void mut* stream, string dir, strbuf.str_buf mut* b, containers.
                 containers.str_push(files, containers.pool_intern(scratch, name));
             }
         }
-        e = next_entry(stream);
+        failure = libc.readdir_r(stream, &entry, &got);
     }
+    return failure;
 }
 
 // Lists the modules below the directory `dir`, whose module-path prefix is `prefix`. Returns false
@@ -184,7 +181,7 @@ fn walk_dir(tree mut* t, string dir, string prefix, i32 mut* error) bool {
         *error = sys.errno();
         return false;
     }
-    // The names are copied out of each entry, because the next readdir(3) can reuse its storage.
+    // The names are copied out of each entry, because the next readdir_r(3) writes the same entry.
     containers.str_vec mut dirs = containers.str_create();
     defer del(dirs.items);
     containers.str_vec mut files = containers.str_create();
@@ -199,9 +196,7 @@ fn walk_dir(tree mut* t, string dir, string prefix, i32 mut* error) bool {
             containers.pool_free(&scratch);
         }
     }
-    list_entries(stream, dir, &b, &scratch, &dirs, &files);
-    // readdir(3) gives null at the end and on an error, and only an error sets errno
-    i32 failure = sys.errno();
+    i32 failure = list_entries(stream, dir, &b, &scratch, &dirs, &files);
     libc.closedir(move(stream));
     if (failure != 0) {
         *error = failure;

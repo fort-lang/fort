@@ -277,8 +277,10 @@ fn the_main_symbol_is_reserved() void {
 // can carry a pointer, is the error: the result first, then the parameters in order. The `own`
 // of the outermost reference alone exempts a type, so `o1` is refused. A pointer parameter after
 // a scalar carries a pointer (`f`), and the first parameter of a callback that is refused is the
-// error, whatever the later ones are (`g`).
-u64 REFUSED_LEN = 88;
+// error, whatever the later ones are (`g`). The rule of the `mut` reads the result before the rule
+// of the result type does: `find` gives a type that no parameter has, and `get` a function pointer
+// type that no parameter has, and each reports its `mut`.
+u64 REFUSED_LEN = 96;
 
 string[REFUSED_LEN] REFUSED = {
     "extern fn strchr(char* s, i32 c) char mut*;",
@@ -325,6 +327,88 @@ string[REFUSED_LEN] REFUSED = {
     "1:29", "f", "char mut*",
     "extern fn g(u64* p, fn (u64 mut*, u64) void cb) void;",
     "1:21", "g", "u64 mut*",
+    "extern fn find(char* s, i32 c) u8 mut*;",
+    "1:32", "find", "u8 mut*",
+    "extern fn get(void* p) fn (char*) char mut*;",
+    "1:24", "get", "char mut*",
+};
+
+// The declarations that the rule of the result type refuses, four strings each, as above
+// (D17.13). C can give back each argument that can carry a pointer, so a typed pointer result,
+// `own` or not, needs each such parameter to point to its pointee. A `void*` with any marks
+// (`memchr`, `peek`, `readdir`, `owned`, `make`, `strncpy`), the variable tail (`pick`, `tail`,
+// `tail_own`) and a function pointer (`call`, `bsearch`) point to no type, and a parameter of the
+// result type beside them does not help (`strncpy`, `tail`, `bsearch`). A pointer to another type
+// makes the pointee larger (`widen`, `widen2`), adds a pointer place (`as_slot`, `slot2`) or
+// gives another type (`new_node`, `o4`, `gmtime_r`); `char` and `u8` differ (`bytes`); the
+// pointee is the type that level 1 of the parameter holds (`deref`, `slot_of`). A function
+// pointer result needs its type in each such parameter (`as_fn`, `swap_fn`, `fn_tail`,
+// `fn_data`). A function pointer type that C gives meets the rule for its own result, at the
+// result (`get_memchr`) or at the parameter that names it (`enroll`, `hand`). The result comes
+// before the parameters (`first`).
+u64 REFUSED_TYPE_LEN = 120;
+
+string[REFUSED_TYPE_LEN] REFUSED_TYPE = {
+    "extern fn memchr(void* s, i32 c, u64 n) i64*;",
+    "1:41", "memchr", "i64*",
+    "extern fn peek(void mut* p) u64*;",
+    "1:29", "peek", "u64*",
+    "extern fn readdir(void mut* dir) u64*;",
+    "1:34", "readdir", "u64*",
+    "extern fn owned(void* s, i32 c, u64 n) i64* own;",
+    "1:40", "owned", "i64* own",
+    "extern fn make(void* p) u64* own;",
+    "1:25", "make", "u64* own",
+    "extern fn strncpy(void mut* dst, i64* src, u64 n) i64*;",
+    "1:51", "strncpy", "i64*",
+    "extern fn widen(i32* p) i64*;",
+    "1:25", "widen", "i64*",
+    "extern fn widen2(i32 mut* dst, i64* src, u64 n) i64*;",
+    "1:49", "widen2", "i64*",
+    "extern fn as_slot(u64* p) u64**;",
+    "1:27", "as_slot", "u64**",
+    "extern fn slot2(u64 mut* dst, u64** src, u64 n) u64**;",
+    "1:49", "slot2", "u64**",
+    "extern fn new_node(char* name) u64* own;",
+    "1:32", "new_node", "u64* own",
+    "extern fn o4(char* s) char mut* mut* own;",
+    "1:23", "o4", "char mut* mut* own",
+    "extern fn gmtime_r(i64* t, u64 mut* out) u64 mut*;",
+    "1:42", "gmtime_r", "u64 mut*",
+    "extern fn bytes(u8* s, u64 n) char*;",
+    "1:31", "bytes", "char*",
+    "extern fn deref(char** s) char*;",
+    "1:27", "deref", "char*",
+    "extern fn slot_of(char* s) char* own*;",
+    "1:28", "slot_of", "char* own*",
+    "extern fn pick(i32 n, ...) u64*;",
+    "1:28", "pick", "u64*",
+    "extern fn tail(i64* p, ...) i64*;",
+    "1:29", "tail", "i64*",
+    "extern fn tail_own(i64* p, ...) i64* own;",
+    "1:33", "tail_own", "i64* own",
+    "extern fn later(i32 n, void* s) u64*;",
+    "1:33", "later", "u64*",
+    "extern fn call(fn () u64* g) u64*;",
+    "1:30", "call", "u64*",
+    "extern fn bsearch(u64* k, u64* base, u64 n, u64 s, fn (u64*, u64*) i32 cmp) u64*;",
+    "1:77", "bsearch", "u64*",
+    "extern fn as_fn(void* p) fn (u64) void;",
+    "1:26", "as_fn", "fn (u64) void",
+    "extern fn swap_fn(fn (u64) void f) fn (u64*) void;",
+    "1:36", "swap_fn", "fn (u64*) void",
+    "extern fn fn_tail(i32 n, ...) fn () void;",
+    "1:31", "fn_tail", "fn () void",
+    "extern fn fn_data(fn () void f, u64* p) fn () void;",
+    "1:41", "fn_data", "fn () void",
+    "extern fn get_memchr() fn (void*, i32, u64) i64*;",
+    "1:24", "get_memchr", "i64*",
+    "extern fn enroll(void* p, fn (fn (void*) i64*) void cb) void;",
+    "1:27", "enroll", "i64*",
+    "extern fn hand(void* p, (fn (void*) i64*) mut* out) void;",
+    "1:25", "hand", "i64*",
+    "extern fn first(char* s, u64 mut* mut* out) u64*;",
+    "1:45", "first", "u64*",
 };
 
 // Declarations that the rule takes: a result with no `mut`, a parameter of the type of the result,
@@ -332,8 +416,14 @@ string[REFUSED_LEN] REFUSED = {
 // pointer with no `mut` or an `own` one or a type that a parameter has, a callback whose parameter
 // types a parameter has or that mark nothing, a level that the parameter does not mark `mut`, a
 // struct that C writes, a function pointer type that C gives whose own result follows the rule,
-// and a type whose outermost reference says `own` (`o3`), whatever its deeper levels mark.
-u64 TAKEN_LEN = 23;
+// and a type whose outermost reference says `own` (`o3`), whatever its deeper levels mark. A
+// `void*` result gives no type (`memchr`, `erase`, `dlsym`, `gmtime_r`, `bsearch`, `as_void`). A
+// typed pointer result points to the pointee of each parameter that can carry a pointer, with the
+// marks aside (`strchr`, `make_temp`, `keep_own`, `chain`, `strdup`, `two`, `realpath`, `o3`), or
+// comes from an extern with no such parameter (`errno_slot`, `give`, `strerror`, `alloc`,
+// `get_cmp`). A function pointer result has the type of each such parameter (`signal`,
+// `give_fn`).
+u64 TAKEN_LEN = 41;
 
 string[TAKEN_LEN] TAKEN = {
     "extern fn strchr(char* s, i32 c) char*;",
@@ -348,30 +438,61 @@ string[TAKEN_LEN] TAKEN = {
     "extern fn keep(char mut* mut* slot, char mut* s) void;",
     "extern fn walk(u64 mut* p, fn (u64 mut*) void cb) void;",
     "extern fn sort_ints(i32 mut* base, u64 n, u64 size, fn (i32*, i32*) i32 cmp) void;",
-    "extern fn gmtime_r(i64* t, u64 mut* out) u64 mut*;",
+    "extern fn gmtime_r(i64* t, u64 mut* out) void*;",
     "extern fn level_two(char* s, char* mut** out) void;",
     "extern fn peek(char mut** p) void;",
     "struct hdr {\n    void mut* name;\n}\nextern fn recv(i32 fd, hdr mut* h) i64;",
     "extern fn get_cmp() fn (i32*, i32*) i32;",
     "extern fn get_dup() fn (char mut*) char mut*;",
     "extern fn get_fn() fn () u64 mut*;",
-    "extern fn o3(char* s) char mut* mut* own;",
+    "extern fn o3(char mut** s) char mut* mut* own;",
     "extern fn swap_chain(char mut** s) char mut**;",
     "extern fn printf(char* fmt, ...) i32;",
-    "extern fn readdir(void mut* dir) u64*;",
+    "extern fn memchr(void* s, i32 c, u64 n) void*;",
+    "extern fn signal(i32 sig, fn (i32) void handler) fn (i32) void;",
+    "extern fn mkdtemp(char mut* tmpl) char mut*;",
+    "extern fn strerror(i32 code) char*;",
+    "extern fn alloc(u64 n) u64* own;",
+    "extern fn realpath(char* path, char mut* resolved) char*;",
+    "extern fn get_memchr() fn (void*, i32, u64) void*;",
+    "extern fn bsearch(u64* k, u64* base, u64 n, u64 s, fn (u64*, u64*) i32 cmp) void*;",
+    "extern fn erase(u64* p) void*;",
+    "extern fn dlsym(void mut* handle, char* name) void*;",
+    "extern fn make_temp(char mut* tmpl) char*;",
+    "extern fn keep_own(char* own p) char*;",
+    "extern fn chain(char mut** s) char**;",
+    "extern fn strchr(char mut* s, i32 c) char*;",
+    "extern fn strdup(char* s) char mut* own;",
+    "extern fn two(char* a, char mut* b) char*;",
+    "extern fn give_fn(fn (u64) void f, i32 n) fn (u64) void;",
+    "extern fn as_void(void mut* p) void mut*;",
+    "struct de {\n    u64 ino;\n}\nextern fn readdir_r(void mut* d, de mut* e, de* mut* r) i32;",
 };
+
+// The end of the error text of the rule of the `mut` and of the rule of the result type.
+string MUT_TAIL = "' with a 'mut' that no parameter of that type has";
+string TYPE_TAIL = "', but a parameter can carry a pointer of another type";
 
 fn each_declaration_that_gives_a_mut_no_argument_had_is_one_error() void {
     u64 mut k = 0;
     while (k < REFUSED.len) {
-        refused_at(REFUSED[k], REFUSED[k + 1], REFUSED[k + 2], REFUSED[k + 3]);
+        refused_at(REFUSED[k], REFUSED[k + 1], REFUSED[k + 2], REFUSED[k + 3], MUT_TAIL);
         k += 4;
     }
 }
 
-// Checks the one declaration `decl` and holds that the rule refuses it with one error at `at`, and
-// that the error names the extern `name` and the type `given`.
-fn refused_at(string decl, string at, string name, string given) void {
+fn each_result_whose_type_no_parameter_has_is_one_error() void {
+    u64 mut k = 0;
+    while (k < REFUSED_TYPE.len) {
+        refused_at(REFUSED_TYPE[k], REFUSED_TYPE[k + 1], REFUSED_TYPE[k + 2], REFUSED_TYPE[k + 3],
+                   TYPE_TAIL);
+        k += 4;
+    }
+}
+
+// Checks the one declaration `decl` and holds that a rule refuses it with one error at `at`, and
+// that the error names the extern `name` and the type `given`, and ends in `tail`.
+fn refused_at(string decl, string at, string name, string given, string tail) void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
@@ -386,7 +507,7 @@ fn refused_at(string decl, string at, string name, string given) void {
     strbuf.append(&text, name);
     strbuf.append(&text, "': C gives '");
     strbuf.append(&text, given);
-    strbuf.append(&text, "' with a 'mut' that no parameter of that type has");
+    strbuf.append(&text, tail);
     if (check_env.errors(&e) != 1 || check_env.report_text(&e, 0) != strbuf.view(&text)) {
         eprintln(decl, " gives ", check_env.report_text(&e, 0));
         panic("check_extern_test: the rule of D17.13 gives another report");
@@ -502,6 +623,7 @@ fn main() i32 {
     a_c_name_other_than_main_is_an_ordinary_extern_declaration();
     the_main_symbol_is_reserved();
     each_declaration_that_gives_a_mut_no_argument_had_is_one_error();
+    each_result_whose_type_no_parameter_has_is_one_error();
     each_declaration_that_gives_no_new_mut_is_taken();
     check_env.run(a_refused_declaration_fails_its_symbol_and_its_calls_report_nothing);
     check_env.run(a_held_back_extern_meets_the_rule_at_its_declaration);

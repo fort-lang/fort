@@ -78,9 +78,13 @@ extern fn realpath(char* path, char mut* resolved) char*;
 
 // <dirent.h>: a directory stream is an allocation of C that closedir(3) frees, so the stream
 // that opendir(3) and fdopendir(3) give says `own`, and closedir takes it with `move`. `dirent`
-// is the x86-64 glibc layout of `struct dirent`. Only `kind` and `name` are read. readdir(3)
-// gives a `dirent*` with no `mut`, a view of storage of C that the next readdir of the stream can
-// change, and null at the end of the stream and on an error (D17.13).
+// is the x86-64 glibc layout of `struct dirent`. Only `kind` and `name` are read. readdir_r(3)
+// writes the next entry of the stream into `*entry`, stores `entry` into `*result`, or null at the
+// end of the stream, and gives 0; after an error it gives the error number. glibc skips a name
+// longer than 255 bytes and then gives ENAMETOOLONG at the end of the stream, so a caller reports
+// such a directory as an error. readdir(3) gives storage of C as a `dirent*`, and the stream is a
+// `void mut*`, so D17.13 refuses its result, `own` or not. A declaration that gives the stream the
+// type `dirent*` breaks A7, and fort defines no more for it (D10.7).
 struct dirent {
     u64 ino;
     i64 off;
@@ -89,7 +93,7 @@ struct dirent {
     char[256] name;
 }
 extern fn opendir(char* path) void mut* own;
-extern fn readdir(void mut* dir) dirent*;
+extern fn readdir_r(void mut* dir, dirent mut* entry, dirent* mut* result) i32;
 extern fn closedir(void mut* own dir) i32;
 
 // The `kind` values of a directory entry. A file system that does not record the kind gives
@@ -112,13 +116,14 @@ i32 EEXIST = 17;
 i32 R_OK = 4;
 
 // <string.h>, <stdlib.h>: the error text of an errno value, the C float parsers, a
-// temporary directory (mkdtemp replaces the six X of its argument in place), and
-// the environment of the process. A float parser stores a `char*` into `*end`, so `end`
-// marks that level `mut` and the `char*` it holds marks none (D17.13).
+// temporary directory (mkdtemp replaces the six X of its argument in place and gives back that
+// argument, so its result has the type of the argument), and the environment of the process. A
+// float parser stores a `char*` into `*end`, so `end` marks that level `mut` and the `char*` it
+// holds marks none (D17.13).
 extern fn strerror(i32 code) char*;
 extern fn strtod(char* s, char* mut* end) f64;
 extern fn strtof(char* s, char* mut* end) f32;
-extern fn mkdtemp(char mut* tmpl) char*;
+extern fn mkdtemp(char mut* tmpl) char mut*;
 extern fn setenv(char* name, char* value, i32 overwrite) i32;
 extern fn unsetenv(char* name) i32;
 

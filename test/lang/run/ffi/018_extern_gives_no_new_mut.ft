@@ -2,16 +2,16 @@
 //! stdout:
 //| bc
 //| 42 2
-//| 1970 2
 //| true 1970 2
 //| true
 // The declarations of C functions that the rule of the pointers that C gives takes (D17.13). A
 // result with no `mut` reads storage that fort code lent: `strchr` gives a `char*`. An
-// out-parameter drops the `mut` of the level that it holds: `strtol` stores a `char*`. A result
-// that fort code only reads drops its `mut`: `gmtime` gives a `tm*`. A result of the type of a
-// parameter gives back that parameter: `gmtime_r` gives the `tm mut*` that it fills. A C object
-// that one function opens and another closes is an allocation of C: `fopen` gives it with `own`,
-// and `fclose` takes it with `move`. Each function is in the C library of Linux and of Darwin.
+// out-parameter drops the `mut` of the level that it holds: `strtol` stores a `char*`. `gmtime_r`
+// fills the `tm` that `out` names and gives back `out`. Its `i64* t` points to no `tm`, so its
+// result is a `void*`, which gives no type, and fort code reads `out` (fail/ffi/014 holds a typed
+// result of `gmtime_r`). A C object that one function opens and another closes is an allocation of
+// C: `fopen` gives it with `own`, and `fclose` takes it with `move`. Each function is in the C
+// library of Linux and of Darwin.
 import std.str;
 
 // struct tm of glibc on x86-64 and of Darwin on arm64: nine `int`, a `long` and a `char*`.
@@ -31,8 +31,7 @@ struct tm {
 
 extern fn strchr(char* s, i32 c) char*;
 extern fn strtol(char* nptr, char* mut* endptr, i32 base) i64;
-extern fn gmtime(i64* t) tm*;
-extern fn gmtime_r(i64* t, tm mut* out) tm mut*;
+extern fn gmtime_r(i64* t, tm mut* out) void*;
 extern fn fopen(char* path, char* mode) void mut* own;
 extern fn fclose(void mut* own f) i32;
 
@@ -48,12 +47,9 @@ fn main() i32 {
 
     // one day after the epoch, in UTC
     i64 day = 86400;
-    tm* shared = gmtime(&day);
-    println(shared->year + 1900, " ", shared->mday);
     tm mut out = {};
-    tm mut* back = gmtime_r(&day, &out);
-    back->isdst = 0;
-    println(back == &out, " ", out.year + 1900, " ", out.mday);
+    void* back = gmtime_r(&day, &out);
+    println(cast(back, u64) == cast(&out, u64), " ", out.year + 1900, " ", out.mday);
 
     char mut@ own path = str.to_cstr("/dev/null");
     defer del(path);

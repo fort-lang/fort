@@ -7,6 +7,7 @@
 /// Checks the walk of a library root in src/fort/library/tree.ft (D9.11, module-system.md 10.1):
 /// which files are modules, the module path of each, the byte order of the list, and the root
 /// that cannot be read.
+import fort.containers;
 import fort.library.tree;
 import modules_env;
 import std.libc;
@@ -285,8 +286,8 @@ fn a_file_without_read_permission_is_no_directory() void {
     assert(!directory && kind == libc.DT_REG);
 }
 
-// An errno that an earlier call left does not fail the walk: next_entry clears it before each
-// readdir(3), so only an error of the walk itself counts.
+// An errno that an earlier call left does not fail the walk: readdir_r(3) gives its error number
+// as its result, and the walk reads no errno.
 fn an_old_errno_does_not_fail_the_walk() void {
     modules_env.env mut e = modules_env.open();
     defer modules_env.close(&e);
@@ -298,6 +299,36 @@ fn an_old_errno_does_not_fail_the_walk() void {
     i32 mut failure = 0;
     assert(walk(&e, "geom", "lib/geom", &t, &failure));
     assert(failure == 0 && tree.count(&t) == 2);
+}
+
+// The descriptor of a directory stream (dirent.h), in the C library of Linux and of Darwin.
+extern fn dirfd(void mut* dir) i32;
+
+// The errno value of a closed descriptor, 9 on Linux and on Darwin.
+i32 EBADF = 9;
+
+// readdir_r(3) gives an error as its result, and list_entries gives it back to the walk: a stream
+// whose descriptor is closed gives EBADF on glibc and on Darwin, and the lists stay empty.
+fn a_read_error_of_the_stream_is_the_failure_of_the_list() void {
+    void mut* own d = libc.opendir("/".ptr);
+    assert(d != null);
+    assert(libc.close(dirfd(d)) == 0);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    containers.pool mut scratch = containers.pool_create();
+    defer {
+        while (scratch.head != null) {
+            containers.pool_free(&scratch);
+        }
+    }
+    containers.str_vec mut dirs = containers.str_create();
+    defer del(dirs.items);
+    containers.str_vec mut files = containers.str_create();
+    defer del(files.items);
+    i32 failure = tree.list_entries(d, "/", &b, &scratch, &dirs, &files);
+    libc.closedir(move(d));
+    assert(failure == EBADF);
+    assert(dirs.len == 0 && files.len == 0);
 }
 
 fn main() i32 {
@@ -315,6 +346,7 @@ fn main() i32 {
     a_list_is_empty_after_free_and_can_be_walked_again();
     a_file_without_read_permission_is_no_directory();
     an_old_errno_does_not_fail_the_walk();
+    a_read_error_of_the_stream_is_the_failure_of_the_list();
     println("walk ok");
     println("ok");
     return 0;
