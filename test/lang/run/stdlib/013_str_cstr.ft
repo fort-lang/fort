@@ -5,13 +5,15 @@
 //| 3 abc
 //| 0 true true true
 //| 0 true
-//| 6
+//| 6 6
 import std.libc;
 import std.str;
 
 // str.to_cstr is the one sanctioned way to hand a string to C (D13.4): an
 // owned char span of length s.len + 1 whose .ptr is the C string, and
 // str.from_cstr wraps a C string back without copying (stdlib.md 2.5).
+// str.from_cbuf wraps the C string in a buffer and reads no byte past the
+// buffer; from_cstr takes no .ptr (D3.5).
 fn main() i32 {
     char mut@ own path = str.to_cstr("path");
     defer del(path);
@@ -25,7 +27,7 @@ fn main() i32 {
     // An embedded NUL means C sees the prefix while fort still sees the whole.
     char mut@ own cut = str.to_cstr("abc\x00de");
     defer del(cut);
-    println(libc.strlen(cut.ptr), " ", str.from_cstr(cut.ptr));
+    println(libc.strlen(cut.ptr), " ", str.from_cbuf(cast(cut[..], u8@)));
 
     // from_cstr(null) is the zero string, not "": both have length 0 and D3.7
     // makes them ==, but a literal's .ptr is never null, so only the null .ptr
@@ -36,18 +38,19 @@ fn main() i32 {
     // The wrap of an empty C string is empty too, but its .ptr is the C one.
     char mut@ own nothing = str.to_cstr("");
     defer del(nothing);
-    string wrapped_empty = str.from_cstr(nothing.ptr);
+    string wrapped_empty = str.from_cbuf(cast(nothing[..], u8@));
     // .ptr of a string is char* and of a char mut@ is char mut*, and the
     // operands of == must be of identical type, mutability levels included:
     // the implicit drop of D5.4 reaches initialization, assignment, argument
-    // passing and return, but not a comparison (D6.2). So the writable one is
-    // cast down.
-    println(wrapped_empty.len, " ", wrapped_empty.ptr == cast(nothing.ptr, char*));
+    // passing and return, but not a comparison (D6.2). No cast takes a .ptr
+    // (D3.5), so the span is cast to a string first.
+    println(wrapped_empty.len, " ", wrapped_empty.ptr == cast(nothing, string).ptr);
 
-    // The wrap is a view: it aliases the bytes rather than copying them.
+    // The wrap is a view: it aliases the bytes rather than copying them. The
+    // address of the first element goes to from_cstr, which reads to the NUL.
     char mut@ own text = str.to_cstr("abcdef");
     defer del(text);
-    string wrapped = str.from_cstr(text.ptr);
-    println(wrapped.len);
+    string wrapped = str.from_cbuf(cast(text[..], u8@));
+    println(wrapped.len, " ", str.from_cstr(&text[0]).len);
     return 0;
 }

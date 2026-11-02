@@ -198,28 +198,47 @@ Sections:
   read-only pseudo-fields. Spans are produced by `new(T, n)` (D10.2, as `T mut@ own`), by taking a
   span (D6.9, always a view) and by the zero initializer `{}`. A span literal `{1, 2, 3}` does not
   exist.
-  **`.ptr` is no element pointer.** The `.ptr` of a span or of a string (D3.7) is legal in four
-  positions only: an argument of a call of an `extern fn`, alone or as the operand of the casts
-  that form that argument; the argument of `str.from_cstr` (D6.9); an operand of `==` or `!=`;
-  and the operand of a cast to `u64` or to a `void*`. Each other use is the error
+  **`.ptr` is no element pointer.** The `.ptr` of a span or of a string (D3.7) is legal in two
+  positions only, each as the `.ptr` stands: an argument of a call of an `extern fn` that can give
+  fort code no pointer, and an operand of `==` or `!=`. No cast takes a `.ptr`, so
+  `cast(s.ptr, void*)` and `cast(s.ptr, u64)` are errors too: write `cast(&s[0], void*)`.
+  `str.from_cstr` takes no `.ptr` either. A buffer that C wrote a C string into goes to
+  `str.from_cbuf(u8@ b)`, which reads only the `b.len` bytes of `b` and panics when none of them is
+  a NUL (`stdlib.md` 2.5). Each other use is the error
   `'.ptr' can name the byte after the last element: write '&s[0]'`. The reason: the `.ptr` of an
   empty span names the byte after its object, and no check reads it. For an `i32[2] a`,
-  `*a[2..].ptr` read the next local, and for an `i64 mut@ own a = new(i64, 3)`,
-  `*a[3..].ptr = 0` wrote the size word of the next chunk of the allocator. `&s[0]` checks its
-  index (D10.6), so a pointer to an element of a span stays inside the span. A C function that
-  gets the `.ptr` and the `.len` of an empty span reads no element (A7 of `ownership-design.md`
-  5.1). As an argument of an `extern fn`, a `.ptr` is legal only for a parameter whose C type is
-  no C type of a pointer that C gives in that declaration (D17.13), because C can give that
-  argument back. The C types compare with the `mut` and `own` marks dropped on both sides, with
-  `char` and `u8` as one type (D9.8), and with a `void*` equal to each pointer type. A type that C
-  gives and that says `own` is a new allocation (A2), and C gives back no argument through it.
-  With `memcpy` declared with a `u8 mut*` result, `libc.memcpy(a[24..].ptr, a.ptr, 0)` gave back
-  the byte after the 24 bytes of `a`, and a store through it wrote the size word of the next
-  chunk; `strncpy(char mut* dst, char* src, u64 n) char mut*` and
-  `strncpy(u8 mut* dst, u8* src, u64 n) char*` did the same through `dst`. So `libc.write(1, s.ptr,
-  s.len)`, `str.from_cstr(buf.ptr)`, `s.ptr == t.ptr` and `cast(s.ptr, u64)` stay legal;
-  `i32* p = s.ptr` is an error, and so is `libc.getenv(c.ptr)`, because `getenv` gives back a
-  `char*`: write `libc.getenv(&c[0])`.
+  `*a[2..].ptr` read the next local, and for an `i64 mut@ own a = new(i64, 3)`, `*a[3..].ptr = 0`
+  wrote the size word of the next chunk of the allocator. `&s[0]` checks its index (D10.6), so a
+  pointer to an element of a span stays inside the span. A C function that gets the `.ptr` and the
+  `.len` of an empty span reads no element (A7 of `ownership-design.md` 5.1). An `extern fn` can
+  give fort code a pointer when a value that C gives holds a pointer that does not say `own`: a
+  reference, a `void*` or a function pointer, as the value itself, as an element of a fixed array or
+  as a field of a struct at any depth. C gives its result, each value that it writes into a level
+  that a parameter marks `mut`, at that level and at each level that a value of the parameter
+  reaches, and each argument of a callback that a parameter holds; it reads the result of that
+  callback as it reads a parameter. A reference that C gives and that says `own` is a new allocation
+  (A2), so it gives the pointers that its storage holds and no other. The storage of a `void*` holds
+  no pointer (D3.14). An argument of the variable tail has no parameter, so its type is the type
+  that C reads: when that type can give a pointer, each `.ptr` argument of the call is an error. The
+  checker walks the declaration once for each call that has a `.ptr` argument, and when the
+  declaration gives no pointer, once more for each argument of the variable tail. Each walk enters
+  each struct at most twice, once for the storage that C reads and once for a value that C gives,
+  and each entry is a step of the work limit of D3.14, 65536 steps for each walk; past the limit of
+  a walk, the call counts as one that gives a pointer. A struct with no layout gives no pointer: it
+  is in error and has reported, or it waits in a module-level initializer, where a call is an error
+  already (D4.6). The C types do not matter: C gives back a `u32*` argument as an `i32*`, and a
+  `u8[8]*` argument as a `u8[4]*`. With `memcpy` declared with a `u8 mut*` result,
+  `libc.memcpy(a[24..].ptr, a.ptr, 0)` gave back the byte after the 24 bytes of `a`, and a store
+  through it wrote the size word of the next chunk; `extern fn wrap(char* s) char**` gave it back
+  one level down, and `extern fn stash(char* s, holder mut* h)` through the field `h->p`. A cast hid
+  the `.ptr` from this rule: `cast(a[24..].ptr, void mut*)` went to a local and then to `mempcpy`,
+  which gave back the byte after the 24 bytes of `a`. C gives back an argument only in the call that
+  gets it, and only through a parameter of pointer type, because C keeps no pointer to fort storage
+  after the call returns (A7). So `libc.write(1, s.ptr, s.len)` for a `u8@ s`,
+  `libc.memcpy(d.ptr, s.ptr, n)`, `strdup(s.ptr)` with a result that says `own`,
+  `str.from_cbuf(cast(buf[..], u8@))` and `s.ptr == t.ptr` stay legal; `i32* p = s.ptr` is an error,
+  and so are `libc.getenv(c.ptr)`, because `getenv` gives a `char*`, and `str.from_cstr(c.ptr)`:
+  write `libc.getenv(&c[0])` and `str.from_cbuf(cast(c[..], u8@))`.
 - history: Amended 2026-09-10: the type was called a slice until then, and the operation slicing.
   Amended 2026-10-31: `.ptr` was legal in each position, so the `.ptr` of an empty span at the end
   of its object gave fort code a pointer to the next object, with no extern and no cast. The user
@@ -233,6 +252,26 @@ Sections:
   review of the same day made it compare C types. It refuses 11 more arguments (by text): 1 in
   `src`, 6 in `std` (`getenv`, `realpath`, the `qsort` of `std.sort`) and 4 in `test/lang`, 3 of
   them `qsort` calls, which go with the `qsort` of `std.libc` (`stdlib.md` 2.2).
+  Amended 2026-11-01: a `.ptr` was legal as the operand of a cast to `u64` or to a `void*`, and
+  as the operand of the casts that formed an extern argument. A `.ptr` in a `void*` or a `u64`
+  then reached an extern parameter as no `.ptr`, and the rule of the extern argument did not read
+  it. The user ruled "No .ptr escape" (user, 2026-11-01): a `.ptr` stands only in the three
+  positions, and no cast takes it. A count over the trees of 858e2eb8 with the checker of this
+  rule (`fort --check` of each file, `std` by an entry that imports each module) found 79 uses
+  that it refuses: 1 in `src`, 2 in `std` (`std/sort.ft`), 24 in `test/fort`, 30 in
+  `test/lang/run` and 22 in `test/lang/fail`. 4 more stood in the sources that `test/fort`
+  embeds (by text). Each became `&s[0]`, a cast of a span, or a `.ptr` in one of the positions.
+  Amended 2026-11-01: an extern argument was legal for a parameter whose C type was no C type of a
+  pointer that C gave in that declaration, compared at the top level of each type, and the argument
+  of `str.from_cstr` was a position. C gave the `.ptr` back one level down, through a field of a
+  struct, as a sign variant and as a narrower array, and `str.from_cstr(a[24..].ptr)` read the
+  bytes after `a` up to a NUL. The user ruled "Refuse if any pointer" and "Bounded scan" (user,
+  2026-11-01): a `.ptr` argument is an error when the declaration can give any pointer that does
+  not say `own`, and `str.from_cbuf` reads a buffer with a bound. The checker of this rule over
+  the trees of edfe363d (`fort --check` of each file, `std` by an entry that imports each module,
+  with the Linux and the Darwin root) refused 12 more uses: 10 arguments of `str.from_cstr`, 1 in
+  `src`, 4 in `std` and 5 in `test/lang/run`, and 2 forms that a fail test held as legal. The
+  rule refused no other extern argument there, because the earlier rules had moved each one.
 
 ### D3.6 How type suffixes read
 - owner: `type-system.md`.
@@ -472,9 +511,9 @@ Sections:
   lvalue with no `move`; then the size and then the alignment of the pointee; then a function
   pointer type that the cast changes; then the pointer places of a `mut` cast; and last the
   pointer places of a view. An error of the operand comes before each error of the cast: so
-  `cast(s.ptr, i64*)` for an `i32@ s` reports the `.ptr` of D3.5, which is no operand of a cast to
-  `u64` or to a `void*`. So `cast(bits, i32 mut*)` for a `u64 bits` reports the pointer from
-  an integer, and `cast(&x, i64 mut*)` for an `i32 mut x` reports the size.
+  `cast(s.ptr, i64*)` for an `i32@ s` reports the `.ptr` of D3.5, which no cast takes. So
+  `cast(bits, i32 mut*)` for a `u64 bits` reports the pointer from an integer, and
+  `cast(&x, i64 mut*)` for an `i32 mut x` reports the size.
   **A `mut` cast keeps the pointer places that its result can change.** The result of a cast can
   change level `k` (D5.2) when its type marks a level from 1 to `k` `mut`: by a store when it
   marks level `k` `mut`, and by a store of another pointer when it marks a level above `k` `mut`.
@@ -1108,15 +1147,17 @@ Sections:
   two functions of the standard library. A pointer holds no length, so the bounds of such a span
   could reach past the object. The two functions take a pointer with no length that fort can
   check (A7 of `ownership-design.md` 5.1): `str.from_cstr(char* p) string` makes
-  `p[0..libc.strlen(p)]` of a C string, which C gave or which C wrote into a buffer of fort code,
-  as `getcwd` does, and it trusts that a NUL ends `p` inside its storage; and `rt.args_init(i32
+  `p[0..libc.strlen(p)]` of a C string that C gave, or of the address of an element of a buffer
+  that C wrote a C string into, as `getcwd` does, and it trusts that a NUL ends `p` inside its
+  storage; it takes no `.ptr` (D3.5); and `rt.args_init(i32
   argc, char* mut* argv)` makes `argv[0..argc]` from the values that C passes to `main`. In their
   bodies, `p[lo..hi]` on a `T*` or a `T mut*` produces a
   `T@` or a `T mut@` with no check, and `p[lo..]`, `p[..hi]` and `p[..]` stay errors. Each other
   function, of `std` too, takes no span of a raw pointer. So the functions of `std.rt` that made
   a span of a pointer and a length take a span or a string: `rt.print_str` and `rt.panic` take a
-  `string`, `rt.print_enum` takes an `enum_member@`, `rt.emit_cstr` and `rt.message_cstr` take a
-  `string`, and `rt.scan` takes the span of its buffer. `rt.str_eq` makes no span: it gives its
+  `string`, `rt.print_enum` takes an `enum_member@`, and `rt.scan` takes the span of its buffer.
+  `rt.emit_cstr` and `rt.message_cstr` do not exist: a caller gives `str.from_cstr(p)` to
+  `rt.emit_str` or to `rt.message_str`. `rt.str_eq` makes no span: it gives its
   pointers and lengths to `memcmp` (A7). A `char*` that the compiler gives as a C string,
   the file of a position or the name of an enum member, keeps its type, and `std.rt` reads it
   through `str.from_cstr`.
@@ -1124,7 +1165,10 @@ Sections:
   compiler emits calls `rt.args_init` (`toolchain.md` 6 item 22): each name of it in source, a
   call or a function value, is the error
   `'std.rt.args_init' belongs to the start of the program`, in `std.rt` too. A program gets a span
-  of a C string through the one trusted form `str.from_cstr`. A span of a fixed array, of a span and
+  of a C string through the one trusted form `str.from_cstr`. It gets a span of the C string in a
+  buffer through `str.from_cbuf(u8@ b)`, which makes no span of a raw pointer: it reads only the
+  `b.len` bytes of `b` and panics when none of them is a NUL (D3.5). A span of a fixed array, of a
+  span and
   of a string stays legal everywhere,
   with its check. So `i32 mut@ s = px[0..2]` for an `i32 mut* px` is an error, and
   `string v = str.from_cstr(libc.getenv(&name[0]))` gives the value of a variable of the
@@ -1137,6 +1181,15 @@ Sections:
   that the compiler passes; `str.from_cstr` and `rt.args_init` get a bare pointer from C. The
   coordinator ratified on 2026-10-31 the exception of these two functions, in place of each
   module of `std`.
+  Amended 2026-11-01: the rule said that `rt.emit_cstr` and `rt.message_cstr` take a `string`.
+  With a `string` each would do what `rt.emit_str` and `rt.message_str` do, so `std.rt` removed
+  both, and their callers give `str.from_cstr(p)` to the `_str` entries. The coordinator ratified
+  the removal on 2026-11-01.
+  Amended 2026-11-01: the rule named `str.from_cstr` as the one way to wrap a C string that C
+  wrote into a buffer of fort code, and its argument could be the `.ptr` of the buffer, so strlen
+  read past an empty span or past a buffer with no NUL. The user ruled "Bounded scan" (user,
+  2026-11-01): `str.from_cstr` takes no `.ptr`, and `str.from_cbuf` wraps such a buffer with a
+  bound.
 
 ### D6.10 The arrow operator
 - owner: `core-language.md` (Expressions).
@@ -1898,7 +1951,8 @@ Sections:
   The compile-time rules give this guarantee, and no undefined item is necessary for it. D3.14:
   no cast makes a pointer from an integer, gives a type to a `void*` or makes the pointee larger
   or more aligned, and no view adds or changes a pointer place, an argument of an `extern fn`
-  included. D3.5: the `.ptr` of a span or a string is legal only where no fort code loads or
+  included. D3.5: the `.ptr` of a span or a string is legal only as an operand of `==` or `!=` and
+  as an argument of an `extern fn` that can give fort code no pointer, so no fort code loads or
   stores through it. D6.9: only `str.from_cstr` and `rt.args_init` take a span of a raw pointer,
   and no source calls `rt.args_init`. D10.4: no pointer arithmetic. D10.6: each index and each
   span expression of a fixed array, a span or a string is in bounds. D17.13: a pointer type that
@@ -1906,8 +1960,9 @@ Sections:
   level, or where the extern has no parameter that can carry a pointer. For C, A7 of
   `ownership-design.md` 5.1 holds: C gives fort code only storage that C gave, or storage that
   fort code gave to C, with the whole pointee inside that storage, at an address aligned for the
-  pointee, and with no `mut` that fort code did not give; and C writes only a level that the type
-  of a parameter marks `mut`. So a pointer that fort code holds is `null`, a value that derives from
+  pointee, and with no `mut` that fort code did not give; C writes only a level that the type of a
+  parameter marks `mut`; and C keeps no pointer to fort storage after the call returns. So a
+  pointer that fort code holds is `null`, a value that derives from
   an address and keeps its whole pointee inside the object of that address, or a dangling pointer.
   A read or a write of the storage of a local of a run goes through a value that derives from an
   address of that local that the run took, or through a dangling pointer. Fort code reaches a
@@ -1920,8 +1975,9 @@ Sections:
   D10.6. A build with a standard library other than the one of the compiler (`--std-dir`, D14.1)
   runs code that these rules did not check as `std`, such as a span of a raw pointer in each
   function. An `extern fn` declaration or C code that breaks A7, such as `memchr` declared with an
-  `i64*` result for a search of one byte, or a declaration whose parameter marks no `mut` at a
-  level that C writes, has the behavior that C gives it, and fort defines no more. And a call of an
+  `i64*` result for a search of one byte, a declaration whose parameter marks no `mut` at a level
+  that C writes, or C code that keeps an argument and gives it back in a later call, has the
+  behavior that C gives it, and fort defines no more. And a call of an
   `extern fn` whose arguments break the contract of the C function, such as a `char*` with no NUL
   inside its storage for `strlen` or a length past the end of a buffer for `memcpy`, has the
   behavior that C gives it (A7).
@@ -1941,6 +1997,11 @@ Sections:
   2026-10-31). D3.14, D6.9 and D17.13 now refuse each route by which fort code got such a value,
   so no program that compiles makes such an access, and the item went. The terms of the item stay
   as the terms of the guarantee, because D17.11 and D17.21 read them.
+  Amended 2026-11-01: A7 let C give back storage that fort code gave to C in an earlier call, so
+  `save(a[24..].ptr)` and a later `load()` gave fort code the byte after `a`, and no rule of one
+  declaration can see that. The user ruled "A7: C keeps none" (user, 2026-11-01): C keeps no
+  pointer to fort storage after the call returns, and C code that keeps one is outside the
+  guarantee.
 
 ### D10.8 Stack probes
 - owner: `memory-model.md`.

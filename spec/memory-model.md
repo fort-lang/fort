@@ -581,7 +581,9 @@ bounds of such a span could reach past the object, and fort code would reach sto
 address it does not hold. A program gets a span from `new(T, n)` (D10.2), from a fixed array,
 from a span or a string, all with their checks, and a span of a C string from the one trusted
 form, `str.from_cstr(char* p) string` (`stdlib.md` 2.5). That form trusts that a NUL ends `p`
-inside its storage, as `strlen` does (A7 of `ownership-design.md` 5.1).
+inside its storage, as `strlen` does (A7 of `ownership-design.md` 5.1), and it takes no `.ptr`
+(D3.5). A buffer that C wrote a C string into goes to `str.from_cbuf(u8@ b) string`, which reads
+only the `b.len` bytes of `b` and panics when none of them is a NUL.
 
 In those two bodies, `p[lo..hi]` yields a `T@` (or `T mut@` from a `T mut*`) with `ptr` advanced
 by `lo` elements and `len == hi - lo`, performing no check at all. `str.from_cstr` makes
@@ -760,14 +762,15 @@ del(d);                              // frees the copy; d is {null, 0}, which eq
 ### 4.5 Handing memory to C
 
 Spans, strings, structs and fixed arrays never cross an `extern` boundary (D9.8, D13.4). Unpack
-`.ptr` and `.len`, cast the pointer to the declared C type, and pass a struct by address.
+`.ptr` and `.len`, and pass a struct by address. No cast takes a `.ptr` (D3.5), so cast the span to
+the element type of the C parameter first: `cast(s, u8@).ptr`.
 
 ```fort
 extern fn write(i32 fd, u8* buf, u64 n) i64;
 extern fn memset(u8 mut* p, i32 c, u64 n) void;
 
 fn put(string s) void {
-    write(1, cast(s.ptr, u8*), s.len);
+    write(1, cast(s, u8@).ptr, s.len);
 }
 fn clear(u8 mut@ b) void {
     memset(b.ptr, 0, b.len);
@@ -805,7 +808,7 @@ char mut@ text = line[0..n];                   // error: cannot take a span of c
 string seen = str.from_cstr(line);             // a view of the line up to its NUL
 del(line);                                     // frees what C allocated
 u8 mut@ own b = new(u8, 64);
-free(cast(b.ptr, void* own));                  // error: a cast never adds own to the view b.ptr
+free(cast(&b[0], void* own));                  // error: a cast never adds own to the view &b[0]
 ```
 
 The last line would make a second owner: `b` would still look live after it, so a `del(b)` would

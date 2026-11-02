@@ -1,0 +1,37 @@
+//! run
+//! abort
+//! stderr: panic: str.from_cbuf: no NUL in the buffer
+//! stdout:
+//| 0 true
+//| 3 abc true
+//| ab
+//| before
+import std.str;
+
+// str.from_cbuf wraps the bytes of a buffer before its first NUL, without a copy, and reads no
+// byte past the buffer (D3.5, stdlib.md 2.5). A buffer with no NUL is a violated precondition,
+// so it panics (D13.3).
+fn main() i32 {
+    // The NUL at the first byte gives the empty string.
+    u8[4] mut zeros = {};
+    string empty = str.from_cbuf(zeros[..]);
+    println(empty.len, " ", empty == "");
+
+    // The NUL at the last byte gives each byte before it, as a view of the buffer.
+    string last = "abc\x00";
+    u8@ bytes = cast(last, u8@);
+    string at_last = str.from_cbuf(bytes);
+    println(at_last.len, " ", at_last, " ", at_last.ptr == last.ptr);
+
+    // The first NUL ends the string.
+    string twice = "ab\x00c\x00";
+    println(str.from_cbuf(cast(twice, u8@)));
+
+    // A literal holds a NUL after its last byte, outside its span. The scan stops at the end of
+    // the span and panics: it does not read that NUL, as strlen would.
+    string bare = "abcd";
+    println("before");
+    string none = str.from_cbuf(cast(bare, u8@));
+    println("not reached ", none);
+    return 0;
+}

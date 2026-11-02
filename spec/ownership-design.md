@@ -506,7 +506,12 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   D10.7 names an extern declaration or C code that breaks A7 as outside its guarantee. A7 also asks
   that a function pointer that C gives to fort code names a function of its type. No cast gives a
   function pointer another type, as an argument of an `extern fn` too (D3.14), so fort gives C no
-  function pointer of another type.
+  function pointer of another type. C gives back an argument only through a parameter of pointer
+  type: a pointer that C gives derives from no argument of an integer type. So no cast makes a
+  `.ptr` an integer or a `void*` (D3.5). The user ruled this part with "No .ptr escape" (user,
+  2026-11-01). C keeps no pointer to fort storage after the call returns, so C gives back an
+  argument only in the call that gets it, and the `.ptr` rule of D3.5 reads only the declaration
+  of that call. The user ruled this part with "A7: C keeps none" (user, 2026-11-01).
 - **A8**: a value designates storage of a local of this run of F only when it derives from an
   address of that local that this run took. It derives through copies, casts, arithmetic, stores and
   loads, in F or in a callee. The user ruled on 2026-10-26: "Yes, add A8 to D10.7" (section 12),
@@ -520,12 +525,13 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   view adds or changes a pointer place, but for a drop of marks in a place that carries no mark.
   An argument of an `extern fn` follows these rules, with no exemption (D3.14). No span
   expression takes a raw pointer but in `str.from_cstr` and `rt.args_init` (D6.9), and no
-  source calls `rt.args_init`. The `.ptr` of a span is legal only where no fort code loads or
-  stores through it (D3.5). A pointer type that C gives marks `mut` only where it says `own`,
-  where a parameter of the same type marks the level, or where the extern has no parameter that
-  can carry a pointer (D17.13). With A7 for C, a pointer that fort code holds is `null`, a value
-  that derives from an address and keeps its whole pointee inside the object of that address, or
-  a dangling pointer. So A8 holds for each program that compiles, in a build without
+  source calls `rt.args_init`. The `.ptr` of a span is legal only as an operand of `==` or `!=` and
+  as an argument of an `extern fn` that can give fort code no pointer, so no fort code loads or
+  stores through it, and no cast takes it (D3.5). A pointer type that C gives marks `mut` only where
+  it says `own`, where a parameter of the same type marks the level, or where the extern has no
+  parameter that can carry a pointer (D17.13). With A7 for C, a pointer that fort code holds is
+  `null`, a value that derives from an address and keeps its whole pointee inside the object of that
+  address, or a dangling pointer. So A8 holds for each program that compiles, in a build without
   `--no-bounds-check`, and keeps A1 and A7, for a `del` too.
   Rules (b) and (e) of V1 need A8 for such a read. Without A8 the
   read can name a local that is not memory, and it is then no use (5.5 rule (b)) and no borrow
@@ -1297,6 +1303,20 @@ read, each write and each `del` of each program that compiles, in a build withou
 `--no-bounds-check`, and keeps A1 and A7 (5.1). A
 count at 855b512f over `src`, `std`, `test/fort`, `test/lsp`, `test/lang` and `test/library` found
 165 sites and 2 extern declarations that the rules refuse.
+
+The user ruled on 2026-11-01: "No .ptr escape". A cast to a `void*` or to `u64` took a `.ptr`,
+and the `void*` then reached an extern as no `.ptr`, so glibc's `mempcpy` gave back the byte after
+an object. A `.ptr` now stands only as an argument of an `extern fn`, as the argument of
+`str.from_cstr`, or as an operand of `==` or `!=`, and no cast takes it (D3.5). A7 says that C
+gives back an argument only through a parameter of pointer type (5.1).
+
+The user ruled three questions of the same class on 2026-11-01. "Refuse if any pointer": C gave
+the `.ptr` back one level down, through a field of a struct, as a sign variant and as a narrower
+array, so a `.ptr` argument is now an error when the declaration can give any pointer that does
+not say `own` (D3.5). "A7: C keeps none": C kept an argument and gave it back in a later call, so
+A7 now says that C keeps no pointer to fort storage after the call returns (5.1, D10.7).
+"Bounded scan": `str.from_cstr(a[24..].ptr)` read past `a`, so `str.from_cstr` takes no `.ptr`,
+and `str.from_cbuf` reads a buffer with a bound (D3.5, D6.9).
 
 The questions, their options and their counts stay below as the record.
 
