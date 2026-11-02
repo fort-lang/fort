@@ -10,42 +10,38 @@ import lifetime;
 import std.strbuf;
 
 //
-// support/lifetime.ft states the rule of the probe, its views and the
+// support/lifetime.ft states the rule of the probe, its view and the
 // size of a round. Each file tests one driver mode. This keeps every program
 // below the harness limit of 60 s under load.
 //
-// This mode adds six releases. index.free releases the record span, the type
-// spelling pool, and the spelling buffer. driver.check_document releases the
-// file list and the index. driver.write_document releases `doc`.
+// This mode adds the releases of the identifier index. driver.write_document
+// releases `doc`, and driver.check_document releases the file list and the
+// index. At b6676ced the deletion of `defer del(doc.data)` moved the live view
+// by 31727168 bytes under glibc 2.39 and 2.43, and the deletion of
+// `defer del(files.items)` moved it by 131104 bytes or more. index.free
+// releases the record span, the type spelling pool and the spelling buffer.
+// The deferred block of driver.check_document releases each of the three
+// again after index.free. So the deletion of `index.free(&ix)`, or of one
+// release in index.free, keeps nothing and moved no probe.
 //
-// The width makes the small releases visible. Each round allocates 256 bytes
-// for a spelling buffer and a one-name vector. Each record also carries a long
-// type spelling. These allocations then affect a complete round.
+// The width was chosen to make two small releases visible: the file list and
+// the spelling buffer. Each record carries a long type spelling. At b6676ced
+// the deletion of the file list moved the live view by 131104 bytes or more.
+// The spelling buffer has no witness here: the deferred block releases it
+// again, so the deletion of `strbuf.free(&ix->msg)` moved no probe.
 //
-// The width also has a ceiling, and the ceiling is why it is 27 and not 40.
-// The driver.write_document buffer holds the complete document. A strbuf
-// doubles its capacity. A document above 65536 bytes therefore gives the
-// buffer a capacity of 131072. glibc serves that block through mmap, so the
-// system view does not move. At width 40, the document is 92003 bytes and
-// removing `strbuf.free(&doc)` is invisible to this test. At 27, the document
-// is 62541 bytes and the buffer is a heap
-// block of 65536, and the deletion turns this test red. A width that makes
-// the document exceed 65536 bytes hides that release from the probe. Measure
-// the document size when the width or document format changes.
-// The shared lifetime probe states the measurement rule.
+// The width was 27 and not 40 for the system view, which does not see a block
+// that glibc serves by mmap. The driver.write_document buffer holds the
+// complete document, and a strbuf doubles its capacity. A document above
+// 65536 bytes gives the buffer a capacity of 131072, and glibc serves that
+// block by mmap. At width 40 the document was 92003 bytes, and the deletion
+// of `doc` did not move the system view. At 27 the document was 62541 bytes.
+// The live view counts the mmap blocks too. Measure the document size when
+// the width or the document format changes.
 //
-// The round count is one quarter of a front-end mode's count. At 1000 rounds,
-// all six releases turn this test red. Each small release then leaks 256 KB.
-//
-// The block view is off for this mode, and the reason is a measurement. Under
-// glibc 2.43 the address of the 32-byte probe block jumps among positions up
-// to about 300 KB apart from one round to the next, on the base tree as well,
-// while the live view stays flat. On the tree 301ae145 the block view of round
-// 500 met a late round 2352 bytes away; on a tree that added one 32-byte block
-// to each round, it met none nearer than 5728, and the test went red with no
-// byte kept. Under glibc 2.39 the view is steady. The system view and the live view answer for the
-// mode, and each of the six releases still turns the test red under glibc 2.39
-// and 2.43 with the block view off.
+// The round count is one quarter of a front-end mode's count. The live view
+// stops moving by round 9 with nothing kept, and the early sample comes at
+// round 500.
 u64 INDEX_ROUNDS = 1000;
 u64 INDEX_WIDTH = 27;
 
@@ -53,7 +49,7 @@ fn main() i32 {
     lifetime.write_runtime();
     write_indexed();
     string[3] mut indexed = {"fort", "--index", "indexed.ft"};
-    assert(lifetime.measure_rounds(indexed[0..3], INDEX_ROUNDS, false) < lifetime.BOUND);
+    assert(lifetime.measure_rounds(indexed[0..3], INDEX_ROUNDS) < lifetime.BOUND);
     println("ok");
     return 0;
 }
@@ -62,19 +58,13 @@ fn main() i32 {
 // identifier creates a record, and every record creates a type spelling. A
 // long spelling also grows the spelling buffer.
 //
-// This test is the only witness of six releases. index.free runs
-// `del(ix->entries)`, `containers.pool_free(&ix->pool)`, and
-// `strbuf.free(&ix->msg)`. driver.check_document runs
-// `containers.str_free(&files)` and `defer index.free(&ix)`.
-// driver.write_document runs `defer strbuf.free(&doc)`.
-// Every release of the six modes was measured this way, one deletion at a
-// time, against all six tests. support/lifetime.ft records
-// release counts for all six modes. It also records the
-// measurement command and the release with no single-test witness.
+// This test is the only witness of `defer del(doc.data)` in
+// driver.write_document and of `defer del(files.items)` in
+// driver.check_document.
 //
-// The width is what makes the two small ones visible. A file list of one name
-// and a buffer that holds one spelling are a few hundred bytes in each round.
-// So the type of every local is written `a_structure_with_a_long_name mut*
+// The width is what makes the file list visible. A file list of one name and
+// a buffer that holds one spelling are a few hundred bytes in each round. So
+// the type of every local is written `a_structure_with_a_long_name mut*
 // own`, which is 38 bytes interned one time for each record.
 fn write_indexed() void {
     strbuf.str_buf mut b = strbuf.create();
@@ -112,9 +102,11 @@ fn write_indexed() void {
     }
     // The function has INDEX_WIDTH parameters and
     // a pointer to it. Its type spelling grows the
-    // spelling buffer past one block. With the
-    // spelling of the owning local alone, 38 bytes,
-    // deleting `strbuf.free(&ix->msg)` left this test green.
+    // spelling buffer past one block. The deferred
+    // block of driver.check_document releases that
+    // buffer again after `strbuf.free(&ix->msg)`, so
+    // at b6676ced the deletion of that call moved no
+    // probe.
     strbuf.append(&b, "    fn (");
     i = 0;
     while (i < INDEX_WIDTH) {

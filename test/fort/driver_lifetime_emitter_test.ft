@@ -9,7 +9,7 @@ import lifetime;
 import std.strbuf;
 
 //
-// support/lifetime.ft states the rule of the probe, its views and the size
+// support/lifetime.ft states the rule of the probe, its view and the size
 // of a round. Each file tests one driver mode. This keeps every program below
 // the harness limit of 60 s under load.
 //
@@ -18,12 +18,12 @@ import std.strbuf;
 // smaller count of rounds therefore reaches the same bound. Each of the
 // thirteen gen.gen_free releases is large enough to affect a complete round.
 //
-// The early sample comes at half the rounds, so it must come after the heap
-// reaches its steady size. On glibc 2.43 the program break of a tree that frees
-// its nodes from the newest grew once by 176128 bytes between round 200 and
-// round 300, and then stayed flat to round 1199: no block was kept. With 400
-// rounds the early sample fell before that step. 800 rounds put it at round
-// 400, after the step.
+// The early sample comes at half the rounds, round 400, after the live view
+// reaches its steady value. With nothing kept, its last move came at round 10
+// or before under glibc 2.39 and 2.43, on the trees b6676ced, e0080544 and
+// bda63b82. So 800 rounds give a margin of 390 rounds. They also give the
+// smallest release that this test watches, `strbuf.free(&g->scratch)`, a
+// distance of 24032 bytes or more at b6676ced, about six times BOUND.
 u64 EMIT_ROUNDS = 800;
 u64 EMIT_WIDTH = 60;
 
@@ -31,7 +31,7 @@ fn main() i32 {
     lifetime.write_check_runtime();
     write_emitted();
     string[3] mut emitted = {"fort", "-S", "emitted.ft"};
-    assert(lifetime.measure_rounds(emitted[0..3], EMIT_ROUNDS, false) < lifetime.BOUND);
+    assert(lifetime.measure_rounds(emitted[0..3], EMIT_ROUNDS) < lifetime.BOUND);
     println("ok");
     return 0;
 }
@@ -44,28 +44,18 @@ fn main() i32 {
 // grow `allocas`. An index and an `assert` grow `fail`. The program checks and
 // prints, so the probe writes the stub runtime of lifetime.write_check_runtime.
 //
-// On T-118's tree, deletion checked fourteen of the sixteen gen.gen_free
-// releases. T-255 deleted three of the sixteen with the direct path: the
-// vectors `scopes` and `defers`, and `slots`, whose release had no witness of
-// its own. Twelve of the thirteen that remain were checked then, and T-255 did
-// not measure them again. Seven are the buffers `named`, `globals`, `funcs`,
-// `allocas`, `body`, `fail`, and `scratch`. Four are the lists `files`, `strs`,
-// `enums`, and `externs`. The pool is the final release. This test is the only
-// witness of `globals`, `fail`, `files`, `strs`, `enums`, `externs`, and
-// `scratch`. On Linux the break does not move for a missing release of
-// `scratch`, or of `globals` under glibc 2.39. The live view of
-// support/heap.ft counts the bytes in use and sees both under glibc 2.39 and
-// 2.43. On macOS every view counts the bytes in use.
-//
-// The thirteenth, `strbuf.free(&g->out)`, turns
-// driver_lifetime_closure_test.ft red. At b0606efa it left this test green,
-// and the reason was a measurement. The module of this program was
-// 155159 bytes. The buffer exceeds 128 KB. At this threshold, glibc uses mmap
-// instead of the heap. A leak of such a block does not move the system view.
-// And the block view is off for this mode. The closure mode emits a module of
-// about two kilobytes, which comes out of the heap. On the tree that added the
-// live view, this test is red for that deletion too: support/lifetime.ft
-// gives the distance. Read the two files together for gen.gen_free.
+// gen.gen_free makes fourteen releases. At b6676ced the deletion of each of
+// thirteen of them turned this test red under glibc 2.39 and 2.43, one
+// deletion at a time: the buffers `named`, `globals`, `funcs`, `out`,
+// `allocas`, `body`, `fail` and `scratch`, the lists `files`, `strs`, `enums`
+// and `externs`, and the pool. The live view moved by 24032 bytes or more.
+// The deletion of `syms_free(&g->declared)` moved no probe: the program has no
+// interface module, so no round fills `declared`. This test is the
+// only witness of `globals`, `fail`, `files`, `strs`, `enums` and `externs`.
+// The break did not move for a deleted `globals` or `scratch` under glibc
+// 2.39 and 2.43, or for a deleted `files` under 2.43. The live view counts
+// the mmap blocks of glibc too, so the release of a buffer above 128 KB stays
+// in view.
 //
 // The width makes the small releases visible. A two-line program covers only
 // `named`, `funcs`, `out`, `body`, and the pool. The `externs` list
