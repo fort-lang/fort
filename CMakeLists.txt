@@ -823,6 +823,16 @@ set_tests_properties(overwrite_oracle PROPERTIES
     LABELS "fort;integration"
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
+# Hold the sites of --aggregate-report and --leak-report over each entry of test/lang, for the
+# Linux and the Darwin target: a site that is not in the lists of the test turns it red.
+add_test(NAME aggregate-lang
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_lang_test.py"
+            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}" -j "${FORT_LANG_JOBS}")
+set_tests_properties(aggregate-lang PROPERTIES
+    LABELS "fort;integration"
+    PROCESSORS ${FORT_LANG_JOBS}
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
+
 # Node's built-in runner tests the VS Code extension in editors/vscode.
 # It converts diagnostic documents into editor shapes.
 # It also converts 1-based byte columns to character offsets.

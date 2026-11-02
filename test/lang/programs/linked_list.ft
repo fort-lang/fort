@@ -71,13 +71,25 @@ fn push_back(list mut* l, i64 v) void {
 }
 
 fn clear(list mut* l) void {
-    while (l->head != null) {
-        node mut* own gone = move(l->head);
+    list_drop(move(*l));
+}
+
+// Frees each node of a list that the caller moves in. `del` is shallow, so each node gives up its
+// tail before it is freed.
+fn list_drop(list mut l) void {
+    while (l.head != null) {
+        node mut* own gone = move(l.head);
         node mut* own rest = move(gone->next);
         del(gone);
-        l->head = move(rest);
+        l.head = move(rest);
     }
-    l->count = 0;
+}
+
+// Ends a list in an allocation that the caller moves in.
+fn list_drop_made(list mut* own p) void {
+    list kept = move(*p);
+    del(p);
+    list_drop(move(kept));
 }
 
 fn show(string name, list* l) void {
@@ -169,44 +181,48 @@ fn merge_sorted(list mut* a, list mut* b, list mut* out) void {
 }
 
 fn main() i32 {
-    list mut l = {};
-    defer clear(&l);
+    // Each list lives in an allocation, because main lends it to calls, and list_drop_made
+    // ends it.
+    list mut* own l = new(list);
+    defer list_drop_made(move(l));
     for (i64 mut i = 1; i <= 5; i++) {
-        push_front(&l, i);
+        push_front(l, i);
     }
-    show("front", &l);
-    push_back(&l, 99);
-    show("back", &l);
-    println("sum=", sum(&l), " has3=", contains(&l, 3), " has7=", contains(&l, 7));
+    show("front", l);
+    push_back(l, 99);
+    show("back", l);
+    println("sum=", sum(l), " has3=", contains(l, 3), " has7=", contains(l, 7));
 
-    reverse(&l);
-    show("reversed", &l);
+    reverse(l);
+    show("reversed", l);
 
-    println("remove 3=", remove_first(&l, 3), " remove 7=", remove_first(&l, 7));
-    show("removed", &l);
+    println("remove 3=", remove_first(l, 3), " remove 7=", remove_first(l, 7));
+    show("removed", l);
 
     i64 mut v = 0;
-    println("pop=", pop_front(&l, &v), " ", v, " count=", l.count);
+    println("pop=", pop_front(l, &v), " ", v, " count=", l->count);
 
-    clear(&l);
-    println("cleared count=", l.count, " empty=", l.head == null);
-    println("pop empty=", pop_front(&l, &v));
+    clear(l);
+    println("cleared count=", l->count, " empty=", l->head == null);
+    println("pop empty=", pop_front(l, &v));
 
-    list mut odd = {};
-    list mut even = {};
-    list mut merged = {};
-    defer clear(&merged);
+    list mut* own odd = new(list);
+    defer list_drop_made(move(odd));
+    list mut* own even = new(list);
+    defer list_drop_made(move(even));
+    list mut* own merged = new(list);
+    defer list_drop_made(move(merged));
     for (i64 mut i = 9; i >= 1; i -= 2) {
-        push_front(&odd, i);
+        push_front(odd, i);
     }
     for (i64 mut i = 10; i >= 2; i -= 2) {
-        push_front(&even, i);
+        push_front(even, i);
     }
-    show("odd", &odd);
-    show("even", &even);
-    merge_sorted(&odd, &even, &merged);
-    show("merged", &merged);
-    println("drained=", odd.count, " ", even.count, " ", odd.head == null, " ",
-            even.head == null);
+    show("odd", odd);
+    show("even", even);
+    merge_sorted(odd, even, merged);
+    show("merged", merged);
+    println("drained=", odd->count, " ", even->count, " ", odd->head == null, " ",
+            even->head == null);
     return 0;
 }

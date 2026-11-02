@@ -16,8 +16,19 @@ struct node_vec {
 }
 
 fn node_free(node_vec mut* v) void {
-    del(v->items);
-    v->len = 0;
+    node_drop(move(*v));
+}
+
+// Frees a vector that the caller moves in: the slots, and no node that they point to.
+fn node_drop(node_vec mut v) void {
+    del(v.items);
+}
+
+// Ends a vector in an allocation that the caller moves in.
+fn node_drop_made(node_vec mut* own p) void {
+    node_vec kept = move(*p);
+    del(p);
+    node_drop(move(kept));
 }
 
 fn node_push(node_vec mut* v, node mut* n) void {
@@ -49,17 +60,17 @@ fn main() i32 {
     first->value = 5;
     second->value = 6;
 
-    node_vec mut v = node_vec{};
-    defer node_free(&v);
+    node_vec mut* own v = new(node_vec);
+    defer node_drop_made(move(v));
     // The argument lends: what is stored is a borrowed pointer, so the slot
     // type of the vector carries no own of its own.
-    node_push(&v, first);
-    node_push(&v, second);
-    println(v.len, " ", value_at(&v, 0), " ", value_at(&v, 1));
+    node_push(v, first);
+    node_push(v, second);
+    println(v->len, " ", value_at(v, 0), " ", value_at(v, 1));
 
     // Freeing the vector frees the slots and nothing else.
-    node_free(&v);
-    println(v.len, " ", v.items.len, " ", v.items.ptr == null);
+    node_free(v);
+    println(v->len, " ", v->items.len, " ", v->items.ptr == null);
     println(first->value, " ", second->value);
 
     // The pointers are as good as they were, and their owners still free them

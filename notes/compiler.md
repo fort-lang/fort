@@ -948,8 +948,8 @@ came here.
   location and local (`report.write_aggregates`). Most sites are memory locals after a call: a call
   kills each fact of a memory local, and a deferred `free(&b)` that a later deferred call follows
   leaves `b` unproved also with the probe of R1 (`spec/ownership-design.md` 7), so the order of the
-  deferred frees decides cause 1 or cause 3 (`test/lang/programs/bignum.ft`, where only the last
-  deferred `free_big` gets cause 1).
+  deferred frees decides cause 1 or cause 3 (`main.c14` and `main.c26` of
+  `test/fort/owner/prover_aggregate_test.ft`: a free that a call follows gets cause 3).
   The time that the change added to `fort --check src/fort/main.ft` is that of the functions that
   the full proof takes on: a variant that proved the aggregates only in a function with other work
   of the pass, `has_owner` without `is_aggregate_local`, added none. Measure such a variant with a

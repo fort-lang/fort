@@ -204,16 +204,25 @@ fn keep(arena mut* head, char mut@ own block) void {
     head->next = move(cell);
 }
 
-// `del` is shallow, so each cell gives up its tail before it is freed. The
-// loop tests `head->next`, so no local holds the null at the end.
-fn free_arena(arena mut* head) void {
-    while (head->next != null) {
-        arena mut* own cell = move(head->next);
+// Frees an arena head that the caller moves in: each cell of the chain, then the block of the
+// head. `del` is shallow, so each cell gives up its tail before it is freed. keep fills no block
+// of the head, so that `del` frees nothing.
+fn arena_drop(arena mut head) void {
+    while (head.next != null) {
+        arena mut* own cell = move(head.next);
         arena mut* own rest = move(cell->next);
         del(cell->block);
         del(cell);
-        head->next = move(rest);
+        head.next = move(rest);
     }
+    del(head.block);
+}
+
+// Ends an arena head in an allocation that the caller moves in.
+fn arena_drop_made(arena mut* own p) void {
+    arena kept = move(*p);
+    del(p);
+    arena_drop(move(kept));
 }
 
 // Frees a value with its children and the siblings after it.
@@ -478,9 +487,9 @@ string[6] PATHS = {"name", "tags.1", "a.b.c.2", "a.b.missing", "tags.9", ""};
 
 fn inspect(string src) void {
     reader mut r = reader{src, 0, false, "", 0};
-    arena mut strings = {};
-    defer free_arena(&strings);
-    jvalue mut* own doc = parse_value(&r, &strings);
+    arena mut* own strings = new(arena);
+    defer arena_drop_made(move(strings));
+    jvalue mut* own doc = parse_value(&r, strings);
     defer free_value(move(doc));
     skip_space(&r);
     if (!r.failed && r.pos != src.len) {

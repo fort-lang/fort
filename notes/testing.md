@@ -310,6 +310,14 @@ bullet at a time and without a rewrite.
   into `build/<Host>/<preset>/std`: running `run_tests.py` by hand against a source
   that has not been copied reports `module 'std.x' not found`. `test/lang/run/stdlib` is where a
   library module is tested.
+- **A free under test hides a defect of the drop at the end of the same local.** The free empties
+  the local, so the drop at the end runs on the zero value, and a deletion of the drop call from
+  the `drop_made` changes no stdout and gives no event of the fir-run oracle. In 6 programs of PR
+  212 only `--aggregate-report` saw such a deletion. `test/aggregate_lang_test.py` (ctest
+  `aggregate-lang`) holds the sites of `--aggregate-report` and `--leak-report` over test/lang on
+  the Linux and the Darwin target, so a site that is not in its lists turns it red; a change that
+  ends a site removes it from the lists. To judge a drop, delete each release and each drop call,
+  one at a time, and run that test, the language harness and the fir-run oracle.
 
 ## 4. fort module tests
 
