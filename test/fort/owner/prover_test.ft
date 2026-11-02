@@ -8802,8 +8802,11 @@ fn write_unproved(fir.func* f, prover.proof* p, session.session mut* s,
 // the owners of its exits and the inner owners that it does not prove, and frees its proof. A
 // proof that keeps a vector of its context, a set of a dataflow or the probes of a walk keeps 32
 // bytes or more in each proof, so 30720 bytes or more in each round of the 48 functions, and the
-// program break moves. The probe runs first in main, as the probe of fir_flow_test does: after the
-// other tests, the allocator can serve a leak out of the free chunks that they left.
+// live view of support/heap.ft moves by that much. At d2f5b2b6 the smallest move that a deletion
+// of a release made red was 282240 bytes, under glibc 2.39 and 2.43. With nothing kept the view
+// moved by 2288 bytes or less under glibc 2.39 when a block that the probe does not own was kept
+// before it or held in each round.
+// The probe runs first in main, as the probe of fir_flow_test does.
 fn the_proofs_leave_the_heap_where_it_was() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
@@ -8824,7 +8827,7 @@ fn the_proofs_leave_the_heap_where_it_was() void {
     defer fir.module_free(&m);
     strbuf.str_buf mut out = strbuf.create();
     defer strbuf.free(&out);
-    u64[3] mut break_at = {};
+    u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < fir_env.LEAK_ROUNDS) {
         u64 mut k = 0;
@@ -8841,11 +8844,11 @@ fn the_proofs_leave_the_heap_where_it_was() void {
         }
         u64 slot = fir_env.leak_slot(round);
         if (slot < 3) {
-            break_at[slot] = heap.system_view();
+            live_at[slot] = heap.live_view();
         }
         round += 1;
     }
-    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(live_at) < fir_env.LEAK_BOUND);
 }
 
 // ---- the work limit ----------------------------------------------------------------------------

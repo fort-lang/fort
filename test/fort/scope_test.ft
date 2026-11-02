@@ -316,16 +316,13 @@ fn free_empties_the_scope_and_leaves_it_usable() void {
 // other test here can see a release that is missing. The gate's sanitizers
 // instrument the C compiler and not the x86-64 program the harness runs.
 //
-// What can see one is the allocator, in two views, because each is blind to
-// what the other sees (modules_closure_test.ft says which and why). Two
-// hundred identical rounds fill and free one scope: the system view sees a
-// leak the allocator had to ask the kernel for. And the address of the
-// binding vector sees one it served out of its own free chunks.
+// What can see one is the allocator, through the live view of support/heap.ft:
+// the bytes of the blocks that the allocator does not hold as free. Two
+// hundred identical rounds fill and free one scope.
 //
-// scope.free makes three releases. Deletion verified each release.
-// Without `del(s->items)`, this probe fails. Before D17.11 became static, a
-// checked build without `del(b)` reported `overwriting owned value` at the next
-// write into that slot.
+// scope.free makes three releases. At d2f5b2b6 a deletion of `del(s->items)`
+// moved the live view by 202272 bytes under glibc 2.39 and 2.43. The compiler
+// refuses a deletion of `del(b)` (D17.11).
 // Without `strmap.free(&s->index)`, the stale index outlives the bindings.
 // Then `free_empties_the_scope_and_leaves_it_usable` reports
 // `index 0 out of range for length 0`.
@@ -345,14 +342,6 @@ fn moved(u64 early, u64 late, u64 last) u64 {
     return other;
 }
 
-// The address of the binding vector of `s`: the address of its first binding, because no cast takes
-// a `.ptr` (D3.5). The test below lends `s` to each call, so the use rule
-// of `move` and `del` (D17.21) asks a proof of each read of `s` after the call; this read stands in
-// a frame of its own.
-fn items_address(scope.scope* s) u64 {
-    return cast(&s->items[0], u64);
-}
-
 fn everything_a_scope_holds_is_released_with_it() void {
     // The names are made once, outside the rounds, so that the only
     // allocations the rounds make are the scope's own.
@@ -361,8 +350,7 @@ fn everything_a_scope_holds_is_released_with_it() void {
     containers.str_vec mut names = containers.str_create();
     defer containers.str_free(&names);
     fill_names(&p, &names, LEAK_NAMES);
-    u64[3] mut break_at = {};
-    u64[3] mut items_at = {};
+    u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < LEAK_ROUNDS) {
         scope.scope mut s = module_scope();
@@ -371,6 +359,7 @@ fn everything_a_scope_holds_is_released_with_it() void {
             scope.declare(&s, containers.str_at(&names, i), scope.bind_kind.b_var, at(1), null);
             i += 1;
         }
+        scope.free(&s);
         u64 mut slot = 3;
         if (round == LEAK_EARLY) {
             slot = 0;
@@ -382,16 +371,11 @@ fn everything_a_scope_holds_is_released_with_it() void {
             slot = 2;
         }
         if (slot < 3) {
-            items_at[slot] = items_address(&s);
-        }
-        scope.free(&s);
-        if (slot < 3) {
-            break_at[slot] = heap.system_view();
+            live_at[slot] = heap.live_view();
         }
         round += 1;
     }
-    assert(moved(break_at[0], break_at[1], break_at[2]) < LEAK_BOUND);
-    assert(!heap.ADDRESS_IS_A_VIEW || moved(items_at[0], items_at[1], items_at[2]) < LEAK_BOUND);
+    assert(moved(live_at[0], live_at[1], live_at[2]) < LEAK_BOUND);
 }
 
 fn main() i32 {

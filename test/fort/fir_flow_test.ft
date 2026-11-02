@@ -623,50 +623,30 @@ fn the_transfers_stay_linear_in_the_blocks() void {
     assert(some.steps == 2 * cast(BLOCKS, u64) - 2);
 }
 
-// The address of the vector of in-sets of `d`: the address of its first set, because no cast takes
-// a `.ptr` (D3.5); the function has BLOCKS blocks. The read through `d` stands in a function that
-// takes it as a parameter (D17.21).
-fn ins_address(fir_flow.dataflow* d) u64 {
-    return cast(&d->ins[0], u64);
-}
-
-// The address of the vector of out-sets of `d`, for the reason of ins_address (D17.21).
-fn outs_address(fir_flow.dataflow* d) u64 {
-    return cast(&d->outs[0], u64);
-}
-
-// Each round runs a dataflow over the chain twice into one record. The address of each result
-// vector is the block view, and the program break is the system view (notes/testing.md 4). The
-// block view of one set of 80 bytes read 465808 with nothing leaked, because a round this large
-// leaves free chunks of every size, so the probe does not watch it. A release of one small set in
-// each run is too small for this round; the probe small_rounds_leave_the_heap_where_it_was holds
-// those releases.
+// Each round runs a dataflow over the chain twice into one record. The probe watches the live view
+// of support/heap.ft (notes/testing.md 4). At d2f5b2b6 a deletion of a release of a result vector
+// moved it by 1412768 bytes or more under glibc 2.39 and 2.43. A release of one small set in each
+// run is small for this round; the probe small_rounds_leave_the_heap_where_it_was holds those
+// releases. The address of a block is no view here: the address of one set of 80 bytes moved by
+// 465808 bytes with nothing leaked, because a round this large leaves free chunks of every size.
 fn two_hundred_rounds_leave_the_heap_where_it_was() void {
     env mut e = env{};
     open(&e);
     defer close(&e);
     fir.func* f = chain_func(&e);
-    u64[3] mut ins_at = {};
-    u64[3] mut outs_at = {};
-    u64[3] mut break_at = {};
+    u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < fir_env.LEAK_ROUNDS) {
         fir_flow.dataflow mut d = run(f, BLOCKS, fir_flow.join_kind.join_union, mark_block);
         fir_flow.dataflow_forward(f, &d);
+        fir_flow.dataflow_free(&d);
         u64 slot = fir_env.leak_slot(round);
         if (slot < 3) {
-            ins_at[slot] = ins_address(&d);
-            outs_at[slot] = outs_address(&d);
-        }
-        fir_flow.dataflow_free(&d);
-        if (slot < 3) {
-            break_at[slot] = heap.system_view();
+            live_at[slot] = heap.live_view();
         }
         round += 1;
     }
-    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(ins_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(outs_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(live_at) < fir_env.LEAK_BOUND);
 }
 
 // The count of the dataflows in one round of the next probe.
@@ -675,11 +655,12 @@ u64 CALLS = 100;
 // Each round runs CALLS dataflows of each join over a loop of four blocks. A release of one set of
 // 8 to 80 bytes in each run, such as the entry or the initial set, the work list or the set of
 // the next transfer, leaks 32 bytes or more in each run, so 6400 bytes or more in each round, and
-// the program break moves. With one run in each round, the deletion of such a release left the
-// probe above green (the T-233 Log). The probe watches the system view alone, for the reason
-// above. It runs first in main: after the other tests of this program, the allocator served the
-// blocks that the deletion of `bits_free(&next)` leaked out of the free chunks those tests left,
-// and the break read 0.
+// the live view moves by that much. With one run in each round, the deletion of such a release left
+// the probe above green when it read the program break. At d2f5b2b6 the deletion of each such
+// release moved the live view of this probe by 627200 bytes under glibc 2.39 and 2.43. The probe
+// runs first in main. When it read the program break and ran after the other tests of this
+// program, the allocator served the blocks that a deletion of `bits_free(&next)` leaked out of the
+// free chunks of those tests. The break then read 0.
 fn small_rounds_leave_the_heap_where_it_was() void {
     env mut e = env{};
     open(&e);
@@ -687,7 +668,7 @@ fn small_rounds_leave_the_heap_where_it_was() void {
     fir.func* f = parse(&e, "", LOOP[..]);
     fir.pred_table mut pt = fir.func_predecessors(f);
     defer fir.pred_table_free(&pt);
-    u64[3] mut break_at = {};
+    u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < fir_env.LEAK_ROUNDS) {
         u64 mut k = 0;
@@ -702,11 +683,11 @@ fn small_rounds_leave_the_heap_where_it_was() void {
         }
         u64 slot = fir_env.leak_slot(round);
         if (slot < 3) {
-            break_at[slot] = heap.system_view();
+            live_at[slot] = heap.live_view();
         }
         round += 1;
     }
-    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(live_at) < fir_env.LEAK_BOUND);
 }
 
 fn main() i32 {

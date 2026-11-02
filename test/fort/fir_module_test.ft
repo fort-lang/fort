@@ -35,24 +35,6 @@ fn expect_global(fir_env.env mut* e, fir.global* g, ast.sym* named, string ty, i
     assert(consts.cv_to_i64(g->value, &v) && v == value);
 }
 
-// The address of each vector that the release probe watches, in each of three rounds.
-struct watched {
-    u64[3] funcs;
-    u64[3] globals;
-    u64[3] externs;
-    u64[3] locals;
-}
-
-// Records in slot `slot` of `at` the address of the function, global and extern vectors of `m`,
-// and of the locals of its function 20: the address of the first element, because no cast takes a
-// `.ptr` (D3.5), and each vector holds elements here.
-fn record(fir.module* m, u64 slot, watched mut* at) void {
-    at->funcs[slot] = cast(&m->funcs.items[0], u64);
-    at->globals[slot] = cast(&m->globals.items[0], u64);
-    at->externs[slot] = cast(&m->externs.items[0], u64);
-    at->locals[slot] = cast(&fir.module_function_at(m, 20)->locals.items[0], u64);
-}
-
 // ---- the module ---------------------------------------------------------------------------------
 
 fn functions_keep_their_order() void {
@@ -184,8 +166,8 @@ fn module_free_empties_the_module() void {
 
 // A module of forty functions, forty globals and forty externs, each function with a hundred
 // locals, made and freed two hundred times, leaves the heap where it was. The probe watches the
-// program break and the addresses of the function, global and extern vectors and of the locals
-// of one function. Deleting any one of the four releases of module_free turns it red.
+// live view of support/heap.ft. At d2f5b2b6 a deletion of any one of the four releases of
+// module_free moved it by 51744 bytes or more under glibc 2.39 and 2.43.
 fn a_module_leaves_the_heap_where_it_was() void {
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
@@ -195,8 +177,7 @@ fn a_module_leaves_the_heap_where_it_was() void {
     ast.sym* puts = fir_env.sym(&e, "puts");
     types.node* add_ty = fir_env.ty(&e, "add");
     types.node* limit_ty = fir_env.ty(&e, "LIMIT");
-    u64[3] mut break_at = {};
-    watched mut at = watched{};
+    u64[3] mut live_at = {};
     // Forty distinct C names, one for each extern.
     ast.sym[40] mut names = {};
     string letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN";
@@ -223,22 +204,15 @@ fn a_module_leaves_the_heap_where_it_was() void {
             fir.module_use_extern(&m, &names[i]);
             i += 1;
         }
-        u64 slot = fir_env.leak_slot(round);
-        if (slot < 3) {
-            record(&m, slot, &at);
-        }
         assert(fir.module_extern_count(&m) == 40);
         fir.module_free(&m);
+        u64 slot = fir_env.leak_slot(round);
         if (slot < 3) {
-            break_at[slot] = heap.system_view();
+            live_at[slot] = heap.live_view();
         }
         round += 1;
     }
-    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(at.funcs) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(at.globals) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(at.externs) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(at.locals) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(live_at) < fir_env.LEAK_BOUND);
 }
 
 fn main() i32 {

@@ -547,10 +547,16 @@ fn two_used_libraries_each_own_their_paths(library_env.env mut* e) void {
 
 // The release probe of the used libraries: rounds that each use two libraries in a fresh set and
 // a fresh session and free both, the round of the early sample, the late rounds that it is held
-// against, the distance in bytes that fails it, and the sections of each interface file. The
-// address of a fresh block runs through a cycle over rounds that keep nothing, so the probe takes
-// the smallest distance over the late rounds. A round that keeps one library keeps its record, its
-// tokens and its section map.
+// against, the distance in bytes that fails it, and the sections of each interface file. The probe
+// holds the live view of support/heap.ft and takes the smallest distance over the late rounds. A
+// round that keeps one library keeps its record, its tokens and its section map.
+//
+// At d2f5b2b6 a deletion of each of the seven releases of a used library in modules.free, of
+// `del(set->used.items)`, of the three releases of diag.free_sources and of
+// `containers.pool_free(&set->pool)` moved the live view by 14720 bytes or more under glibc 2.39
+// and 2.43. The program break and the address of a fresh block, which the probe read before then,
+// did not see the deletion of `containers.str_free(&store->texts)` in diag.free_sources, and
+// under glibc 2.39 they did not see the deletion of `del(set->used.items)`.
 u64 USED_ROUNDS = 400;
 u64 USED_EARLY = 200;
 u64 USED_LATE = 16;
@@ -586,10 +592,8 @@ fn two_used_libraries_are_released_with_the_set() void {
     strbuf.str_buf mut forms = strbuf.create();
     defer strbuf.free(&forms);
     interface_of("forms", &forms);
-    u64 mut early_break = 0;
-    u64 mut early_block = 0;
-    u64 mut break_moved = 0;
-    u64 mut block_moved = 0;
+    u64 mut early = 0;
+    u64 mut live_moved = 0;
     bool mut sampled = false;
     u64 mut round = 0;
     while (round < USED_ROUNDS) {
@@ -603,25 +607,19 @@ fn two_used_libraries_are_released_with_the_set() void {
         modules.free(&set);
         session.free(&s);
         if (round == USED_EARLY) {
-            early_break = heap.system_view();
-            early_block = heap.block_view();
+            early = heap.live_view();
         }
         if (round + USED_LATE >= USED_ROUNDS) {
-            u64 break_now = heap.distance(heap.system_view(), early_break);
-            u64 block_now = heap.distance(heap.block_view(), early_block);
-            if (!sampled || break_now < break_moved) {
-                break_moved = break_now;
-            }
-            if (!sampled || block_now < block_moved) {
-                block_moved = block_now;
+            u64 now = heap.distance(heap.live_view(), early);
+            if (!sampled || now < live_moved) {
+                live_moved = now;
             }
             sampled = true;
         }
         round += 1;
     }
-    assert(early_break != 0 && early_block != 0 && sampled);
-    assert(break_moved < USED_BOUND);
-    assert(!heap.ADDRESS_IS_A_VIEW || block_moved < USED_BOUND);
+    assert(early != 0 && sampled);
+    assert(live_moved < USED_BOUND);
 }
 
 fn a_listed_module_that_vanished_is_a_read_error() void {

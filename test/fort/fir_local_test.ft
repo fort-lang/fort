@@ -65,12 +65,6 @@ fn name_of(fir.func* f, u32 n) string {
     return fir.local_at(f, n)->name;
 }
 
-// The address of the vector of the locals of `f`: the address of its first local, because no cast
-// takes a `.ptr` (D3.5).
-fn locals_address(fir.func* f) u64 {
-    return cast(&f->locals.items[0], u64);
-}
-
 // ---- the locals ---------------------------------------------------------------------------------
 
 fn the_return_local_has_the_result_type() void {
@@ -233,9 +227,9 @@ fn func_free_empties_the_function() void {
 }
 
 // A function with a thousand locals, made and freed two hundred times, leaves the heap where it
-// was. The locals vector reaches 1024 slots, about 64 KB. The address of that block and the
-// program break both stay where the early round left them when func_free releases it; deleting
-// `del(f->locals.items)` in func_free turns this test red.
+// was. The locals vector reaches 1024 slots, about 64 KB. The live view of support/heap.ft stays
+// where the early round left it when func_free releases it. At d2f5b2b6 a deletion of
+// `del(f->locals.items)` in func_free moved it by 8029728 bytes under glibc 2.39 and 2.43.
 fn a_thousand_locals_leave_the_heap_where_it_was() void {
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
@@ -243,8 +237,7 @@ fn a_thousand_locals_leave_the_heap_where_it_was() void {
     ast.sym* s = fir_env.sym(&e, "add");
     types.node* fn_ty = fir_env.ty(&e, "add");
     types.node* ty = fir_env.u64_ty(&e);
-    u64[3] mut break_at = {};
-    u64[3] mut locals_at = {};
+    u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < fir_env.LEAK_ROUNDS) {
         fir.func mut f = fir.func_new(fir_env.tt(&e), s, fn_ty);
@@ -253,18 +246,14 @@ fn a_thousand_locals_leave_the_heap_where_it_was() void {
             fir.local_add(&f, ty, fir.local_kind.lk_temp, null, fir_env.at(1, 1));
             i += 1;
         }
+        fir.func_free(&f);
         u64 slot = fir_env.leak_slot(round);
         if (slot < 3) {
-            locals_at[slot] = locals_address(&f);
-        }
-        fir.func_free(&f);
-        if (slot < 3) {
-            break_at[slot] = heap.system_view();
+            live_at[slot] = heap.live_view();
         }
         round += 1;
     }
-    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(locals_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(live_at) < fir_env.LEAK_BOUND);
 }
 
 fn main() i32 {
