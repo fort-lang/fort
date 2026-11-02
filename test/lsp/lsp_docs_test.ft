@@ -20,10 +20,15 @@ import std.strbuf;
 
 // The rounds of the release probe and the distance in bytes that fails it.
 // Each round opens twenty documents of about a kibibyte and closes them all.
-// One retained text moves the system view by twenty kibibytes. Four
-// hundred retained texts exceed the process's initial heap.
+// One retained text moves the live view by twenty kibibytes.
 u64 ROUNDS = 400;
 u64 BOUND = 4096;
+
+// The round of the early sample. With nothing kept, the live view rises in the first rounds:
+// under glibc 2.39 it rose by 13136 bytes, and its last move came at round 5 or 6. At round 3,
+// the round of the early sample before, the probe read 4480 to 4928 bytes with nothing kept,
+// which is above BOUND. Under glibc 2.43 the view did not move.
+u64 EARLY_ROUND = 20;
 
 // How many of the last rounds the probe holds against the early round. The allocator does not
 // hand a round the same block every time. The probe takes the smallest distance over a window
@@ -534,33 +539,29 @@ fn round() void {
 }
 
 fn a_store_gives_back_everything_it_took() void {
-    // Four hundred rounds against two views of the heap: the system view, which catches a
-    // leak the allocator serves from the operating system. The address of a small fresh block,
-    // which catches one it serves from its own free chunks.
-    u64 mut early_break = 0;
-    u64 mut early_block = 0;
-    u64[16] mut late_break = u64[16]{};
-    u64[16] mut late_block = u64[16]{};
+    // Four hundred rounds against the live view of support/heap.ft, which counts the bytes of
+    // each block that the allocator does not hold as free. At d2f5b2b6 a deletion of each of the
+    // three releases of docs.free moved it by 116896 bytes or more under glibc 2.39 and 2.43.
+    // The address of a small fresh block is no view here: with only the order or the count of
+    // the allocations moved, it moved by 12112 to 32016 bytes under glibc 2.39.
+    u64 mut early = 0;
+    u64[16] mut late = u64[16]{};
     u64 mut i = 0;
     while (i < ROUNDS) {
         round();
-        if (i == 3) {
-            early_break = heap.system_view();
-            early_block = heap.block_view();
+        if (i == EARLY_ROUND) {
+            early = heap.live_view();
         }
         if (i + LATE_SAMPLES >= ROUNDS) {
-            late_break[i + LATE_SAMPLES - ROUNDS] = heap.system_view();
-            late_block[i + LATE_SAMPLES - ROUNDS] = heap.block_view();
+            late[i + LATE_SAMPLES - ROUNDS] = heap.live_view();
         }
         i += 1;
     }
-    u64 break_moved = moved(early_break, late_break);
-    u64 block_moved = moved(early_block, late_block);
-    if (break_moved >= BOUND || block_moved >= BOUND) {
-        println("the system view moved ", break_moved, " and the block ", block_moved);
+    u64 live_moved = moved(early, late);
+    if (live_moved >= BOUND) {
+        println("the live view moved ", live_moved);
     }
-    assert(break_moved < BOUND);
-    assert(block_moved < BOUND);
+    assert(live_moved < BOUND);
 }
 
 fn main() i32 {

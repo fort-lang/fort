@@ -152,23 +152,18 @@ fn a_fresh_arena_is_empty(env mut* e) void {
 // x86-64 program the harness runs. So a leak here is invisible to every
 // other test and to ctest.
 //
-// What can see one is the allocator, in two views, because each is blind to
-// what the other sees (modules_closure_test.ft says which and why). Two
-// hundred identical rounds build the same tree and free it: the system view
-// sees a leak the allocator had to ask the kernel for. And the address a
-// round is handed sees one it served out of its own free chunks. The early
-// round is held against the last two and the smaller distance taken. The
-// allocator alternates between two positions from one round to the next
-// once the program's path is long enough to change a bin.
+// What can see one is the allocator, through the live view of support/heap.ft:
+// the bytes of the blocks that the allocator does not hold as free. Two
+// hundred identical rounds build the same tree and free it. A round that
+// keeps a block moves the view by the bytes of that block. The early round is
+// held against the last two and the smaller distance taken.
 //
-// ast_arena_free makes three releases. `del(n->list.items)` and
-// `del(ar->nodes)` are each watched here by the system view and, where an
-// address is a view (heap.ADDRESS_IS_A_VIEW), by an address. Each was verified
-// by deleting that one release and watching this test fail, on Linux and on
-// macOS, when the first was the call `list_free(&n->list)`.
+// ast_arena_free makes three releases. At d2f5b2b6 a deletion of
+// `del(n->list.items)` moved the live view by 804384 bytes, and a deletion of
+// `del(ar->nodes)` by 1607200 bytes, under glibc 2.39 and 2.43.
 // The third, `del(n)` on the node itself, is held by the language rather than
-// by a probe: without it, `n` is a live owner at the end of its scope, and the
-// leak rule (D17.20) makes that a compile error.
+// by a probe: at d2f5b2b6 the compiler refused its deletion with `overwriting
+// owned value` at the next `move(ar->last)` into `n` (D17.11).
 u64 LEAK_ROUNDS = 200;
 u64 LEAK_EARLY = 100;
 u64 LEAK_CHILDREN = 1024;
@@ -185,23 +180,8 @@ fn moved(u64 early, u64 late, u64 last) u64 {
     return other;
 }
 
-// The address of the child list of `n` and of the node vector of the arena of `e`: the address of
-// the first element, because no cast takes a `.ptr` (D3.5), and both hold elements when the test
-// reads them. The test below
-// lends `e` to each call, so the use rule of `move` and `del` (D17.21) asks a proof of each read of
-// `e` or through a pointer after the call; these reads stand in frames of their own.
-fn list_address(ast.node* n) u64 {
-    return cast(&n->list.items[0], u64);
-}
-
-fn nodes_address(env* e) u64 {
-    return cast(&e->arena.nodes[0], u64);
-}
-
 fn the_nodes_and_their_lists_are_released_with_the_arena() void {
-    u64[3] mut break_at = {};
-    u64[3] mut list_at = {};
-    u64[3] mut nodes_at = {};
+    u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < LEAK_ROUNDS) {
         env mut e = open();
@@ -211,6 +191,7 @@ fn the_nodes_and_their_lists_are_released_with_the_arena() void {
             ast.ast_push(parent, int_lit(&e, i));
             i += 1;
         }
+        close(&e);
         u64 mut slot = 3;
         if (round == LEAK_EARLY) {
             slot = 0;
@@ -221,25 +202,12 @@ fn the_nodes_and_their_lists_are_released_with_the_arena() void {
         if (round == LEAK_ROUNDS - 1) {
             slot = 2;
         }
-        // The addresses are read while the arena still holds them, the system view
-        // after it is freed, which is where a round's keeping shows.
         if (slot < 3) {
-            list_at[slot] = list_address(parent);
-            nodes_at[slot] = nodes_address(&e);
-        }
-        close(&e);
-        if (slot < 3) {
-            break_at[slot] = heap.system_view();
+            live_at[slot] = heap.live_view();
         }
         round += 1;
     }
-    assert(moved(break_at[0], break_at[1], break_at[2]) < LEAK_BOUND);
-    // A node owns its list and `del` is shallow, so the list goes before the
-    // node does. If it did not, this is where it would show.
-    assert(!heap.ADDRESS_IS_A_VIEW || moved(list_at[0], list_at[1], list_at[2]) < LEAK_BOUND);
-    // The vector of node pointers is the arena's own block and is
-    // released last.
-    assert(!heap.ADDRESS_IS_A_VIEW || moved(nodes_at[0], nodes_at[1], nodes_at[2]) < LEAK_BOUND);
+    assert(moved(live_at[0], live_at[1], live_at[2]) < LEAK_BOUND);
 }
 
 // ---- children ------------------------------------------------------------------

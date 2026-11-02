@@ -394,40 +394,31 @@ fn free_empties_the_set_and_leaves_it_usable() void {
 // sanitizers instrument the C compiler and not the x86-64 program the harness
 // runs.
 //
-// What can see one is the allocator, and it takes two views of it, because
-// each is blind to what the other sees. Two hundred identical rounds load the
-// same two modules and ask for the same blocks in the same order.
+// What can see one is the allocator, through the live view of support/heap.ft:
+// the bytes of the blocks that the allocator does not hold as free. Two hundred
+// identical rounds load the same two modules and ask for the same blocks in the
+// same order. A round that keeps a block moves the view by the bytes of that
+// block, however small the block is and wherever the allocator put it.
 //
-// The first view is the system view: a round that gives its blocks back
-// leaves it where it was. A round that retains an allocation pushes it up.
-// This view sees a large leak but can miss a small one. The allocator can
-// serve a sixty-four-byte vector from its free chunks without more memory from
-// the kernel. Removing `del(set->modules.items)` therefore does not move the
-// system view.
-//
-// The second view is the address of a block a round receives. A round that
-// frees what it took receives the same address again. This view sees a small
-// leak and misses a large one. With `defer analysis_free` deleted, it read 0
-// while the system view climbed by megabytes. These checks watch the owned-module
-// vector, the dependency-order vector, and the pool's first block. One address
-// cannot see each release. A leak of the order vector alone left the
-// address of the modules vector where it was.
-//
-// Every release of modules.free was verified by deleting it and watching this
-// test fail. `del(set->modules.items)` and `del(set->order.items)` move an
-// address. `ast.ast_arena_free(&set->arena)`,
-// `containers.pool_free(&set->pool)`, `strmap.free(&set->by_path)`, and
-// `scope.free(&m->names)` move both measured views. Before D17.11 became
-// static, dropping the `del(m)` of a module made the checked build abort with
-// `overwriting owned value` in the first test of this file instead.
+// At d2f5b2b6 a deletion of each of these releases moved the live view or
+// stopped the program, under glibc 2.39 and 2.43: `del(set->modules.items)`,
+// `del(set->order.items)` and `del(set->stack.items)` by 7840 bytes or more,
+// `strbuf.free(&set->msg)` by 3136 or more, `containers.pool_free(&set->pool)`
+// by 407680, `ast.ast_arena_free(&set->arena)` by 987840, and `free(&s)` in
+// scope.drop by 28224. A deletion of `strmap.free(&set->by_path)` or
+// `strmap.free(&set->by_real)` stopped the program at a bounds check. The
+// program break and the three addresses that the probe read before then did
+// not see the deletion of `free(&s)` in scope.drop. Under glibc 2.43 they did
+// not see the deletion of `strbuf.free(&set->msg)` or of `del(n->list.items)`
+// in ast.ast_arena_free either.
+// A deletion of the other releases of modules.free moved no view. The
+// compiler refuses a deletion of the `del(m)` of a module (D17.11).
 u64 LEAK_ROUNDS = 200;
 u64 LEAK_EARLY = 100;
 u64 LEAK_BOUND = 1024;
 
-// How far the system view moved between the early round and the end of the rounds.
-// Uses the smaller distance to the final
-// two samples. This ignores no steady growth
-// and absorbs alternating allocator growth.
+// How far the live view moved between the early round and the end of the rounds: the smaller
+// distance to the last two samples. A leak moves both of them.
 fn moved(u64 early, u64 late, u64 last) u64 {
     assert(early != 0 && late != 0 && last != 0);
     u64 one = heap.distance(late, early);
@@ -438,29 +429,17 @@ fn moved(u64 early, u64 late, u64 last) u64 {
     return other;
 }
 
-// The addresses that `set` holds: its modules, its order and its pool. A vector gives the address
-// of its first element, because no cast takes a `.ptr` (D3.5).
-fn addresses(modules.module_set* set) u64[3] {
-    u64[3] held = {cast(&set->modules.items[0], u64), cast(&set->order.items[0], u64),
-                   cast(set->pool.head, u64)};
-    return held;
-}
-
 fn everything_a_set_holds_is_released_with_it(modules_env.env mut* e) void {
     modules_env.add(e, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
     modules_env.add(e, "util.ft", modules_env.src_add());
-    u64[3] mut break_at = {};
-    u64[3] mut modules_at = {};
-    u64[3] mut order_at = {};
-    u64[3] mut pool_at = {};
+    u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < LEAK_ROUNDS) {
         modules.module_set mut set = modules.create();
         string own entry = modules_env.in_sandbox(e, "main.ft");
         assert(modules.load(&e->s, &set, entry));
         del(entry);
-        // The addresses are read while the set still holds them, the system view
-        // after it is freed, which is where a round's keeping shows.
+        modules.free(&set);
         u64 mut slot = 3;
         if (round == LEAK_EARLY) {
             slot = 0;
@@ -472,22 +451,11 @@ fn everything_a_set_holds_is_released_with_it(modules_env.env mut* e) void {
             slot = 2;
         }
         if (slot < 3) {
-            u64[3] held = addresses(&set);
-            modules_at[slot] = held[0];
-            order_at[slot] = held[1];
-            pool_at[slot] = held[2];
-        }
-        modules.free(&set);
-        if (slot < 3) {
-            break_at[slot] = heap.system_view();
+            live_at[slot] = heap.live_view();
         }
         round += 1;
     }
-    assert(moved(break_at[0], break_at[1], break_at[2]) < LEAK_BOUND);
-    assert(!heap.ADDRESS_IS_A_VIEW
-           || moved(modules_at[0], modules_at[1], modules_at[2]) < LEAK_BOUND);
-    assert(!heap.ADDRESS_IS_A_VIEW || moved(order_at[0], order_at[1], order_at[2]) < LEAK_BOUND);
-    assert(!heap.ADDRESS_IS_A_VIEW || moved(pool_at[0], pool_at[1], pool_at[2]) < LEAK_BOUND);
+    assert(moved(live_at[0], live_at[1], live_at[2]) < LEAK_BOUND);
 }
 
 fn main() i32 {

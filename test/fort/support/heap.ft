@@ -1,49 +1,40 @@
-/// heap: the views of the heap that the leak probes of test/fort share.
+/// heap: the live view of the heap that the leak probes of test/fort and test/lsp share.
 //
 // A leak probe runs many identical rounds and holds an early sample of the
 // heap against the late ones. A round that gives every block back leaves the
-// heap where it was. A round that keeps a block moves it. The system view and
-// the block view are each blind to what the other view sees.
-//
-// The system view is what the allocator holds from the operating system. It
-// moves for a leak the allocator serves with new memory. It does not move for
-// a leak the allocator serves out of a free chunk it already holds.
-//
-// The block view is what the allocator serves out of what it holds. It moves
-// for a small leak the system view misses. It can miss a large leak: without
-// `analysis_free`, the block view read 0 while the system view moved by
-// megabytes.
+// heap where it was. A round that keeps a block moves it.
 //
 // The live view counts the bytes of the blocks that the allocator does not
-// hold as free. A leaked block is in that count. On Linux a free block in the
-// thread cache of glibc is in that count too, so the view does not see a
-// release of a small block until that cache is full. The probes of
-// test/fort/support/lifetime.ft hold this view alone.
+// hold as free. A leaked block is in that count, whatever its size and
+// wherever the allocator put it. On Linux a free block in the thread cache of
+// glibc is in that count too, so the view does not see a release of a small
+// block until that cache is full. A block that every round keeps is never in
+// that cache, so the view moves by the kept bytes times the rounds between the
+// two samples.
 //
-// Each target gives the views its own way, and the values of the two
-// targets are not comparable. A probe compares two samples of one view on one
-// target, so a distance in bytes means the same thing on both.
+// Each target gives the view its own way, and the values of the two targets
+// are not comparable. A probe compares two samples on one target, so a
+// distance in bytes means the same thing on both.
 //
-// On Linux the system view is the program break, the end of the heap, which
-// sbrk(0) reports without moving it. glibc serves a block above 128 KB by
-// mmap, so the break does not move for a leak of such a block. The block view
-// is the address of a fresh 32-byte block, which the probe frees at once. A
-// round that kept a block gives the next round a different address. The live
-// view is the sum of two fields of glibc's mallinfo2(3): `uordblks`, the heap
-// bytes in use, and `hblkhd`, the bytes of the mmap blocks. Under glibc 2.39
-// and 2.43 the break of the emitter probe did not move for a deleted
-// `strbuf.free(&g->globals)` or `strbuf.free(&g->scratch)`, because glibc
-// served each leak out of free chunks. At b6676ced the live view moved by
-// 76848 and 27280 bytes under glibc 2.39, and by 65136 and 24032 bytes under
-// glibc 2.43.
-//
-// On macOS all three views count the bytes of every live block, which the
-// allocator's own enumerator reports zone by zone, as the `heap` tool does.
-// One exact count covers what the Linux views cover between them. The
+// On Linux the view is the sum of two fields of glibc's mallinfo2(3):
+// `uordblks`, the heap bytes in use, and `hblkhd`, the bytes of the mmap
+// blocks. On macOS it counts the bytes of every live block, which the
+// allocator's own enumerator reports zone by zone, as the `heap` tool does. The
 // statistics of `malloc_zone_statistics` are no view there: `size_in_use`
-// steps by 16384 bytes at a round the program does not choose, and the
-// address of a fresh block comes from a per-CPU magazine, so two rounds get
-// addresses gigabytes apart with nothing leaked.
+// steps by 16384 bytes at a round the program does not choose.
+//
+// At d2f5b2b6 this module gave two more views, and no probe reads them now.
+// The system view was the program break, which sbrk(0) reports. The block view
+// was the address of a fresh 32-byte block. Each of them moved when only the
+// order or the count of the allocations moved, with nothing kept: the break of
+// the emitter probe flipped between two values 1896448 bytes apart under glibc
+// 2.43, and the block view of test/lsp/lsp_docs_test.ft moved by 12112 to 32016
+// bytes under glibc 2.39. And they missed leaks that the live view saw. Of 303
+// deletions of a release on the paths of the 16 test files that read them, the
+// two views and the other assertions of those files failed 179 under glibc
+// 2.39 or 2.43. The live view and the same assertions failed the same 179 and 3
+// more, under each glibc where the two views failed them. notes/testing.md
+// gives the measurement.
 
 import std.libc;
 
@@ -131,7 +122,7 @@ $if ($cfg(target_os) == "macos") {
         }
     }
 
-    fn system_view() u64 {
+    fn live_view() u64 {
         zone** mut zones = null;
         u32 mut count = 0;
         u32 task = mach_task_self();
@@ -155,33 +146,7 @@ $if ($cfg(target_os) == "macos") {
         }
         return w.sum;
     }
-
-    fn block_view() u64 {
-        return system_view();
-    }
-
-    fn live_view() u64 {
-        return system_view();
-    }
 } else {
-    // sbrk(0) moves nothing and reports the break. std has no binding for it
-    // and this module is its one caller.
-    extern fn sbrk(i64 increment) void*;
-
-    fn system_view() u64 {
-        return cast(sbrk(0), u64);
-    }
-
-    // The probe releases the block at once, so the probe itself leaks nothing.
-    u64 PROBE_BLOCK = 32;
-
-    fn block_view() u64 {
-        u8 mut@ own block = new(u8, PROBE_BLOCK);
-        u64 at = cast(&block[0], u64);
-        del(block);
-        return at;
-    }
-
     $if ($cfg(target_arch) == "x86_64") {
         // <malloc.h>: struct mallinfo2 of glibc 2.33 and later, ten size_t fields.
         struct malloc_counts {
@@ -224,15 +189,4 @@ fn distance(u64 a, u64 b) u64 {
         return a - b;
     }
     return b - a;
-}
-
-// Whether the address of a buffer is a view of the heap on this target: false
-// on macOS, where a fresh block comes from a per-CPU magazine (see the top of
-// this file). A probe that samples the address of a buffer asserts on it only
-// where this is true, and on macOS its system view must then witness each
-// release alone, with a bound below the smallest release it watches.
-$if ($cfg(target_os) == "macos") {
-    bool ADDRESS_IS_A_VIEW = false;
-} else {
-    bool ADDRESS_IS_A_VIEW = true;
 }

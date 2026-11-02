@@ -260,39 +260,13 @@ fn a_function_with_no_edge_has_an_empty_table() void {
 
 // ---- release ----------------------------------------------------------------------------
 
-// The address of each vector that the release probe watches, in each of three rounds.
-struct watched {
-    u64[3] locals;
-    u64[3] projs;
-    u64[3] ops;
-    u64[3] arms;
-    u64[3] blocks;
-    u64[3] stmts;
-    u64[3] first;
-    u64[3] preds;
-}
-
-// Records in slot `slot` of `at` the address of each vector of `f` and of `pt`, and of the
-// statements of block 100: the address of the first element, because no cast takes a `.ptr`
-// (D3.5), and each vector holds elements here. The reads through `f` and `pt` stand in a function
-// that takes them as parameters (D17.21).
-fn record(fir.func* f, fir.pred_table* pt, u64 slot, watched mut* at) void {
-    at->locals[slot] = cast(&f->locals.items[0], u64);
-    at->projs[slot] = cast(&f->projs.items[0], u64);
-    at->ops[slot] = cast(&f->ops.items[0], u64);
-    at->arms[slot] = cast(&f->arms.items[0], u64);
-    at->blocks[slot] = cast(&f->blocks.items[0], u64);
-    at->stmts[slot] = cast(&fir.block_at(f, 100)->statements.items[0], u64);
-    at->first[slot] = cast(&pt->first[0], u64);
-    at->preds[slot] = cast(&pt->preds[0], u64);
-}
-
 // A function with 200 blocks and its predecessor table, made and freed two hundred times, leave
 // the heap where they were. Each block holds four statements, one of them an assignment into a
 // field with two operands, and ends in a switch with one arm, so the round fills the locals, the
 // projections, the operands, the arms, the statements of each block and the blocks. The probe
-// watches the program break and the address of each of those vectors and of the predecessor
-// list. Deleting any one of the eight releases of func_free and pred_table_free turns it red.
+// watches the live view of support/heap.ft. At d2f5b2b6 a deletion of any one of the eight
+// releases of func_free and pred_table_free moved it by 79968 bytes or more under glibc 2.39 and
+// 2.43.
 fn two_hundred_blocks_leave_the_heap_where_they_were() void {
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
@@ -300,8 +274,7 @@ fn two_hundred_blocks_leave_the_heap_where_they_were() void {
     ast.sym* s = fir_env.sym(&e, "add");
     types.node* fn_ty = fir_env.ty(&e, "add");
     types.node* pair = fir_env.ty(&e, "pair");
-    u64[3] mut break_at = {};
-    watched mut at = watched{};
+    u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < fir_env.LEAK_ROUNDS) {
         fir.func mut f = fir.func_new(fir_env.tt(&e), s, fn_ty);
@@ -328,26 +301,15 @@ fn two_hundred_blocks_leave_the_heap_where_they_were() void {
         }
         ret(&f, 199);
         fir.pred_table mut pt = fir.func_predecessors(&f);
-        u64 slot = fir_env.leak_slot(round);
-        if (slot < 3) {
-            record(&f, &pt, slot, &at);
-        }
         fir.pred_table_free(&pt);
         fir.func_free(&f);
+        u64 slot = fir_env.leak_slot(round);
         if (slot < 3) {
-            break_at[slot] = heap.system_view();
+            live_at[slot] = heap.live_view();
         }
         round += 1;
     }
-    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(at.locals) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(at.projs) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(at.ops) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(at.arms) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(at.blocks) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(at.stmts) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(at.first) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(at.preds) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(live_at) < fir_env.LEAK_BOUND);
 }
 
 fn main() i32 {

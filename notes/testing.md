@@ -412,18 +412,19 @@ bullet at a time and without a rewrite.
   qemu, so a `del` a module forgets leaks silently through all three presets. A module that
   promises its allocations die with the value that owns them (D20.5) needs a witness of its own --
   in-band accounting the module already keeps (`containers.pool_used`), or the allocator itself:
-  identical rounds are handed the same addresses again when a round frees what it took and fresh
-  ones when it does not, so an address that repeats over eight rounds is the release
-  (`the_blocks_a_node_owns_are_released_with_it` in `test/fort/types_table_test.ft`, T-032).
-  Verify such a witness by deleting the `del` it covers and watching it go red; two of them in
-  `types.ft` had no witness at all until that was measured.
+  the live view of `test/fort/support/heap.ft` counts each block that a round keeps, so a probe
+  of identical rounds holds an early sample of it against the late ones
+  (`the_blocks_a_node_owns_are_released_with_it` in `test/fort/types_table_test.ft`). Verify such
+  a witness by deleting the `del` it covers and watching it go red; two of them in `types.ft` had
+  no witness at all until that was measured.
   **An allocator probe without the live view needs two views, because each is blind to what the
   other sees** (T-034), and both of them can miss a leaked block above 128 KB (section 4 of this
   file). They do not always miss it: a deleted `strbuf.free(&g->out)` moved the break of
   `driver_lifetime_emitter_test.ft` by 109043712 bytes. **The lifetime probes hold a third view
   alone, the live view.** On Linux it is `uordblks + hblkhd` of glibc's `mallinfo2(3)`, so it counts
-  the mmap blocks. On macOS it is the system view. On Linux it also counts the free blocks in the
-  thread cache of glibc. So it does not see the release of a small block while that cache has space:
+  the mmap blocks. On macOS it counts the bytes of each live block. On Linux it also counts the
+  free blocks in the thread cache of glibc. So it does not see the release of a small block while
+  that cache has space:
   `test/fort/heap_test.ft` measures what it sees. A block that every round keeps is never in that
   cache, so the view moves by the kept bytes times the rounds between the samples. At b6676ced, 57
   deletions of a release on the paths of the six probes ran one at a time under glibc 2.39 and 2.43.
@@ -448,13 +449,13 @@ bullet at a time and without a rewrite.
   a 64-byte vector -- and misses a large one, because a small probe block still comes back at the
   same address while the heap has grown: with `defer analysis_free` deleted in the driver the
   address probe read 0 while the program break had climbed by megabytes, so the release it
-  claimed to witness was unwitnessed. The program break (`sbrk(0)`, the Linux system view of
-  `test/fort/support/heap.ft`, which gives macOS a view of its own)
-  catches exactly the other half: it did not move at all when `del(set->modules.items)` was
-  deleted. So watch both, and more than one address when a round allocates several blocks -- a
+  claimed to witness was unwitnessed. The program break (`sbrk(0)`, the Linux system view that
+  `test/fort/support/heap.ft` gave until the live view replaced it) catches exactly the other
+  half: it did not move at all when `del(set->modules.items)` was deleted. So a probe without the
+  live view watched both, and more than one address when a round allocated several blocks -- a
   dropped `del(set->order.items)` left the address of the module vector exactly where it was, so
-  `modules_closure_test.ft` watches three addresses and the break, and every one of the six
-  releases was verified against the view that moves. Sample the early round against the **last
+  `modules_closure_test.ft` watched three addresses and the break, and every one of the six
+  releases was verified against the view that moved. Sample the early round against the **last
   sixteen** rounds and take the smallest distance: the allocator's small-block position runs
   through a cycle once the program's own path is long enough to change a bin -- which the
   harness's `mkdtemp` directory is, while a hand run from `/tmp/prog` is not, so a probe reads 0
@@ -485,10 +486,31 @@ bullet at a time and without a rewrite.
   the live view alone, and both trees pass under glibc 2.39 and 2.43. A probe that holds the break
   or the address of a block can meet the same false failure. Where the live view is available,
   hold it instead.
+  **Every leak probe holds the live view alone, and `test/fort/support/heap.ft` gives no other
+  view.** At d2f5b2b6, 16 test files read the break or the address of a block: 13 in `test/fort` and
+  3 in `test/lsp` (`grep -rln "system_view\|block_view" test --include=*_test.ft`). For each probe,
+  a measurement read the live view at the samples of the old views. It ran the 16 files under glibc
+  2.39 and 2.43 with nothing deleted, and with the order and the count of the allocations moved by
+  11 settings: a block of 24 to 100000 bytes kept before the tests, or a block of 40 to 20000 bytes
+  held through each round. The break and the addresses read 0 in each run. The block view of
+  `lsp_docs_test.ft` read 12112 to 32016 bytes in 3 runs under glibc 2.39, and that of
+  `lsp_json_arena_test.ft` read 42288 in 1 run, each above its bound of 4096. Then a deletion of
+  each line that holds a release in a `src` function on the static call path of a probe round made
+  438 trees. The compiler refused 135. The other 303 ran one at a time under both glibc versions. Of
+  them, the old views and the other assertions of the files failed 179, and the live view and the
+  same assertions failed the same 179 and 3 more. No run that the old views failed passed with the
+  live view. The old views missed 5 deletions under glibc 2.43 that they caught under 2.39, among
+  them `del(t->layout)` in `types.type_table_free`, which keeps 80 bytes in each round. They missed
+  2 under glibc 2.39 that they caught under 2.43. The live view and the same assertions failed the
+  same 182 under each glibc. Two changes keep each witness. `types_table_test.ft` takes a bound of
+  1024 on both targets, since that deletion moves the live view by 7840 bytes and the view read 0
+  with nothing kept. The early sample of the session, documents and store probes of `test/lsp` moved
+  from round 3 to round 20: with nothing kept, the live view rose under glibc 2.39 until round 7,
+  and the store probe read 4480 to 4928 bytes at round 3, above its bound.
   On macOS the address of a buffer is no view of the heap: the allocator serves a block from a
-  per-CPU magazine, so `heap.ADDRESS_IS_A_VIEW` in `test/fort/support/heap.ft` is false there,
-  `fir_env.address_moved` answers 0, and each probe that samples an address asserts on it only
-  where the constant is true (T-256, T-270). A probe then reads the system view only, which on
+  per-CPU magazine, so `heap.ADDRESS_IS_A_VIEW` in `test/fort/support/heap.ft` was false there,
+  `fir_env.address_moved` answered 0, and each probe that sampled an address asserted on it only
+  where the constant was true (T-256, T-270). A probe then read the system view only, which on
   macOS counts live bytes exactly and reads 0 when the rounds keep nothing, so its bound must sit
   below the smallest release it watches: `types_table_test.ft` missed a lost `del(t->layout)`,
   3136 bytes over its rounds, under a bound of 8192, and takes 1024 on macOS since (T-270).
@@ -496,9 +518,9 @@ bullet at a time and without a rewrite.
   **A round large enough to witness a big release makes the block view useless**, which is the
   other half of the same measurement: a round that allocates a hundred kilobytes and gives it all
   back leaves free chunks of every size, so the 32-byte probe lands wherever one starts and ranged
-  over 450 KB with nothing leaking. Switch the block view off for such a round and say why in the
-  test, and earn it: every release that round covers must then be large enough for the *break* to
-  move, which the deletion experiment confirms one release at a time.
+  over 450 KB with nothing leaking. A probe that read the block view switched it off for such a
+  round and said why in the test. Every release that round covered then had to be large enough
+  for the *break* to move, which the deletion experiment confirmed one release at a time.
   **Two calls that release the same vector cannot be witnessed apart.** `gen_free`'s `slots_free`
   and `gen.function_begin` both release the emitter's slot vector, and deleting either
   alone leaks nothing: 15 of `gen_free`'s 16 releases turned T-038's probe red and the sixteenth

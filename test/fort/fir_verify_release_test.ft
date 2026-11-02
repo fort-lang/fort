@@ -29,10 +29,11 @@ u64 CALLS = 100;
 
 // Each round runs every rule of the verifier CALLS times over a loop of four blocks that keeps
 // every rule. A release of one block of 8 to 80 bytes in each call leaks 32 bytes or more in
-// each call, so 3200 bytes or more in each round, and the program break moves. The probe watches
-// the system view alone, because the free chunks of a round leave the address of a small block
-// no view. It runs first, before any other test of this program leaves free chunks that absorb
-// the leak.
+// each call, so 3200 bytes or more in each round, and the live view of support/heap.ft moves by
+// that much. At d2f5b2b6 the smallest move that a deletion of a release made red was 313600
+// bytes, under glibc 2.39 and 2.43. The free chunks of a round leave the address of a small block
+// no view. It runs first, as it did when it read the program break, which the free chunks of the
+// other tests of this program could absorb a leak from.
 fn small_rounds_leave_the_heap_where_it_was() void {
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
@@ -56,7 +57,7 @@ fn small_rounds_leave_the_heap_where_it_was() void {
     defer fir.module_free(&m);
     fir.func* f = parse(&e, &m, strbuf.view(&text));
     fir_verify.runtime rt = fir_verify.runtime{};
-    u64[3] mut break_at = {};
+    u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < fir_env.LEAK_ROUNDS) {
         u64 mut k = 0;
@@ -67,11 +68,11 @@ fn small_rounds_leave_the_heap_where_it_was() void {
         }
         u64 slot = fir_env.leak_slot(round);
         if (slot < 3) {
-            break_at[slot] = heap.system_view();
+            live_at[slot] = heap.live_view();
         }
         round += 1;
     }
-    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(live_at) < fir_env.LEAK_BOUND);
 }
 
 // The count of the blocks of the chain.
@@ -112,7 +113,8 @@ fn chain(strbuf.str_buf mut* b) void {
 }
 
 // Each round runs every rule over the chain once, so each result vector of a dataflow is about
-// 10 KB and the program break moves for a leak of one of them.
+// 10 KB and the live view of support/heap.ft moves for a leak of one of them. At d2f5b2b6 the
+// smallest move that a deletion of a release made red was 9408 bytes, under glibc 2.39 and 2.43.
 fn chain_rounds_leave_the_heap_where_it_was() void {
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
@@ -125,18 +127,18 @@ fn chain_rounds_leave_the_heap_where_it_was() void {
     fir.func* f = parse(&e, &m, strbuf.view(&text));
     assert(fir.block_count(f) == BLOCKS);
     fir_verify.runtime rt = fir_verify.runtime{};
-    u64[3] mut break_at = {};
+    u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < fir_env.LEAK_ROUNDS) {
         fir_verify.violation mut v = fir_verify.violation{};
         assert(!fir_verify.find_violation(f, &rt, &v));
         u64 slot = fir_env.leak_slot(round);
         if (slot < 3) {
-            break_at[slot] = heap.system_view();
+            live_at[slot] = heap.live_view();
         }
         round += 1;
     }
-    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.moved(live_at) < fir_env.LEAK_BOUND);
 }
 
 fn main() i32 {
