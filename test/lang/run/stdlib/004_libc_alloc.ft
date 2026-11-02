@@ -13,17 +13,24 @@ import std.mem;
 // (D3.11, D5.4). The own is erased at the boundary and states C's convention
 // (D17.13), so the pair is interchangeable with new and del (D10.3,
 // stdlib.md 2.2).
+
+// bcopy(3) copies bytes through a `void*`. No cast gives a type to a `void*`
+// (D3.14), so the test gives the block of malloc to C as it is.
+extern fn bcopy(void* source, void mut* destination, u64 n) void;
+
 fn main() i32 {
-    // A block sized in bytes, typed by the cast. The source and the target say
-    // own, so the result owns (D3.14). p[0..n] is a view of it (D6.9).
-    u8 mut* own block = cast(libc.malloc(32), u8 mut* own);
+    // A block sized in bytes, which owns: no cast gives it a type (D3.14), so
+    // bcopy writes the block and copies it back into a fixed array.
+    void mut* own block = libc.malloc(32);
     if (block == null) {
         del(block);
         return 1;
     }
-    u8 mut@ bytes = block[0..32];
-    mem.copy(bytes, cast("hello", u8@));
-    println(block != null, " ", cast(bytes[..5], string));
+    u8@ hello = cast("hello", u8@);
+    bcopy(cast(&hello[0], void*), block, hello.len);
+    u8[5] mut back = {};
+    bcopy(block, cast(&back, void mut*), 5);
+    println(block != null, " ", cast(back[..], string));
     // del releases what malloc returned, frees by the pointer alone, and
     // empties the lvalue (D10.3, D17.9, stdlib.md 3).
     del(block);

@@ -8,8 +8,11 @@ Use `fort_lint.py --fort build/<Host>/<preset>/fort [--target linux|darwin] [-I 
 [file.ft ...]`.
 Without file arguments, the tool checks the source sets of the target except SKIPPED. The
 target selects `std/<target>/**/*.ft`: a standard root declares one libc, so each target's
-modules are checked under the root of that target, on its own host. Each set reads nested
-directories, so `src/fort/fir/flow.ft` gets the checks of `src/fort/ast.ft`.
+modules are checked under the root of that target. Each set reads nested directories, so
+`src/fort/fir/flow.ft` gets the checks of `src/fort/ast.ft`. A file of `std/` checks as a module
+`std.<name>` of the standard root of its target, which symbolic links to the files of `std/`
+make, so a list of files may name one module of `std/` or the modules of both targets. A module
+that both targets share checks under the root of the target.
 
 The naming checks of notes/style.md 3.1 apply to a file of `src/fort`, `src/lsp` and `std`
 by its path. The prefix check applies in each directory of those roots. The function and
@@ -24,6 +27,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 # Pair each source group with the search roots that resolve its imports.
@@ -489,8 +493,93 @@ def text_problems(relative, text, root=None):
     return problems
 
 
-def lint_files(fort, root, files, std_dir=None):
+def std_module(relative):
+    """The module path of a file of `std/` in the standard root of its target, or None.
+
+    `std/str.ft` gives `std.str`, `std/linux/os.ft` gives `std.os` and `std/digest/sha256.ft`
+    gives `std.digest.sha256`.
+    """
+    parts = Path(relative).parts
+    if len(parts) < 2 or parts[0] != "std" or not parts[-1].endswith(".ft"):
+        return None
+    rest = list(parts[1:])
+    if len(rest) > 1 and rest[0] in TARGETS:
+        rest = rest[1:]
+    rest[-1] = rest[-1][: -len(".ft")]
+    return ".".join(["std"] + rest)
+
+
+def std_target(relative, target):
+    """The target whose standard root holds the file `relative` of `std/`: the target of its
+    directory, or `target` for a module that both targets share."""
+    parts = Path(relative).parts
+    if len(parts) > 2 and parts[1] in TARGETS:
+        return parts[1]
+    return target
+
+
+def link_std_root(root, target, out):
+    """Make `out` the standard root of `target`, as symbolic links to the files of `std/`.
+
+    assemble_std.sh copies each `.ft` of `std/` outside the target directories, and each `.ft` of
+    `std/<target>/`, to its path below the root. A link keeps the real path of its file, so the
+    real path of a record is the file of `std/`, while the links exist. No path of a module of a
+    target directory is the path of a module that both targets share, so no link takes the place
+    of another; a second link to one path stops the run with FileExistsError.
+    """
+    std = (Path(root) / "std").resolve()
+    for source in sorted(std.rglob("*.ft")):
+        parts = source.relative_to(std).parts
+        if len(parts) > 1 and parts[0] in TARGETS:
+            if parts[0] != target:
+                continue
+            parts = parts[1:]
+        link = out.joinpath(*parts)
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(source)
+
+
+def std_documents(fort, root, entries, cache, target):
+    """Run `fort --index` over the modules of `std/` among `entries`, as `std.<name>`.
+
+    D6.9 names two functions of `std` by their modules, `str.from_cstr` and `rt.args_init`, so
+    a module of `std/` checks as `std.<name>` and not as an entry module named by its file. A
+    module of `std/<target>/` checks under the standard root of its target, and a shared module
+    under the root of `target`. Each run uses a standard root of symbolic links to each file of
+    `std/` that the root of its target holds, so a closure finds each module that it imports.
+    One entry module imports each module that the run judges. Returns a list of
+    (indexes, records by real path, diagnostics, error), one item for each run.
+    """
+    groups = {}
+    for index, (relative, _, _, _) in enumerate(entries):
+        module = std_module(relative)
+        if module is not None:
+            groups.setdefault(std_target(relative, target), []).append((index, module))
+    runs = []
+    for run_target in sorted(groups):
+        members = groups[run_target]
+        with tempfile.TemporaryDirectory() as tmp:
+            std_root = Path(tmp) / "std"
+            link_std_root(root, run_target, std_root)
+            entry = Path(tmp) / "lint_std.ft"
+            lines = ["import %s;" % module for module in sorted({module for _, module in members})]
+            lines.append("fn main() i32 {\n    return 0;\n}")
+            entry.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            document, error = index_document(fort, root, str(entry), (), std_root)
+            indexes = [index for index, _ in members]
+            if error is not None:
+                runs.append((indexes, {}, [], error))
+                continue
+            runs.append((indexes, group_records(document, root, cache),
+                         diagnostic_problems(document), None))
+    return runs
+
+
+def lint_files(fort, root, files, std_dir=None, target="linux"):
     """Return the formatted problems of each file, and the number of runs.
+
+    A file of `std/` checks as a module of the standard root of its target (std_documents);
+    `target` gives the root of a module that both targets share.
 
     `std_dir` applies to the complete run, not one entry. It comes from the
     command line. It names the standard library when the build does not put it
@@ -518,6 +607,16 @@ def lint_files(fort, root, files, std_dir=None):
         entries.append((relative, tuple(includes), real_path(root, relative, cache), text))
     reports = [None] * len(entries)
     runs = 0
+    for indexes, buckets, diagnostics, error in std_documents(fort, root, entries, cache, target):
+        runs += 1
+        for index in indexes:
+            relative, _, path, text = entries[index]
+            if error is not None:
+                reports[index] = [(1, 1, error)]
+                continue
+            records = buckets.get(path, [])
+            reports[index] = file_problems(records, diagnostics, has_source_text(text),
+                                           module_segments(relative))
     for index, (relative, includes, _, _) in enumerate(entries):
         if reports[index] is not None:
             continue
@@ -630,7 +729,7 @@ def main(argv=None):
 
     problems = []
     files_with_problems = 0
-    reports, _ = lint_files(args.fort, args.root, files, args.std_dir)
+    reports, _ = lint_files(args.fort, args.root, files, args.std_dir, args.target)
     for found in reports:
         if found:
             files_with_problems += 1

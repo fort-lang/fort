@@ -1,23 +1,15 @@
 //! run
 //! stdout:
 //| 1 2
-//| 9 2
-//| 9 5
+//| 0 2
+//| 0 0
 //| true true
 // `void* mut p` marks the binding and `void mut* p` the storage the pointer
 // reaches, so the two are distinct types and both are legal (D3.11, D5.3).
-// No expression reaches that storage, so the mark states what the holder of
-// the address may do with it, and a cast recovers a typed pointer to write
-// through.
-fn store(void mut* dst, i32 v) void {
-    i32 mut* p = cast(dst, i32 mut*);
-    *p = v;
-}
-
-fn load(void* src) i32 {
-    i32* p = cast(src, i32*);
-    return *p;
-}
+// No expression reaches that storage, and no cast gives a type to a `void*`
+// (D3.14), so the mark states what C may do with the address: bzero writes
+// through a `void mut*`.
+extern fn bzero(void mut* dst, u64 n) void;
 
 fn main() i32 {
     i32 mut x = 1;
@@ -26,23 +18,23 @@ fn main() i32 {
 
     // A fixed binding whose target may be written.
     void mut* w = cast(&x, void mut*);
-    store(w, 9);
+    bzero(w, sizeof(i32));
     println(x, " ", y);
 
     // A rebindable binding whose target is read-only. No cast puts the mark
-    // back, so the holder of this address reads through it and never writes
-    // (D3.14). A writable view of `y` comes from `&y`, which is a mutable
-    // lvalue, and never from `r`.
+    // back, so the holder of this address never writes through it (D3.14). A
+    // writable view of `y` comes from `&y`, which is a mutable lvalue, and
+    // never from `r`.
     void* mut r = cast(&x, void*);
     r = cast(&y, void*);
-    store(cast(&y, void mut*), 5);
-    println(load(w), " ", load(r));
+    bzero(cast(&y, void mut*), sizeof(i32));
+    println(x, " ", y);
 
     // Dropping the mark is implicit, and the two types are one machine word,
     // so the address survives the conversion (D5.4, D3.1). The comparison below
     // casts, because `==` requires identical types and the drop does not reach
     // it: `lent == w` is an error (D6.2, fail/mutability/011).
     void* lent = w;
-    println(load(lent) == 9, " ", lent == cast(w, void*));
+    println(lent == cast(w, void*), " ", r == cast(&y, void*));
     return 0;
 }

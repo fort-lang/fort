@@ -112,8 +112,8 @@ fn a_cast_never_adds_mut() void {
     // count is the rule as much as the text. This is because a second report on the
     // line would leave the corpus green.
     assert(!check_env.check_body(&e,
-        "    void* q = null;\n    println(cast(q, i32 mut*));"));
-    assert(check_env.said(&e, "cannot cast void* to i32 mut*: a cast never adds 'mut'"));
+        "    i32* q = null;\n    println(cast(q, i32 mut*));"));
+    assert(check_env.said(&e, "cannot cast i32* to i32 mut*: a cast never adds 'mut'"));
     assert(check_env.errors(&e) == 1);
 }
 
@@ -524,9 +524,9 @@ fn a_read_only_view_that_adds_a_marked_place_is_one_error_each() void {
     check_env.open(&e);
     defer check_env.close(&e);
     // A place that carries `mut` or `own` writes or frees through any view (D3.14): from a
-    // pointer, through the struct that a pointer reaches, and from a `void*`. Its type is exact,
-    // so a `cell*` that drops the `mut` of a `cell mut*` is an error too. An integer gives no
-    // pointer at all, and that rule comes first.
+    // pointer and through the struct that a pointer reaches. Its type is exact, so a `cell*` that
+    // drops the `mut` of a `cell mut*` is an error too. An integer gives no pointer at all, and no
+    // cast gives a type to a `void*`: those rules come first.
     string[10] lines = {"u64 mut x = 0;", "cell* c = cast(&x, cell*);", "u64 mut* mut q = &x;",
                         "cell** d = cast(&q, cell**);", "void* v = cast(&x, void*);",
                         "holder* g = cast(v, holder*);", "cell* i = cast(cast(&x, u64), cell*);",
@@ -540,7 +540,7 @@ fn a_read_only_view_that_adds_a_marked_place_is_one_error_each() void {
     assert(reported_at(&e, 1, "32:16", "cannot cast u64 mut* mut* to cell**",
                        ": a cast adds the pointer cell* at byte 0"));
     assert(reported_at(&e, 2, "34:17", "cannot cast void* to holder*",
-                       ": a cast adds the pointer u64* own at byte 8"));
+                       ": a cast never gives a type to a void*"));
     assert(reported_at(&e, 3, "35:15", "cannot cast u64 to cell*",
                        ": a cast never makes a pointer from an integer"));
     assert(reported_at(&e, 4, "37:16", "cannot cast cell mut* mut* to cell**",
@@ -1443,6 +1443,68 @@ fn a_cast_never_makes_a_pointer_from_an_integer() void {
     assert(reported_at(&e, 10, "23:16", "cannot cast bool to void*", ""));
     assert(reported_at(&e, 11, "24:16", "cannot cast f64 to void*", ""));
     assert(reported_at(&e, 12, "25:16", "cannot cast color to void*", ""));
+}
+
+fn a_cast_never_gives_a_type_to_a_void() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // No cast takes a `void*`, with any marks, to a typed pointer, with any marks, whatever the
+    // size of the pointee (D3.14). The rule comes after the pointer from an integer and before the
+    // `mut` and the `own` that the cast adds, and an argument of an `extern fn` gets no exemption.
+    // A function pointer target keeps the error of a function pointer, and a span target the error
+    // of a pair that no row allows. A `void*` deeper than level 1 is a pointer place of a view.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct pair {\n");
+    strbuf.append(&b, "    i32 a;\n");
+    strbuf.append(&b, "    i32 b;\n");
+    strbuf.append(&b, "}\n");
+    strbuf.append(&b, "extern fn peek(u64* p) u64;\n");
+    strbuf.append(&b, "fn main() i32 {\n");
+    strbuf.append(&b, "    i32 mut x = 1;\n");
+    strbuf.append(&b, "    void* v = cast(&x, void*);\n");
+    strbuf.append(&b, "    void mut* w = cast(&x, void mut*);\n");
+    strbuf.append(&b, "    i64* a = cast(v, i64*);\n");
+    strbuf.append(&b, "    u8* c = cast(v, u8*);\n");
+    strbuf.append(&b, "    i32 mut* d = cast(w, i32 mut*);\n");
+    strbuf.append(&b, "    i32 mut* f = cast(v, i32 mut*);\n");
+    strbuf.append(&b, "    i32* own g = cast(v, i32* own);\n");
+    strbuf.append(&b, "    pair* h = cast(v, pair*);\n");
+    strbuf.append(&b, "    void** k = cast(v, void**);\n");
+    strbuf.append(&b, "    u64 m = peek(cast(v, u64*));\n");
+    strbuf.append(&b, "    fn () void n = cast(v, fn () void);\n");
+    strbuf.append(&b, "    i32@ s = cast(v, i32@);\n");
+    strbuf.append(&b, "    void mut* mut deep = w;\n");
+    strbuf.append(&b, "    i32 mut** under = cast(&deep, i32 mut**);\n");
+    strbuf.append(&b, "    void* same = cast(w, void*);\n");
+    strbuf.append(&b, "    u64 bits = cast(v, u64);\n");
+    strbuf.append(&b, "    return 0;\n");
+    strbuf.append(&b, "}\n");
+    assert(!check_env.check_src(&e, strbuf.view(&b)));
+    // one report for each refused cast, at the cast, and none for the last two
+    assert(check_env.errors(&e) == 11);
+    assert(reported_at(&e, 0, "10:14", "cannot cast void* to i64*",
+                       ": a cast never gives a type to a void*"));
+    assert(reported_at(&e, 1, "11:13", "cannot cast void* to u8*",
+                       ": a cast never gives a type to a void*"));
+    assert(reported_at(&e, 2, "12:18", "cannot cast void mut* to i32 mut*",
+                       ": a cast never gives a type to a void*"));
+    assert(reported_at(&e, 3, "13:18", "cannot cast void* to i32 mut*",
+                       ": a cast never gives a type to a void*"));
+    assert(reported_at(&e, 4, "14:18", "cannot cast void* to i32* own",
+                       ": a cast never gives a type to a void*"));
+    assert(reported_at(&e, 5, "15:15", "cannot cast void* to pair*",
+                       ": a cast never gives a type to a void*"));
+    assert(reported_at(&e, 6, "16:16", "cannot cast void* to void**",
+                       ": a cast never gives a type to a void*"));
+    assert(reported_at(&e, 7, "17:18", "cannot cast void* to u64*",
+                       ": a cast never gives a type to a void*"));
+    assert(reported_at(&e, 8, "18:20", "cannot cast void* to fn () void",
+                       ": a cast adds the function pointer fn () void"));
+    assert(reported_at(&e, 9, "19:14", "cannot cast void* to i32@", ""));
+    assert(reported_at(&e, 10, "21:23", "cannot cast void mut* mut* to i32 mut**",
+                       ": a cast adds the pointer i32 mut* at byte 0"));
 }
 
 fn a_pointer_and_a_void_pointer_cast_to_u64() void {
@@ -2446,6 +2508,7 @@ fn main() i32 {
     the_work_limit_makes_a_cast_an_error_with_a_note();
     the_rule_reads_no_long_array_element_by_element();
     a_cast_never_makes_a_pointer_from_an_integer();
+    a_cast_never_gives_a_type_to_a_void();
     a_pointer_and_a_void_pointer_cast_to_u64();
     a_cast_never_makes_the_pointee_larger_or_more_aligned();
     the_size_of_the_pointee_comes_after_mut_own_and_move();

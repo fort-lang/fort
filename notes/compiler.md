@@ -276,36 +276,45 @@ came here.
   `check_pointee_growth` compares `sizeof` and then the alignment of the level-1 pointees of a
   typed pointer cast, after the rules of `mut`, `own` and `move` and before `check_pointer_places`,
   with no exemption for an `extern` argument.
+- **A cast gives no type to a `void*`** (D3.14). `check_cast` asks `types.type_cast_gives_type`
+  after the rule of a pointer from an integer and before the matrix, so a `void*` source with any
+  marks reports the rule for each typed pointer target, before an added `mut` or `own` and with no
+  exemption for an `extern` argument. A function pointer target keeps the report of
+  `report_function_pointer`, and a span target the report of the matrix. The matrix refuses the
+  pair too, and a `void*` to a function pointer type (`types.type_cast_makes_function`), so FIR
+  verification (V4) refuses a `cast<T*>` and a `cast<fn ...>` of a `void*` in FIR text
+  (`test/fir/verify/v04_cast_void_*`), and `fir.md` 4 names no row for them. FIR text that forges a
+  pointer goes through the row from `u64`, or reads a slot through a pointer to another type. A
+  typed extern signature or a typed handle replaces each such cast: `std.sort` sorts typed spans
+  in fort, a vector of pointers is a typed copy of `int_vec`, and `libc.readdir` gives a
+  `dirent*`.
 - **A cast keeps each pointer place, in any view** (D3.14). After the walk of the `mut` levels,
   `check_view_places` runs `first_hidden` once more over level 1 of the target with
   `place_memo.view` set. A place of the same type at its byte in the source holds a place of the
   target. A place of the source of the same shape (`types.type_same_shape`) holds it only when
   `carries_mark` answers false for the place of the target, so the walk of the marks runs only
   for such a place, and a cast whose places are all identical walks no struct. Each other place
-  of the target is added. A `void*` source keeps the walk of `place_memo.marked`, which skips each
-  type that `carries_mark` answers false for, until the checker refuses each cast of a `void*` to
-  a typed pointer. A function pointer carries a mark always
+  of the target is added. `check_cast` refuses a `void*` source with a typed target before this
+  walk, so no source of it is a `void*`. A function pointer carries a mark always
   (`mark_step` answers MARK_SOME). The walk reads none of its parameters and not its result, so
   no cycle passes through a function type. A cast to a function pointer type from another type
-  (the matrix allows only `void*`) is the error of `report_function_pointer`, with no byte. The
-  test stands at the top of `check_pointer_places`.
-  C calls a function as the type of its parameter says (`fail/casts/036` to `038` and `040`,
-  `run/casts/017`). An argument of an `extern fn` meets the same walks (`fail/casts/041` to
-  `043`). `walk_marks` is Tarjan's algorithm over the structs, with explicit stacks
-  (`place_memo.frames` and `entered`), so a chain of 65600 structs needs no deep recursion. A
-  struct keeps its answer in `types.layout.mark` for the life of the checker: MARK_SOME on the path
-  to a mark, MARK_NONE for each struct of a set of structs that reach each other once the walk
-  closes the set with no mark, and no answer after a layout that waits or the work limit. So the
-  walk enters each struct once, and each entry is a step of POINTER_WORK_LIMIT
-  (`check_mark_limit_test.ft`). Before the cache, one legal cast of a 15248-line program took
-  15.65 s, because each pointer place walked its chain again. A `void*` source has no level-1
-  storage, so each place of the target that the walk reads is added. **No compiler module casts a
-  `void*` back to a type that holds such a place.** A type keeps a `u64` handle of its declaration,
-  `k + 1` for `ck->syms[k]` (`check.nominal_sym`), and the layout of a struct keeps the type, the
-  offset and the name of each field, so the FIR, the interpreter and `owner/place` read the fields
-  with no declaration. `scope.binding.module` is `k + 1` for module `k` of the set
-  (`check.module_of`, `modules.read_at`), and the source lookup of `diag` takes the `diag.sources`
-  that the session embeds.
+  (`check_cast` lets only a `void*` past the matrix) is the error of `report_function_pointer`, with
+  no byte. The test stands at the top of `check_pointer_places`. C calls a function as the type of
+  its parameter says (`fail/casts/036` to `038` and `040`, `run/casts/017`). An argument of an
+  `extern fn` meets the same walks (`fail/casts/041` to `043`). `walk_marks` is Tarjan's algorithm
+  over the structs, with explicit stacks (`place_memo.frames` and `entered`), so a chain of 65600
+  structs needs no deep recursion. A struct keeps its answer in `types.layout.mark` for the life of
+  the checker: MARK_SOME on the path to a mark, MARK_NONE for each struct of a set of structs that
+  reach each other once the walk closes the set with no mark, and no answer after a layout that
+  waits or the work limit. So the walk enters each struct once, and each entry is a step of
+  POINTER_WORK_LIMIT (`check_mark_limit_test.ft`). Before the cache, one legal cast of a 15248-line
+  program took 15.65 s, because each pointer place walked its chain again. **No compiler module
+  casts a `void*` back to a typed pointer**, because the checker refuses each such cast. A type
+  keeps a `u64` handle of its declaration, `k + 1` for `ck->syms[k]` (`check.nominal_sym`), and the
+  layout of a struct keeps the type, the offset and the name of each field, so the FIR, the
+  interpreter and `owner/place` read the fields with no declaration. `scope.binding.module` is
+  `k + 1` for module `k` of the set (`check.module_of`, `modules.read_at`), and the source lookup
+  of `diag` takes the `diag.sources` that the session embeds.
 - **An `extern fn` declaration gives no `mut` that no argument had** (D17.13). `resolve_fn` asks
   `first_given_mut` after it makes the type of an `extern fn`, before the comparison of D9.8, so a
   declaration that a library holds back meets the rule too. The types that C gives are the result,
@@ -1385,17 +1394,18 @@ came here.
   and D9.8 holds a program's own `extern` declaration of a libc symbol against the library's,
   `own` included: `run/ownership/015` and `019` gained the `own` `std.libc` carries. **So a
   declaration added to `std.libc` binds every program in the repository**, and the cost of a wrong
-  signature is paid by all of them at once: T-045 added `qsort` there, and a program that
-  redeclares it must now write the same parameter types, `fn (void*, void*) i32` included.
-  `grep -rn 'extern fn qsort' .` finds one in each `std/<target>/libc.ft` and one in
-  `spec/module-system.md` 8.5, which spells it out as its callback example. Since the decision
-  text of 2026-10-31, `stdlib.md` 2.2 declares no `qsort`: its comparator reads a `void*`, which no
-  cast types (D3.14), and the code follows when the migration of that rule lands. **Retyping one
-  costs the same**, and the bill is the programs that redeclare it, not the ones that call it: T-086
-  gave `read`, `write` and the four `<string.h>` byte functions `u8*` and `u8 mut*` and made
-  `malloc` return `void mut* own`, and 9 corpus tests had to redeclare their `extern` while 7
-  only dropped a cast. `spec/decisions.md` D9.8 carried a `void* buf` example of `write` that a
-  program could then no longer copy, so a signature in the specification is part of that bill.
+  signature is paid by all of them at once: T-045 added `qsort` there, and a program that redeclared
+  it had to write the same parameter types, `fn (void*, void*) i32` included. Since the migration of
+  the rule of a typed `void*` (D3.14), `std/<target>/libc.ft` declares no `qsort`: its comparator
+  reads a `void*`, which no cast types. `grep -rn 'extern fn qsort' .` finds the declarations of the
+  programs that call it, each with the parameter types that it needs, and one in
+  `spec/module-system.md` 8.5, which spells it out as its callback example; `run/ffi/019` runs that
+  example. **Retyping one costs the same**, and the bill is the programs that redeclare it, not the
+  ones that call it: T-086 gave `read`, `write` and the four `<string.h>` byte functions `u8*` and
+  `u8 mut*` and made `malloc` return `void mut* own`, and 9 corpus tests had to redeclare their
+  `extern` while 7 only dropped a cast. `spec/decisions.md` D9.8 carried a `void* buf` example of
+  `write` that a program could then no longer copy, so a signature in the specification is part of
+  that bill.
   A set with no
   such directory loads no runtime, which is what every in-process unit suite is, so a suite that
   drives the whole driver writes an **empty** `std/rt.ft` in its sandbox

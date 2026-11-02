@@ -10,22 +10,23 @@ import std.sort;
 
 // The comparator of stdlib.md 2.10 is an ordinary function value (D3.10): it
 // is held in a variable, compared for identity, passed through a parameter and
-// called by C, which is what makes the sort usable without generics.
+// called by the sort, which is what makes the sort usable without generics. Its
+// type is `fn (i64*, i64*) i32`, so it reads each element with no cast (D3.14).
 
 u64 mut calls = 0;
 
-fn counted(void* a, void* b) i32 {
+fn counted(i64* a, i64* b) i32 {
     calls += 1;
     return sort.cmp_i64(a, b);
 }
 
-fn down(void* a, void* b) i32 {
+fn down(i64* a, i64* b) i32 {
     return sort.cmp_i64(b, a);
 }
 
 // A comparator reaches the sort through a parameter as easily as through a
 // module name, which is how a caller chooses an order at run time.
-fn order_with(i64 mut@ xs, fn (void*, void*) i32 cmp) void {
+fn order_with(i64 mut@ xs, fn (i64*, i64*) i32 cmp) void {
     sort.sort_i64(xs, cmp);
 }
 
@@ -41,7 +42,7 @@ fn show(i64@ xs) void {
 
 // Everything ties, so the order is unspecified. What is specified is that the
 // call permutes: each of the four values is still there afterwards.
-fn tie(void* a, void* b) i32 {
+fn tie(i64* a, i64* b) i32 {
     return 0;
 }
 
@@ -64,7 +65,7 @@ fn holds_each(i64@ xs) bool {
 fn main() i32 {
     // A qualified name is a value and identity is what == compares (D3.10,
     // D3.13), so the variable and the name are the same function.
-    fn (void*, void*) i32 cmp = sort.cmp_i64;
+    fn (i64*, i64*) i32 cmp = sort.cmp_i64;
     println(cmp == sort.cmp_i64, " ", cmp == down);
 
     i64[4] mut xs = {4, -3, 9, 1};
@@ -73,15 +74,15 @@ fn main() i32 {
     order_with(xs[..], down);
     show(xs[..]);
 
-    // C calls back into fort, so the counter moves. The exact number is
-    // qsort's business and the test does not pin it.
+    // The sort calls back into the comparator, so the counter moves. The exact
+    // number is the business of the sort, and the test does not pin it.
     i64[8] mut ys = {8, 3, 7, 1, 6, 2, 5, 4};
     sort.sort_i64(ys[..], counted);
     println("calls above zero: ", calls > 0);
 
-    // A longer array, which is where qsort does real work. The check is the
-    // whole contract: every adjacent pair is ordered and the sum says no
-    // element was lost or duplicated.
+    // A longer array, where the sort does real work. The check is the whole
+    // contract: every adjacent pair is ordered and the sum says no element was
+    // lost or duplicated.
     i64[64] mut many = {};
     i64 mut seed = 17;
     for (u64 mut i = 0; i < 64; i += 1) {

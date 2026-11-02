@@ -1,0 +1,71 @@
+//! run
+//! stdout:
+//| 2 5 6
+//| 0 0 true
+//| 5 6
+//| 5 6
+// A vector of views is a typed copy of int_vec (stdlib.md 2.7). It owns its slots and borrows
+// every pointer in them (D13.5, D17.2): node_push lends its argument, node_free releases the slots
+// alone, and the nodes outlive the vector and are released by the owner that made them.
+struct node { i64 value; }
+
+// The typed copy of int_vec with the slot type node mut*, cut to what the test calls.
+struct node_vec {
+    node mut* mut@ own items;
+    u64 len;
+}
+
+fn node_free(node_vec mut* v) void {
+    del(v->items);
+    v->len = 0;
+}
+
+fn node_push(node_vec mut* v, node mut* n) void {
+    if (v->len == v->items.len) {
+        // the first push takes the floor of 16 slots, and the test pushes two nodes
+        node mut* mut@ own bigger = new(node mut*, 16);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = n;
+    v->len += 1;
+}
+
+// A read through a pointer: the owner is no local owner here (D17.21).
+fn value_at(node_vec* v, u64 k) i64 {
+    return v->items[k]->value;
+}
+
+fn main() i32 {
+    node mut* own first = new(node);
+    defer del(first);
+    node mut* own second = new(node);
+    defer del(second);
+    first->value = 5;
+    second->value = 6;
+
+    node_vec mut v = node_vec{};
+    defer node_free(&v);
+    // The argument lends: what is stored is a borrowed pointer, so the slot
+    // type of the vector carries no own of its own.
+    node_push(&v, first);
+    node_push(&v, second);
+    println(v.len, " ", value_at(&v, 0), " ", value_at(&v, 1));
+
+    // Freeing the vector frees the slots and nothing else.
+    node_free(&v);
+    println(v.len, " ", v.items.len, " ", v.items.ptr == null);
+    println(first->value, " ", second->value);
+
+    // The pointers are as good as they were, and their owners still free them
+    // at the end of this function.
+    node* a = first;
+    node* b = second;
+    println(a->value, " ", b->value);
+    return 0;
+}

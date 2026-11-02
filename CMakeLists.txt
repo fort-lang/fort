@@ -740,6 +740,15 @@ set_tests_properties(long_imports_selftest PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# Hold the runs of tools/fort_lint.py over a list of files of `std/`: one module alone, a module
+# of a target directory alone, and the modules of both targets in one run (notes/style.md 3).
+add_test(NAME fort_lint_std
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/fort_lint_std_test.py"
+            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}")
+set_tests_properties(fort_lint_std PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # Hold the library options `--use` and `--cache-dir` of test/lang/run_tests.py (D9.11).
 add_test(NAME lang_harness_selftest
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/lang_harness_test.py"

@@ -1,8 +1,8 @@
 //! fail
 // A view over storage that holds no function pointer adds one, and the bits that it reads can name
 // any code (D3.14). The sources here are a `u64` and the storage of a `void*`. An integer gives no
-// pointer at all, and that rule comes first. A read-only view that hides the place stays legal: it
-// only reads the bits.
+// pointer at all, and no cast gives a type to a `void*`: those rules come first. A read-only view
+// that hides the place stays legal: it only reads the bits.
 fn take(u64* own p) void {
     del(p);
 }
@@ -37,6 +37,17 @@ struct outer {
     inner[2] items;
 }
 
+// The fields of `cbs` and `inner` with the `mut` that a view of them drops. The place of the view
+// carries a mark, so it needs the exact type of the place under it, and a drop of `mut` changes it.
+struct cbs_mut {
+    (fn () void) mut@ s;
+}
+
+struct inner_mut {
+    u64 n;
+    (fn () void) mut* p;
+}
+
 fn main() i32 {
     u64 mut y = 7;
     owner_cb o = owner_cb{.f = take};
@@ -45,7 +56,7 @@ fn main() i32 {
     view_cb* v = cast(&bits, view_cb*); //! error: cannot cast u64* to view_cb*: a cast adds the pointer fn (u64*) void at byte 0
     v->f(&y);
     void* any = cast(&o, void*);
-    view_cb* r = cast(any, view_cb*); //! error: cannot cast void* to view_cb*: a cast adds the pointer fn (u64*) void at byte 0
+    view_cb* r = cast(any, view_cb*); //! error: cannot cast void* to view_cb*: a cast never gives a type to a void*
     r->f(&y);
     owner_cb* back = cast(cast(&o, u64), owner_cb*); //! error: cannot cast u64 to owner_cb*: a cast never makes a pointer from an integer
     (fn () void)* slot = cast(&bits, (fn () void)*); //! error: cannot cast u64* to (fn () void)*: a cast adds the pointer fn () void at byte 0
@@ -53,5 +64,10 @@ fn main() i32 {
     self_cb* s = cast(&ints, self_cb*); //! error: cannot cast u64[8]* to self_cb*: a cast adds the pointer fn (self_cb*) void at byte 0
     cbs* c = cast(&ints, cbs*); //! error: cannot cast u64[8]* to cbs*: a cast adds the pointer (fn () void)@ at byte 0
     outer* nest = cast(&ints, outer*); //! error: cannot cast u64[8]* to outer*: a cast adds the pointer (fn () void)* at byte 16
+    (fn () void)[1] mut calls = {null};
+    cbs_mut sm = cbs_mut{.s = calls[..]};
+    cbs* dropped = cast(&sm, cbs*); //! error: cannot cast cbs_mut* to cbs*: a cast adds the pointer (fn () void)@ at byte 0
+    inner_mut im = inner_mut{.n = 1, .p = &calls[0]};
+    inner* inner_dropped = cast(&im, inner*); //! error: cannot cast inner_mut* to inner*: a cast adds the pointer (fn () void)* at byte 8
     return 0;
 }

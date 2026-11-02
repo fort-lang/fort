@@ -1,0 +1,78 @@
+//! run
+//! stdout:
+//| 30 10 20
+//| 10 20 30
+//| 10 20 30
+//| 30 10 20
+import std.sort;
+
+// To order data that the sort may not move, stdlib.md 2.10 sorts a typed span of pointers with a
+// typed copy of sort.sort_i64. The copy permutes the slots, so they must be writable, and it never
+// writes through a pointee. The comparator reads each pointee through a typed pointer to a slot:
+// no cast gives a type to a `void*` (D3.14), so a sort of `void*` slots could read no pointee.
+
+// The copy of sort.sort_i64 for i64*: `i64` is `i64*` and the prefix is `ptr_`.
+fn ptr_sort(i64* mut@ items, fn (i64**, i64**) i32 cmp) void {
+    if (cmp == null) {
+        panic("ptr_sort: null comparator");
+    }
+    u64 mut start = items.len / 2;
+    u64 mut end = items.len;
+    while (end > 1) {
+        if (start > 0) {
+            start -= 1;
+        } else {
+            end -= 1;
+            i64* last = items[end];
+            items[end] = items[0];
+            items[0] = last;
+        }
+        u64 mut at = start;
+        while (at < end / 2) {
+            u64 mut child = 2 * at + 1;
+            if (child + 1 < end && cmp(&items[child], &items[child + 1]) < 0) {
+                child += 1;
+            }
+            if (cmp(&items[at], &items[child]) >= 0) {
+                break;
+            }
+            i64* parent = items[at];
+            items[at] = items[child];
+            items[child] = parent;
+            at = child;
+        }
+    }
+}
+
+fn by_pointee(i64** a, i64** b) i32 {
+    return sort.cmp_i64(*a, *b);
+}
+
+fn main() i32 {
+    // The owner is one allocation and every pointer below borrows one of its
+    // elements. The order of the allocation never changes.
+    i64 mut@ own values = new(i64, 3);
+    defer del(values);
+    values[0] = 30;
+    values[1] = 10;
+    values[2] = 20;
+
+    i64*[3] mut ps = {&values[0], &values[1], &values[2]};
+    println(*ps[0], " ", *ps[1], " ", *ps[2]);
+    ptr_sort(ps[..], by_pointee);
+    println(*ps[0], " ", *ps[1], " ", *ps[2]);
+
+    // A caller that allocates its slots with new(i64*, n) holds the element
+    // type of the copy and reaches it with no cast at all.
+    i64* mut@ own slots = new(i64*, 3);
+    defer del(slots);
+    slots[0] = &values[0];
+    slots[1] = &values[1];
+    slots[2] = &values[2];
+    ptr_sort(slots, by_pointee);
+    println(*slots[0], " ", *slots[1], " ", *slots[2]);
+
+    // The elements themselves stayed where they were: only the pointers moved.
+    println(values[0], " ", values[1], " ", values[2]);
+    return 0;
+}
