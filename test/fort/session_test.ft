@@ -20,68 +20,69 @@ import std.strbuf;
 
 // A fresh session holds nothing and has reported nothing.
 fn a_fresh_session_is_empty() void {
-    session.session mut s = session.create();
-    defer session.free(&s);
-    assert(session.source_count(&s) == 0);
-    assert(session.error_count(&s) == 0);
-    assert(!session.has_source(&s, "a.ft"));
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    assert(session.source_count(s) == 0);
+    assert(session.error_count(s) == 0);
+    assert(!session.has_source(s, "a.ft"));
 }
 
 // Freeing a session twice is a no-op: every container it holds empties itself.
 fn freeing_twice_is_a_no_op() void {
-    session.session mut s = session.create();
-    session.set_source(&s, "a.ft", "fn main() i32 { return 0; }");
-    session.free(&s);
-    session.free(&s);
-    assert(session.source_count(&s) == 0);
-    assert(!session.has_source(&s, "a.ft"));
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    session.set_source(s, "a.ft", "fn main() i32 { return 0; }");
+    session.free(s);
+    session.free(s);
+    assert(session.source_count(s) == 0);
+    assert(!session.has_source(s, "a.ft"));
 }
 
 // A freed session is usable again, and holds nothing of what it held before.
 fn a_freed_session_is_usable_again() void {
-    session.session mut s = session.create();
-    defer session.free(&s);
-    session.set_source(&s, "a.ft", "first");
-    assert(session.source_count(&s) == 1);
-    session.free(&s);
-    assert(session.source_count(&s) == 0);
-    session.set_source(&s, "b.ft", "second");
-    assert(session.source_count(&s) == 1);
-    assert(!session.has_source(&s, "a.ft"));
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    session.set_source(s, "a.ft", "first");
+    assert(session.source_count(s) == 1);
+    session.free(s);
+    assert(session.source_count(s) == 0);
+    session.set_source(s, "b.ft", "second");
+    assert(session.source_count(s) == 1);
+    assert(!session.has_source(s, "a.ft"));
     string mut text = "";
-    assert(session.read_source(&s, "b.ft", &text));
+    assert(session.read_source(s, "b.ft", &text));
     assert(text == "second");
 }
 
 // Two sessions share nothing: the sources of one are not the sources of the
 // other and neither is a global.
 fn two_sessions_share_nothing() void {
-    session.session mut a = session.create();
-    defer session.free(&a);
-    session.session mut b = session.create();
-    defer session.free(&b);
-    session.set_source(&a, "x.ft", "in a");
-    session.set_source(&b, "x.ft", "in b");
+    session.session mut* own a = session.make();
+    defer session.drop_made(move(a));
+    session.session mut* own b = session.make();
+    defer session.drop_made(move(b));
+    session.set_source(a, "x.ft", "in a");
+    session.set_source(b, "x.ft", "in b");
     string mut text = "";
-    assert(session.read_source(&a, "x.ft", &text));
+    assert(session.read_source(a, "x.ft", &text));
     assert(text == "in a");
-    assert(session.read_source(&b, "x.ft", &text));
+    assert(session.read_source(b, "x.ft", &text));
     assert(text == "in b");
-    assert(session.source_count(&a) == 1);
-    assert(session.source_count(&b) == 1);
+    assert(session.source_count(a) == 1);
+    assert(session.source_count(b) == 1);
 }
 
 // The sink is the session's own: diagnostics reported through it are the ones
 // the session counts.
 fn the_sink_belongs_to_the_session() void {
-    session.session mut s = session.create();
-    defer session.free(&s);
-    assert(session.error_count(&s) == 0);
-    diag.error(session.diags(&s), diag.loc_make("a.ft", 2, 5), "undefined name 'x'");
-    diag.note(session.diags(&s), diag.loc_make("a.ft", 1, 1), "declared here");
-    assert(session.error_count(&s) == 1);
-    assert(diag.record_count(session.diags(&s)) == 2);
-    diag.record r = diag.record_at(session.diags(&s), 0);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    assert(session.error_count(s) == 0);
+    diag.error(session.diags(s), diag.loc_make("a.ft", 2, 5), "undefined name 'x'");
+    diag.note(session.diags(s), diag.loc_make("a.ft", 1, 1), "declared here");
+    assert(session.error_count(s) == 1);
+    assert(diag.record_count(session.diags(s)) == 2);
+    diag.record r = diag.record_at(session.diags(s), 0);
     assert(r.msg == "undefined name 'x'");
     assert(r.loc.file == "a.ft");
     assert(r.loc.line == 2);
@@ -90,13 +91,13 @@ fn the_sink_belongs_to_the_session() void {
 // The pool is the session's own: what an analysis interns lives exactly as
 // long as the session it belongs to.
 fn the_pool_belongs_to_the_session() void {
-    session.session mut s = session.create();
-    defer session.free(&s);
-    assert(containers.pool_used(session.pool(&s)) == 0);
-    string name = containers.pool_intern(session.pool(&s), "identifier");
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    assert(containers.pool_used(session.pool(s)) == 0);
+    string name = containers.pool_intern(session.pool(s), "identifier");
     assert(name == "identifier");
-    assert(containers.pool_used(session.pool(&s)) == 10);
-    assert(containers.pool_block_count(session.pool(&s)) == 1);
+    assert(containers.pool_used(session.pool(s)) == 10);
+    assert(containers.pool_block_count(session.pool(s)) == 1);
 }
 
 // A thousand analyses are a thousand sessions, each of which frees everything
@@ -104,15 +105,15 @@ fn the_pool_belongs_to_the_session() void {
 fn a_thousand_sessions_free_what_they_allocate() void {
     u64 mut i = 0;
     while (i < 1000) {
-        session.session mut s = session.create();
-        session.set_source(&s, "doc.ft", "fn main() i32 { return 0; }");
-        session.config_set(&s, "mode", "test");
+        session.session mut* own s = session.make();
+        session.set_source(s, "doc.ft", "fn main() i32 { return 0; }");
+        session.config_set(s, "mode", "test");
         string mut text = "";
-        assert(session.read_source(&s, "doc.ft", &text));
+        assert(session.read_source(s, "doc.ft", &text));
         assert(text.len == 27);
-        diag.error(session.diags(&s), diag.loc_make("doc.ft", 1, 1), "an error");
-        assert(session.error_count(&s) == 1);
-        session.free(&s);
+        diag.error(session.diags(s), diag.loc_make("doc.ft", 1, 1), "an error");
+        assert(session.error_count(s) == 1);
+        session.drop_made(move(s));
         i += 1;
     }
 }
@@ -120,20 +121,20 @@ fn a_thousand_sessions_free_what_they_allocate() void {
 // The map distinguishes an absent key from an empty value. It copies each
 // pair into the session and shares nothing with another session.
 fn configuration_belongs_to_one_session() void {
-    session.session mut a = session.create();
-    defer session.free(&a);
-    session.session mut b = session.create();
-    defer session.free(&b);
+    session.session mut* own a = session.make();
+    defer session.drop_made(move(a));
+    session.session mut* own b = session.make();
+    defer session.drop_made(move(b));
     string mut value = "unchanged";
-    assert(!session.config_get(&a, "missing", &value));
+    assert(!session.config_get(a, "missing", &value));
     assert(value == "unchanged");
-    session.config_set(&a, "empty", "");
-    session.config_set(&a, "mode", "fast");
-    assert(session.config_get(&a, "empty", &value));
+    session.config_set(a, "empty", "");
+    session.config_set(a, "mode", "fast");
+    assert(session.config_get(a, "empty", &value));
     assert(value == "");
-    assert(session.config_get(&a, "mode", &value));
+    assert(session.config_get(a, "mode", &value));
     assert(value == "fast");
-    assert(!session.config_get(&b, "mode", &value));
+    assert(!session.config_get(b, "mode", &value));
 }
 
 // ---- the overlay ----------------------------------------------------------------
@@ -141,13 +142,13 @@ fn configuration_belongs_to_one_session() void {
 // A text installed by set_source is what read_source returns, and the session
 // says it holds it.
 fn a_set_source_is_what_is_read() void {
-    session.session mut s = session.create();
-    defer session.free(&s);
-    session.set_source(&s, "buffer.ft", "fn f() void {}");
-    assert(session.has_source(&s, "buffer.ft"));
-    assert(session.source_count(&s) == 1);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    session.set_source(s, "buffer.ft", "fn f() void {}");
+    assert(session.has_source(s, "buffer.ft"));
+    assert(session.source_count(s) == 1);
     string mut text = "";
-    assert(session.read_source(&s, "buffer.ft", &text));
+    assert(session.read_source(s, "buffer.ft", &text));
     assert(text == "fn f() void {}");
     assert(text.len == 14);
 }
@@ -155,103 +156,103 @@ fn a_set_source_is_what_is_read() void {
 // The text is copied, so the caller's buffer may die: a server's editor
 // buffer is not the analysis's storage.
 fn a_set_source_copies_the_text() void {
-    session.session mut s = session.create();
-    defer session.free(&s);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
     {
         string own built = str.concat("fn g() ", "void {}");
         defer del(built);
-        session.set_source(&s, "copied.ft", built);
+        session.set_source(s, "copied.ft", built);
     }
     string mut text = "";
-    assert(session.read_source(&s, "copied.ft", &text));
+    assert(session.read_source(s, "copied.ft", &text));
     assert(text == "fn g() void {}");
 }
 
 // The path is copied too, so an interned key of the source table never points
 // at a caller's buffer.
 fn a_set_source_copies_the_path() void {
-    session.session mut s = session.create();
-    defer session.free(&s);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
     {
         string own path = str.concat("dir/", "file.ft");
         defer del(path);
-        session.set_source(&s, path, "contents");
+        session.set_source(s, path, "contents");
     }
-    assert(session.has_source(&s, "dir/file.ft"));
+    assert(session.has_source(s, "dir/file.ft"));
     string mut text = "";
-    assert(session.read_source(&s, "dir/file.ft", &text));
+    assert(session.read_source(s, "dir/file.ft", &text));
     assert(text == "contents");
-    assert(session.source_count(&s) == 1);
+    assert(session.source_count(s) == 1);
 }
 
 // A second set_source of one path replaces the text and adds no entry: the
 // keystroke a server sends between two analyses.
 fn a_second_set_source_replaces_the_text() void {
-    session.session mut s = session.create();
-    defer session.free(&s);
-    session.set_source(&s, "doc.ft", "first version");
-    session.set_source(&s, "doc.ft", "second version");
-    assert(session.source_count(&s) == 1);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    session.set_source(s, "doc.ft", "first version");
+    session.set_source(s, "doc.ft", "second version");
+    assert(session.source_count(s) == 1);
     string mut text = "";
-    assert(session.read_source(&s, "doc.ft", &text));
+    assert(session.read_source(s, "doc.ft", &text));
     assert(text == "second version");
-    session.set_source(&s, "doc.ft", "third");
-    assert(session.read_source(&s, "doc.ft", &text));
+    session.set_source(s, "doc.ft", "third");
+    assert(session.read_source(s, "doc.ft", &text));
     assert(text == "third");
-    assert(session.source_count(&s) == 1);
+    assert(session.source_count(s) == 1);
     // Only the text of a replacement is copied. set_source
     // interns the path only when it creates the entry. A
     // thousand changes allocate a thousand texts but only one path.
-    u64 used = containers.pool_used(session.pool(&s));
-    session.set_source(&s, "doc.ft", "fourth");
-    assert(containers.pool_used(session.pool(&s)) == used + 6);
+    u64 used = containers.pool_used(session.pool(s));
+    session.set_source(s, "doc.ft", "fourth");
+    assert(containers.pool_used(session.pool(s)) == used + 6);
 }
 
 // The source store of the session holds the one pool of the session: a text, a path and a
 // configuration pair all take bytes of `session.pool`, and the lookup that show_sources installs
 // answers from the store that read_source fills.
 fn the_store_holds_the_pool_of_the_session() void {
-    session.session mut s = session.create();
-    defer session.free(&s);
-    u64 empty = containers.pool_used(session.pool(&s));
-    session.set_source(&s, "store.ft", "abcd");
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    u64 empty = containers.pool_used(session.pool(s));
+    session.set_source(s, "store.ft", "abcd");
     // the four bytes of the text and the eight of the path
-    assert(containers.pool_used(session.pool(&s)) == empty + 12);
-    session.config_set(&s, "key", "value");
-    assert(containers.pool_used(session.pool(&s)) == empty + 20);
+    assert(containers.pool_used(session.pool(s)) == empty + 12);
+    session.config_set(s, "key", "value");
+    assert(containers.pool_used(session.pool(s)) == empty + 20);
     string mut text = "";
-    assert(session.lookup_source(&s.files, "store.ft", &text));
+    assert(session.lookup_source(&s->files, "store.ft", &text));
     assert(text == "abcd");
-    assert(session.source_count(&s) == 1);
+    assert(session.source_count(s) == 1);
 }
 
 // Several documents live side by side and keep their own text.
 fn several_documents_live_side_by_side() void {
-    session.session mut s = session.create();
-    defer session.free(&s);
-    session.set_source(&s, "a.ft", "text of a");
-    session.set_source(&s, "b.ft", "text of b");
-    session.set_source(&s, "c.ft", "text of c");
-    assert(session.source_count(&s) == 3);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    session.set_source(s, "a.ft", "text of a");
+    session.set_source(s, "b.ft", "text of b");
+    session.set_source(s, "c.ft", "text of c");
+    assert(session.source_count(s) == 3);
     string mut text = "";
-    assert(session.read_source(&s, "b.ft", &text));
+    assert(session.read_source(s, "b.ft", &text));
     assert(text == "text of b");
-    assert(session.read_source(&s, "a.ft", &text));
+    assert(session.read_source(s, "a.ft", &text));
     assert(text == "text of a");
-    assert(session.read_source(&s, "c.ft", &text));
+    assert(session.read_source(s, "c.ft", &text));
     assert(text == "text of c");
-    assert(!session.has_source(&s, "d.ft"));
+    assert(!session.has_source(s, "d.ft"));
 }
 
 // An empty document is a document: it is held and read back as the empty
 // string rather than read from disk.
 fn an_empty_document_is_held() void {
-    session.session mut s = session.create();
-    defer session.free(&s);
-    session.set_source(&s, "empty.ft", "");
-    assert(session.has_source(&s, "empty.ft"));
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    session.set_source(s, "empty.ft", "");
+    assert(session.has_source(s, "empty.ft"));
     string mut text = "not touched";
-    assert(session.read_source(&s, "empty.ft", &text));
+    assert(session.read_source(s, "empty.ft", &text));
     assert(text.len == 0);
     assert(text == "");
 }
@@ -262,36 +263,36 @@ fn an_empty_document_is_held() void {
 // the session, which a second write to the same path shows.
 fn a_file_is_read_once_and_remembered() void {
     assert(io.write_file("read_once.ft", cast("on disk", u8@)));
-    session.session mut s = session.create();
-    defer session.free(&s);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
     string mut text = "";
-    assert(session.read_source(&s, "read_once.ft", &text));
+    assert(session.read_source(s, "read_once.ft", &text));
     assert(text == "on disk");
-    assert(session.source_count(&s) == 1);
-    assert(session.has_source(&s, "read_once.ft"));
+    assert(session.source_count(s) == 1);
+    assert(session.has_source(s, "read_once.ft"));
     // The file changes. The session does not, since it holds the bytes it
     // read.
     assert(io.write_file("read_once.ft", cast("changed on disk", u8@)));
-    u64 used = containers.pool_used(session.pool(&s));
+    u64 used = containers.pool_used(session.pool(s));
     string mut again = "";
-    assert(session.read_source(&s, "read_once.ft", &again));
+    assert(session.read_source(s, "read_once.ft", &again));
     assert(again == "on disk");
-    assert(session.source_count(&s) == 1);
+    assert(session.source_count(s) == 1);
     // A repeated read of a known path allocates nothing. The lookup uses the caller's bytes and
     // the map keeps the key of the read that created the entry. Nothing is interned on the hit
     // path.
-    assert(containers.pool_used(session.pool(&s)) == used);
+    assert(containers.pool_used(session.pool(s)) == used);
     u64 mut round = 0;
     while (round < 100) {
-        assert(session.read_source(&s, "read_once.ft", &again));
+        assert(session.read_source(s, "read_once.ft", &again));
         round += 1;
     }
-    assert(containers.pool_used(session.pool(&s)) == used);
+    assert(containers.pool_used(session.pool(s)) == used);
     // A session that never read it sees the new bytes.
-    session.session mut fresh = session.create();
-    defer session.free(&fresh);
+    session.session mut* own fresh = session.make();
+    defer session.drop_made(move(fresh));
     string mut now = "";
-    assert(session.read_source(&fresh, "read_once.ft", &now));
+    assert(session.read_source(fresh, "read_once.ft", &now));
     assert(now == "changed on disk");
 }
 
@@ -299,34 +300,34 @@ fn a_file_is_read_once_and_remembered() void {
 // read used. So they are still there after the reader has returned.
 fn the_bytes_read_belong_to_the_session() void {
     assert(io.write_file("owned.ft", cast("fn main() i32 { return 0; }", u8@)));
-    session.session mut s = session.create();
-    defer session.free(&s);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
     string mut text = "";
-    assert(session.read_source(&s, "owned.ft", &text));
+    assert(session.read_source(s, "owned.ft", &text));
     assert(text.len == 27);
     // Reading another file cannot disturb the first one's bytes.
     assert(io.write_file("other.ft", cast("something else entirely", u8@)));
     string mut other = "";
-    assert(session.read_source(&s, "other.ft", &other));
+    assert(session.read_source(s, "other.ft", &other));
     assert(other == "something else entirely");
     assert(text == "fn main() i32 { return 0; }");
-    assert(session.source_count(&s) == 2);
+    assert(session.source_count(s) == 2);
 }
 
 // A file that cannot be read is false with *out unchanged, and no diagnostic:
 // the caller knows what the file was wanted for.
 fn an_unreadable_file_is_false_and_silent() void {
-    session.session mut s = session.create();
-    defer session.free(&s);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
     string mut text = "untouched";
-    assert(!session.read_source(&s, "no_such_file.ft", &text));
+    assert(!session.read_source(s, "no_such_file.ft", &text));
     assert(text == "untouched");
-    assert(session.error_count(&s) == 0);
-    assert(session.source_count(&s) == 0);
-    assert(!session.has_source(&s, "no_such_file.ft"));
+    assert(session.error_count(s) == 0);
+    assert(session.source_count(s) == 0);
+    assert(!session.has_source(s, "no_such_file.ft"));
     // A failed read is not remembered, so the file appearing later is read.
     assert(io.write_file("no_such_file.ft", cast("here now", u8@)));
-    assert(session.read_source(&s, "no_such_file.ft", &text));
+    assert(session.read_source(s, "no_such_file.ft", &text));
     assert(text == "here now");
 }
 
@@ -335,39 +336,39 @@ fn an_unreadable_file_is_false_and_silent() void {
 // routing every read through one function.
 fn an_overlay_wins_over_the_file() void {
     assert(io.write_file("edited.ft", cast("saved version", u8@)));
-    session.session mut s = session.create();
-    defer session.free(&s);
-    session.set_source(&s, "edited.ft", "unsaved version");
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    session.set_source(s, "edited.ft", "unsaved version");
     string mut text = "";
-    assert(session.read_source(&s, "edited.ft", &text));
+    assert(session.read_source(s, "edited.ft", &text));
     assert(text == "unsaved version");
-    assert(session.source_count(&s) == 1);
+    assert(session.source_count(s) == 1);
 }
 
 // An overlay installed after a read replaces what was read.
 fn an_overlay_replaces_what_was_read() void {
     assert(io.write_file("later.ft", cast("from disk", u8@)));
-    session.session mut s = session.create();
-    defer session.free(&s);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
     string mut text = "";
-    assert(session.read_source(&s, "later.ft", &text));
+    assert(session.read_source(s, "later.ft", &text));
     assert(text == "from disk");
-    session.set_source(&s, "later.ft", "from the editor");
-    assert(session.read_source(&s, "later.ft", &text));
+    session.set_source(s, "later.ft", "from the editor");
+    assert(session.read_source(s, "later.ft", &text));
     assert(text == "from the editor");
-    assert(session.source_count(&s) == 1);
+    assert(session.source_count(s) == 1);
 }
 
 // An empty file reads as the empty string and is remembered like any other.
 fn an_empty_file_reads_as_the_empty_string() void {
     u8@ nothing = {};
     assert(io.write_file("empty_on_disk.ft", nothing));
-    session.session mut s = session.create();
-    defer session.free(&s);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
     string mut text = "not empty";
-    assert(session.read_source(&s, "empty_on_disk.ft", &text));
+    assert(session.read_source(s, "empty_on_disk.ft", &text));
     assert(text.len == 0);
-    assert(session.has_source(&s, "empty_on_disk.ft"));
+    assert(session.has_source(s, "empty_on_disk.ft"));
 }
 
 // A file of some size arrives whole, which a read through a growing buffer
@@ -381,10 +382,10 @@ fn a_larger_file_arrives_whole() void {
         i += 1;
     }
     assert(io.write_file("big.ft", body));
-    session.session mut s = session.create();
-    defer session.free(&s);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
     string mut text = "";
-    assert(session.read_source(&s, "big.ft", &text));
+    assert(session.read_source(s, "big.ft", &text));
     is_the_big_file(text);
 }
 
@@ -405,21 +406,21 @@ fn is_the_big_file(string text) void {
 // overlay first, then the disk, and false for a file nobody can read.
 fn the_lookup_reads_through_the_session() void {
     assert(io.write_file("looked_up.ft", cast("on disk", u8@)));
-    session.session mut s = session.create();
-    defer session.free(&s);
-    session.set_source(&s, "overlay.ft", "in the editor");
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    session.set_source(s, "overlay.ft", "in the editor");
     // The context is the source store of the session, as show_sources gives it.
     string mut text = "";
-    assert(session.lookup_source(&s.files, "overlay.ft", &text));
+    assert(session.lookup_source(&s->files, "overlay.ft", &text));
     assert(text == "in the editor");
-    assert(session.lookup_source(&s.files, "looked_up.ft", &text));
+    assert(session.lookup_source(&s->files, "looked_up.ft", &text));
     assert(text == "on disk");
     // The file read for the lookup is remembered like any other read.
-    assert(session.has_source(&s, "looked_up.ft"));
+    assert(session.has_source(s, "looked_up.ft"));
     text = "untouched";
-    assert(!session.lookup_source(&s.files, "never_there.ft", &text));
+    assert(!session.lookup_source(&s->files, "never_there.ft", &text));
     assert(text == "untouched");
-    assert(session.source_count(&s) == 2);
+    assert(session.source_count(s) == 2);
 }
 
 // The stderr of one error at 2:5-2:8 of `path` through a session that shows
@@ -439,10 +440,10 @@ fn reported(session.session mut* s, string path, bool shown) string own {
 // because the tree was built from the overlay.
 fn the_rendered_line_is_the_overlay() void {
     assert(io.write_file("shown.ft", cast("fn f() void {\n    old line\n}\n", u8@)));
-    session.session mut s = session.create();
-    defer session.free(&s);
-    session.set_source(&s, "shown.ft", "fn f() void {\n    new line\n}\n");
-    string own got = reported(&s, "shown.ft", true);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    session.set_source(s, "shown.ft", "fn f() void {\n    new line\n}\n");
+    string own got = reported(s, "shown.ft", true);
     defer del(got);
     assert(got == "shown.ft:2:5: error: bad\n        new line\n        ^~~\n");
 }
@@ -450,67 +451,67 @@ fn the_rendered_line_is_the_overlay() void {
 // A file the session does not hold yet is read from the disk and kept.
 fn the_rendered_line_is_read_from_the_disk() void {
     assert(io.write_file("disk.ft", cast("fn f() void {\n    on disk\n}\n", u8@)));
-    session.session mut s = session.create();
-    defer session.free(&s);
-    string own got = reported(&s, "disk.ft", true);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    string own got = reported(s, "disk.ft", true);
     defer del(got);
     assert(got == "disk.ft:2:5: error: bad\n        on disk\n        ^~~\n");
-    assert(session.has_source(&s, "disk.ft"));
+    assert(session.has_source(s, "disk.ft"));
 }
 
 // A file that cannot be read shows the header line alone and counts as the
 // error it is.
 fn an_unreadable_file_shows_the_header_alone() void {
-    session.session mut s = session.create();
-    defer session.free(&s);
-    string own got = reported(&s, "not_on_disk.ft", true);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    string own got = reported(s, "not_on_disk.ft", true);
     defer del(got);
     assert(got == "not_on_disk.ft:2:5: error: bad\n");
-    assert(session.error_count(&s) == 1);
-    assert(session.source_count(&s) == 0);
+    assert(session.error_count(s) == 1);
+    assert(session.source_count(s) == 0);
 }
 
 // A session that does not show sources writes the header line alone and
 // reads nothing.
 fn without_show_sources_nothing_is_read() void {
     assert(io.write_file("unread.ft", cast("fn f() void {\n    unread\n}\n", u8@)));
-    session.session mut s = session.create();
-    defer session.free(&s);
-    string own got = reported(&s, "unread.ft", false);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    string own got = reported(s, "unread.ft", false);
     defer del(got);
     assert(got == "unread.ft:2:5: error: bad\n");
-    assert(!session.has_source(&s, "unread.ft"));
+    assert(!session.has_source(s, "unread.ft"));
 }
 
 // With the text off the sink asks no lookup, so a document analysed for a
 // client reads no file for the text form.
 fn with_the_text_off_nothing_is_read() void {
     assert(io.write_file("quiet.ft", cast("fn f() void {\n    quiet\n}\n", u8@)));
-    session.session mut s = session.create();
-    defer session.free(&s);
-    session.show_sources(&s);
-    diag.set_text(session.diags(&s), false);
-    diag.error(session.diags(&s), diag.loc_range("quiet.ft", 2, 5, 2, 8), "bad");
-    assert(session.error_count(&s) == 1);
-    assert(!session.has_source(&s, "quiet.ft"));
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    session.show_sources(s);
+    diag.set_text(session.diags(s), false);
+    diag.error(session.diags(s), diag.loc_range("quiet.ft", 2, 5, 2, 8), "bad");
+    assert(session.error_count(s) == 1);
+    assert(!session.has_source(s, "quiet.ft"));
 }
 
 // An error and its note in two files each show a line of their own file.
 fn a_note_shows_its_own_file() void {
-    session.session mut s = session.create();
-    defer session.free(&s);
-    session.set_source(&s, "one.ft", "fn a() void {\n    first\n}\n");
-    session.set_source(&s, "two.ft", "fn b() void {\n}\n");
-    diag.set_text(session.diags(&s), true);
-    session.show_sources(&s);
+    strbuf.str_buf mut want = strbuf.create();
+    defer del(want.data);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    session.set_source(s, "one.ft", "fn a() void {\n    first\n}\n");
+    session.set_source(s, "two.ft", "fn b() void {\n}\n");
+    diag.set_text(session.diags(s), true);
+    session.show_sources(s);
     i32 saved = capture.begin(io.STDERR, "two_files.txt");
-    diag.error(session.diags(&s), diag.loc_range("one.ft", 2, 5, 2, 10), "here");
-    diag.note(session.diags(&s), diag.loc_range("two.ft", 1, 4, 1, 5), "and there");
+    diag.error(session.diags(s), diag.loc_range("one.ft", 2, 5, 2, 10), "here");
+    diag.note(session.diags(s), diag.loc_range("two.ft", 1, 4, 1, 5), "and there");
     capture.end(io.STDERR, saved);
     string own got = capture.text("two_files.txt");
     defer del(got);
-    strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
     strbuf.append(&want, "one.ft:2:5: error: here\n        first\n        ^~~~~\n");
     strbuf.append(&want, "two.ft:1:4: note: and there\n    fn b() void {\n       ^\n");
     assert(got == strbuf.view(&want));

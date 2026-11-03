@@ -21,7 +21,7 @@ import std.strbuf;
 // hundred columns is built from its pieces here.
 fn src2(check_env.env mut* e, string a, string b) bool {
     strbuf.str_buf mut sb = strbuf.create();
-    defer strbuf.free(&sb);
+    defer del(sb.data);
     strbuf.append(&sb, a);
     strbuf.append(&sb, b);
     return check_env.check_src(e, strbuf.view(&sb));
@@ -29,7 +29,7 @@ fn src2(check_env.env mut* e, string a, string b) bool {
 
 fn src3(check_env.env mut* e, string a, string b, string c) bool {
     strbuf.str_buf mut sb = strbuf.create();
-    defer strbuf.free(&sb);
+    defer del(sb.data);
     strbuf.append(&sb, a);
     strbuf.append(&sb, b);
     strbuf.append(&sb, c);
@@ -38,7 +38,7 @@ fn src3(check_env.env mut* e, string a, string b, string c) bool {
 
 fn src4(check_env.env mut* e, string a, string b, string c, string d) bool {
     strbuf.str_buf mut sb = strbuf.create();
-    defer strbuf.free(&sb);
+    defer del(sb.data);
     strbuf.append(&sb, a);
     strbuf.append(&sb, b);
     strbuf.append(&sb, c);
@@ -48,7 +48,7 @@ fn src4(check_env.env mut* e, string a, string b, string c, string d) bool {
 
 fn src5(check_env.env mut* e, string a, string b, string c, string d, string f) bool {
     strbuf.str_buf mut sb = strbuf.create();
-    defer strbuf.free(&sb);
+    defer del(sb.data);
     strbuf.append(&sb, a);
     strbuf.append(&sb, b);
     strbuf.append(&sb, c);
@@ -59,7 +59,7 @@ fn src5(check_env.env mut* e, string a, string b, string c, string d, string f) 
 
 fn body2(check_env.env mut* e, string a, string b) bool {
     strbuf.str_buf mut sb = strbuf.create();
-    defer strbuf.free(&sb);
+    defer del(sb.data);
     strbuf.append(&sb, a);
     strbuf.append(&sb, b);
     return check_env.check_body(e, strbuf.view(&sb));
@@ -67,7 +67,7 @@ fn body2(check_env.env mut* e, string a, string b) bool {
 
 fn body3(check_env.env mut* e, string a, string b, string c) bool {
     strbuf.str_buf mut sb = strbuf.create();
-    defer strbuf.free(&sb);
+    defer del(sb.data);
     strbuf.append(&sb, a);
     strbuf.append(&sb, b);
     strbuf.append(&sb, c);
@@ -77,328 +77,300 @@ fn body3(check_env.env mut* e, string a, string b, string c) bool {
 // ---- scopes and shadowing ----------------------------------------------------------
 
 fn a_local_may_not_reuse_a_parameter_name() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!src2(&e, "fn twice(i32 n) i32 {\n    i32 n = 2;\n    return n;\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!src2(e, "fn twice(i32 n) i32 {\n    i32 n = 2;\n    return n;\n}\n",
                  "fn main() i32 {\n    return twice(1);\n}\n"));
     // The diagnostic stands at the inner declaration.
-    assert(check_env.report_text(&e, 0) == "2:9: 'n' shadows a parameter");
+    assert(check_env.report_text(e, 0) == "2:9: 'n' shadows a parameter");
 }
 
 fn a_local_may_not_reuse_an_enclosing_local_name() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!body2(&e, "    i32 x = 1;\n    {\n        i32 x = 2;\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!body2(e, "    i32 x = 1;\n    {\n        i32 x = 2;\n",
                   "        println(x);\n    }"));
-    assert(check_env.said(&e, "'x' shadows an enclosing local"));
+    assert(check_env.said(e, "'x' shadows an enclosing local"));
 }
 
 fn sibling_scopes_may_reuse_a_name() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(body2(&e, "    {\n        i32 k = 1;\n        println(k);\n    }\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(body2(e, "    {\n        i32 k = 1;\n        println(k);\n    }\n",
                  "    {\n        i32 k = 2;\n        println(k);\n    }"));
 }
 
 fn a_local_may_shadow_a_module_level_name() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(src2(&e, "i32 MAX = 1;\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(src2(e, "i32 MAX = 1;\n",
                 "fn main() i32 {\n    i32 MAX = 2;\n    return MAX;\n}\n"));
 }
 
 fn a_local_is_visible_only_after_its_own_declaration() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_body(&e, "    i32 x = x;\n    println(x);"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_body(e, "    i32 x = x;\n    println(x);"));
     // A local's scope starts after its own declaration.
-    assert(check_env.said(&e, "unknown name 'x'"));
+    assert(check_env.said(e, "unknown name 'x'"));
 }
 
 fn a_redeclaration_in_one_block_is_refused() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_body(&e, "    i32 x = 1;\n    i32 x = 2;\n    println(x);"));
-    assert(check_env.said(&e, "'x' is already declared in this block"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_body(e, "    i32 x = 1;\n    i32 x = 2;\n    println(x);"));
+    assert(check_env.said(e, "'x' is already declared in this block"));
 }
 
 fn a_duplicate_parameter_is_refused() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!src2(&e, "fn add(i32 a, i32 a) i32 {\n    return a;\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!src2(e, "fn add(i32 a, i32 a) i32 {\n    return a;\n}\n",
                  "fn main() i32 {\n    return add(1, 2);\n}\n"));
-    assert(check_env.said(&e, "duplicate parameter 'a'"));
+    assert(check_env.said(e, "duplicate parameter 'a'"));
 }
 
 // ---- declarations and initializers -------------------------------------------------
 
 fn a_local_takes_its_declared_type() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_body(&e, "    i32 mut* mut p = null;\n    println(p);"));
-    assert(check_env.decl_type(&e, "p") == "i32 mut* mut");
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_body(e, "    i32 mut* mut p = null;\n    println(p);"));
+    assert(check_env.decl_type(e, "p") == "i32 mut* mut");
 }
 
 fn a_brace_initializer_needs_an_aggregate() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_body(&e, "    i32 h = {};\n    println(h);"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_body(e, "    i32 h = {};\n    println(h);"));
     // `= {}` zero-initializes any aggregate, span, string or enum.
-    assert(check_env.said(&e, "'{}' initializes an aggregate, span, string or enum, not i32"));
-    check_env.reopen(&e);
-    assert(!check_env.check_body(&e, "    i32* k = {};\n    println(k);"));
-    assert(check_env.said(&e, "not i32*"));
+    assert(check_env.said(e, "'{}' initializes an aggregate, span, string or enum, not i32"));
+    check_env.reopen(e);
+    assert(!check_env.check_body(e, "    i32* k = {};\n    println(k);"));
+    assert(check_env.said(e, "not i32*"));
 }
 
 fn the_zero_initializer_works_for_every_aggregate() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(src4(&e, "enum color {\n    red,\n}\nstruct point {\n    i32 x;\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(src4(e, "enum color {\n    red,\n}\nstruct point {\n    i32 x;\n}\n",
                 "fn main() i32 {\n    point p = {};\n    i32[2] a = {};\n",
                 "    i32@ s = {};\n    string t = {};\n    color c = {};\n",
                 "    println(p.x, a[0], s.len, t, cast(c, i32));\n    return 0;\n}\n"));
 }
 
 fn a_positional_struct_literal_needs_every_field() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!src2(&e, "struct point {\n    i32 x;\n    i32 y;\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!src2(e, "struct point {\n    i32 x;\n    i32 y;\n}\n",
                  "fn main() i32 {\n    point p = point{1};\n    return p.x;\n}\n"));
-    assert(check_env.said(&e, "a positional literal of struct point needs its 2 fields, 1 given"));
+    assert(check_env.said(e, "a positional literal of struct point needs its 2 fields, 1 given"));
 }
 
 fn a_designated_literal_refuses_duplicates_and_unknown_fields() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!src3(&e, "struct point {\n    i32 x;\n    i32 y;\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!src3(e, "struct point {\n    i32 x;\n    i32 y;\n}\n",
                  "fn main() i32 {\n    point p = point{.x = 1, .x = 2};\n",
                  "    return p.x;\n}\n"));
-    assert(check_env.said(&e, "duplicate field 'x'"));
-    check_env.reopen(&e);
-    assert(!src3(&e, "struct point {\n    i32 x;\n    i32 y;\n}\n",
+    assert(check_env.said(e, "duplicate field 'x'"));
+    check_env.reopen(e);
+    assert(!src3(e, "struct point {\n    i32 x;\n    i32 y;\n}\n",
                  "fn main() i32 {\n    point p = point{.z = 1};\n",
                  "    return p.x;\n}\n"));
-    assert(check_env.said(&e, "struct point has no field 'z'"));
+    assert(check_env.said(e, "struct point has no field 'z'"));
 }
 
 fn an_array_literal_needs_exactly_its_length() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_body(&e, "    i32[2] a = {1, 2, 3};\n    println(a[0]);"));
-    assert(check_env.said(&e, "an array literal for i32[2] needs 2 elements, 3 given"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_body(e, "    i32[2] a = {1, 2, 3};\n    println(a[0]);"));
+    assert(check_env.said(e, "an array literal for i32[2] needs 2 elements, 3 given"));
 }
 
 fn a_nested_literal_checks_its_leaves() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(src4(&e, "struct point {\n    i32 x;\n    i32 y;\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(src4(e, "struct point {\n    i32 x;\n    i32 y;\n}\n",
                 "struct line {\n    point a;\n    point b;\n}\n",
                 "fn main() i32 {\n    line l = {{0, 0}, {1, 1}};\n",
                 "    return l.b.x;\n}\n"));
-    check_env.reopen(&e);
-    assert(!src4(&e, "struct point {\n    i32 x;\n    i32 y;\n}\n",
+    check_env.reopen(e);
+    assert(!src4(e, "struct point {\n    i32 x;\n    i32 y;\n}\n",
                  "struct line {\n    point a;\n    point b;\n}\n",
                  "fn main() i32 {\n    line l = {{0, 0}, {1, \"s\"}};\n",
                  "    return l.b.x;\n}\n"));
-    assert(check_env.said(&e, "the field expects i32, not string"));
+    assert(check_env.said(e, "the field expects i32, not string"));
 }
 
 // ---- assignment --------------------------------------------------------------------
 
 fn assignment_needs_a_mutable_lvalue() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_body(&e, "    i32 x = 1;\n    x = 2;\n    println(x);"));
-    assert(check_env.said(&e, "cannot assign to immutable 'x'"));
-    check_env.reopen(&e);
-    assert(check_env.check_body(&e, "    i32 mut y = 1;\n    y = 2;\n    println(y);"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_body(e, "    i32 x = 1;\n    x = 2;\n    println(x);"));
+    assert(check_env.said(e, "cannot assign to immutable 'x'"));
+    check_env.reopen(e);
+    assert(check_env.check_body(e, "    i32 mut y = 1;\n    y = 2;\n    println(y);"));
     // A member of an rvalue is an rvalue, and no rvalue is a target.
-    check_env.reopen(&e);
-    assert(!src2(&e, "struct point {\n    i32 x;\n}\n",
+    check_env.reopen(e);
+    assert(!src2(e, "struct point {\n    i32 x;\n}\n",
                  "fn main() i32 {\n    point{1}.x = 5;\n    return 0;\n}\n"));
-    assert(check_env.said(&e, "cannot assign to a value that is not an lvalue"));
+    assert(check_env.said(e, "cannot assign to a value that is not an lvalue"));
 }
 
 fn assignment_converts_the_value() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!body2(&e, "    i32 mut x = 1;\n    i64 w = 2;\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!body2(e, "    i32 mut x = 1;\n    i64 w = 2;\n",
                   "    x = w;\n    println(x);"));
-    assert(check_env.said(&e, "the assignment expects i32, not i64"));
+    assert(check_env.said(e, "the assignment expects i32, not i64"));
 }
 
 fn assignment_may_drop_mutability() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(body2(&e, "    i32 mut v = 1;\n    i32 mut* p = &v;\n    i32* mut q = null;\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(body2(e, "    i32 mut v = 1;\n    i32 mut* p = &v;\n    i32* mut q = null;\n",
                  "    q = p;\n    println(q);"));
 }
 
 fn a_compound_assignment_has_the_rules_of_its_operator() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(body2(&e, "    i32 mut x = 1;\n    x += 2;\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(body2(e, "    i32 mut x = 1;\n    x += 2;\n",
                  "    x <<= 3;\n    println(x);"));
-    check_env.reopen(&e);
-    assert(!body2(&e, "    i32 mut x = 1;\n    i64 w = 2;\n",
+    check_env.reopen(e);
+    assert(!body2(e, "    i32 mut x = 1;\n    i64 w = 2;\n",
                   "    x += w;\n    println(x);"));
-    assert(check_env.said(&e, "'+' takes two operands of the same type, not i32 and i64"));
-    check_env.reopen(&e);
-    assert(!body2(&e, "    string mut s = \"a\";\n",
+    assert(check_env.said(e, "'+' takes two operands of the same type, not i32 and i64"));
+    check_env.reopen(e);
+    assert(!body2(e, "    string mut s = \"a\";\n",
                   "    s += \"b\";\n    println(s);"));
-    assert(check_env.said(&e, "'+' takes numeric operands, not string"));
+    assert(check_env.said(e, "'+' takes numeric operands, not string"));
     // A target that failed says nothing about the operator as well: one
     // construct, one diagnostic.
-    check_env.reopen(&e);
-    assert(!check_env.check_body(&e, "    i32 x = 1;\n    x += \"s\";\n    println(x);"));
-    assert(check_env.said(&e, "cannot assign to immutable 'x'"));
-    assert(check_env.reports(&e) == 1);
+    check_env.reopen(e);
+    assert(!check_env.check_body(e, "    i32 x = 1;\n    x += \"s\";\n    println(x);"));
+    assert(check_env.said(e, "cannot assign to immutable 'x'"));
+    assert(check_env.reports(e) == 1);
 }
 
 fn incdec_needs_an_integer_lvalue() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_body(&e, "    i32 mut x = 1;\n    x++;\n    x--;\n    println(x);"));
-    check_env.reopen(&e);
-    assert(!check_env.check_body(&e, "    i32 x = 1;\n    x++;\n    println(x);"));
-    assert(check_env.said(&e, "cannot modify immutable 'x'"));
-    check_env.reopen(&e);
-    assert(!check_env.check_body(&e, "    char mut c = 'a';\n    c++;\n    println(c);"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_body(e, "    i32 mut x = 1;\n    x++;\n    x--;\n    println(x);"));
+    check_env.reopen(e);
+    assert(!check_env.check_body(e, "    i32 x = 1;\n    x++;\n    println(x);"));
+    assert(check_env.said(e, "cannot modify immutable 'x'"));
+    check_env.reopen(e);
+    assert(!check_env.check_body(e, "    char mut c = 'a';\n    c++;\n    println(c);"));
     // `++` and `--` are allowed on integer types only.
-    assert(check_env.said(&e, "'++' takes an integer operand, not char"));
+    assert(check_env.said(e, "'++' takes an integer operand, not char"));
 }
 
 fn a_call_statement_may_discard_its_result() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(src2(&e, "fn compute() i32 {\n    return 1;\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(src2(e, "fn compute() i32 {\n    return 1;\n}\n",
                 "fn main() i32 {\n    compute();\n    return 0;\n}\n"));
 }
 
 fn an_owning_result_may_not_be_discarded() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_body(&e, "    i32 mut* own p = new(i32);\n    move(p);\n    del(p);"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_body(e, "    i32 mut* own p = new(i32);\n    move(p);\n    del(p);"));
     // The value of `move` must land somewhere.
-    assert(check_env.said(&e, "owning temporary would leak"));
+    assert(check_env.said(e, "owning temporary would leak"));
 }
 
 // ---- control flow ------------------------------------------------------------------
 
 fn every_condition_must_be_bool() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_body(&e, "    i32 x = 1;\n    if (x) {\n        println(1);\n    }"));
-    assert(check_env.said(&e, "a condition must be bool, not i32"));
-    check_env.reopen(&e);
-    assert(!body2(&e, "    i32 mut x = 1;\n    i32* p = &x;\n    while (p) {\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_body(e, "    i32 x = 1;\n    if (x) {\n        println(1);\n    }"));
+    assert(check_env.said(e, "a condition must be bool, not i32"));
+    check_env.reopen(e);
+    assert(!body2(e, "    i32 mut x = 1;\n    i32* p = &x;\n    while (p) {\n",
                   "        println(1);\n    }"));
-    assert(check_env.said(&e, "a condition must be bool, not i32*"));
-    check_env.reopen(&e);
-    assert(!check_env.check_body(&e,
+    assert(check_env.said(e, "a condition must be bool, not i32*"));
+    check_env.reopen(e);
+    assert(!check_env.check_body(e,
                                  "    for (i32 mut i = 0; i; i++) {\n        println(i);\n    }"));
-    assert(check_env.said(&e, "a condition must be bool, not i32"));
+    assert(check_env.said(e, "a condition must be bool, not i32"));
 }
 
 // The body of a `do` runs before the condition. And a variable declared in
 // that body is not visible in the condition, because the two are separate
 // scopes.
 fn a_do_while_body_is_not_visible_in_its_condition() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(body2(&e, "    i32 mut n = 0;\n    do {\n        n++;\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(body2(e, "    i32 mut n = 0;\n    do {\n        n++;\n",
                  "    } while (n < 3);"));
-    check_env.reopen(&e);
-    assert(!body2(&e, "    do {\n        i32 k = 1;\n        println(k);\n",
+    check_env.reopen(e);
+    assert(!body2(e, "    do {\n        i32 k = 1;\n        println(k);\n",
                   "    } while (k < 3);"));
-    assert(check_env.said(&e, "unknown name 'k'"));
-    check_env.reopen(&e);
+    assert(check_env.said(e, "unknown name 'k'"));
+    check_env.reopen(e);
     // Its condition is a condition like any other.
-    assert(!body2(&e, "    i32 mut n = 0;\n    do {\n        n++;\n",
+    assert(!body2(e, "    i32 mut n = 0;\n    do {\n        n++;\n",
                   "    } while (n);"));
-    assert(check_env.said(&e, "a condition must be bool, not i32"));
+    assert(check_env.said(e, "a condition must be bool, not i32"));
 }
 
 // `break` and `continue` target a `do` as they target any other loop, and
 // `continue` runs its test.
 fn break_and_continue_target_a_do_while() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(body2(&e, "    i32 mut n = 0;\n    do {\n        n++;\n        continue;\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(body2(e, "    i32 mut n = 0;\n    do {\n        n++;\n        continue;\n",
                  "    } while (n < 3);"));
-    check_env.reopen(&e);
-    assert(body2(&e, "    i32 mut n = 0;\n    do {\n        n++;\n        break;\n",
+    check_env.reopen(e);
+    assert(body2(e, "    i32 mut n = 0;\n    do {\n        n++;\n        break;\n",
                  "    } while (n < 3);"));
-    check_env.reopen(&e);
+    check_env.reopen(e);
     // A `break` inside deferred code binds to a loop inside the deferred code,
     // so the `do` around the `defer` does not answer for this one.
-    assert(!body2(&e, "    do {\n        defer {\n            break;\n        }\n",
+    assert(!body2(e, "    do {\n        defer {\n            break;\n        }\n",
                   "    } while (false);"));
-    assert(check_env.said(&e, "'break' outside a loop or switch"));
-    assert(check_env.errors(&e) == 1);
+    assert(check_env.said(e, "'break' outside a loop or switch"));
+    assert(check_env.errors(e) == 1);
 }
 
 fn an_else_if_chain_is_checked() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(src4(&e, "fn main() i32 {\n    i32 n = 1;\n    if (n < 0) {\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(src4(e, "fn main() i32 {\n    i32 n = 1;\n    if (n < 0) {\n",
                 "        println(0);\n    } else if (n > 0) {\n        println(1);\n",
                 "    } else {\n        println(2);\n    }\n",
                 "    return 0;\n}\n"));
 }
 
 fn a_for_init_variable_is_scoped_to_the_loop() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(body2(&e, "    for (i32 mut i = 0; i < 3; i++) {\n        println(i);\n    }\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(body2(e, "    for (i32 mut i = 0; i < 3; i++) {\n        println(i);\n    }\n",
                  "    i32 i = 9;\n    println(i);"));
-    check_env.reopen(&e);
-    assert(!body2(&e, "    for (i32 mut i = 0; i < 3; i++) {\n        println(i);\n    }\n",
+    check_env.reopen(e);
+    assert(!body2(e, "    for (i32 mut i = 0; i < 3; i++) {\n        println(i);\n    }\n",
                   "    println(i);"));
-    assert(check_env.said(&e, "unknown name 'i'"));
+    assert(check_env.said(e, "unknown name 'i'"));
 }
 
 fn a_for_induction_variable_must_be_mut() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_body(&e,
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_body(e,
                                  "    for (i32 i = 0; i < 3; i++) {\n        println(i);\n    }"));
     // There is no exception for induction variables.
-    assert(check_env.said(&e, "cannot modify immutable 'i'"));
+    assert(check_env.said(e, "cannot modify immutable 'i'"));
 }
 
 fn an_empty_for_header_is_legal() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_body(&e, "    for (;;) {\n        break;\n    }"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_body(e, "    for (;;) {\n        break;\n    }"));
 }
 
 fn a_range_for_binds_the_element_type(check_env.env mut* e) void {
@@ -411,141 +383,128 @@ fn a_range_for_binds_the_element_type(check_env.env mut* e) void {
 }
 
 fn a_range_for_refuses_a_wrong_element_type() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!body2(&e, "    i32[3] a = {1, 2, 3};\n    for (i64 v : a) {\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!body2(e, "    i32[3] a = {1, 2, 3};\n    for (i64 v : a) {\n",
                   "        println(v);\n    }"));
-    assert(check_env.said(&e, "the element type is i32, not i64"));
+    assert(check_env.said(e, "the element type is i32, not i64"));
 }
 
 fn a_range_for_needs_a_collection() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!body2(&e, "    i32 mut x = 1;\n    i32* p = &x;\n    for (i32 v : p) {\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!body2(e, "    i32 mut x = 1;\n    i32* p = &x;\n    for (i32 v : p) {\n",
                   "        println(v);\n    }"));
-    assert(check_env.said(&e, "cannot iterate i32*"));
+    assert(check_env.said(e, "cannot iterate i32*"));
 }
 
 fn a_range_for_over_a_string_yields_char() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_body(&e, "    for (char c : \"hi\") {\n        println(c);\n    }"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_body(e, "    for (char c : \"hi\") {\n        println(c);\n    }"));
 }
 
 fn a_range_variable_cannot_be_own() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!body2(&e, "    i32 mut* own mut@ own k = new(i32 mut* own, 2);\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!body2(e, "    i32 mut* own mut@ own k = new(i32 mut* own, 2);\n",
                   "    for (i32 mut* own c : k) {\n        println(c);\n    }\n    del(k);"));
     // The loop lends its collection.
-    assert(check_env.said(&e, "a range variable cannot be own"));
+    assert(check_env.said(e, "a range variable cannot be own"));
 }
 
 fn a_range_for_lends_an_owning_element() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(body2(&e, "    i32 mut* own mut@ own k = new(i32 mut* own, 2);\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(body2(e, "    i32 mut* own mut@ own k = new(i32 mut* own, 2);\n",
                  "    for (i32 mut* c : k) {\n        println(c);\n    }\n    del(k);"));
     // An owning aggregate copied into the range variable would need a `move`,
     // so an index loop is the way.
-    check_env.reopen(&e);
-    assert(!src4(&e, "struct buf {\n    u8 mut@ own data;\n}\n",
+    check_env.reopen(e);
+    assert(!src4(e, "struct buf {\n    u8 mut@ own data;\n}\n",
                  "fn main() i32 {\n    buf[2] mut bufs = {};\n",
                  "    for (buf b : bufs) {\n        println(b.data.len);\n    }\n",
                  "    del(bufs[0].data);\n    del(bufs[1].data);\n    return 0;\n}\n"));
-    assert(check_env.said(&e, "the elements are owning: iterate by index"));
+    assert(check_env.said(e, "the elements are owning: iterate by index"));
 }
 
 // ---- switch ------------------------------------------------------------------------
 
 fn a_switch_operand_is_an_integer_a_char_or_an_enum() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_body(&e,
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_body(e,
                                  "    string s = \"a\";\n    switch (s) {\n    default:\n    }"));
-    assert(check_env.said(&e, "cannot switch on string"));
-    check_env.reopen(&e);
-    assert(!body2(&e, "    bool flag = true;\n",
+    assert(check_env.said(e, "cannot switch on string"));
+    check_env.reopen(e);
+    assert(!body2(e, "    bool flag = true;\n",
                   "    switch (flag) {\n    default:\n    }"));
-    assert(check_env.said(&e, "cannot switch on bool"));
-    check_env.reopen(&e);
-    assert(body2(&e, "    char c = 'a';\n    switch (c) {\n    case 'a':\n",
+    assert(check_env.said(e, "cannot switch on bool"));
+    check_env.reopen(e);
+    assert(body2(e, "    char c = 'a';\n    switch (c) {\n    case 'a':\n",
                  "        println(1);\n    default:\n    }"));
 }
 
 fn duplicate_case_values_are_refused() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!src4(&e, "i32 TWO = 2;\nfn main() i32 {\n    i32 x = 1;\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!src4(e, "i32 TWO = 2;\nfn main() i32 {\n    i32 x = 1;\n",
                  "    switch (x) {\n    case 1:\n        println(1);\n",
                  "    case 2, 3:\n        println(2);\n    case TWO:\n",
                  "        println(3);\n    }\n    return 0;\n}\n"));
     // No duplicates after evaluation.
-    assert(check_env.said(&e, "duplicate case value 2"));
+    assert(check_env.said(e, "duplicate case value 2"));
 }
 
 fn a_switch_has_at_most_one_default() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!body2(&e, "    i32 x = 1;\n    switch (x) {\n    default:\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!body2(e, "    i32 x = 1;\n    switch (x) {\n    default:\n",
                   "        println(1);\n    default:\n        println(2);\n    }"));
-    assert(check_env.said(&e, "a switch has at most one 'default'"));
+    assert(check_env.said(e, "a switch has at most one 'default'"));
 }
 
 fn a_case_label_must_be_a_constant_expression() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!body2(&e, "    i32 x = 1;\n    i32 k = 2;\n    switch (x) {\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!body2(e, "    i32 x = 1;\n    i32 k = 2;\n    switch (x) {\n",
                   "    case k:\n        println(1);\n    }"));
-    assert(check_env.said(&e, "a case label must be a constant expression"));
+    assert(check_env.said(e, "a case label must be a constant expression"));
 }
 
 fn a_case_label_takes_the_operand_type() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!body2(&e, "    char c = 'a';\n    switch (c) {\n    case 65:\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!body2(e, "    char c = 'a';\n    switch (c) {\n    case 65:\n",
                   "        println(1);\n    }"));
     // An integer constant in a char context is an error.
-    assert(check_env.said(&e, "an integer constant does not become char"));
+    assert(check_env.said(e, "an integer constant does not become char"));
 }
 
 fn a_non_exhaustive_enum_switch_is_reported_at_the_closing_brace() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!src4(&e, "enum color {\n    red,\n    green,\n    blue,\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!src4(e, "enum color {\n    red,\n    green,\n    blue,\n}\n",
                  "fn main() i32 {\n    color c = color.red;\n    switch (c) {\n",
                  "    case color.red:\n        println(1);\n    }\n",
                  "    return 0;\n}\n"));
     // Reported at the closing brace of the switch.
-    assert(check_env.report_text(&e, 0) == "11:5: switch over color does not handle green, blue");
+    assert(check_env.report_text(e, 0) == "11:5: switch over color does not handle green, blue");
 }
 
 fn a_default_completes_an_enum_switch() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(src4(&e, "enum color {\n    red,\n    green,\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(src4(e, "enum color {\n    red,\n    green,\n}\n",
                 "fn main() i32 {\n    color c = color.red;\n    switch (c) {\n",
                 "    case color.red:\n        println(1);\n    default:\n    }\n",
                 "    return 0;\n}\n"));
 }
 
 fn a_case_body_is_a_scope() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(src4(&e, "fn main() i32 {\n    i32 x = 1;\n    switch (x) {\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(src4(e, "fn main() i32 {\n    i32 x = 1;\n    switch (x) {\n",
                 "    case 1:\n        i32 k = 2;\n        println(k);\n",
                 "    case 2:\n        i32 k = 3;\n        println(k);\n    default:\n    }\n",
                 "    return 0;\n}\n"));
@@ -554,99 +513,93 @@ fn a_case_body_is_a_scope() void {
 // ---- break, continue and defer -----------------------------------------------------
 
 fn break_outside_a_loop_or_switch_is_refused() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_body(&e, "    break;"));
-    assert(check_env.said(&e, "'break' outside a loop or switch"));
-    check_env.reopen(&e);
-    assert(body2(&e, "    i32 x = 1;\n    switch (x) {\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_body(e, "    break;"));
+    assert(check_env.said(e, "'break' outside a loop or switch"));
+    check_env.reopen(e);
+    assert(body2(e, "    i32 x = 1;\n    switch (x) {\n",
                  "    default:\n        break;\n    }"));
 }
 
 fn continue_outside_a_loop_is_refused() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!body2(&e, "    i32 x = 1;\n    switch (x) {\n    default:\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!body2(e, "    i32 x = 1;\n    switch (x) {\n    default:\n",
                   "        continue;\n    }"));
-    assert(check_env.said(&e, "'continue' outside a loop"));
-    check_env.reopen(&e);
-    assert(check_env.check_body(&e, "    while (true) {\n        continue;\n    }"));
+    assert(check_env.said(e, "'continue' outside a loop"));
+    check_env.reopen(e);
+    assert(check_env.check_body(e, "    while (true) {\n        continue;\n    }"));
 }
 
 fn return_is_refused_inside_deferred_code() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_body(&e, "    defer {\n        return 1;\n    }"));
-    assert(check_env.said(&e, "'return' inside deferred code"));
-    assert(check_env.errors(&e) == 1);
-    check_env.reopen(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_body(e, "    defer {\n        return 1;\n    }"));
+    assert(check_env.said(e, "'return' inside deferred code"));
+    assert(check_env.errors(e) == 1);
+    check_env.reopen(e);
     // A loop inside the deferred code catches `break` and `continue`, and it
     // catches no `return`: that would leave the function mid-unwind.
-    assert(!body2(&e, "    defer {\n        while (true) {\n",
+    assert(!body2(e, "    defer {\n        while (true) {\n",
                   "            return 1;\n        }\n    }"));
-    assert(check_env.said(&e, "'return' inside deferred code"));
-    assert(check_env.errors(&e) == 1);
+    assert(check_env.said(e, "'return' inside deferred code"));
+    assert(check_env.errors(e) == 1);
 }
 
 // The `defer` stands in a loop body and the `break` in a loop of its own. So
 // the `break` leaves that inner loop and the enclosing one still runs.
 fn break_and_continue_bind_to_a_loop_inside_deferred_code() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(body3(&e, "    while (true) {\n        defer {\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(body3(e, "    while (true) {\n        defer {\n",
                  "            while (true) {\n                break;\n            }\n",
                  "        }\n        break;\n    }"));
-    check_env.reopen(&e);
-    assert(body3(&e, "    for (i32 mut i = 0; i < 2; i++) {\n        defer {\n",
+    check_env.reopen(e);
+    assert(body3(e, "    for (i32 mut i = 0; i < 2; i++) {\n        defer {\n",
                  "            for (i32 mut k = 0; k < 2; k++) {\n                continue;\n",
                  "            }\n        }\n    }"));
-    check_env.reopen(&e);
+    check_env.reopen(e);
     // A `switch` inside the deferred code catches `break` as a loop does.
-    assert(body2(&e, "    i32 x = 1;\n    defer {\n        switch (x) {\n",
+    assert(body2(e, "    i32 x = 1;\n    defer {\n        switch (x) {\n",
                  "        default:\n            break;\n        }\n    }"));
 }
 
 // The loop around the `defer` is out of reach. So the diagnostic is the one a
 // `break` gets with no loop and no `switch` anywhere around it.
 fn break_and_continue_with_no_loop_inside_deferred_code_are_refused() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!body2(&e, "    while (true) {\n        defer {\n            break;\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!body2(e, "    while (true) {\n        defer {\n            break;\n",
                   "        }\n        break;\n    }"));
-    assert(check_env.said(&e, "'break' outside a loop or switch"));
-    assert(check_env.errors(&e) == 1);
-    check_env.reopen(&e);
-    assert(!body2(&e, "    while (true) {\n        defer {\n            continue;\n",
+    assert(check_env.said(e, "'break' outside a loop or switch"));
+    assert(check_env.errors(e) == 1);
+    check_env.reopen(e);
+    assert(!body2(e, "    while (true) {\n        defer {\n            continue;\n",
                   "        }\n        break;\n    }"));
-    assert(check_env.said(&e, "'continue' outside a loop"));
-    assert(check_env.errors(&e) == 1);
-    check_env.reopen(&e);
+    assert(check_env.said(e, "'continue' outside a loop"));
+    assert(check_env.errors(e) == 1);
+    check_env.reopen(e);
     // The `switch` around the `defer` is out of reach in the same way.
-    assert(!body2(&e, "    i32 x = 1;\n    switch (x) {\n    default:\n",
+    assert(!body2(e, "    i32 x = 1;\n    switch (x) {\n    default:\n",
                   "        defer {\n            break;\n        }\n    }"));
-    assert(check_env.said(&e, "'break' outside a loop or switch"));
-    assert(check_env.errors(&e) == 1);
-    check_env.reopen(&e);
+    assert(check_env.said(e, "'break' outside a loop or switch"));
+    assert(check_env.errors(e) == 1);
+    check_env.reopen(e);
     // A `switch` inside the deferred code catches `break` and not `continue`.
-    assert(!body3(&e, "    i32 x = 1;\n    while (true) {\n        defer {\n",
+    assert(!body3(e, "    i32 x = 1;\n    while (true) {\n        defer {\n",
                   "            switch (x) {\n            default:\n                continue;\n",
                   "            }\n        }\n        break;\n    }"));
-    assert(check_env.said(&e, "'continue' outside a loop"));
-    assert(check_env.errors(&e) == 1);
+    assert(check_env.said(e, "'continue' outside a loop"));
+    assert(check_env.errors(e) == 1);
 }
 
 // The counters the deferred code hid are restored, so the `break` below the
 // `defer` still binds to the `switch` the `defer` stands in.
 fn the_loops_around_a_defer_are_reachable_again_after_it() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(body3(&e, "    i32 x = 1;\n    switch (x) {\n    default:\n        defer {\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(body3(e, "    i32 x = 1;\n    switch (x) {\n    default:\n        defer {\n",
                  "            while (true) {\n                break;\n            }\n",
                  "        }\n        break;\n    }"));
 }
@@ -655,234 +608,218 @@ fn the_loops_around_a_defer_are_reachable_again_after_it() void {
 // there never targets the loop being walked. This `while (true)` still
 // terminates, so the one diagnostic is the `break` itself.
 fn a_break_inside_deferred_code_does_not_end_the_enclosing_loop() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!src3(&e, "fn main() i32 {\n    while (true) {\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!src3(e, "fn main() i32 {\n    while (true) {\n",
                  "        defer {\n            break;\n        }\n",
                  "    }\n}\n"));
-    assert(check_env.said(&e, "'break' outside a loop or switch"));
-    assert(!check_env.said(&e, "missing return"));
-    assert(check_env.errors(&e) == 1);
+    assert(check_env.said(e, "'break' outside a loop or switch"));
+    assert(!check_env.said(e, "missing return"));
+    assert(check_env.errors(e) == 1);
 }
 
 fn a_deferred_statement_is_checked() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(body2(&e, "    i32 mut* own p = new(i32);\n    defer del(p);\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(body2(e, "    i32 mut* own p = new(i32);\n    defer del(p);\n",
                  "    println(p);"));
-    check_env.reopen(&e);
-    assert(!check_env.check_body(&e, "    defer println(nope);"));
-    assert(check_env.said(&e, "unknown name 'nope'"));
+    check_env.reopen(e);
+    assert(!check_env.check_body(e, "    defer println(nope);"));
+    assert(check_env.said(e, "unknown name 'nope'"));
 }
 
 // ---- return and terminating statements ---------------------------------------------
 
 fn a_return_with_a_value_in_a_void_function_is_refused() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!src2(&e, "fn nothing() void {\n    return 1;\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!src2(e, "fn nothing() void {\n    return 1;\n}\n",
                  "fn main() i32 {\n    nothing();\n    return 0;\n}\n"));
-    assert(check_env.said(&e, "'return' with a value in a void function"));
+    assert(check_env.said(e, "'return' with a value in a void function"));
 }
 
 fn a_return_without_a_value_in_a_non_void_function_is_refused() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!src2(&e, "fn bare() i32 {\n    return;\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!src2(e, "fn bare() i32 {\n    return;\n}\n",
                  "fn main() i32 {\n    return bare();\n}\n"));
-    assert(check_env.said(&e, "'return' without a value in a function returning i32"));
+    assert(check_env.said(e, "'return' without a value in a function returning i32"));
 }
 
 fn a_return_in_a_noreturn_function_is_refused() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!src3(&e, "fn quit(i32 code) noreturn {\n    if (code == 0) {\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!src3(e, "fn quit(i32 code) noreturn {\n    if (code == 0) {\n",
                  "        return;\n    }\n    panic(\"quit\");\n}\n",
                  "fn main() i32 {\n    quit(1);\n}\n"));
     // A `noreturn` function may not contain `return`.
-    assert(check_env.said(&e, "'return' in a noreturn function"));
+    assert(check_env.said(e, "'return' in a noreturn function"));
 }
 
 fn a_missing_return_is_reported_at_the_closing_brace() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!src2(&e, "fn pick(bool b) i32 {\n    if (b) {\n        return 1;\n    }\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!src2(e, "fn pick(bool b) i32 {\n    if (b) {\n        return 1;\n    }\n}\n",
                  "fn main() i32 {\n    return pick(true);\n}\n"));
     // Reported at the body's closing brace.
-    assert(check_env.report_text(&e, 0) == "5:1: missing return");
+    assert(check_env.report_text(e, 0) == "5:1: missing return");
 }
 
 fn an_if_with_an_else_terminates() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(src3(&e, "fn sign(i32 x) i32 {\n    if (x < 0) {\n        return -1;\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(src3(e, "fn sign(i32 x) i32 {\n    if (x < 0) {\n        return -1;\n",
                 "    } else {\n        return 1;\n    }\n}\n",
                 "fn main() i32 {\n    return sign(1);\n}\n"));
-    check_env.reopen(&e);
-    assert(!src3(&e, "fn sign(i32 x) i32 {\n    if (x < 0) {\n        return -1;\n",
+    check_env.reopen(e);
+    assert(!src3(e, "fn sign(i32 x) i32 {\n    if (x < 0) {\n        return -1;\n",
                  "    } else if (x > 0) {\n        return 1;\n    }\n}\n",
                  "fn main() i32 {\n    return sign(1);\n}\n"));
-    assert(check_env.said(&e, "missing return"));
+    assert(check_env.said(e, "missing return"));
 }
 
 fn a_while_true_with_no_break_terminates() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(src2(&e, "fn spin() i32 {\n    while (true) {\n        println(1);\n    }\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(src2(e, "fn spin() i32 {\n    while (true) {\n        println(1);\n    }\n}\n",
                 "fn main() i32 {\n    return spin();\n}\n"));
-    check_env.reopen(&e);
-    assert(!src2(&e, "fn spin() i32 {\n    while (true) {\n        break;\n    }\n}\n",
+    check_env.reopen(e);
+    assert(!src2(e, "fn spin() i32 {\n    while (true) {\n        break;\n    }\n}\n",
                  "fn main() i32 {\n    return spin();\n}\n"));
     // A `break` targeting the loop makes it fall through.
-    assert(check_env.said(&e, "missing return"));
+    assert(check_env.said(e, "missing return"));
 }
 
 fn a_constant_true_condition_does_not_terminate() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The rule names `while (true)`, the literal: a condition that folds to
     // true is not one. And the conservative reading reports the missing
     // return rather than accepting a body that may fall through.
-    assert(!src3(&e, "bool ALWAYS = true;\n",
+    assert(!src3(e, "bool ALWAYS = true;\n",
                  "fn spin() i32 {\n    while (ALWAYS) {\n        println(1);\n    }\n}\n",
                  "fn main() i32 {\n    return spin();\n}\n"));
-    assert(check_env.said(&e, "missing return"));
+    assert(check_env.said(e, "missing return"));
 }
 
 fn a_call_through_a_noreturn_pointer_terminates() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // A call statement to a `noreturn` function is terminating, through a
     // function pointer as through a name.
-    assert(src4(&e, "fn pick(bool b, fn (string) noreturn quit) i32 {\n",
+    assert(src4(e, "fn pick(bool b, fn (string) noreturn quit) i32 {\n",
                 "    if (b) {\n        return 1;\n    }\n    quit(\"no\");\n}\n",
                 "fn die(string msg) noreturn {\n    panic(msg);\n}\n",
                 "fn main() i32 {\n    return pick(true, die);\n}\n"));
-    check_env.reopen(&e);
-    assert(!src4(&e, "fn pick(bool b, fn (string) void quit) i32 {\n",
+    check_env.reopen(e);
+    assert(!src4(e, "fn pick(bool b, fn (string) void quit) i32 {\n",
                  "    if (b) {\n        return 1;\n    }\n    quit(\"no\");\n}\n",
                  "fn say(string msg) void {\n    println(msg);\n}\n",
                  "fn main() i32 {\n    return pick(true, say);\n}\n"));
-    assert(check_env.said(&e, "missing return"));
+    assert(check_env.said(e, "missing return"));
 }
 
 fn a_discarded_owning_aggregate_is_refused() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // An owning result is an `own` reference or an owning aggregate, and
     // neither may be dropped.
-    assert(!src3(&e, "struct vec {\n    i32 mut@ own data;\n}\n",
+    assert(!src3(e, "struct vec {\n    i32 mut@ own data;\n}\n",
                  "fn make() vec {\n    return vec{.data = new(i32, 2)};\n}\n",
                  "fn main() i32 {\n    make();\n    return 0;\n}\n"));
-    assert(check_env.said(&e, "owning temporary would leak"));
-    check_env.reopen(&e);
-    assert(!src3(&e, "struct vec {\n    i32 mut@ own data;\n}\n",
+    assert(check_env.said(e, "owning temporary would leak"));
+    check_env.reopen(e);
+    assert(!src3(e, "struct vec {\n    i32 mut@ own data;\n}\n",
                  "fn main() i32 {\n    vec mut b = {};\n    move(b);\n",
                  "    return 0;\n}\n"));
-    assert(check_env.said(&e, "owning temporary would leak"));
+    assert(check_env.said(e, "owning temporary would leak"));
     // A result that owns nothing is discarded freely.
-    check_env.reopen(&e);
-    assert(src3(&e, "struct point {\n    i32 x;\n}\n",
+    check_env.reopen(e);
+    assert(src3(e, "struct point {\n    i32 x;\n}\n",
                 "fn make() point {\n    return point{1};\n}\n",
                 "fn main() i32 {\n    make();\n    return 0;\n}\n"));
 }
 
 fn a_local_may_not_have_type_void() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // `void` is a return type and the base of `void*`. It is never a storage
     // type. This test checks a local. check_test.ft checks a global.
-    assert(!check_env.check_body(&e, "    void v = 0;\n    println(1);"));
-    assert(check_env.said(&e, "'void' is only a return type or the base of 'void*'"));
+    assert(!check_env.check_body(e, "    void v = 0;\n    println(1);"));
+    assert(check_env.said(e, "'void' is only a return type or the base of 'void*'"));
 }
 
 fn a_break_in_an_inner_switch_does_not_target_the_loop() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(src3(&e, "fn spin(i32 n) i32 {\n    while (true) {\n        switch (n) {\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(src3(e, "fn spin(i32 n) i32 {\n    while (true) {\n        switch (n) {\n",
                 "        default:\n            break;\n        }\n    }\n}\n",
                 "fn main() i32 {\n    return spin(1);\n}\n"));
     // Nor does a `break` of a nested loop: the walk stops at the construct
     // the inner `break` targets.
-    check_env.reopen(&e);
-    assert(src3(&e, "fn spin(i32 n) i32 {\n    while (true) {\n",
+    check_env.reopen(e);
+    assert(src3(e, "fn spin(i32 n) i32 {\n    while (true) {\n",
                 "        while (n > 0) {\n            break;\n        }\n    }\n}\n",
                 "fn main() i32 {\n    return spin(1);\n}\n"));
 }
 
 fn a_for_with_no_condition_terminates() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(src2(&e, "fn spin() i32 {\n    for (;;) {\n        println(1);\n    }\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(src2(e, "fn spin() i32 {\n    for (;;) {\n        println(1);\n    }\n}\n",
                 "fn main() i32 {\n    return spin();\n}\n"));
 }
 
 fn an_exhaustive_enum_switch_terminates() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(src4(&e, "enum color {\n    red,\n    green,\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(src4(e, "enum color {\n    red,\n    green,\n}\n",
                 "fn code(color c) i32 {\n    switch (c) {\n    case color.red:\n",
                 "        return 1;\n    case color.green:\n        return 2;\n    }\n}\n",
                 "fn main() i32 {\n    return code(color.red);\n}\n"));
-    check_env.reopen(&e);
-    assert(!src4(&e, "enum color {\n    red,\n    green,\n}\n",
+    check_env.reopen(e);
+    assert(!src4(e, "enum color {\n    red,\n    green,\n}\n",
                  "fn code(color c) i32 {\n    switch (c) {\n    case color.red:\n",
                  "        return 1;\n    case color.green:\n        println(2);\n    }\n}\n",
                  "fn main() i32 {\n    return code(color.red);\n}\n"));
-    assert(check_env.said(&e, "missing return"));
+    assert(check_env.said(e, "missing return"));
 }
 
 // A `break` in a clause leaves the switch, so the switch falls through and is
 // not terminating (D8.4). The rule holds in a plain clause, in the default
 // and in an exhaustive enum switch.
 fn a_break_that_leaves_a_switch_ends_its_termination() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!src4(&e, "fn f(bool c, i32 k) i32 {\n    switch (k) {\n    case 1:\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!src4(e, "fn f(bool c, i32 k) i32 {\n    switch (k) {\n    case 1:\n",
                  "        if (c) {\n            break;\n        }\n        return 1;\n",
                  "    default:\n        return 2;\n    }\n}\n",
                  "fn main() i32 {\n    return f(true, 1);\n}\n"));
-    assert(check_env.report_text(&e, 0) == "11:1: missing return");
-    assert(check_env.errors(&e) == 1);
-    check_env.reopen(&e);
-    assert(!src4(&e, "fn f(bool c, i32 k) i32 {\n    switch (k) {\n    case 1:\n",
+    assert(check_env.report_text(e, 0) == "11:1: missing return");
+    assert(check_env.errors(e) == 1);
+    check_env.reopen(e);
+    assert(!src4(e, "fn f(bool c, i32 k) i32 {\n    switch (k) {\n    case 1:\n",
                  "        return 1;\n    default:\n",
                  "        if (c) {\n            break;\n        }\n        return 2;\n    }\n}\n",
                  "fn main() i32 {\n    return f(true, 1);\n}\n"));
-    assert(check_env.said(&e, "missing return"));
-    check_env.reopen(&e);
-    assert(!src5(&e, "enum color {\n    red,\n    green,\n}\n",
+    assert(check_env.said(e, "missing return"));
+    check_env.reopen(e);
+    assert(!src5(e, "enum color {\n    red,\n    green,\n}\n",
                  "fn code(color c, bool b) i32 {\n    switch (c) {\n    case color.red:\n",
                  "        if (b) {\n            break;\n        }\n        return 1;\n",
                  "    case color.green:\n        return 2;\n    }\n}\n",
                  "fn main() i32 {\n    return code(color.red, true);\n}\n"));
-    assert(check_env.said(&e, "missing return"));
+    assert(check_env.said(e, "missing return"));
     // A `break` in the selected branch of a `$if` leaves the switch too. A
     // `break` in a branch that is not selected is not in the program.
-    check_env.reopen(&e);
-    assert(!src4(&e, "fn f(i32 k) i32 {\n    switch (k) {\n    case 1:\n",
+    check_env.reopen(e);
+    assert(!src4(e, "fn f(i32 k) i32 {\n    switch (k) {\n    case 1:\n",
                  "        $if (true) {\n            break;\n        }\n        return 1;\n",
                  "    default:\n        return 2;\n    }\n}\n",
                  "fn main() i32 {\n    return f(1);\n}\n"));
-    assert(check_env.said(&e, "missing return"));
-    check_env.reopen(&e);
-    assert(src4(&e, "fn f(i32 k) i32 {\n    switch (k) {\n    case 1:\n",
+    assert(check_env.said(e, "missing return"));
+    check_env.reopen(e);
+    assert(src4(e, "fn f(i32 k) i32 {\n    switch (k) {\n    case 1:\n",
                 "        $if (false) {\n            break;\n        }\n        return 1;\n",
                 "    default:\n        return 2;\n    }\n}\n",
                 "fn main() i32 {\n    return f(1);\n}\n"));
@@ -891,21 +828,20 @@ fn a_break_that_leaves_a_switch_ends_its_termination() void {
 // A `break` of a loop or a switch inside a clause targets that construct, and
 // `continue` never targets a switch (D7.6). The outer switch still terminates.
 fn a_break_of_an_inner_construct_keeps_a_switch_terminating() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(src5(&e, "fn f(i32 k) i32 {\n    switch (k) {\n    case 1:\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(src5(e, "fn f(i32 k) i32 {\n    switch (k) {\n    case 1:\n",
                 "        while (k > 0) {\n            if (k > 2) {\n                continue;\n",
                 "            }\n            break;\n        }\n        return 1;\n",
                 "    default:\n        return 2;\n    }\n}\n",
                 "fn main() i32 {\n    return f(1);\n}\n"));
-    check_env.reopen(&e);
-    assert(src4(&e, "fn f(i32 k) i32 {\n    switch (k) {\n    case 1:\n",
+    check_env.reopen(e);
+    assert(src4(e, "fn f(i32 k) i32 {\n    switch (k) {\n    case 1:\n",
                 "        for (i32 mut i = 0; i < k; i++) {\n            break;\n        }\n",
                 "        return 1;\n    default:\n        return 2;\n    }\n}\n",
                 "fn main() i32 {\n    return f(1);\n}\n"));
-    check_env.reopen(&e);
-    assert(src5(&e, "fn f(i32 k) i32 {\n    switch (k) {\n    case 1:\n",
+    check_env.reopen(e);
+    assert(src5(e, "fn f(i32 k) i32 {\n    switch (k) {\n    case 1:\n",
                 "        switch (k) {\n        case 0:\n            break;\n",
                 "        default:\n            println(k);\n        }\n        return 1;\n",
                 "    default:\n        return 2;\n    }\n}\n",
@@ -913,101 +849,111 @@ fn a_break_of_an_inner_construct_keeps_a_switch_terminating() void {
 }
 
 fn a_panic_and_a_noreturn_call_terminate() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(src3(&e, "fn checked(i32 x) i32 {\n    if (x < 0) {\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(src3(e, "fn checked(i32 x) i32 {\n    if (x < 0) {\n",
                 "        panic(\"negative\");\n    } else {\n        return x;\n    }\n}\n",
                 "fn main() i32 {\n    return checked(1);\n}\n"));
-    check_env.reopen(&e);
-    assert(src3(&e, "fn die() noreturn {\n    panic(\"stop\");\n}\n",
+    check_env.reopen(e);
+    assert(src3(e, "fn die() noreturn {\n    panic(\"stop\");\n}\n",
                 "fn pick(bool b) i32 {\n    if (b) {\n        return 1;\n    }\n    die();\n}\n",
                 "fn main() i32 {\n    return pick(true);\n}\n"));
 }
 
 fn a_noreturn_function_must_end_in_a_terminating_statement() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!src2(&e, "fn die() noreturn {\n    println(1);\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!src2(e, "fn die() noreturn {\n    println(1);\n}\n",
                  "fn main() i32 {\n    die();\n}\n"));
-    assert(check_env.said(&e, "a noreturn function must end in a terminating statement"));
+    assert(check_env.said(e, "a noreturn function must end in a terminating statement"));
 }
 
 fn a_body_with_an_error_node_never_reports_missing_return() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // An error node stands where a statement was expected, and a block that
     // holds one is not judged. The checker
     // adds nothing to the parser's diagnostic.
-    assert(check_env.check_broken(&e, "fn pick(bool b) i32 {\n    i32 x = ;\n}\n"));
-    assert(!check_env.said(&e, "missing return"));
-    assert(check_env.said(&e, "expected an expression"));
-    assert(check_env.reports(&e) == 1);
+    assert(check_env.check_broken(e, "fn pick(bool b) i32 {\n    i32 x = ;\n}\n"));
+    assert(!check_env.said(e, "missing return"));
+    assert(check_env.said(e, "expected an expression"));
+    assert(check_env.reports(e) == 1);
+}
+
+// A parameter scope in an allocation of its own: open_params lends it to the checker.
+fn params_make() scope.scope mut* own {
+    return new(scope.scope);
+}
+
+// Ends a parameter scope of params_make that the caller moves in, as check_env.close_params ends
+// one: the checker forgets the scope, the value moves out before the `del` of the allocation, and
+// scope.drop frees it.
+fn params_drop_made(check_env.env mut* e, scope.scope mut* own p) void {
+    e->ck.scope = null;
+    scope.scope kept = move(*p);
+    del(p);
+    scope.drop(move(kept));
 }
 
 // ---- direct checker probes ---------------------------------------------------------
 
 fn an_immutable_binding_of_an_own_type_may_be_emptied_but_not_assigned() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut sb = strbuf.create();
+    defer del(sb.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // `empty` and `is_mut` answer two questions. Can `move` or `del` empty the
     // expression? Can an assignment change it? They only differ on a local or a
     // parameter, whose own storage is emptiable whether or not the binding is
     // `mut`. Every module-level shape has them agree, which is why this
     // stands here and not in check_own_test.ft.
-    strbuf.str_buf mut sb = strbuf.create();
-    defer strbuf.free(&sb);
     strbuf.append(&sb, "struct cell {\n    i32 v;\n}\n");
     strbuf.append(&sb, "fn probe(cell mut* own p) void {\n    del(p);\n}\n");
     strbuf.append(&sb, "fn main() i32 {\n    return 0;\n}\n");
-    assert(check_env.open_module(&e, strbuf.view(&sb)));
+    assert(check_env.open_module(e, strbuf.view(&sb)));
     // The parameter scope check_function_body opens around a body, so that
     // the name in it resolves to the parameter.
-    scope.scope mut params = scope.scope{};
-    check_env.open_params(&e, &params, "probe");
-    ast.node mut* id = check_env.node_in_main(&e, ast.ast_kind.k_ident, "p");
+    scope.scope mut* own params = params_make();
+    check_env.open_params(e, params, "probe");
+    ast.node mut* id = check_env.node_in_main(e, ast.ast_kind.k_ident, "p");
     assert(id != null);
-    check.expr got = check_env.probe_expr(&e, id);
-    check_env.close_params(&e, &params);
-    assert(check_env.errors(&e) == 0);
+    check.expr got = check_env.probe_expr(e, id);
+    params_drop_made(e, move(params));
+    assert(check_env.errors(e) == 0);
     assert(got.lvalue);
     // The binding is immutable and its own storage is still emptiable.
     assert(!got.is_mut);
     assert(got.empty == check.empty_kind.empty_ok);
     // The same separation as the statement checker reports it over a body. An
     // immutable `own` local may be `del`ed and may not be assigned to.
-    check_env.reopen(&e);
-    assert(check_env.check_body(&e, "    i32 mut* own p = new(i32);\n    del(p);"));
-    check_env.reopen(&e);
-    assert(!body2(&e, "    i32 mut* own p = new(i32);\n",
+    check_env.reopen(e);
+    assert(check_env.check_body(e, "    i32 mut* own p = new(i32);\n    del(p);"));
+    check_env.reopen(e);
+    assert(!body2(e, "    i32 mut* own p = new(i32);\n",
                   "    p = null;\n    del(p);"));
-    assert(check_env.said(&e, "cannot assign to immutable 'p'"));
+    assert(check_env.said(e, "cannot assign to immutable 'p'"));
 }
 
 fn returning_an_own_local_from_a_body_is_an_implicit_move() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // check_return_value is the one own place an owning lvalue reaches
     // without `move`, and check_return is its only caller. The bit is
     // asserted here over a body the statement checker walked, and not over a
     // call made by hand.
-    assert(src4(&e, "struct cell {\n    i32 v;\n}\n",
+    assert(src4(e, "struct cell {\n    i32 v;\n}\n",
                 "fn take(cell mut* own p) cell mut* own {\n    return p;\n}\n",
                 "fn main() i32 {\n    cell mut* own c = take(new(cell));\n",
                 "    del(c);\n    return 0;\n}\n"));
-    assert(check_env.has_ann(check_env.return_in(&e, "take"), check.ANN_MOVE));
+    assert(check_env.has_ann(check_env.return_in(e, "take"), check.ANN_MOVE));
     // A global names no local, so the transfer is written and the emitter is
     // told nothing.
-    check_env.reopen(&e);
-    assert(!src3(&e, "struct cell {\n    i32 v;\n}\ncell mut* own mut kept = null;\n",
+    check_env.reopen(e);
+    assert(!src3(e, "struct cell {\n    i32 v;\n}\ncell mut* own mut kept = null;\n",
                  "fn give() cell mut* own {\n    return kept;\n}\n",
                  "fn main() i32 {\n    return 0;\n}\n"));
-    assert(check_env.said(&e, "copying an owning value requires 'move': write move(kept)"));
-    assert(!check_env.has_ann(check_env.return_in(&e, "give"), check.ANN_MOVE));
+    assert(check_env.said(e, "copying an owning value requires 'move': write move(kept)"));
+    assert(!check_env.has_ann(check_env.return_in(e, "give"), check.ANN_MOVE));
 }
 
 fn main() i32 {

@@ -11,24 +11,22 @@ import check_env;
 // Two analyses in one process share nothing: the second sees none of the
 // first's symbols, diagnostics or types.
 fn two_checkers_are_independent() void {
-    check_env.env mut first = check_env.env{};
-    check_env.open(&first);
-    defer check_env.close(&first);
-    assert(!check_env.check_decls(&first, "i32 k = nosuch;\n"));
-    assert(check_env.errors(&first) == 1);
-    u64 made = check.check_sym_count(&first.ck);
-    check_env.env mut second = check_env.env{};
-    check_env.open(&second);
-    defer check_env.close(&second);
-    assert(check_env.check_decls(&second, "i32 k = 1;\n"));
+    check_env.env mut* own first = check_env.make();
+    defer check_env.drop_made(move(first));
+    assert(!check_env.check_decls(first, "i32 k = nosuch;\n"));
+    assert(check_env.errors(first) == 1);
+    u64 made = check.check_sym_count(&first->ck);
+    check_env.env mut* own second = check_env.make();
+    defer check_env.drop_made(move(second));
+    assert(check_env.check_decls(second, "i32 k = 1;\n"));
     // The second analysis reported nothing and made its own records: even the
     // universe is one set per checker. So no symbol of the first is a symbol
     // of the second.
-    assert(check_env.errors(&second) == 0);
-    assert(check.check_sym_at(&second.ck, 0) != check.check_sym_at(&first.ck, 0));
+    assert(check_env.errors(second) == 0);
+    assert(check.check_sym_at(&second->ck, 0) != check.check_sym_at(&first->ck, 0));
     // The first is untouched by the second.
-    assert(check_env.errors(&first) == 1);
-    assert(check.check_sym_count(&first.ck) == made);
+    assert(check_env.errors(first) == 1);
+    assert(check.check_sym_count(&first->ck) == made);
 }
 
 // The universe functions are one record each per checker, which is what makes
@@ -45,12 +43,11 @@ fn every_checker_makes_its_own_universe(check_env.env mut* e) void {
 fn a_hundred_analyses_of_one_document_answer_alike() void {
     u64 mut i = 0;
     while (i < 100) {
-        check_env.env mut e = check_env.env{};
-        check_env.open(&e);
-        assert(!check_env.check_decls(&e, "i32 k = nosuch;\n"));
-        assert(check_env.errors(&e) == 1);
-        assert(check_env.said(&e, "unknown name 'nosuch'"));
-        check_env.close(&e);
+        check_env.env mut* own e = check_env.make();
+        assert(!check_env.check_decls(e, "i32 k = nosuch;\n"));
+        assert(check_env.errors(e) == 1);
+        assert(check_env.said(e, "unknown name 'nosuch'"));
+        check_env.drop_made(move(e));
         i += 1;
     }
 }

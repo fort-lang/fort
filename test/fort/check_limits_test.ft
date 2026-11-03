@@ -116,11 +116,10 @@ fn init_of(types.type_kind kind) string {
 // suffix stack.
 fn takes(strbuf.str_buf mut* b, string base, types.type_kind kind, u64 inner, u64 outer,
          u64 count) bool {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     string decl = deep_decl(b, base, suffix_of(kind), inner, outer, init_of(kind));
-    return check_env.check_decls(&e, decl) && took(&e, base, kind, count);
+    return check_env.check_decls(e, decl) && took(e, base, kind, count);
 }
 
 // The type of `deep` in the entry module of `e`. A caller that holds an environment lends it to
@@ -150,64 +149,57 @@ fn took(check_env.env mut* e, string base, types.type_kind kind, u64 count) bool
 // checker closed each frame of its suffix stack. The checker's own refusal
 // never shows.
 fn refused(strbuf.str_buf mut* b, string base, types.type_kind kind, u64 inner, u64 outer) bool {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     string decl = deep_decl(b, base, suffix_of(kind), inner, outer, init_of(kind));
-    return !check_env.check_decls(&e, decl)
-           && check_env.said(&e, "nesting deeper than 256")
-           && !check_env.said(&e, "too many type suffixes") && check_env.errors(&e) == 1
-           && e.ck.suffix_top == 0;
+    return !check_env.check_decls(e, decl)
+           && check_env.said(e, "nesting deeper than 256")
+           && !check_env.said(e, "too many type suffixes") && check_env.errors(e) == 1
+           && e->ck.suffix_top == 0;
 }
 
 fn a_struct_of_a_hundred_and_twenty_eight_fields_is_the_last_that_fits() void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_decls(&e, many_fields(&b, 128)));
-    assert(check_env.errors(&e) == 0);
-    check_env.env mut f = check_env.env{};
-    check_env.open(&f);
-    defer check_env.close(&f);
-    assert(!check_env.check_decls(&f, many_fields(&b, 129)));
-    assert(check_env.said(&f, "too many fields"));
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_decls(e, many_fields(&b, 128)));
+    assert(check_env.errors(e) == 0);
+    check_env.env mut* own f = check_env.make();
+    defer check_env.drop_made(move(f));
+    assert(!check_env.check_decls(f, many_fields(&b, 129)));
+    assert(check_env.said(f, "too many fields"));
 }
 
 fn a_function_of_a_hundred_and_twenty_nine_parameters_is_refused() void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_decls(&e, many_params(&b, 128)));
-    assert(check_env.errors(&e) == 0);
-    check_env.env mut f = check_env.env{};
-    check_env.open(&f);
-    defer check_env.close(&f);
-    assert(!check_env.check_decls(&f, many_params(&b, 129)));
-    assert(check_env.said(&f, "too many parameters"));
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_decls(e, many_params(&b, 128)));
+    assert(check_env.errors(e) == 0);
+    check_env.env mut* own f = check_env.make();
+    defer check_env.drop_made(move(f));
+    assert(!check_env.check_decls(f, many_params(&b, 129)));
+    assert(check_env.said(f, "too many parameters"));
 }
 
 fn a_function_type_of_a_hundred_and_twenty_nine_parameters_is_refused() void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_decls(&e, many_fn_params(&b, 128)));
-    assert(check_env.errors(&e) == 0);
-    check_env.env mut f = check_env.env{};
-    check_env.open(&f);
-    defer check_env.close(&f);
-    assert(!check_env.check_decls(&f, many_fn_params(&b, 129)));
-    assert(check_env.said(&f, "too many parameters"));
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_decls(e, many_fn_params(&b, 128)));
+    assert(check_env.errors(e) == 0);
+    check_env.env mut* own f = check_env.make();
+    defer check_env.drop_made(move(f));
+    assert(!check_env.check_decls(f, many_fn_params(&b, 129)));
+    assert(check_env.said(f, "too many parameters"));
 }
 
 fn a_type_takes_256_suffixes_and_not_257() void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     types.type_kind ptr = types.type_kind.k_ptr;
     assert(takes(&b, "i32", ptr, 0, 256, 256));
     assert(refused(&b, "i32", ptr, 0, 257));
@@ -226,39 +218,37 @@ fn a_type_takes_256_suffixes_and_not_257() void {
 // grows the suffix stack while the frame of `deep` is open, so the stack moves.
 fn a_type_in_an_array_length_grows_the_suffix_stack() void {
     strbuf.str_buf mut base = strbuf.create();
-    defer strbuf.free(&base);
+    defer del(base.data);
     strbuf.append(&base, "i32[sizeof(i32");
     append_times(&base, "*", 200);
     strbuf.append(&base, ")]");
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     types.type_kind ptr = types.type_kind.k_ptr;
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_decls(&e, deep_decl(&b, strbuf.view(&base), "*", 0, 50, "null")));
-    assert(check_env.type_text(&e, deep_type(&e))
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_decls(e, deep_decl(&b, strbuf.view(&base), "*", 0, 50, "null")));
+    assert(check_env.type_text(e, deep_type(e))
            == "i32[8]**************************************************");
-    assert(e.ck.suffix_top == 0);
-    assert(e.ck.suffixes.len >= 251);
+    assert(e->ck.suffix_top == 0);
+    assert(e->ck.suffixes.len >= 251);
     assert(refused(&b, strbuf.view(&base), ptr, 0, 256));
 }
 
 // Checks `decl` in a fresh environment. Answers whether the checker gave one
 // diagnostic holding `message` and closed each frame of its suffix stack.
 fn fails_once(string decl, string message) bool {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    return !check_env.check_decls(&e, decl) && check_env.said(&e, message)
-           && check_env.errors(&e) == 1 && e.ck.suffix_top == 0;
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    return !check_env.check_decls(e, decl) && check_env.said(e, message)
+           && check_env.errors(e) == 1 && e->ck.suffix_top == 0;
 }
 
 // A frame that fails closes too: an unknown base stops the frame before its
 // loop, and a bad array length stops it in the loop.
 fn a_failed_type_closes_its_suffix_frame() void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string unknown = deep_decl(&b, "nothing", "*", 0, 256, "null");
     assert(fails_once(unknown, "unknown type 'nothing'"));
     string negative = deep_decl(&b, "i32[-1]", "*", 0, 255, "null");
@@ -267,7 +257,7 @@ fn a_failed_type_closes_its_suffix_frame() void {
 
 fn a_group_does_not_reset_the_suffix_count() void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     types.type_kind ptr = types.type_kind.k_ptr;
     assert(takes(&b, "i32", ptr, 128, 128, 256));
     assert(takes(&b, "i32", ptr, 255, 1, 256));
@@ -279,13 +269,12 @@ fn a_group_does_not_reset_the_suffix_count() void {
 }
 
 fn a_type_whose_size_would_pass_the_ceiling_of_d3_4_is_refused() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // 2,000,000,000,000,000,000 i64 values need more than 2^63 - 1 bytes.
     // This exceeds the largest type size. The diagnostic names the declaration.
-    assert(!check_env.check_decls(&e, "i64[2000000000000000000] big = {};\n"));
-    assert(check_env.said(&e, "type is too large: i64[2000000000000000000]"));
+    assert(!check_env.check_decls(e, "i64[2000000000000000000] big = {};\n"));
+    assert(check_env.said(e, "type is too large: i64[2000000000000000000]"));
 }
 
 // ---- sizes behind a reference (D3.4) ------------------------------------------------
@@ -303,7 +292,7 @@ fn one_report(check_env.env mut* e, string decls, string want) bool {
 // The same for the declarations `first` and then `second`.
 fn one_report_of_two(check_env.env mut* e, string first, string second, string want) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, first);
     strbuf.append(&b, second);
     return one_report(e, strbuf.view(&b), want);
@@ -313,7 +302,7 @@ fn one_report_of_two(check_env.env mut* e, string first, string second, string w
 // n of the body is on line n + 1.
 fn one_body_report(check_env.env mut* e, string first, string second, string want) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, first);
     strbuf.append(&b, second);
     check_env.reopen(e);
@@ -330,91 +319,87 @@ fn clean(check_env.env mut* e, string decls) bool {
 // The same for the declarations `first` and then `second`.
 fn clean_of_two(check_env.env mut* e, string first, string second) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, first);
     strbuf.append(&b, second);
     return clean(e, strbuf.view(&b));
 }
 
 fn an_array_behind_a_reference_that_is_too_large_is_refused() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // u64[2^62] needs 2^65 bytes and u16[2^62] needs 2^63, one more than fits
-    assert(one_report(&e, "u64[4611686018427387904]* BIG = null;\n",
+    assert(one_report(e, "u64[4611686018427387904]* BIG = null;\n",
                       "1:1: type is too large: u64[4611686018427387904]"));
-    assert(one_report(&e, "u16[4611686018427387904]* HALVES = null;\n",
+    assert(one_report(e, "u16[4611686018427387904]* HALVES = null;\n",
                       "1:1: type is too large: u16[4611686018427387904]"));
-    assert(one_report(&e, "u64[4611686018427387904]@ VIEW = {};\n",
+    assert(one_report(e, "u64[4611686018427387904]@ VIEW = {};\n",
                       "1:1: type is too large: u64[4611686018427387904]"));
-    assert(one_report(&e, "(u64[4611686018427387904]*)[2] PAIR = {};\n",
+    assert(one_report(e, "(u64[4611686018427387904]*)[2] PAIR = {};\n",
                       "1:1: type is too large: u64[4611686018427387904]"));
     // 2^60 - 1 values of 8 bytes need 2^63 - 8 bytes; 2^63 - 1 bytes fit exactly
-    assert(clean(&e, "u64[1152921504606846975]* WORDS = null;\n"));
-    assert(clean(&e, "u8[9223372036854775807]@ BYTES = {};\n"));
+    assert(clean(e, "u64[1152921504606846975]* WORDS = null;\n"));
+    assert(clean(e, "u8[9223372036854775807]@ BYTES = {};\n"));
 }
 
 fn a_nested_array_behind_a_pointer_is_named_whole() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // two u16[2^62] need 2^64 bytes; the message names the outer array
-    assert(one_report(&e, "u16[2][4611686018427387904]* N = null;\n",
+    assert(one_report(e, "u16[2][4611686018427387904]* N = null;\n",
                       "1:1: type is too large: u16[2][4611686018427387904]"));
     // 2^60 structs of 24 bytes need 3 * 2^63 bytes
-    assert(one_report_of_two(&e, "struct trio { u64 a; u64 b; u64 c; }\n",
+    assert(one_report_of_two(e, "struct trio { u64 a; u64 b; u64 c; }\n",
                              "trio[1152921504606846976]* T = null;\n",
                              "2:1: type is too large: trio[1152921504606846976]"));
 }
 
 fn a_declaration_reports_the_type_behind_its_pointer() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(one_report(&e, "fn f(u64[4611686018427387904]* p) void {\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(one_report(e, "fn f(u64[4611686018427387904]* p) void {\n}\n",
                       "1:6: type is too large: u64[4611686018427387904]"));
-    assert(one_report(&e, "fn f() u64[4611686018427387904]* {\n    return null;\n}\n",
+    assert(one_report(e, "fn f() u64[4611686018427387904]* {\n    return null;\n}\n",
                       "1:8: type is too large: u64[4611686018427387904]"));
-    assert(one_report(&e, "struct holder {\n    u64[4611686018427387904]* p;\n}\n",
+    assert(one_report(e, "struct holder {\n    u64[4611686018427387904]* p;\n}\n",
                       "2:5: type is too large: u64[4611686018427387904]"));
     // no value stores a parameter of a function type, but D3.4 refuses its type
-    assert(one_report(&e, "fn(u64[4611686018427387904]) void OP = null;\n",
+    assert(one_report(e, "fn(u64[4611686018427387904]) void OP = null;\n",
                       "1:1: type is too large: u64[4611686018427387904]"));
-    assert(one_body_report(&e, "", "    u64[4611686018427387904]* p = null;",
+    assert(one_body_report(e, "", "    u64[4611686018427387904]* p = null;",
                            "2:5: type is too large: u64[4611686018427387904]"));
-    assert(one_body_report(&e, "    u64[2] w = {};\n",
+    assert(one_body_report(e, "    u64[2] w = {};\n",
                            "    println((*cast(&w, u64[2305843009213693952]*))[0]);",
                            "3:15: type is too large: u64[2305843009213693952]"));
-    assert(one_body_report(&e, "    u64 z = sizeof(u64[4611686018427387904]*);\n",
+    assert(one_body_report(e, "    u64 z = sizeof(u64[4611686018427387904]*);\n",
                            "    println(z);", "2:13: type is too large: u64[4611686018427387904]"));
 }
 
 fn a_struct_behind_a_pointer_is_sized_after_its_layout() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // `late` is laid out after `early` resolves, so both orders are one program (D7.10)
     string early = "struct early {\n    late[4611686018427387904]* p;\n}\n";
     string late = "struct late { u64 a; }\n";
-    assert(one_report_of_two(&e, early, late, "2:5: type is too large: late[4611686018427387904]"));
-    assert(one_report_of_two(&e, late, early, "3:5: type is too large: late[4611686018427387904]"));
-    assert(one_report(&e, "struct self {\n    self[4611686018427387904]* next;\n}\n",
+    assert(one_report_of_two(e, early, late, "2:5: type is too large: late[4611686018427387904]"));
+    assert(one_report_of_two(e, late, early, "3:5: type is too large: late[4611686018427387904]"));
+    assert(one_report(e, "struct self {\n    self[4611686018427387904]* next;\n}\n",
                       "2:5: type is too large: self[4611686018427387904]"));
-    assert(clean(&e, "struct self {\n    self[2]* next;\n}\n"));
+    assert(clean(e, "struct self {\n    self[2]* next;\n}\n"));
     // `inner` contains `outer` by value. A forced layout of `inner` from the field
     // of `outer` would read `outer` as resolving and report an infinite size (D3.8).
     string inner = "struct inner {\n    outer o;\n    u64 x;\n}\n";
-    assert(clean_of_two(&e, "struct outer {\n    inner[2]* p;\n}\n", inner));
-    assert(one_report_of_two(&e, "struct outer {\n    inner[4611686018427387904]* p;\n}\n", inner,
+    assert(clean_of_two(e, "struct outer {\n    inner[2]* p;\n}\n", inner));
+    assert(one_report_of_two(e, "struct outer {\n    inner[4611686018427387904]* p;\n}\n", inner,
                              "2:5: type is too large: inner[4611686018427387904]"));
-    assert(!check_env.said(&e, "infinite size"));
+    assert(!check_env.said(e, "infinite size"));
     // Two structs each reach the other through a large array. The field of the
     // second struct reports and fails its struct, and the failed struct silences
     // the waiting entry of the first, so one error stays one error in both orders.
     string first = "struct a {\n    b[4611686018427387904]* p;\n}\n";
     string second = "struct b {\n    a[4611686018427387904]* q;\n}\n";
-    assert(one_report_of_two(&e, first, second, "5:5: type is too large: a[4611686018427387904]"));
-    assert(one_report_of_two(&e, second, first, "5:5: type is too large: b[4611686018427387904]"));
+    assert(one_report_of_two(e, first, second, "5:5: type is too large: a[4611686018427387904]"));
+    assert(one_report_of_two(e, second, first, "5:5: type is too large: b[4611686018427387904]"));
 }
 
 // A `sizeof` in a module constant sizes an array of a struct or an enum after
@@ -424,33 +409,32 @@ fn a_struct_behind_a_pointer_is_sized_after_its_layout() void {
 // infinite size. A `sizeof` in a function body and in an array length reports
 // once too.
 fn a_constant_sizeof_is_sized_after_each_layout() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     string use = "u64 A = sizeof(late[576460752303423488]*);\n";
     string fits = "u64 A = sizeof(late[576460752303423487]*);\n";
     string late = "struct late { u64 a; u64 b; }\n";
     // 2^59 structs of 16 bytes need 2^63 bytes, one more than fits
-    assert(one_report_of_two(&e, use, late, "1:9: type is too large: late[576460752303423488]"));
-    assert(one_report_of_two(&e, late, use, "2:9: type is too large: late[576460752303423488]"));
-    assert(clean_of_two(&e, fits, late));
-    assert(clean_of_two(&e, late, fits));
+    assert(one_report_of_two(e, use, late, "1:9: type is too large: late[576460752303423488]"));
+    assert(one_report_of_two(e, late, use, "2:9: type is too large: late[576460752303423488]"));
+    assert(clean_of_two(e, fits, late));
+    assert(clean_of_two(e, late, fits));
     string node = "struct node { node* next; u64 v; }\n";
-    assert(one_report_of_two(&e, node, "u64 A = sizeof(node[4611686018427387904]@);\n",
+    assert(one_report_of_two(e, node, "u64 A = sizeof(node[4611686018427387904]@);\n",
                              "2:9: type is too large: node[4611686018427387904]"));
-    assert(one_report_of_two(&e, "enum color { red }\n",
+    assert(one_report_of_two(e, "enum color { red }\n",
                              "u64 A = sizeof(fn(color[4611686018427387904]) void);\n",
                              "2:9: type is too large: color[4611686018427387904]"));
     string body = "fn f() u64 {\n    return sizeof(late[4611686018427387904]*);\n}\n";
-    assert(one_report_of_two(&e, late, body, "3:12: type is too large: late[4611686018427387904]"));
+    assert(one_report_of_two(e, late, body, "3:12: type is too large: late[4611686018427387904]"));
     // a cycle of value containment reports its infinite size and nothing more
     string pair = "struct a { b x; }\nstruct b { a y; }\n";
     string ask = "u64 A = sizeof(a[4611686018427387904]*);\n";
-    assert(one_report_of_two(&e, ask, pair, "2:1: struct a has infinite size"));
-    assert(one_report_of_two(&e, pair, ask, "1:1: struct a has infinite size"));
-    assert(!check_env.said(&e, "too large"));
+    assert(one_report_of_two(e, ask, pair, "2:1: struct a has infinite size"));
+    assert(one_report_of_two(e, pair, ask, "1:1: struct a has infinite size"));
+    assert(!check_env.said(e, "too large"));
     string length = "u8[sizeof(late[4611686018427387904]*)] X = {};\n";
-    assert(one_report_of_two(&e, length, late,
+    assert(one_report_of_two(e, length, late,
                              "1:4: type is too large: late[4611686018427387904]"));
 }
 

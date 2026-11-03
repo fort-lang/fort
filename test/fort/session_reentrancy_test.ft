@@ -23,105 +23,105 @@ import std.strbuf;
 // Three sessions hold three versions of one document, at one time, and each
 // reads back its own.
 fn three_sessions_hold_three_versions() void {
-    session.session mut a = session.create();
-    defer session.free(&a);
-    session.session mut b = session.create();
-    defer session.free(&b);
-    session.session mut c = session.create();
-    defer session.free(&c);
-    session.set_source(&a, "doc.ft", "version a");
-    session.set_source(&b, "doc.ft", "version b");
-    session.set_source(&c, "doc.ft", "version c");
+    session.session mut* own a = session.make();
+    defer session.drop_made(move(a));
+    session.session mut* own b = session.make();
+    defer session.drop_made(move(b));
+    session.session mut* own c = session.make();
+    defer session.drop_made(move(c));
+    session.set_source(a, "doc.ft", "version a");
+    session.set_source(b, "doc.ft", "version b");
+    session.set_source(c, "doc.ft", "version c");
     string mut text = "";
-    assert(session.read_source(&a, "doc.ft", &text));
+    assert(session.read_source(a, "doc.ft", &text));
     assert(text == "version a");
-    assert(session.read_source(&c, "doc.ft", &text));
+    assert(session.read_source(c, "doc.ft", &text));
     assert(text == "version c");
-    assert(session.read_source(&b, "doc.ft", &text));
+    assert(session.read_source(b, "doc.ft", &text));
     assert(text == "version b");
     // Changing one leaves the others where they were.
-    session.set_source(&b, "doc.ft", "version b again");
-    assert(session.read_source(&a, "doc.ft", &text));
+    session.set_source(b, "doc.ft", "version b again");
+    assert(session.read_source(a, "doc.ft", &text));
     assert(text == "version a");
-    assert(session.read_source(&b, "doc.ft", &text));
+    assert(session.read_source(b, "doc.ft", &text));
     assert(text == "version b again");
-    assert(session.source_count(&a) == 1);
-    assert(session.source_count(&b) == 1);
-    assert(session.source_count(&c) == 1);
+    assert(session.source_count(a) == 1);
+    assert(session.source_count(b) == 1);
+    assert(session.source_count(c) == 1);
 }
 
 // Diagnostics reported to one session are not counted by another, however
 // they are interleaved.
 fn interleaved_diagnostics_stay_apart() void {
-    session.session mut a = session.create();
-    defer session.free(&a);
-    session.session mut b = session.create();
-    defer session.free(&b);
-    diag.error(session.diags(&a), diag.loc_make("a.ft", 1, 1), "a one");
-    diag.error(session.diags(&b), diag.loc_make("b.ft", 1, 1), "b one");
-    diag.error(session.diags(&a), diag.loc_make("a.ft", 2, 1), "a two");
-    diag.note(session.diags(&b), diag.loc_make("b.ft", 1, 1), "b note");
-    diag.error(session.diags(&a), diag.loc_make("a.ft", 3, 1), "a three");
-    assert(session.error_count(&a) == 3);
-    assert(session.error_count(&b) == 1);
-    assert(diag.record_count(session.diags(&a)) == 3);
-    assert(diag.record_count(session.diags(&b)) == 2);
-    assert(diag.record_at(session.diags(&a), 2).msg == "a three");
-    assert(diag.record_at(session.diags(&b), 1).msg == "b note");
-    assert(diag.record_at(session.diags(&b), 1).loc.file == "b.ft");
+    session.session mut* own a = session.make();
+    defer session.drop_made(move(a));
+    session.session mut* own b = session.make();
+    defer session.drop_made(move(b));
+    diag.error(session.diags(a), diag.loc_make("a.ft", 1, 1), "a one");
+    diag.error(session.diags(b), diag.loc_make("b.ft", 1, 1), "b one");
+    diag.error(session.diags(a), diag.loc_make("a.ft", 2, 1), "a two");
+    diag.note(session.diags(b), diag.loc_make("b.ft", 1, 1), "b note");
+    diag.error(session.diags(a), diag.loc_make("a.ft", 3, 1), "a three");
+    assert(session.error_count(a) == 3);
+    assert(session.error_count(b) == 1);
+    assert(diag.record_count(session.diags(a)) == 3);
+    assert(diag.record_count(session.diags(b)) == 2);
+    assert(diag.record_at(session.diags(a), 2).msg == "a three");
+    assert(diag.record_at(session.diags(b), 1).msg == "b note");
+    assert(diag.record_at(session.diags(b), 1).loc.file == "b.ft");
 }
 
 // The budget is per sink, so one session spending its file's twenty leaves
 // another session's file free to report.
 fn one_spent_budget_does_not_spend_another() void {
-    session.session mut a = session.create();
-    defer session.free(&a);
-    session.session mut b = session.create();
-    defer session.free(&b);
-    diag.begin_file(session.diags(&a));
-    diag.begin_file(session.diags(&b));
+    session.session mut* own a = session.make();
+    defer session.drop_made(move(a));
+    session.session mut* own b = session.make();
+    defer session.drop_made(move(b));
+    diag.begin_file(session.diags(a));
+    diag.begin_file(session.diags(b));
     u64 mut i = 0;
     while (i < 20) {
-        diag.error(session.diags(&a), diag.loc_make("a.ft", cast(i + 1, u32), 1), "spent");
+        diag.error(session.diags(a), diag.loc_make("a.ft", cast(i + 1, u32), 1), "spent");
         i += 1;
     }
-    assert(!diag.budget_left(session.diags(&a)));
-    assert(diag.budget_left(session.diags(&b)));
-    diag.error(session.diags(&b), diag.loc_make("b.ft", 1, 1), "reported");
-    assert(session.error_count(&a) == 20);
-    assert(session.error_count(&b) == 1);
-    assert(diag.record_at(session.diags(&b), 0).msg == "reported");
+    assert(!diag.budget_left(session.diags(a)));
+    assert(diag.budget_left(session.diags(b)));
+    diag.error(session.diags(b), diag.loc_make("b.ft", 1, 1), "reported");
+    assert(session.error_count(a) == 20);
+    assert(session.error_count(b) == 1);
+    assert(diag.record_at(session.diags(b), 0).msg == "reported");
 }
 
 // An inner session does not disturb its outer
 // session. No inner allocation is reachable
 // from the outer session, and no outer view moves.
 fn an_inner_session_disturbs_nothing() void {
-    session.session mut outer = session.create();
-    defer session.free(&outer);
-    session.set_source(&outer, "outer.ft", "the outer document");
-    string outer_name = containers.pool_intern(session.pool(&outer), "outer_symbol");
-    diag.error(session.diags(&outer), diag.loc_make("outer.ft", 1, 1), "outer error");
+    session.session mut* own outer = session.make();
+    defer session.drop_made(move(outer));
+    session.set_source(outer, "outer.ft", "the outer document");
+    string outer_name = containers.pool_intern(session.pool(outer), "outer_symbol");
+    diag.error(session.diags(outer), diag.loc_make("outer.ft", 1, 1), "outer error");
     u64 mut i = 0;
     while (i < 100) {
-        session.session mut inner = session.create();
-        session.set_source(&inner, "inner.ft", "the inner document");
+        session.session mut* own inner = session.make();
+        session.set_source(inner, "inner.ft", "the inner document");
         string mut text = "";
-        assert(session.read_source(&inner, "inner.ft", &text));
+        assert(session.read_source(inner, "inner.ft", &text));
         assert(text == "the inner document");
-        diag.error(session.diags(&inner), diag.loc_make("inner.ft", 1, 1), "inner error");
-        assert(session.error_count(&inner) == 1);
-        assert(session.source_count(&inner) == 1);
-        session.free(&inner);
+        diag.error(session.diags(inner), diag.loc_make("inner.ft", 1, 1), "inner error");
+        assert(session.error_count(inner) == 1);
+        assert(session.source_count(inner) == 1);
+        session.drop_made(move(inner));
         i += 1;
     }
     string mut text = "";
-    assert(session.read_source(&outer, "outer.ft", &text));
+    assert(session.read_source(outer, "outer.ft", &text));
     assert(text == "the outer document");
     assert(outer_name == "outer_symbol");
-    assert(session.error_count(&outer) == 1);
-    assert(session.source_count(&outer) == 1);
-    assert(diag.record_at(session.diags(&outer), 0).msg == "outer error");
+    assert(session.error_count(outer) == 1);
+    assert(session.source_count(outer) == 1);
+    assert(diag.record_at(session.diags(outer), 0).msg == "outer error");
 }
 
 // ---- the same document, again and again ----------------------------------------
@@ -133,21 +133,22 @@ fn an_inner_session_disturbs_nothing() void {
 fn a_document_analysed_a_thousand_times() void {
     u64 mut round = 0;
     while (round < 1000) {
-        session.session mut s = session.create();
-        session.set_source(&s, "doc.ft", "fn main() i32 { return 0; }");
+        session.session mut* own s = session.make();
+        session.set_source(s, "doc.ft", "fn main() i32 { return 0; }");
         string mut text = "";
-        assert(session.read_source(&s, "doc.ft", &text));
+        assert(session.read_source(s, "doc.ft", &text));
         assert(text.len == 27);
         assert(str.starts_with(text, "f"));
-        diag.begin_file(session.diags(&s));
-        diag.error(session.diags(&s), diag.loc_range("doc.ft", 1, 16, 1, 22), "an error");
-        diag.note(session.diags(&s), diag.loc_make("doc.ft", 1, 1), "a note");
-        assert(session.error_count(&s) == 1);
-        assert(diag.record_count(session.diags(&s)) == 2);
-        assert(containers.pool_used(session.pool(&s)) > 0);
-        session.free(&s);
-        assert(session.source_count(&s) == 0);
-        assert(session.error_count(&s) == 0);
+        diag.begin_file(session.diags(s));
+        diag.error(session.diags(s), diag.loc_range("doc.ft", 1, 16, 1, 22), "an error");
+        diag.note(session.diags(s), diag.loc_make("doc.ft", 1, 1), "a note");
+        assert(session.error_count(s) == 1);
+        assert(diag.record_count(session.diags(s)) == 2);
+        assert(containers.pool_used(session.pool(s)) > 0);
+        session.free(s);
+        assert(session.source_count(s) == 0);
+        assert(session.error_count(s) == 0);
+        session.drop_made(move(s));
         round += 1;
     }
 }
@@ -156,20 +157,20 @@ fn a_document_analysed_a_thousand_times() void {
 // not grow without bound. So a server that keeps a session frees it between
 // analyses rather than trusting the counters to fall.
 fn one_session_reused_for_a_thousand_documents() void {
-    session.session mut s = session.create();
-    defer session.free(&s);
     strbuf.str_buf mut path = strbuf.create();
-    defer strbuf.free(&path);
+    defer del(path.data);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
     u64 mut i = 0;
     while (i < 1000) {
         strbuf.clear(&path);
         strbuf.append(&path, "doc_");
         strbuf.append_u64(&path, i);
         strbuf.append(&path, ".ft");
-        session.set_source(&s, strbuf.view(&path), "fn f() void {}");
+        session.set_source(s, strbuf.view(&path), "fn f() void {}");
         i += 1;
     }
-    assert(session.source_count(&s) == 1000);
+    assert(session.source_count(s) == 1000);
     // Every one of them is still readable and none was confused with another.
     i = 0;
     while (i < 1000) {
@@ -177,14 +178,14 @@ fn one_session_reused_for_a_thousand_documents() void {
         strbuf.append(&path, "doc_");
         strbuf.append_u64(&path, i);
         strbuf.append(&path, ".ft");
-        assert(session.has_source(&s, strbuf.view(&path)));
+        assert(session.has_source(s, strbuf.view(&path)));
         string mut text = "";
-        assert(session.read_source(&s, strbuf.view(&path), &text));
+        assert(session.read_source(s, strbuf.view(&path), &text));
         assert(text == "fn f() void {}");
         i += 1;
     }
-    session.free(&s);
-    assert(session.source_count(&s) == 0);
+    session.free(s);
+    assert(session.source_count(s) == 0);
 }
 
 // The same file on disk read by a thousand sessions. Each opens it once and
@@ -193,12 +194,12 @@ fn a_file_read_by_a_thousand_sessions() void {
     assert(io.write_file("shared.ft", cast("fn shared() void {}", u8@)));
     u64 mut round = 0;
     while (round < 1000) {
-        session.session mut s = session.create();
+        session.session mut* own s = session.make();
         string mut text = "";
-        assert(session.read_source(&s, "shared.ft", &text));
+        assert(session.read_source(s, "shared.ft", &text));
         assert(text == "fn shared() void {}");
-        assert(session.source_count(&s) == 1);
-        session.free(&s);
+        assert(session.source_count(s) == 1);
+        session.drop_made(move(s));
         round += 1;
     }
 }
