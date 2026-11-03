@@ -32,24 +32,23 @@ fn order_of(library_env.env* e, strbuf.str_buf mut* out) string {
 // ---- the order of a --lib closure ------------------------------------------------------
 
 fn each_root_follows_the_modules_that_it_imports() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    // a imports c, c imports b; d imports a and b; e imports nothing
-    library_env.add(&e, "lib/geom/a.ft", "import geom.c;\ni32 A = c.C;\n");
-    library_env.add(&e, "lib/geom/b.ft", "i32 B = 1;\n");
-    library_env.add(&e, "lib/geom/c.ft", "import geom.b;\ni32 C = b.B;\n");
-    library_env.add(&e, "lib/geom/d.ft", "import geom.a;\nimport geom.b;\ni32 D = a.A + b.B;\n");
-    library_env.add(&e, "lib/geom/e.ft", "i32 E = 1;\n");
-    assert(library_env.build(&e, "geom", "lib/geom"));
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    assert(order_of(&e, &b) == "geom.b geom.c geom.a geom.d geom.e");
+    defer del(b.data);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    // a imports c, c imports b; d imports a and b; e imports nothing
+    library_env.add(e, "lib/geom/a.ft", "import geom.c;\ni32 A = c.C;\n");
+    library_env.add(e, "lib/geom/b.ft", "i32 B = 1;\n");
+    library_env.add(e, "lib/geom/c.ft", "import geom.b;\ni32 C = b.B;\n");
+    library_env.add(e, "lib/geom/d.ft", "import geom.a;\nimport geom.b;\ni32 D = a.A + b.B;\n");
+    library_env.add(e, "lib/geom/e.ft", "i32 E = 1;\n");
+    assert(library_env.build(e, "geom", "lib/geom"));
+    assert(order_of(e, &b) == "geom.b geom.c geom.a geom.d geom.e");
     // the pass order is the dependency order: every module of the library is in the closure
-    assert(modules.pass_count(&e.m.set) == 5);
+    assert(modules.pass_count(&e->m.set) == 5);
     u64 mut i = 0;
     while (i < 5) {
-        assert(modules.pass_at(&e.m.set, i) == modules.at(&e.m.set, i));
+        assert(modules.pass_at(&e->m.set, i) == modules.at(&e->m.set, i));
         i += 1;
     }
 }
@@ -73,24 +72,22 @@ fn each_module_file_is_read_once_and_named_as_the_walk_listed_it(library_env.env
 }
 
 fn an_import_cycle_among_library_modules_is_reported_at_the_import_that_closes_it() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    library_env.add(&e, "lib/geom/a.ft", "import geom.b;\ni32 A = 1;\n");
-    library_env.add(&e, "lib/geom/b.ft", "i32 B = 1;\nimport geom.a;\n");
-    library_env.add(&e, "lib/geom/b2.ft", "import geom.c;\n");
-    library_env.add(&e, "lib/geom/c.ft", "import geom.b2;\n");
-    assert(!library_env.build(&e, "geom", "lib/geom"));
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.add(e, "lib/geom/a.ft", "import geom.b;\ni32 A = 1;\n");
+    library_env.add(e, "lib/geom/b.ft", "i32 B = 1;\nimport geom.a;\n");
+    library_env.add(e, "lib/geom/b2.ft", "import geom.c;\n");
+    library_env.add(e, "lib/geom/c.ft", "import geom.b2;\n");
+    assert(!library_env.build(e, "geom", "lib/geom"));
     // b imports after a declaration, which is a syntax error before any cycle
-    assert(library_env.said(&e, "an import comes before every declaration"));
-    library_env.env mut other = library_env.env{};
-    library_env.open(&other);
-    defer library_env.close(&other);
-    library_env.add(&other, "lib/geom/b2.ft", "import geom.c;\n");
-    library_env.add(&other, "lib/geom/c.ft", "import geom.b2;\n");
-    assert(!library_env.build(&other, "geom", "lib/geom"));
+    assert(library_env.said(e, "an import comes before every declaration"));
+    library_env.env mut* own other = library_env.make();
+    defer library_env.drop_made(move(other));
+    library_env.add(other, "lib/geom/b2.ft", "import geom.c;\n");
+    library_env.add(other, "lib/geom/c.ft", "import geom.b2;\n");
+    assert(!library_env.build(other, "geom", "lib/geom"));
     string cycle = "circular import: 'geom.b2' imports 'geom.c' imports 'geom.b2'";
-    assert(library_env.said(&other, cycle));
+    assert(library_env.said(other, cycle));
 }
 
 // ---- sections in the closure ----------------------------------------------------------
@@ -98,10 +95,10 @@ fn an_import_cycle_among_library_modules_is_reported_at_the_import_that_closes_i
 // Checks `entry` against the interface whose lines are `lines`, markers written out.
 fn check_lines(library_env.env mut* e, string@ lines, string entry) bool {
     strbuf.str_buf mut joined = strbuf.create();
-    defer strbuf.free(&joined);
+    defer del(joined.data);
     library_env.join(lines, &joined);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     library_env.unmark(strbuf.view(&joined), &text);
     library_env.add(e, "main.ft", entry);
     return library_env.check_against(e, "geom", "geom.flib/interface.ft", strbuf.view(&text),
@@ -136,43 +133,40 @@ fn a_section_and_its_imports_join_the_order_before_the_importer(library_env.env 
     assert(a->file == c->file && a->interface && !a->entry);
     assert(modules.entry(&e->m.set) == modules.find(&e->m.set, "main"));
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     assert(order_of(e, &b) == "geom.a geom.b geom.c main");
 }
 
 fn a_section_that_two_imports_reach_is_loaded_once() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    string entry = "import geom.a;\nimport geom.b;\nimport geom.a.A;\ni32 X = A;\n";
-    assert(check_lines(&e, CHAIN[0..13], entry));
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    assert(order_of(&e, &b) == "geom.a geom.b main");
-    assert(modules.count(&e.m.set) == 3);
+    defer del(b.data);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    string entry = "import geom.a;\nimport geom.b;\nimport geom.a.A;\ni32 X = A;\n";
+    assert(check_lines(e, CHAIN[0..13], entry));
+    assert(order_of(e, &b) == "geom.a geom.b main");
+    assert(modules.count(&e->m.set) == 3);
 }
 
 fn the_prefix_of_a_symbol_reading_is_loaded_as_the_import_s_module() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    assert(check_lines(&e, CHAIN[0..13], "import geom.d.D;\ni32 X = D;\n"));
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    assert(order_of(&e, &b) == "geom.d main");
+    defer del(b.data);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    assert(check_lines(e, CHAIN[0..13], "import geom.d.D;\ni32 X = D;\n"));
+    assert(order_of(e, &b) == "geom.d main");
 }
 
 // ---- a failed import stops the walk ---------------------------------------------------
 
 fn no_further_section_is_loaded_after_an_import_failed() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    assert(!check_lines(&e, CHAIN[0..13], "import geom.gone;\nimport geom.c;\n"));
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    assert(!check_lines(e, CHAIN[0..13], "import geom.gone;\nimport geom.c;\n"));
     // the failed import is reported, and the later import reads nothing more
-    assert(library_env.said(&e, "module 'geom.gone' not found"));
-    assert(modules.find(&e.m.set, "geom.c") == null);
-    assert(modules.find(&e.m.set, "geom.a") == null);
+    assert(library_env.said(e, "module 'geom.gone' not found"));
+    assert(modules.find(&e->m.set, "geom.c") == null);
+    assert(modules.find(&e->m.set, "geom.a") == null);
 }
 
 fn a_section_that_does_not_parse_reports_once_and_enters_no_order(library_env.env mut* e) void {
@@ -193,7 +187,7 @@ fn a_section_that_does_not_parse_reports_once_and_enters_no_order(library_env.en
     modules.module* a = modules.find(&e->m.set, "geom.a");
     assert(a != null && !a->parsed);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     assert(order_of(e, &b) == "");
 }
 
@@ -209,24 +203,22 @@ fn a_prefix_section_that_does_not_parse_is_probed_in_silence() void {
         "i32 C = 1;",
         "",
     };
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    assert(check_lines(&e, lines[0..6], "import geom.a.b;\ni32 X = b.C;\n"));
-    assert(library_env.reports(&e) == 0);
-    assert(modules.find(&e.m.set, "geom.a") == null);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    assert(check_lines(e, lines[0..6], "import geom.a.b;\ni32 X = b.C;\n"));
+    assert(library_env.reports(e) == 0);
+    assert(modules.find(&e->m.set, "geom.a") == null);
 }
 
 // The notes of a path that no section answers name the library, once for each reading.
 fn a_missing_path_of_a_library_notes_each_reading() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    assert(!check_lines(&e, CHAIN[0..13], "import geom.b.c.d;\n"));
-    assert(library_env.reports(&e) == 3);
-    assert(library_env.said(&e, "looked for geom.b.c.d in library 'geom'"));
-    assert(library_env.said(&e, "looked for geom.b.c in library 'geom'"));
-    assert(!library_env.said(&e, "looked for geom.b in library"));
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    assert(!check_lines(e, CHAIN[0..13], "import geom.b.c.d;\n"));
+    assert(library_env.reports(e) == 3);
+    assert(library_env.said(e, "looked for geom.b.c.d in library 'geom'"));
+    assert(library_env.said(e, "looked for geom.b.c in library 'geom'"));
+    assert(!library_env.said(e, "looked for geom.b in library"));
 }
 
 fn main() i32 {

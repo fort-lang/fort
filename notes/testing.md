@@ -37,12 +37,15 @@ bullet at a time and without a rewrite.
   tests of `--check` over the fixture `test/mutate/strict_table.json`;
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fir-run`,
   `library-interface`, `library-artifact`, `library-use`, `library-cache`, `fixpoint`,
-  `aggregate-sites`, `tty`, `stack_depth` and `lsp-binary`; bootstrap0 has none, since building
-  bootstrap-1 proves the C compiler. `aggregate-sites` holds the sites of `--aggregate-report` in
-  src/fort, src/lsp and std on both targets at none, each line of a report at a known form, and a
-  control program at the one site of the module that it imports. The label `libraries` holds
-  `library-compiler` and `fort-modules-libraries`, which carry no step label, so `unit` and
-  `integration` leave them out; the CI job `libraries` runs them (`notes/environment.md` 7).
+  `aggregate-sites`, `aggregate-front`, `tty`, `stack_depth` and `lsp-binary`; bootstrap0 has
+  none, since building bootstrap-1 proves the C compiler. `aggregate-sites` holds the sites of
+  `--aggregate-report` in src/fort, src/lsp and std on both targets at none, each line of a report
+  at a known form, and a control program at the one site of the module that it imports.
+  `aggregate-front` holds the sites of `--aggregate-report` and `--leak-report` in the suites
+  test/fort/check_*, modules_* and session_* on both targets at none, and a control program at one
+  site of each report. The label `libraries` holds `library-compiler` and
+  `fort-modules-libraries`, which carry no step label, so `unit` and `integration` leave them out;
+  the CI job `libraries` runs them (`notes/environment.md` 7).
   `stack_depth` gives each compiler of the build a 1 MB stack and a type of 254 nested groups
   (D2.11). Before the checkers kept their suffixes on a stack of their own, that type needed 1792
   KB in a darwin debug build. The unit tests of the tools (`lang_selftest`, `fort_lint_selftest`,

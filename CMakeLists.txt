@@ -837,6 +837,17 @@ set_tests_properties(aggregate-lang PROPERTIES
     PROCESSORS ${FORT_LANG_JOBS}
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
+# The sites of --aggregate-report and --leak-report in the suites of the session, the module
+# loader and the checker (test/fort/check_*, modules_*, session_*), for both targets: the test
+# holds no site in them.
+add_test(NAME aggregate-front
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_front_test.py"
+            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}" -j "${FORT_LANG_JOBS}")
+set_tests_properties(aggregate-front PROPERTIES
+    LABELS "fort;integration"
+    PROCESSORS ${FORT_LANG_JOBS}
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
+
 # Node's built-in runner tests the VS Code extension in editors/vscode.
 # It converts diagnostic documents into editor shapes.
 # It also converts 1-based byte columns to character offsets.

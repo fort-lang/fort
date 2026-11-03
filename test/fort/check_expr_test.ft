@@ -7,6 +7,7 @@
 import fort.ast;
 import fort.check;
 import check_env;
+import fort.containers;
 import fort.prim;
 import std.str;
 import std.strbuf;
@@ -31,7 +32,7 @@ fn open_probe(check_env.env mut* e, string body) bool {
 fn open_lines(check_env.env mut* e, string one, string two, string three, string four,
                    string extra) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, "fn probe() void {\n");
     strbuf.append(&b, one);
     strbuf.append(&b, two);
@@ -43,7 +44,7 @@ fn open_lines(check_env.env mut* e, string one, string two, string three, string
 
 fn open_probe2(check_env.env mut* e, string body, string extra) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, "struct point {\n    i32 x;\n    i32 y;\n}\n");
     strbuf.append(&b, "enum color {\n    red,\n    green,\n}\n");
     strbuf.append(&b, "i32[3] mut nums = {1, 2, 3};\n");
@@ -73,114 +74,103 @@ fn probe_type(check_env.env mut* e, u64 i) string {
 // ---- casts -------------------------------------------------------------------------
 
 fn a_cast_among_numeric_types_folds_to_what_the_run_time_would_produce() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_init_of(&e, "u8", "cast(300, u8)"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_init_of(e, "u8", "cast(300, u8)"));
     i64 mut v = 0;
-    assert(check_env.init_int(&e, "probe", &v));
+    assert(check_env.init_int(e, "probe", &v));
     // 300 truncated to eight bits.
     assert(v == 44);
-    assert(check_env.probe_type(&e) == "u8");
+    assert(check_env.probe_type(e) == "u8");
 }
 
 fn a_cast_to_an_enum_folds_through_its_underlying_i32() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_decls(&e,
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_decls(e,
         "enum color {\n    red,\n    green,\n}\ni32 k = cast(cast(1, color), i32);\n"));
     i64 mut v = 0;
-    assert(check_env.init_int(&e, "k", &v));
+    assert(check_env.init_int(e, "k", &v));
     assert(v == 1);
 }
 
 fn a_conversion_that_no_row_allows_is_an_error() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_decls(&e,
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_decls(e,
         "struct point {\n    i32 x;\n}\npoint p = {1};\ni32 k = cast(p, i32);\n"));
-    assert(check_env.said(&e, "cannot cast point to i32"));
+    assert(check_env.said(e, "cannot cast point to i32"));
 }
 
 fn a_cast_never_adds_mut() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // One diagnostic for the one cast, at the cast and not at the binding: the
     // count is the rule as much as the text. This is because a second report on the
     // line would leave the corpus green.
-    assert(!check_env.check_body(&e,
+    assert(!check_env.check_body(e,
         "    i32* q = null;\n    println(cast(q, i32 mut*));"));
-    assert(check_env.said(&e, "cannot cast i32* to i32 mut*: a cast never adds 'mut'"));
-    assert(check_env.errors(&e) == 1);
+    assert(check_env.said(e, "cannot cast i32* to i32 mut*: a cast never adds 'mut'"));
+    assert(check_env.errors(e) == 1);
 }
 
 fn the_diagnostic_names_the_rule_that_refused() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // A cast refused for another reason carries no tail, so the tail says which
     // rule refused. A pair that both rows refuse reports the mark.
-    assert(!check_env.check_body(&e, "    i32@ s = {};\n    println(cast(s, u32@).len);"));
-    assert(check_env.said(&e, "cannot cast i32@ to u32@"));
-    assert(!check_env.said(&e, "a cast never adds 'mut'"));
-    assert(check_env.errors(&e) == 1);
+    assert(!check_env.check_body(e, "    i32@ s = {};\n    println(cast(s, u32@).len);"));
+    assert(check_env.said(e, "cannot cast i32@ to u32@"));
+    assert(!check_env.said(e, "a cast never adds 'mut'"));
+    assert(check_env.errors(e) == 1);
 }
 
 fn the_tail_stands_only_where_the_mark_is_the_reason() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The target adds a mark and the element type refuses the cast as well. So
     // a reader who dropped the mark would meet a second error and the tail says
     // nothing. It stands only where dropping the marks of the target makes the
     // cast legal, which the second half is.
-    assert(!check_env.check_body(&e, "    i32@ s = {};\n    println(cast(s, u32 mut@).len);"));
-    assert(check_env.said(&e, "cannot cast i32@ to u32 mut@"));
-    assert(!check_env.said(&e, "a cast never adds 'mut'"));
-    assert(check_env.errors(&e) == 1);
-    check_env.close(&e);
-    check_env.open(&e);
-    assert(!check_env.check_body(&e, "    i32@ s = {};\n    println(cast(s, i32 mut@).len);"));
-    assert(check_env.said(&e, "cannot cast i32@ to i32 mut@: a cast never adds 'mut'"));
-    assert(check_env.errors(&e) == 1);
+    assert(!check_env.check_body(e, "    i32@ s = {};\n    println(cast(s, u32 mut@).len);"));
+    assert(check_env.said(e, "cannot cast i32@ to u32 mut@"));
+    assert(!check_env.said(e, "a cast never adds 'mut'"));
+    assert(check_env.errors(e) == 1);
+    check_env.reopen(e);
+    assert(!check_env.check_body(e, "    i32@ s = {};\n    println(cast(s, i32 mut@).len);"));
+    assert(check_env.said(e, "cannot cast i32@ to i32 mut@: a cast never adds 'mut'"));
+    assert(check_env.errors(e) == 1);
 }
 
 fn a_cast_drops_mut_behind_read_only_levels_only() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // Behind a read-only level 1 the cast drops the mark of level 2.
-    assert(check_env.check_body(&e,
+    assert(check_env.check_body(e,
         "    i32 mut* mut@ s = {};\n    println(cast(s, i32*@).len);"));
-    assert(check_env.errors(&e) == 0);
+    assert(check_env.errors(e) == 0);
     // Behind a `mut` level 1 the drop changes the type of a pointer place that the result can
     // write, which the implicit conversion refuses too (D3.14, D5.4).
-    check_env.close(&e);
-    check_env.open(&e);
-    assert(!check_env.check_body(&e,
+    check_env.reopen(e);
+    assert(!check_env.check_body(e,
         "    i32 mut* mut@ s = {};\n    println(cast(s, i32* mut@).len);"));
-    assert(check_env.errors(&e) == 1);
-    assert(check_env.said(&e, "a 'mut' cast hides the pointer i32 mut* at byte 0"));
+    assert(check_env.errors(e) == 1);
+    assert(check_env.said(e, "a 'mut' cast hides the pointer i32 mut* at byte 0"));
 }
 
 fn null_is_not_a_cast_operand() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_init_of(&e, "i32*", "cast(null, i32*)"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_init_of(e, "i32*", "cast(null, i32*)"));
     // `null` has no type of its own, so there is nothing to convert.
-    assert(check_env.said(&e, "'null' is not a cast operand"));
+    assert(check_env.said(e, "'null' is not a cast operand"));
 }
 
 fn a_cast_target_carries_no_outermost_mut() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_decls(&e, "i32 k = 1;\ni32* p = cast(&k, i32* mut);\n"));
-    assert(check_env.said(&e, "a cast result has no binding: remove the outermost"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_decls(e, "i32 k = 1;\ni32* p = cast(&k, i32* mut);\n"));
+    assert(check_env.said(e, "a cast result has no binding: remove the outermost"));
 }
 
 // ---- a `mut` cast that hides an owner (D3.14) ----------------------------------------
@@ -194,7 +184,7 @@ u64 HIDE_MAIN = 28;
 // structs of owners, two extern functions and two fort functions.
 fn check_hiding(check_env.env mut* e, string@ lines) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, "struct holder {\n    u64 count;\n    u64* own data;\n}\n");
     strbuf.append(&b, "struct mirror {\n    u64 tally;\n    u64* own payload;\n}\n");
     strbuf.append(&b, "struct cell {\n    u64* own p;\n}\n");
@@ -223,7 +213,7 @@ string HIDES_AT_8 = ": a 'mut' cast hides the pointer u64* own at byte 8";
 // Whether report `i` of `e` stands at `pos` and says `cast` and then `hidden`.
 fn reported_at(check_env.env mut* e, u64 i, string pos, string cast_text, string hidden) bool {
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     strbuf.append(&want, pos);
     strbuf.append(&want, ": ");
     strbuf.append(&want, cast_text);
@@ -232,195 +222,181 @@ fn reported_at(check_env.env mut* e, u64 i, string pos, string cast_text, string
 }
 
 fn a_mut_cast_that_hides_an_owner_is_one_error_at_the_cast() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     string[2] lines = {"holder mut h = {};", "void mut* v = cast(&h, void mut*);"};
-    assert(!check_hiding(&e, lines[..]));
+    assert(!check_hiding(e, lines[..]));
     // One report, at the cast and not at the binding, because a second report on the line would
     // leave the corpus green.
-    assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "30:19", "cannot cast holder mut* to void mut*",
+    assert(check_env.errors(e) == 1);
+    assert(reported_at(e, 0, "30:19", "cannot cast holder mut* to void mut*",
                        ": a 'mut' cast hides the pointer u64* own at byte 8"));
 }
 
 fn a_read_only_cast_may_hide_an_owner() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // No store goes through a view whose level 1 is immutable.
     string[4] lines = {"holder mut h = {};", "void* v = cast(&h, void*);",
                        "u64* w = cast(&h, u64*);", "println(v == null, *w);"};
-    assert(check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 0);
+    assert(check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 0);
 }
 
 fn a_target_that_holds_each_owner_at_its_byte_hides_none() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The same owner type at the same byte, under other names, in a struct and in an array.
     string[6] lines = {"holder mut h = {};", "mirror mut* m = cast(&h, mirror mut*);",
                        "u64* own[2] mut two = {};", "twice mut* t = cast(&two, twice mut*);",
                        "cell mut* c = cast(&h.data, cell mut*);",
                        "println(m == null, t == null, c == null);"};
-    assert(check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 0);
+    assert(check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 0);
 }
 
 fn the_error_names_the_first_owner_that_the_target_does_not_hold() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // `half` holds the owner at byte 0 and an integer at byte 8.
     string[2] lines = {"twice mut t = {};", "half mut* h = cast(&t, half mut*);"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "30:19", "cannot cast twice mut* to half mut*",
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 1);
+    assert(reported_at(e, 0, "30:19", "cannot cast twice mut* to half mut*",
                        ": a 'mut' cast hides the pointer u64* own at byte 8"));
 }
 
 fn an_argument_of_an_extern_call_follows_the_rule_as_one_of_a_fort_call_does() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // C writes the storage of an argument through the type of its parameter, so a `mut` view of
     // the bytes of `h` lets C write bits into the owner slot (D3.14). Parentheses change nothing.
     string[4] lines = {"holder mut h = {};", "take(cast(&h, void mut*));",
                        "take((cast(&h, void mut*)));", "keep(cast(&h, void mut*));"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 3);
-    assert(reported_at(&e, 0, "30:10", "cannot cast holder mut* to void mut*", HIDES_AT_8));
-    assert(reported_at(&e, 1, "31:11", "cannot cast holder mut* to void mut*", HIDES_AT_8));
-    assert(reported_at(&e, 2, "32:10", "cannot cast holder mut* to void mut*", HIDES_AT_8));
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 3);
+    assert(reported_at(e, 0, "30:10", "cannot cast holder mut* to void mut*", HIDES_AT_8));
+    assert(reported_at(e, 1, "31:11", "cannot cast holder mut* to void mut*", HIDES_AT_8));
+    assert(reported_at(e, 2, "32:10", "cannot cast holder mut* to void mut*", HIDES_AT_8));
 }
 
 fn an_extern_call_in_the_operand_of_a_cast_changes_no_rule() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The cast in the argument of `same` and the cast around the call of `holder_at` each hide
     // the owner. The operand reports first.
     string[2] lines = {"holder mut h = {};",
                        "take(cast(holder_at(&h, same(cast(&h, void mut*))), void mut*));"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 2);
-    assert(reported_at(&e, 0, "30:34", "cannot cast holder mut* to void mut*", HIDES_AT_8));
-    assert(reported_at(&e, 1, "30:10", "cannot cast holder mut* to void mut*", HIDES_AT_8));
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 2);
+    assert(reported_at(e, 0, "30:34", "cannot cast holder mut* to void mut*", HIDES_AT_8));
+    assert(reported_at(e, 1, "30:10", "cannot cast holder mut* to void mut*", HIDES_AT_8));
 }
 
 fn a_cast_inside_an_extern_argument_follows_the_rule() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The inner cast hides the owner. The outer cast keeps the type `void mut*`.
     string[2] lines = {"holder mut h = {};", "take(cast(cast(&h, void mut*), void mut*));"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "30:15", "cannot cast holder mut* to void mut*", HIDES_AT_8));
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 1);
+    assert(reported_at(e, 0, "30:15", "cannot cast holder mut* to void mut*", HIDES_AT_8));
 }
 
 fn a_fort_call_inside_an_extern_argument_changes_no_rule() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The inner cast is an argument of `holder_at`, a fort function, and the call of `holder_at`
     // is the operand of a cast that is an argument of `take`. Each cast hides the owner.
     string[2] lines = {"holder mut h = {};",
                        "take(cast(holder_at(&h, cast(&h, void mut*)), void mut*));"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 2);
-    assert(reported_at(&e, 0, "30:29", "cannot cast holder mut* to void mut*", HIDES_AT_8));
-    assert(reported_at(&e, 1, "30:10", "cannot cast holder mut* to void mut*", HIDES_AT_8));
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 2);
+    assert(reported_at(e, 0, "30:29", "cannot cast holder mut* to void mut*", HIDES_AT_8));
+    assert(reported_at(e, 1, "30:10", "cannot cast holder mut* to void mut*", HIDES_AT_8));
 }
 
 fn a_call_through_a_function_pointer_is_not_exempt() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // A function pointer can hold a fort function, and an `extern fn` name is no value.
     string[3] lines = {"holder mut h = {};", "fn (void mut*) void call = keep;",
                        "call(cast(&h, void mut*));"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "31:10", "cannot cast holder mut* to void mut*",
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 1);
+    assert(reported_at(e, 0, "31:10", "cannot cast holder mut* to void mut*",
                        ": a 'mut' cast hides the pointer u64* own at byte 8"));
 }
 
 fn a_span_that_drops_the_own_of_its_elements_hides_them() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The pointee of a span is one element. The read-only view of the same elements is legal.
     string[4] lines = {"u64* own mut@ own k = new(u64* own, 2);",
                        "u64* mut@ v = cast(k, u64* mut@);", "u64* own@ r = cast(k, u64* own@);",
                        "println(v.len, r.len);"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "30:19", "cannot cast u64* own mut@ own to u64* mut@",
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 1);
+    assert(reported_at(e, 0, "30:19", "cannot cast u64* own mut@ own to u64* mut@",
                        ": a 'mut' cast hides the pointer u64* own at byte 0"));
 }
 
 fn an_owning_target_hides_as_a_view_does() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The result marks level 1 `mut`, and a later cast back from `void mut* own` would write the
     // first word of the holder.
     string[2] lines = {"holder mut* own p = new(holder);",
                        "void mut* own v = cast(move(p), void mut* own);"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "30:23", "cannot cast holder mut* own to void mut* own",
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 1);
+    assert(reported_at(e, 0, "30:23", "cannot cast holder mut* own to void mut* own",
                        ": a 'mut' cast hides the pointer u64* own at byte 8"));
 }
 
 fn the_error_names_the_first_owner_in_the_order_of_the_fields() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // `mirror` holds the owner of `twice` at byte 8 and an integer at byte 0, so the owner at
     // byte 0 is the one named.
     string[2] lines = {"twice mut t = {};", "mirror mut* m = cast(&t, mirror mut*);"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "30:21", "cannot cast twice mut* to mirror mut*",
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 1);
+    assert(reported_at(e, 0, "30:21", "cannot cast twice mut* to mirror mut*",
                        ": a 'mut' cast hides the pointer u64* own at byte 0"));
 }
 
 fn a_module_level_cast_reads_a_layout_only_when_it_has_one() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // `later` has no layout when the initializer of `early` is checked, so the initializer alone
     // is the error. The pointee of `void mut*` needs no layout, so the rule reports `known`.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, "struct holder {\n    u64 count;\n    u64* own data;\n}\n");
     strbuf.append(&b, "holder mut g = {};\n");
     strbuf.append(&b, "later mut* early = cast(&g, later mut*);\n");
     strbuf.append(&b, "void mut* known = cast(&g, void mut*);\n");
     strbuf.append(&b, "struct later {\n    u64 a;\n}\n");
-    assert(!check_env.check_decls(&e, strbuf.view(&b)));
-    assert(check_env.errors(&e) == 2);
-    assert(check_env.report_text(&e, 0)
+    assert(!check_env.check_decls(e, strbuf.view(&b)));
+    assert(check_env.errors(e) == 2);
+    assert(check_env.report_text(e, 0)
            == "6:20: a module-level initializer must be a constant expression");
-    assert(reported_at(&e, 1, "7:19", "cannot cast holder mut* to void mut*",
+    assert(reported_at(e, 1, "7:19", "cannot cast holder mut* to void mut*",
                        ": a 'mut' cast hides the pointer u64* own at byte 8"));
 }
 
 fn a_struct_whose_layout_waits_carries_no_mark_for_a_while() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The place `h` of `view_h` sits on a `holder mut*`, so the rule of a view walks `holder` to
     // learn whether the `holder*` carries a mark. `holder` reaches `later` through a pointer, so
     // `later` has no layout when the initializer of `early` is checked. The walk of the marks
     // reads no field of it: the initializer alone is the error (D4.6), and the walk does not stop
     // the check. Nor does `holder` keep that answer: in the body of `view`, `later` has its
     // layout, and `holder` reaches its `u64 mut*`.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, "struct holder {\n    later* p;\n}\n");
     strbuf.append(&b, "struct view_h {\n    holder* h;\n}\n");
     strbuf.append(&b, "struct src_h {\n    holder mut* h;\n}\n");
@@ -428,57 +404,53 @@ fn a_struct_whose_layout_waits_carries_no_mark_for_a_while() void {
     strbuf.append(&b, "view_h* early = cast(&s, view_h*);\n");
     strbuf.append(&b, "struct later {\n    u64 mut* q;\n}\n");
     strbuf.append(&b, "fn view(src_h* a) view_h* {\n    return cast(a, view_h*);\n}\n");
-    assert(!check_env.check_decls(&e, strbuf.view(&b)));
-    assert(check_env.errors(&e) == 2);
-    assert(check_env.report_text(&e, 0)
+    assert(!check_env.check_decls(e, strbuf.view(&b)));
+    assert(check_env.errors(e) == 2);
+    assert(check_env.report_text(e, 0)
            == "11:17: a module-level initializer must be a constant expression");
-    assert(reported_at(&e, 1, "16:12", "cannot cast src_h* to view_h*",
+    assert(reported_at(e, 1, "16:12", "cannot cast src_h* to view_h*",
                        ": a cast adds the pointer holder* at byte 0"));
 }
 
 fn a_cast_that_adds_an_owner_is_one_error() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // Through the result, `del(c->p)` would free the bits of an integer.
     string[2] lines = {"u64 mut x = 0;", "cell mut* c = cast(&x, cell mut*);"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "30:19", "cannot cast u64 mut* to cell mut*",
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 1);
+    assert(reported_at(e, 0, "30:19", "cannot cast u64 mut* to cell mut*",
                        ": a 'mut' cast adds the pointer u64* own at byte 0"));
 }
 
 fn a_mut_level_below_an_immutable_level_1_can_change() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The elements of `v` are read-only, but `*v[0]` is a store into the owner slot.
     string[3] lines = {"u64* own mut* mut@ own k = new(u64* own mut*, 1);",
                        "u64* mut*@ v = cast(k, u64* mut*@);", "println(v.len);"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "30:20", "cannot cast u64* own mut* mut@ own to u64* mut*@",
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 1);
+    assert(reported_at(e, 0, "30:20", "cannot cast u64* own mut* mut@ own to u64* mut*@",
                        ": a 'mut' cast hides the pointer u64* own at byte 0 of level 2"));
 }
 
 fn a_mut_level_1_lets_each_level_below_it_change() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // Level 2 is immutable in the target, but `*t = &other` replaces it: the pointer at level 1 is
     // a pointer place, and its type changes.
     string[3] lines = {"cell mut c = {};", "u64* own mut* mut p = &c.p;",
                        "u64** mut* t = cast(&p, u64** mut*);"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "31:20", "cannot cast u64* own mut* mut* to u64** mut*",
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 1);
+    assert(reported_at(e, 0, "31:20", "cannot cast u64* own mut* mut* to u64** mut*",
                        ": a 'mut' cast hides the pointer u64* own mut* at byte 0"));
 }
 
 fn a_read_only_view_may_hide_a_place_and_drop_the_marks_of_one() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // No level of these results is `mut`, so a view only reads. It may hide an owner, and a place
     // with no mark may sit on a place whose type differs only by the `mut` and `own` marks that it
     // drops, at each level of the type of the place (D3.14).
@@ -487,14 +459,13 @@ fn a_read_only_view_may_hide_a_place_and_drop_the_marks_of_one() void {
                        "u64** o = cast(&h.data, u64**);", "u64 mut* mut* mut qq = &q;",
                        "u64*** dd = cast(&qq, u64***);",
                        "println(*w, **d, *o == null, ***dd);"};
-    assert(check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 0);
+    assert(check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 0);
 }
 
 fn a_read_only_view_that_adds_or_changes_a_place_with_no_mark_is_one_error_each() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // Through a place with no mark a view reads storage whose address the program does not hold
     // (D3.14): over an integer, over the count of a holder, and over a pointer, a `string` and a
     // span of another type.
@@ -504,25 +475,24 @@ fn a_read_only_view_that_adds_or_changes_a_place_with_no_mark_is_one_error_each(
                         "u64** c = cast(&pi, u64**);", "void** v = cast(&pi, void**);",
                         "u8@* t = cast(&s, u8@*);",
                         "println(b == null, w == null, c == null, v == null, t == null);"};
-    assert(!check_hiding(&e, lines[..]));
+    assert(!check_hiding(e, lines[..]));
     // one report for each cast, at the cast
-    assert(check_env.errors(&e) == 5);
-    assert(reported_at(&e, 0, "34:15", "cannot cast u64 mut* to u64**",
+    assert(check_env.errors(e) == 5);
+    assert(reported_at(e, 0, "34:15", "cannot cast u64 mut* to u64**",
                        ": a cast adds the pointer u64* at byte 0"));
-    assert(reported_at(&e, 1, "35:15", "cannot cast holder mut* to u64**",
+    assert(reported_at(e, 1, "35:15", "cannot cast holder mut* to u64**",
                        ": a cast adds the pointer u64* at byte 0"));
-    assert(reported_at(&e, 2, "36:15", "cannot cast i32 mut* mut* to u64**",
+    assert(reported_at(e, 2, "36:15", "cannot cast i32 mut* mut* to u64**",
                        ": a cast adds the pointer u64* at byte 0"));
-    assert(reported_at(&e, 3, "37:16", "cannot cast i32 mut* mut* to void**",
+    assert(reported_at(e, 3, "37:16", "cannot cast i32 mut* mut* to void**",
                        ": a cast adds the pointer void* at byte 0"));
-    assert(reported_at(&e, 4, "38:14", "cannot cast string mut* to u8@*",
+    assert(reported_at(e, 4, "38:14", "cannot cast string mut* to u8@*",
                        ": a cast adds the pointer u8@ at byte 0"));
 }
 
 fn a_read_only_view_that_adds_a_marked_place_is_one_error_each() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // A place that carries `mut` or `own` writes or frees through any view (D3.14): from a
     // pointer and through the struct that a pointer reaches. Its type is exact, so a `cell*` that
     // drops the `mut` of a `cell mut*` is an error too. An integer gives no pointer at all, and no
@@ -532,30 +502,29 @@ fn a_read_only_view_that_adds_a_marked_place_is_one_error_each() void {
                         "holder* g = cast(v, holder*);", "cell* i = cast(cast(&x, u64), cell*);",
                         "cell mut* mut cp = null;", "cell** k = cast(&cp, cell**);",
                         "println(c == null, d == null, g == null, i == null, k == null);"};
-    assert(!check_hiding(&e, lines[..]));
+    assert(!check_hiding(e, lines[..]));
     // one report for each cast, at the cast
-    assert(check_env.errors(&e) == 5);
-    assert(reported_at(&e, 0, "30:15", "cannot cast u64 mut* to cell*",
+    assert(check_env.errors(e) == 5);
+    assert(reported_at(e, 0, "30:15", "cannot cast u64 mut* to cell*",
                        ": a cast adds the pointer u64* own at byte 0"));
-    assert(reported_at(&e, 1, "32:16", "cannot cast u64 mut* mut* to cell**",
+    assert(reported_at(e, 1, "32:16", "cannot cast u64 mut* mut* to cell**",
                        ": a cast adds the pointer cell* at byte 0"));
-    assert(reported_at(&e, 2, "34:17", "cannot cast void* to holder*",
+    assert(reported_at(e, 2, "34:17", "cannot cast void* to holder*",
                        ": a cast never gives a type to a void*"));
-    assert(reported_at(&e, 3, "35:15", "cannot cast u64 to cell*",
+    assert(reported_at(e, 3, "35:15", "cannot cast u64 to cell*",
                        ": a cast never makes a pointer from an integer"));
-    assert(reported_at(&e, 4, "37:16", "cannot cast cell mut* mut* to cell**",
+    assert(reported_at(e, 4, "37:16", "cannot cast cell mut* mut* to cell**",
                        ": a cast adds the pointer cell* at byte 0"));
 }
 
 fn a_read_only_view_as_an_extern_argument_adds_no_place() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // C reads the storage of an argument through the type of its parameter, so a view that adds
     // the owner `p` over the integer `x` gives C bits as an owner (D3.14). The same cast as an
     // argument of a fort function is the same error.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, "struct cell {\n    u64* own p;\n}\n");
     strbuf.append(&b, "extern fn peek(cell* c) u64;\n");
     strbuf.append(&b, "fn look(cell* c) u64 {\n    return 0;\n}\n");
@@ -563,24 +532,23 @@ fn a_read_only_view_as_an_extern_argument_adds_no_place() void {
     strbuf.append(&b, "    u64 a = peek(cast(&x, cell*));\n");
     strbuf.append(&b, "    u64 c = look(cast(&x, cell*));\n");
     strbuf.append(&b, "    return cast(a + c, i32);\n}\n");
-    assert(!check_env.check_src(&e, strbuf.view(&b)));
-    assert(check_env.errors(&e) == 2);
-    assert(reported_at(&e, 0, "10:18", "cannot cast u64 mut* to cell*",
+    assert(!check_env.check_src(e, strbuf.view(&b)));
+    assert(check_env.errors(e) == 2);
+    assert(reported_at(e, 0, "10:18", "cannot cast u64 mut* to cell*",
                        ": a cast adds the pointer u64* own at byte 0"));
-    assert(reported_at(&e, 1, "11:18", "cannot cast u64 mut* to cell*",
+    assert(reported_at(e, 1, "11:18", "cannot cast u64 mut* to cell*",
                        ": a cast adds the pointer u64* own at byte 0"));
 }
 
 fn a_mark_counts_in_each_kind_of_pointer_place() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // A `void*`, a `string`, a span with no mark and a struct that reaches no mark carry none, so
     // each may drop the marks of the place under it. A `mut` span, a `string own`, a `void mut*`
     // and an owner in an array carry one, so each needs a place of its exact type. An owner that
     // the source holds in an array is the same place as the target's field at that byte (D3.14).
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, "struct plain {\n");
     strbuf.append(&b, "    u64* p;\n");
     strbuf.append(&b, "    string s;\n");
@@ -653,32 +621,31 @@ fn a_mark_counts_in_each_kind_of_pointer_place() void {
     strbuf.append(&b, "    println(e == null, f == null, g == null, h == null);\n");
     strbuf.append(&b, "    return 0;\n");
     strbuf.append(&b, "}\n");
-    assert(!check_env.check_src(&e, strbuf.view(&b)));
+    assert(!check_env.check_src(e, strbuf.view(&b)));
     // one report for each cast whose target adds a place that carries a mark, at the cast
-    assert(check_env.errors(&e) == 5);
-    assert(reported_at(&e, 0, "58:22", "cannot cast span_owner mut* to marked_span*",
+    assert(check_env.errors(e) == 5);
+    assert(reported_at(e, 0, "58:22", "cannot cast span_owner mut* to marked_span*",
                        ": a cast adds the pointer u8 mut@ at byte 0"));
-    assert(reported_at(&e, 1, "60:21", "cannot cast text_view mut* to owned_text*",
+    assert(reported_at(e, 1, "60:21", "cannot cast text_view mut* to owned_text*",
                        ": a cast adds the pointer string own at byte 0"));
-    assert(reported_at(&e, 2, "62:18", "cannot cast void_view mut* to by_void*",
+    assert(reported_at(e, 2, "62:18", "cannot cast void_view mut* to by_void*",
                        ": a cast adds the pointer void mut* at byte 0"));
-    assert(reported_at(&e, 3, "64:19", "cannot cast in_array_view mut* to in_array*",
+    assert(reported_at(e, 3, "64:19", "cannot cast in_array_view mut* to in_array*",
                        ": a cast adds the pointer u64* own at byte 8"));
-    assert(reported_at(&e, 4, "66:19", "cannot cast u64*[3] mut* to in_array*",
+    assert(reported_at(e, 4, "66:19", "cannot cast u64*[3] mut* to in_array*",
                        ": a cast adds the pointer u64* own at byte 8"));
 }
 
 // ---- a function pointer place (D3.14) ----------------------------------------------------
 
 fn a_function_pointer_place_carries_a_mark_in_any_view() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // A call through a function pointer runs the function that the bits name. So a read-only view
     // keeps each function pointer place with its type, and each place that reaches one. The same
     // type under another name and a view that hides the place are legal.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, "struct owner_cb {\n    fn (u64* own) void f;\n}\n");
     strbuf.append(&b, "struct view_cb {\n    fn (u64*) void f;\n}\n");
     strbuf.append(&b, "struct same_cb {\n    fn (u64* own) void g;\n}\n");
@@ -698,27 +665,26 @@ fn a_function_pointer_place_carries_a_mark_in_any_view() void {
     strbuf.append(&b, "    println(a == null, b == null, c == null, d == null);\n");
     strbuf.append(&b, "    println(e == null, f == null);\n");
     strbuf.append(&b, "    return 0;\n}\n");
-    assert(!check_env.check_src(&e, strbuf.view(&b)));
+    assert(!check_env.check_src(e, strbuf.view(&b)));
     // one report for each cast that adds or changes a function pointer place, at the cast
-    assert(check_env.errors(&e) == 3);
-    assert(reported_at(&e, 0, "22:18", "cannot cast owner_cb* to view_cb*",
+    assert(check_env.errors(e) == 3);
+    assert(reported_at(e, 0, "22:18", "cannot cast owner_cb* to view_cb*",
                        ": a cast adds the pointer fn (u64*) void at byte 0"));
-    assert(reported_at(&e, 1, "25:18", "cannot cast u64 mut* to view_cb*",
+    assert(reported_at(e, 1, "25:18", "cannot cast u64 mut* to view_cb*",
                        ": a cast adds the pointer fn (u64*) void at byte 0"));
-    assert(reported_at(&e, 2, "27:13", "cannot cast oh* to vh*",
+    assert(reported_at(e, 2, "27:13", "cannot cast oh* to vh*",
                        ": a cast adds the pointer view_cb* at byte 0"));
 }
 
 fn a_cast_to_a_function_pointer_type_keeps_its_type() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // A `void*` reaches no type, so a cast of it to a function pointer type adds a function
     // pointer, with no byte in the error. The cast gets no exemption as an argument of an
     // `extern fn` or of a fort function. A cast to `void*`, an identity cast and a function
     // pointer with no cast are legal.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, "extern fn keep_cb(fn (u64) u64 f) void;\n");
     strbuf.append(&b, "fn twice(u64 x) u64 {\n    return 2 * x;\n}\n");
     strbuf.append(&b, "fn hold(fn (u64) u64 f) void {\n    return;\n}\n");
@@ -735,27 +701,26 @@ fn a_cast_to_a_function_pointer_type_keeps_its_type() void {
     strbuf.append(&b, "    keep_cb(g);\n");
     strbuf.append(&b, "    println(g == h, j == null);\n");
     strbuf.append(&b, "    return 0;\n}\n");
-    assert(!check_env.check_src(&e, strbuf.view(&b)));
-    assert(check_env.errors(&e) == 4);
-    assert(reported_at(&e, 0, "12:22", "cannot cast void* to fn (u64) u64",
+    assert(!check_env.check_src(e, strbuf.view(&b)));
+    assert(check_env.errors(e) == 4);
+    assert(reported_at(e, 0, "12:22", "cannot cast void* to fn (u64) u64",
                        ": a cast adds the function pointer fn (u64) u64"));
-    assert(reported_at(&e, 1, "13:13", "cannot cast void* to fn (u64) u64",
+    assert(reported_at(e, 1, "13:13", "cannot cast void* to fn (u64) u64",
                        ": a cast adds the function pointer fn (u64) u64"));
-    assert(reported_at(&e, 2, "14:10", "cannot cast void* to fn (u64) u64",
+    assert(reported_at(e, 2, "14:10", "cannot cast void* to fn (u64) u64",
                        ": a cast adds the function pointer fn (u64) u64"));
-    assert(reported_at(&e, 3, "17:20", "cannot cast void mut* to fn () void",
+    assert(reported_at(e, 3, "17:20", "cannot cast void mut* to fn () void",
                        ": a cast adds the function pointer fn () void"));
 }
 
 fn an_extern_argument_keeps_each_pointer_place() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // C calls a function as its type says, and it frees an owner and writes through a `mut`
     // pointer as their types say, so an argument of an `extern fn` adds no pointer place. The
     // error names the first place that the source does not hold.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, "struct cell {\n    u64* own p;\n}\n");
     strbuf.append(&b, "struct view_cb {\n    fn (u64*) void f;\n}\n");
     strbuf.append(&b, "struct both {\n    u64* own p;\n    fn (u64*) void f;\n}\n");
@@ -769,31 +734,30 @@ fn an_extern_argument_keeps_each_pointer_place() void {
     strbuf.append(&b, "    u64[2] mut w = {};\n");
     strbuf.append(&b, "    u64 c = peek_both(cast(&w, both*));\n");
     strbuf.append(&b, "    return cast(a + b + c, i32);\n}\n");
-    assert(!check_env.check_src(&e, strbuf.view(&b)));
+    assert(!check_env.check_src(e, strbuf.view(&b)));
     // one report for each cast, at the cast
-    assert(check_env.errors(&e) == 3);
-    assert(reported_at(&e, 0, "16:23", "cannot cast u64 mut* to cell*",
+    assert(check_env.errors(e) == 3);
+    assert(reported_at(e, 0, "16:23", "cannot cast u64 mut* to cell*",
                        ": a cast adds the pointer u64* own at byte 0"));
-    assert(reported_at(&e, 1, "17:21", "cannot cast u64 mut* to view_cb*",
+    assert(reported_at(e, 1, "17:21", "cannot cast u64 mut* to view_cb*",
                        ": a cast adds the pointer fn (u64*) void at byte 0"));
-    assert(reported_at(&e, 2, "19:23", "cannot cast u64[2] mut* to both*",
+    assert(reported_at(e, 2, "19:23", "cannot cast u64[2] mut* to both*",
                        ": a cast adds the pointer u64* own at byte 0"));
     // a place that the source does not hold at all needs no walk of the marks
-    assert(kept_mark(&e, "cell") == check.MARK_UNKNOWN);
-    assert(kept_mark(&e, "both") == check.MARK_UNKNOWN);
+    assert(kept_mark(e, "cell") == check.MARK_UNKNOWN);
+    assert(kept_mark(e, "both") == check.MARK_UNKNOWN);
 }
 
 fn the_walk_of_the_marks_ends_at_a_function_pointer() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // Each place sits on a place that differs from it only by a `mut`, so the rule of a view walks
     // what it reaches. `self_cb` reaches itself through the parameter of its function pointer.
     // The walk reads no parameter, so it ends at the function pointer, and each struct on the path
     // keeps the mark. A struct whose pointers carry no mark keeps none, and its place may drop the
     // `mut`.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, "struct self_cb {\n");
     strbuf.append(&b, "    fn (self_cb*) void f;\n");
     strbuf.append(&b, "}\n");
@@ -813,39 +777,37 @@ fn the_walk_of_the_marks_ends_at_a_function_pointer() void {
     strbuf.append(&b, "    println(a == null, b == null);\n");
     strbuf.append(&b, "    return 0;\n");
     strbuf.append(&b, "}\n");
-    assert(!check_env.check_src(&e, strbuf.view(&b)));
-    assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "14:17", "cannot cast holds mut* mut* to holds**",
+    assert(!check_env.check_src(e, strbuf.view(&b)));
+    assert(check_env.errors(e) == 1);
+    assert(reported_at(e, 0, "14:17", "cannot cast holds mut* mut* to holds**",
                        ": a cast adds the pointer holds* at byte 0"));
-    assert(kept_mark(&e, "self_cb") == check.MARK_SOME);
-    assert(kept_mark(&e, "holds") == check.MARK_SOME);
-    assert(kept_mark(&e, "quiet") == check.MARK_NONE);
+    assert(kept_mark(e, "self_cb") == check.MARK_SOME);
+    assert(kept_mark(e, "holds") == check.MARK_SOME);
+    assert(kept_mark(e, "quiet") == check.MARK_NONE);
 }
 
 fn a_hidden_owner_is_named_before_an_added_one() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // `half` holds an owner at byte 0 and `mirror` at byte 8: the first is hidden and the second
     // added, and the hidden one is named.
     string[2] lines = {"half mut h = {};", "mirror mut* m = cast(&h, mirror mut*);"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "30:21", "cannot cast half mut* to mirror mut*",
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 1);
+    assert(reported_at(e, 0, "30:21", "cannot cast half mut* to mirror mut*",
                        ": a 'mut' cast hides the pointer u64* own at byte 0"));
 }
 
 fn each_source_level_below_the_end_of_the_target_chain_can_change() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // `*t = cast(&fake, u64)` would give `*p` a slot that holds no owner. The read-only view of
     // the same bits is legal.
     string[4] lines = {"cell mut c = {};", "u64* own mut* mut p = &c.p;",
                        "u64 mut* t = cast(&p, u64 mut*);", "println(*t, *cast(&p, u64*));"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 1);
-    assert(reported_at(&e, 0, "31:18", "cannot cast u64* own mut* mut* to u64 mut*",
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 1);
+    assert(reported_at(e, 0, "31:18", "cannot cast u64* own mut* mut* to u64 mut*",
                        ": a 'mut' cast hides the pointer u64* own mut* at byte 0"));
 }
 
@@ -898,27 +860,25 @@ fn check_view(check_env.env mut* e, strbuf.str_buf mut* b, string from, string t
 }
 
 fn a_flat_array_over_nested_structs_takes_no_walk_of_each_owner() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // 128 to the power 6 owners on both sides. A walk of each owner, or of each path to one,
     // would not end within the timeout of the suite; the memo of first_hidden reads each part
     // once. The run takes about 0.1 s.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     append_nested(&b, "s", 6, 128, "u64* own", "");
-    assert(check_view(&e, &b, "u64* own[4398046511104] mut*", "s6 mut*"));
-    assert(check_env.errors(&e) == 0);
+    assert(check_view(e, &b, "u64* own[4398046511104] mut*", "s6 mut*"));
+    assert(check_env.errors(e) == 0);
 }
 
 fn nested_structs_over_arrays_of_parts_take_no_walk_of_each_owner() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The target nests an array field in each struct, so each run of the source meets an array
     // of parts, and a byte modulo the element size is the key of each part.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     append_nested(&b, "s", 6, 128, "u64* own", "");
     strbuf.append(&b, "struct r1 {\n    u64* own[128] xs;\n}\n");
     u64 mut k = 2;
@@ -930,45 +890,43 @@ fn nested_structs_over_arrays_of_parts_take_no_walk_of_each_owner() void {
         strbuf.append(&b, "[128] xs;\n}\n");
         k += 1;
     }
-    assert(check_view(&e, &b, "s6 mut*", "r6 mut*"));
-    assert(check_env.errors(&e) == 0);
+    assert(check_view(e, &b, "s6 mut*", "r6 mut*"));
+    assert(check_env.errors(e) == 0);
 }
 
 fn the_last_owner_that_differs_is_found_after_each_equal_part() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The target is the source but for its last owner, a `u8* own`: the walk verifies each part
     // before it, once for each kind of part.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     append_nested(&b, "s", 6, 128, "u64* own", "");
     append_nested(&b, "z", 6, 128, "u64* own", "u8* own");
-    assert(!check_view(&e, &b, "s6 mut*", "z6 mut*"));
-    assert(check_env.errors(&e) == 1);
-    assert(check_env.said(&e, "cannot cast s6 mut* to z6 mut*"));
-    assert(check_env.said(&e, "hides the pointer u64* own at byte 35184372088824"));
+    assert(!check_view(e, &b, "s6 mut*", "z6 mut*"));
+    assert(check_env.errors(e) == 1);
+    assert(check_env.said(e, "cannot cast s6 mut* to z6 mut*"));
+    assert(check_env.said(e, "hides the pointer u64* own at byte 35184372088824"));
 }
 
 fn each_end_of_the_target_chain_at_a_mut_level_hides_the_pointer_to_the_next() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The chain of the target ends at an integer, at a `void`, and at a fixed array on the source
     // side and on the target side. Each line is one report, at the cast.
     string[6] lines = {"cell mut c = {};", "u64* own mut* mut p = &c.p;",
                        "u64* own mut*[1] mut a = {&c.p};", "println(cast(&p, u64 mut*) == null,",
                        "        cast(&p, void mut*) == null, cast(&a, u64** mut*) == null,",
                        "        cast(&p, u64**[1] mut*) == null);"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 4);
-    assert(reported_at(&e, 0, "32:13", "cannot cast u64* own mut* mut* to u64 mut*",
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 4);
+    assert(reported_at(e, 0, "32:13", "cannot cast u64* own mut* mut* to u64 mut*",
                        ": a 'mut' cast hides the pointer u64* own mut* at byte 0"));
-    assert(reported_at(&e, 1, "33:13", "cannot cast u64* own mut* mut* to void mut*",
+    assert(reported_at(e, 1, "33:13", "cannot cast u64* own mut* mut* to void mut*",
                        ": a 'mut' cast hides the pointer u64* own mut* at byte 0"));
-    assert(reported_at(&e, 2, "33:42", "cannot cast u64* own mut*[1] mut* to u64** mut*",
+    assert(reported_at(e, 2, "33:42", "cannot cast u64* own mut*[1] mut* to u64** mut*",
                        ": a 'mut' cast hides the pointer u64* own mut* at byte 0"));
-    assert(reported_at(&e, 3, "34:13", "cannot cast u64* own mut* mut* to u64**[1] mut*",
+    assert(reported_at(e, 3, "34:13", "cannot cast u64* own mut* mut* to u64**[1] mut*",
                        ": a 'mut' cast hides the pointer u64* own mut* at byte 0"));
 }
 
@@ -977,7 +935,7 @@ fn each_end_of_the_target_chain_at_a_mut_level_hides_the_pointer_to_the_next() v
 // pointer after the call. A test keeps this string, whose address it lends to no call.
 fn nested(string name, u64 depth, u64 width, string leaf, string last) string own {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     append_nested(&b, name, depth, width, leaf, last);
     return strbuf.take(&b);
 }
@@ -988,6 +946,29 @@ fn one_owner(check_env.env mut* e) types.node* {
     return types.type_ptr(&e->ck.types, word, true, false);
 }
 
+// A memo in an allocation of its own: first_hidden takes it by pointer.
+fn memo_make() check.place_memo mut* own {
+    return new(check.place_memo);
+}
+
+// Frees a memo that the caller moves in: each owner that check.memo_free frees, and the pool of
+// the keys through its drop.
+fn memo_drop(check.place_memo mut m) void {
+    del(m.held.entries);
+    containers.pool_drop(move(m.keys));
+    del(m.text.data);
+    del(m.frames);
+    del(m.entered);
+}
+
+// Ends a memo of memo_make that the caller moves in: the value moves out before the `del` of the
+// allocation, and memo_drop frees it.
+fn memo_drop_made(check.place_memo mut* own p) void {
+    check.place_memo kept = move(*p);
+    del(p);
+    memo_drop(move(kept));
+}
+
 fn the_memo_keeps_one_key_for_each_kind_of_part_and_not_for_each_owner(check_env.env mut* e) void {
     string own decls = nested("s", 6, 128, "u64* own", "");
     defer del(decls);
@@ -996,17 +977,17 @@ fn the_memo_keeps_one_key_for_each_kind_of_part_and_not_for_each_owner(check_env
     types.node* flat = types.type_array(&e->ck.types, one_owner(e), 4398046511104);
     // A flat array over the nesting: the array, the run of its owners over each of the six
     // structs, and the one owner. A walk of each owner would read 128 to the power 6 of them.
-    check.place_memo mut m = check.place_memo{};
-    defer check.memo_free(&m);
+    check.place_memo mut* own m = memo_make();
+    defer memo_drop_made(move(m));
     check.pointer_place mut h = check.pointer_place{};
-    assert(!check.first_hidden(&m, flat, 1, 0, nest, &h));
-    assert(strmap.count(&m.held) == 8);
+    assert(!check.first_hidden(m, flat, 1, 0, nest, &h));
+    assert(strmap.count(&m->held) == 8);
     // The nesting over the flat array: each struct at a byte that is 0 modulo the element size of
     // the array, and the one owner.
-    check.place_memo mut back = check.place_memo{};
-    defer check.memo_free(&back);
-    assert(!check.first_hidden(&back, nest, 1, 0, flat, &h));
-    assert(strmap.count(&back.held) == 7);
+    check.place_memo mut* own back = memo_make();
+    defer memo_drop_made(move(back));
+    assert(!check.first_hidden(back, nest, 1, 0, flat, &h));
+    assert(strmap.count(&back->held) == 7);
 }
 
 fn the_memo_keeps_no_key_for_a_run_with_a_hidden_owner(check_env.env mut* e) void {
@@ -1017,13 +998,13 @@ fn the_memo_keeps_no_key_for_a_run_with_a_hidden_owner(check_env.env mut* e) voi
     // Fifteen owners of the flat array are held, and the sixteenth is past the end of `s2`. The
     // memo keeps the runs that hold each owner and none of the runs that lead to the sixteenth.
     types.node* flat = types.type_array(&e->ck.types, one_owner(e), 17);
-    check.place_memo mut m = check.place_memo{};
-    defer check.memo_free(&m);
+    check.place_memo mut* own m = memo_make();
+    defer memo_drop_made(move(m));
     check.pointer_place mut h = check.pointer_place{};
-    assert(check.first_hidden(&m, flat, 1, 0, nest, &h));
+    assert(check.first_hidden(m, flat, 1, 0, nest, &h));
     assert(h.at == 128);
     assert(types.type_equal(h.ty, one_owner(e)));
-    assert(strmap.count(&m.held) == 3);
+    assert(strmap.count(&m->held) == 3);
 }
 
 fn a_part_holds_its_own_bytes_and_padding_and_the_end_hold_none(check_env.env mut* e) void {
@@ -1051,9 +1032,8 @@ fn a_part_holds_its_own_bytes_and_padding_and_the_end_hold_none(check_env.env mu
 }
 
 fn a_mut_view_keeps_each_pointer_place_and_puns_the_rest() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // A `u64 mut*` slot seen as an integer, a pointer field of another type, and a mark that
     // changes: three reports. The bits of a float and the bytes of an integer pun freely.
     string[8] lines = {"u64 mut x = 0;", "u64 mut* mut slot = &x;", "f64 mut f = 1.0;",
@@ -1062,13 +1042,13 @@ fn a_mut_view_keeps_each_pointer_place_and_puns_the_rest() void {
                        "u64* mut* drop = cast(&slot, u64* mut*);",
                        "u64 mut* fb = cast(&f, u64 mut*);",
                        "println(*bits, view == null, drop == null, *fb, *cast(&x, u8 mut*));"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 3);
-    assert(reported_at(&e, 0, "32:21", "cannot cast u64 mut* mut* to u64 mut*",
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 3);
+    assert(reported_at(e, 0, "32:21", "cannot cast u64 mut* mut* to u64 mut*",
                        ": a 'mut' cast hides the pointer u64 mut* at byte 0"));
-    assert(reported_at(&e, 1, "33:21", "cannot cast u64 mut* mut* to u8* mut*",
+    assert(reported_at(e, 1, "33:21", "cannot cast u64 mut* mut* to u8* mut*",
                        ": a 'mut' cast hides the pointer u64 mut* at byte 0"));
-    assert(reported_at(&e, 2, "34:22", "cannot cast u64 mut* mut* to u64* mut*",
+    assert(reported_at(e, 2, "34:22", "cannot cast u64 mut* mut* to u64* mut*",
                        ": a 'mut' cast hides the pointer u64 mut* at byte 0"));
 }
 
@@ -1119,59 +1099,56 @@ fn append_roots(strbuf.str_buf mut* b, string name, string first, string mark, u
 }
 
 fn the_walk_of_the_marks_enters_each_struct_once_for_the_checker() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // 100 pointer places reach one chain of 2000 structs, and each sits on a place of `tw` that
     // differs from it only by a `mut`, so the rule of a view walks each one. A walk for each place
     // that read the chain again would enter about 100000 structs and pass the work limit of
     // 65536; the struct keeps its answer, so the cast is legal (D3.14). The walk reads the places
     // of `t` and not `t`, which keeps no answer.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     append_chain(&b, 2000);
     append_roots(&b, "t", "c", "", 100, 20);
     append_roots(&b, "tw", "c", " mut", 100, 20);
     strbuf.append(&b, "fn view(tw* a) t* {\n    return cast(a, t*);\n}\n");
-    assert(check_env.check_decls(&e, strbuf.view(&b)));
-    assert(check_env.errors(&e) == 0);
-    assert(kept_mark(&e, "c0") == check.MARK_NONE);
-    assert(kept_mark(&e, "c1999") == check.MARK_NONE);
-    assert(kept_mark(&e, "t") == check.MARK_UNKNOWN);
+    assert(check_env.check_decls(e, strbuf.view(&b)));
+    assert(check_env.errors(e) == 0);
+    assert(kept_mark(e, "c0") == check.MARK_NONE);
+    assert(kept_mark(e, "c1999") == check.MARK_NONE);
+    assert(kept_mark(e, "t") == check.MARK_UNKNOWN);
 }
 
 fn the_path_to_a_mark_keeps_it_for_each_struct() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // 100 pointer places reach one chain of 2000 structs whose last struct holds a `u64 mut*`. The
     // walk of the first place keeps the mark for each struct on its path, so a later walk that
     // enters the chain answers at once. The first place carries the mark, and its type differs
     // from the place under it, so the cast is one error at that place (D3.14).
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     append_chain_ending(&b, 2000, "u64 mut* m");
     append_roots(&b, "t", "c", "", 100, 10);
     append_roots(&b, "tw", "c", " mut", 100, 10);
     strbuf.append(&b, "fn view(tw* a) t* {\n    return cast(a, t*);\n}\n");
-    assert(!check_env.check_decls(&e, strbuf.view(&b)));
-    assert(check_env.errors(&e) == 1);
-    assert(check_env.said(&e, "cannot cast tw* to t*: a cast adds the pointer c0* at byte 0"));
-    assert(kept_mark(&e, "c0") == check.MARK_SOME);
-    assert(kept_mark(&e, "c1000") == check.MARK_SOME);
-    assert(kept_mark(&e, "c1999") == check.MARK_SOME);
+    assert(!check_env.check_decls(e, strbuf.view(&b)));
+    assert(check_env.errors(e) == 1);
+    assert(check_env.said(e, "cannot cast tw* to t*: a cast adds the pointer c0* at byte 0"));
+    assert(kept_mark(e, "c0") == check.MARK_SOME);
+    assert(kept_mark(e, "c1000") == check.MARK_SOME);
+    assert(kept_mark(e, "c1999") == check.MARK_SOME);
 }
 
 fn a_struct_with_no_mark_behind_a_mark_is_walked_once() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // 70 structs each reach a chain of 1000 structs with no mark and then a `u64 mut*`. The walk
     // of the first one closes the chain with no mark before it finds the `u64 mut*`, so the chain
     // keeps MARK_NONE and no later walk enters it again (D3.14). The first place carries the mark,
     // so the cast is one error at that place.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     append_chain(&b, 1000);
     u64 mut k = 0;
     while (k < 70) {
@@ -1183,24 +1160,23 @@ fn a_struct_with_no_mark_behind_a_mark_is_walked_once() void {
     append_roots(&b, "t", "s", "", 70, 1);
     append_roots(&b, "tw", "s", " mut", 70, 1);
     strbuf.append(&b, "fn view(tw* a) t* {\n    return cast(a, t*);\n}\n");
-    assert(!check_env.check_decls(&e, strbuf.view(&b)));
-    assert(check_env.errors(&e) == 1);
-    assert(check_env.said(&e, "cannot cast tw* to t*: a cast adds the pointer s0* at byte 0"));
-    assert(kept_mark(&e, "s0") == check.MARK_SOME);
-    assert(kept_mark(&e, "c0") == check.MARK_NONE);
-    assert(kept_mark(&e, "c999") == check.MARK_NONE);
+    assert(!check_env.check_decls(e, strbuf.view(&b)));
+    assert(check_env.errors(e) == 1);
+    assert(check_env.said(e, "cannot cast tw* to t*: a cast adds the pointer s0* at byte 0"));
+    assert(kept_mark(e, "s0") == check.MARK_SOME);
+    assert(kept_mark(e, "c0") == check.MARK_NONE);
+    assert(kept_mark(e, "c999") == check.MARK_NONE);
 }
 
 fn a_struct_that_reaches_a_mark_through_a_cycle_keeps_it() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The place of `hb` sits on a `b mut*`, so the walk of the first cast enters `b`, then `a`,
     // which reaches `b` again and ends there: `a` and `b` reach each other, and the mark of `b` is
     // the mark of `a`. A walk that answered for `a` alone when it left `a` would give it no mark,
     // and the second cast would pass, as a place with no mark may drop the `mut` (D3.14).
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, "struct a {\n");
     strbuf.append(&b, "    b* first;\n");
     strbuf.append(&b, "}\n");
@@ -1222,11 +1198,11 @@ fn a_struct_that_reaches_a_mark_through_a_cycle_keeps_it() void {
     strbuf.append(&b, "    println(one == null, two == null);\n");
     strbuf.append(&b, "    return 0;\n");
     strbuf.append(&b, "}\n");
-    assert(!check_env.check_src(&e, strbuf.view(&b)));
-    assert(check_env.errors(&e) == 2);
-    assert(reported_at(&e, 0, "16:15", "cannot cast b mut* mut* to hb*",
+    assert(!check_env.check_src(e, strbuf.view(&b)));
+    assert(check_env.errors(e) == 2);
+    assert(reported_at(e, 0, "16:15", "cannot cast b mut* mut* to hb*",
                        ": a cast adds the pointer b* at byte 0"));
-    assert(reported_at(&e, 1, "18:15", "cannot cast a mut* mut* to ha*",
+    assert(reported_at(e, 1, "18:15", "cannot cast a mut* mut* to ha*",
                        ": a cast adds the pointer a* at byte 0"));
 }
 
@@ -1236,16 +1212,15 @@ fn kept_mark(check_env.env mut* e, string name) u8 {
 }
 
 fn a_closed_walk_keeps_no_mark_for_each_struct_it_entered() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The places of `t` sit on places of `tw` that differ from them only by a `mut`. The walk of
     // the first one enters the chain from `c0`, which it closes with no mark, and the walk of the
     // second reads the kept answer of `c2`. The chain keeps MARK_NONE. The walk reads the places
     // of `t` and not `t`, the source `tw` is read by no walk of the marks, and `c9` is reached by
     // no walk: the three keep no answer (D3.14).
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     append_chain(&b, 5);
     append_roots(&b, "t", "c", "", 2, 2);
     append_roots(&b, "tw", "c", " mut", 2, 2);
@@ -1254,54 +1229,53 @@ fn a_closed_walk_keeps_no_mark_for_each_struct_it_entered() void {
     // The second cast reads the kept answer of the chain: `c1*` carries no mark, so it may drop
     // the `mut` of the `c1 mut*` under it.
     strbuf.append(&b, "fn drop(c1 mut** a) c1** {\n    return cast(a, c1**);\n}\n");
-    assert(check_env.check_decls(&e, strbuf.view(&b)));
-    assert(check_env.errors(&e) == 0);
-    assert(kept_mark(&e, "c1") == check.MARK_NONE);
-    assert(kept_mark(&e, "c3") == check.MARK_NONE);
-    assert(kept_mark(&e, "c0") == check.MARK_NONE);
-    assert(kept_mark(&e, "c2") == check.MARK_NONE);
-    assert(kept_mark(&e, "c4") == check.MARK_NONE);
-    assert(kept_mark(&e, "t") == check.MARK_UNKNOWN);
-    assert(kept_mark(&e, "tw") == check.MARK_UNKNOWN);
-    assert(kept_mark(&e, "c9") == check.MARK_UNKNOWN);
+    assert(check_env.check_decls(e, strbuf.view(&b)));
+    assert(check_env.errors(e) == 0);
+    assert(kept_mark(e, "c1") == check.MARK_NONE);
+    assert(kept_mark(e, "c3") == check.MARK_NONE);
+    assert(kept_mark(e, "c0") == check.MARK_NONE);
+    assert(kept_mark(e, "c2") == check.MARK_NONE);
+    assert(kept_mark(e, "c4") == check.MARK_NONE);
+    assert(kept_mark(e, "t") == check.MARK_UNKNOWN);
+    assert(kept_mark(e, "tw") == check.MARK_UNKNOWN);
+    assert(kept_mark(e, "c9") == check.MARK_UNKNOWN);
 }
 
 fn a_walk_that_finds_a_mark_keeps_it_on_its_path_only() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The place `hb*` sits on a `hb mut*`, so the walk enters `hb`, then `b`, then `a`, which
     // reaches `b` again: `a` and `b` are one set that is still open when the walk finds the
     // `u64 mut*` of `b`. `hb` and `b` are on the path and keep MARK_SOME; `a` has left the stack
     // of frames and keeps no answer, since an open set proves nothing for it. The second cast
     // walks `a` again and gives it MARK_SOME.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, "struct a {\n    b* first;\n}\n");
     strbuf.append(&b, "struct b {\n    a* back;\n    u64 mut* m;\n}\n");
     strbuf.append(&b, "struct hb {\n    b* p;\n}\n");
     strbuf.append(&b, "struct ha {\n    a* p;\n}\n");
     strbuf.append(&b, "fn one(hb mut** x) hb** {\n    return cast(x, hb**);\n}\n");
-    assert(!check_env.check_decls(&e, strbuf.view(&b)));
-    assert(check_env.errors(&e) == 1);
-    assert(check_env.said(&e, "cannot cast hb mut** to hb**"));
-    assert(check_env.said(&e, ": a cast adds the pointer hb* at byte 0"));
-    assert(kept_mark(&e, "b") == check.MARK_SOME);
-    assert(kept_mark(&e, "hb") == check.MARK_SOME);
-    assert(kept_mark(&e, "a") == check.MARK_UNKNOWN);
-    assert(kept_mark(&e, "ha") == check.MARK_UNKNOWN);
-    check_env.reopen(&e);
+    assert(!check_env.check_decls(e, strbuf.view(&b)));
+    assert(check_env.errors(e) == 1);
+    assert(check_env.said(e, "cannot cast hb mut** to hb**"));
+    assert(check_env.said(e, ": a cast adds the pointer hb* at byte 0"));
+    assert(kept_mark(e, "b") == check.MARK_SOME);
+    assert(kept_mark(e, "hb") == check.MARK_SOME);
+    assert(kept_mark(e, "a") == check.MARK_UNKNOWN);
+    assert(kept_mark(e, "ha") == check.MARK_UNKNOWN);
+    check_env.reopen(e);
     strbuf.append(&b, "fn two(ha mut** x) ha** {\n    return cast(x, ha**);\n}\n");
-    assert(!check_env.check_decls(&e, strbuf.view(&b)));
-    assert(check_env.errors(&e) == 2);
-    assert(kept_mark(&e, "a") == check.MARK_SOME);
-    assert(kept_mark(&e, "ha") == check.MARK_SOME);
+    assert(!check_env.check_decls(e, strbuf.view(&b)));
+    assert(check_env.errors(e) == 2);
+    assert(kept_mark(e, "a") == check.MARK_SOME);
+    assert(kept_mark(e, "ha") == check.MARK_SOME);
 }
 
 // The declarations of the test below, as one owned string (see nested).
 fn waiting_decls() string own {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, "struct holder {\n    broken* q;\n    later* p;\n}\n");
     strbuf.append(&b, "struct view_h {\n    holder* h;\n}\n");
     strbuf.append(&b, "struct src_h {\n    holder mut* h;\n}\n");
@@ -1331,35 +1305,32 @@ fn a_walk_that_meets_a_layout_that_waits_keeps_no_answer_until_later(check_env.e
 }
 
 fn the_work_limit_makes_a_cast_an_error_with_a_note() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The two arrays hold the same owners, and their elements meet at about 100003 offsets, so
     // the check passes its limit before it proves the cast. One error, and one note after it.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, "struct src_elem {\n    u64* own[100003] a;\n}\n");
     strbuf.append(&b, "struct dst_elem {\n    u64* own[100019] a;\n}\n");
-    assert(!check_view(&e, &b, "src_elem[100019] mut*", "dst_elem[100003] mut*"));
-    assert(check_env.errors(&e) == 1);
-    assert(check_env.reports(&e) == 2);
-    assert(check_env.said(&e, "the check of a 'mut' cast passes its work limit of 65536 steps"));
-    assert(check_env.report_severity(&e, 1) == "note");
-    assert(check_env.said(&e, "the check cannot prove that the cast keeps its pointer places"));
+    assert(!check_view(e, &b, "src_elem[100019] mut*", "dst_elem[100003] mut*"));
+    assert(check_env.errors(e) == 1);
+    assert(check_env.reports(e) == 2);
+    assert(check_env.said(e, "the check of a 'mut' cast passes its work limit of 65536 steps"));
+    assert(check_env.report_severity(e, 1) == "note");
+    assert(check_env.said(e, "the check cannot prove that the cast keeps its pointer places"));
     // Below the limit the same shape is proved: the elements meet at about 1000 offsets.
-    check_env.close(&e);
-    check_env.open(&e);
+    check_env.reopen(e);
     strbuf.clear(&b);
     strbuf.append(&b, "struct src_elem {\n    u64* own[1000] a;\n}\n");
     strbuf.append(&b, "struct dst_elem {\n    u64* own[1001] a;\n}\n");
-    assert(check_view(&e, &b, "src_elem[1001] mut*", "dst_elem[1000] mut*"));
-    assert(check_env.errors(&e) == 0);
+    assert(check_view(e, &b, "src_elem[1001] mut*", "dst_elem[1000] mut*"));
+    assert(check_env.errors(e) == 0);
 }
 
 fn the_rule_reads_no_long_array_element_by_element() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // A billion owners each time: a walk of each element would not end within the timeout of the
     // suite. The first cast holds each owner, the second loses the last one, and in the third the
     // owner at byte 8 meets the integer of the first half.
@@ -1368,12 +1339,12 @@ fn the_rule_reads_no_long_array_element_by_element() void {
                        "u64* own[999999999] mut* r = cast(p, u64* own[999999999] mut*);",
                        "half[500000000] mut* s = cast(p, half[500000000] mut*);",
                        "println(q == null, r == null, s == null);"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 2);
-    assert(reported_at(&e, 0, "31:34",
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 2);
+    assert(reported_at(e, 0, "31:34",
                        "cannot cast u64* own[1000000000] mut* to u64* own[999999999] mut*",
                        ": a 'mut' cast hides the pointer u64* own at byte 7999999992"));
-    assert(reported_at(&e, 1, "32:30",
+    assert(reported_at(e, 1, "32:30",
                        "cannot cast u64* own[1000000000] mut* to half[500000000] mut*",
                        ": a 'mut' cast hides the pointer u64* own at byte 8"));
 }
@@ -1381,16 +1352,15 @@ fn the_rule_reads_no_long_array_element_by_element() void {
 // ---- a pointer from an integer, a larger pointee (D3.14) --------------------------------
 
 fn a_cast_never_makes_a_pointer_from_an_integer() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // No cast takes an integer to a pointer, a `void*` or a function pointer type, whatever its
     // width, its marks and its position (D3.14). The rule comes before the `mut` and the `own`
     // that the cast adds, and an argument of an `extern fn` gets no exemption. A constant operand
     // has the type `i32`. A `char`, a `bool`, a float and an enum reach no pointer either, with
     // the error of a pair that no row allows.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, "enum color {\n");
     strbuf.append(&b, "    red,\n");
     strbuf.append(&b, "}\n");
@@ -1418,44 +1388,43 @@ fn a_cast_never_makes_a_pointer_from_an_integer() void {
     strbuf.append(&b, "    void* x4 = cast(k, void*);\n");
     strbuf.append(&b, "    return 0;\n");
     strbuf.append(&b, "}\n");
-    assert(!check_env.check_src(&e, strbuf.view(&b)));
+    assert(!check_env.check_src(e, strbuf.view(&b)));
     // one report for each cast, at the cast
-    assert(check_env.errors(&e) == 13);
-    assert(reported_at(&e, 0, "13:14", "cannot cast u64 to i32*",
+    assert(check_env.errors(e) == 13);
+    assert(reported_at(e, 0, "13:14", "cannot cast u64 to i32*",
                        ": a cast never makes a pointer from an integer"));
-    assert(reported_at(&e, 1, "14:15", "cannot cast u64 to void*",
+    assert(reported_at(e, 1, "14:15", "cannot cast u64 to void*",
                        ": a cast never makes a pointer from an integer"));
-    assert(reported_at(&e, 2, "15:20", "cannot cast u64 to fn () void",
+    assert(reported_at(e, 2, "15:20", "cannot cast u64 to fn () void",
                        ": a cast never makes a pointer from an integer"));
-    assert(reported_at(&e, 3, "16:14", "cannot cast i32 to i32*",
+    assert(reported_at(e, 3, "16:14", "cannot cast i32 to i32*",
                        ": a cast never makes a pointer from an integer"));
-    assert(reported_at(&e, 4, "17:15", "cannot cast u8 to void*",
+    assert(reported_at(e, 4, "17:15", "cannot cast u8 to void*",
                        ": a cast never makes a pointer from an integer"));
-    assert(reported_at(&e, 5, "18:15", "cannot cast i32 to void*",
+    assert(reported_at(e, 5, "18:15", "cannot cast i32 to void*",
                        ": a cast never makes a pointer from an integer"));
-    assert(reported_at(&e, 6, "19:18", "cannot cast u64 to i32 mut*",
+    assert(reported_at(e, 6, "19:18", "cannot cast u64 to i32 mut*",
                        ": a cast never makes a pointer from an integer"));
-    assert(reported_at(&e, 7, "20:18", "cannot cast u64 to i32* own",
+    assert(reported_at(e, 7, "20:18", "cannot cast u64 to i32* own",
                        ": a cast never makes a pointer from an integer"));
-    assert(reported_at(&e, 8, "21:18", "cannot cast u64 to void*",
+    assert(reported_at(e, 8, "21:18", "cannot cast u64 to void*",
                        ": a cast never makes a pointer from an integer"));
-    assert(reported_at(&e, 9, "22:16", "cannot cast char to void*", ""));
-    assert(reported_at(&e, 10, "23:16", "cannot cast bool to void*", ""));
-    assert(reported_at(&e, 11, "24:16", "cannot cast f64 to void*", ""));
-    assert(reported_at(&e, 12, "25:16", "cannot cast color to void*", ""));
+    assert(reported_at(e, 9, "22:16", "cannot cast char to void*", ""));
+    assert(reported_at(e, 10, "23:16", "cannot cast bool to void*", ""));
+    assert(reported_at(e, 11, "24:16", "cannot cast f64 to void*", ""));
+    assert(reported_at(e, 12, "25:16", "cannot cast color to void*", ""));
 }
 
 fn a_cast_never_gives_a_type_to_a_void() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // No cast takes a `void*`, with any marks, to a typed pointer, with any marks, whatever the
     // size of the pointee (D3.14). The rule comes after the pointer from an integer and before the
     // `mut` and the `own` that the cast adds, and an argument of an `extern fn` gets no exemption.
     // A function pointer target keeps the error of a function pointer, and a span target the error
     // of a pair that no row allows. A `void*` deeper than level 1 is a pointer place of a view.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, "struct pair {\n");
     strbuf.append(&b, "    i32 a;\n");
     strbuf.append(&b, "    i32 b;\n");
@@ -1481,56 +1450,54 @@ fn a_cast_never_gives_a_type_to_a_void() void {
     strbuf.append(&b, "    u64 bits = cast(v, u64);\n");
     strbuf.append(&b, "    return 0;\n");
     strbuf.append(&b, "}\n");
-    assert(!check_env.check_src(&e, strbuf.view(&b)));
+    assert(!check_env.check_src(e, strbuf.view(&b)));
     // one report for each refused cast, at the cast, and none for the last two
-    assert(check_env.errors(&e) == 11);
-    assert(reported_at(&e, 0, "10:14", "cannot cast void* to i64*",
+    assert(check_env.errors(e) == 11);
+    assert(reported_at(e, 0, "10:14", "cannot cast void* to i64*",
                        ": a cast never gives a type to a void*"));
-    assert(reported_at(&e, 1, "11:13", "cannot cast void* to u8*",
+    assert(reported_at(e, 1, "11:13", "cannot cast void* to u8*",
                        ": a cast never gives a type to a void*"));
-    assert(reported_at(&e, 2, "12:18", "cannot cast void mut* to i32 mut*",
+    assert(reported_at(e, 2, "12:18", "cannot cast void mut* to i32 mut*",
                        ": a cast never gives a type to a void*"));
-    assert(reported_at(&e, 3, "13:18", "cannot cast void* to i32 mut*",
+    assert(reported_at(e, 3, "13:18", "cannot cast void* to i32 mut*",
                        ": a cast never gives a type to a void*"));
-    assert(reported_at(&e, 4, "14:18", "cannot cast void* to i32* own",
+    assert(reported_at(e, 4, "14:18", "cannot cast void* to i32* own",
                        ": a cast never gives a type to a void*"));
-    assert(reported_at(&e, 5, "15:15", "cannot cast void* to pair*",
+    assert(reported_at(e, 5, "15:15", "cannot cast void* to pair*",
                        ": a cast never gives a type to a void*"));
-    assert(reported_at(&e, 6, "16:16", "cannot cast void* to void**",
+    assert(reported_at(e, 6, "16:16", "cannot cast void* to void**",
                        ": a cast never gives a type to a void*"));
-    assert(reported_at(&e, 7, "17:18", "cannot cast void* to u64*",
+    assert(reported_at(e, 7, "17:18", "cannot cast void* to u64*",
                        ": a cast never gives a type to a void*"));
-    assert(reported_at(&e, 8, "18:20", "cannot cast void* to fn () void",
+    assert(reported_at(e, 8, "18:20", "cannot cast void* to fn () void",
                        ": a cast adds the function pointer fn () void"));
-    assert(reported_at(&e, 9, "19:14", "cannot cast void* to i32@", ""));
-    assert(reported_at(&e, 10, "21:23", "cannot cast void mut* mut* to i32 mut**",
+    assert(reported_at(e, 9, "19:14", "cannot cast void* to i32@", ""));
+    assert(reported_at(e, 10, "21:23", "cannot cast void mut* mut* to i32 mut**",
                        ": a cast adds the pointer i32 mut* at byte 0"));
 }
 
 fn a_pointer_and_a_void_pointer_cast_to_u64() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // The address goes to a `u64`, and the rule refuses only the way back (D3.14).
     string[5] lines = {"u64 mut x = 0;", "u64 a = cast(&x, u64);",
                        "u64 v = cast(cast(&x, void*), u64);",
                        "u64 w = cast(cast(&x, void mut*), u64);", "println(a == v, v == w);"};
-    assert(check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 0);
+    assert(check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 0);
 }
 
 fn a_cast_never_makes_the_pointee_larger_or_more_aligned() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // A cast from a typed pointer to a typed pointer, with any marks, needs a target pointee no
     // larger and no more aligned than the source pointee (D3.14). The size comes first, a fixed
     // array counts its elements, and a cast back from a smaller pointee is an error at the second
     // cast. Both rules come before the pointer places of a `mut` cast and of a view, and an
     // argument of an `extern fn` gets no exemption. A pointee of the same size or smaller, with
     // the same alignment or a smaller one, is legal.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, "struct two {\n");
     strbuf.append(&b, "    i32 x;\n");
     strbuf.append(&b, "    i32 y;\n");
@@ -1560,33 +1527,32 @@ fn a_cast_never_makes_the_pointee_larger_or_more_aligned() void {
     strbuf.append(&b, "    two* m4 = cast(&pair, two*);\n");
     strbuf.append(&b, "    return 0;\n");
     strbuf.append(&b, "}\n");
-    assert(!check_env.check_src(&e, strbuf.view(&b)));
+    assert(!check_env.check_src(e, strbuf.view(&b)));
     // one report for each cast, at the cast
-    assert(check_env.errors(&e) == 9);
-    assert(reported_at(&e, 0, "15:14", "cannot cast i32 mut* to i64*",
+    assert(check_env.errors(e) == 9);
+    assert(reported_at(e, 0, "15:14", "cannot cast i32 mut* to i64*",
                        ": a cast never makes the pointee larger (4 to 8 bytes)"));
-    assert(reported_at(&e, 1, "16:14", "cannot cast i32[2] mut* to i64*",
+    assert(reported_at(e, 1, "16:14", "cannot cast i32[2] mut* to i64*",
                        ": a cast never makes the alignment larger (4 to 8 bytes)"));
-    assert(reported_at(&e, 2, "17:18", "cannot cast i32 mut* to i64 mut*",
+    assert(reported_at(e, 2, "17:18", "cannot cast i32 mut* to i64 mut*",
                        ": a cast never makes the pointee larger (4 to 8 bytes)"));
-    assert(reported_at(&e, 3, "18:14", "cannot cast u8* to u64*",
+    assert(reported_at(e, 3, "18:14", "cannot cast u8* to u64*",
                        ": a cast never makes the pointee larger (1 to 8 bytes)"));
-    assert(reported_at(&e, 4, "19:17", "cannot cast i32[2] mut* to i64[2]*",
+    assert(reported_at(e, 4, "19:17", "cannot cast i32[2] mut* to i64[2]*",
                        ": a cast never makes the pointee larger (8 to 16 bytes)"));
-    assert(reported_at(&e, 5, "20:19", "cannot cast u8 mut* to wrap mut*",
+    assert(reported_at(e, 5, "20:19", "cannot cast u8 mut* to wrap mut*",
                        ": a cast never makes the pointee larger (1 to 8 bytes)"));
-    assert(reported_at(&e, 6, "21:15", "cannot cast u32 mut* to u64**",
+    assert(reported_at(e, 6, "21:15", "cannot cast u32 mut* to u64**",
                        ": a cast never makes the pointee larger (4 to 8 bytes)"));
-    assert(reported_at(&e, 7, "22:19", "cannot cast i32[2] mut* to wrap mut*",
+    assert(reported_at(e, 7, "22:19", "cannot cast i32[2] mut* to wrap mut*",
                        ": a cast never makes the alignment larger (4 to 8 bytes)"));
-    assert(reported_at(&e, 8, "23:18", "cannot cast i32 mut* to i64*",
+    assert(reported_at(e, 8, "23:18", "cannot cast i32 mut* to i64*",
                        ": a cast never makes the pointee larger (4 to 8 bytes)"));
 }
 
 fn the_size_of_the_pointee_comes_after_mut_own_and_move() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // Each cast below makes the pointee larger, and an earlier rule reports first: a `mut` that
     // the cast adds, an `own` that it adds, and an owner with no `move` (D3.14). A cast that
     // carries the `own` with a `move` reports the size.
@@ -1594,344 +1560,316 @@ fn the_size_of_the_pointee_comes_after_mut_own_and_move() void {
                        "i64* own o = cast(p, i64* own);", "i32 mut* own q = new(i32);",
                        "i64 mut* own r = cast(q, i64 mut* own);",
                        "i64 mut* own s = cast(move(q), i64 mut* own);"};
-    assert(!check_hiding(&e, lines[..]));
-    assert(check_env.errors(&e) == 4);
-    assert(reported_at(&e, 0, "31:18", "cannot cast i32* to i64 mut*",
+    assert(!check_hiding(e, lines[..]));
+    assert(check_env.errors(e) == 4);
+    assert(reported_at(e, 0, "31:18", "cannot cast i32* to i64 mut*",
                        ": a cast never adds 'mut'"));
-    assert(reported_at(&e, 1, "32:18", "cannot cast i32* to i64* own",
+    assert(reported_at(e, 1, "32:18", "cannot cast i32* to i64* own",
                        ": a cast never adds 'own'"));
-    assert(reported_at(&e, 2, "34:22", "casting an owning value to an owning type requires 'move'",
+    assert(reported_at(e, 2, "34:22", "casting an owning value to an owning type requires 'move'",
                        ": write move(q)"));
-    assert(reported_at(&e, 3, "35:22", "cannot cast i32 mut* own to i64 mut* own",
+    assert(reported_at(e, 3, "35:22", "cannot cast i32 mut* own to i64 mut* own",
                        ": a cast never makes the pointee larger (4 to 8 bytes)"));
 }
 
 // ---- sizeof ------------------------------------------------------------------------
 
 fn sizeof_yields_an_untyped_constant_of_the_type_s_size() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_decls(&e,
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_decls(e,
         "struct rec {\n    u8 tag;\n    i32 v;\n}\ni64 k = sizeof(rec);\n"));
     i64 mut v = 0;
-    assert(check_env.init_int(&e, "k", &v));
+    assert(check_env.init_int(e, "k", &v));
     // One byte, three of padding and four: the layout.
     assert(v == 8);
     // The constant took the type of its context, which is what an untyped
     // constant does.
-    assert(check_env.init_type(&e, "k") == "i64");
+    assert(check_env.init_type(e, "k") == "i64");
 }
 
 fn sizeof_needs_a_sized_type() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_init_of(&e, "u64", "sizeof(void)"));
-    assert(check_env.said(&e, "'sizeof' needs a sized type, not void"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_init_of(e, "u64", "sizeof(void)"));
+    assert(check_env.said(e, "'sizeof' needs a sized type, not void"));
 }
 
 // ---- new ---------------------------------------------------------------------------
 
 fn new_yields_an_owning_pointer_and_a_counted_new_an_owning_span() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    del(new(point));\n    del(new(i32, 4));\n}\n"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    del(new(point));\n    del(new(i32, 4));\n}\n"));
     // `new(T)` is `T mut* own` and `new(T, n)` is `T mut@ own`.
-    assert(probe_type(&e, 0) == "void");
-    check.expr one = check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_new, ""));
-    assert(check_env.type_text(&e, one.ty) == "point mut* own");
-    check.expr many = check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 1), ast.ast_kind.k_new, ""));
-    assert(check_env.type_text(&e, many.ty) == "i32 mut@ own");
+    assert(probe_type(e, 0) == "void");
+    check.expr one = check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_new, ""));
+    assert(check_env.type_text(e, one.ty) == "point mut* own");
+    check.expr many = check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 1), ast.ast_kind.k_new, ""));
+    assert(check_env.type_text(e, many.ty) == "i32 mut@ own");
 }
 
 fn new_needs_a_sized_type_and_a_non_negative_count() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    del(new(void));\n    del(new(i32, -1));\n}\n"));
-    check_env.probe_stmt(&e, "probe", 0);
-    assert(check_env.said(&e, "'new' needs a sized type, not void"));
-    check_env.probe_stmt(&e, "probe", 1);
-    assert(check_env.said(&e, "a negative count: -1"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    del(new(void));\n    del(new(i32, -1));\n}\n"));
+    check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.said(e, "'new' needs a sized type, not void"));
+    check_env.probe_stmt(e, "probe", 1);
+    assert(check_env.said(e, "a negative count: -1"));
 }
 
 // ---- indexing and spans ------------------------------------------------------------
 
 fn an_index_of_an_array_is_an_lvalue_of_its_element_type() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    s_i32(nums[1]);\n}\n"));
-    check.expr o = check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_index, ""));
-    assert(check_env.type_text(&e, o.ty) == "i32");
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    s_i32(nums[1]);\n}\n"));
+    check.expr o = check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_index, ""));
+    assert(check_env.type_text(e, o.ty) == "i32");
     // The element of a `mut` global array is an assignable lvalue.
     assert(o.lvalue && o.is_mut);
 }
 
 fn a_constant_index_out_of_range_for_a_fixed_array_is_a_compile_error() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    s_i32(nums[3]);\n}\n"));
-    check_env.probe_stmt(&e, "probe", 0);
-    assert(check_env.said(&e, "index 3 out of range for i32[3]"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    s_i32(nums[3]);\n}\n"));
+    check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.said(e, "index 3 out of range for i32[3]"));
 }
 
 fn a_pointer_cannot_be_indexed() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    s_i32(q[0]);\n}\n"));
-    check_env.probe_stmt(&e, "probe", 0);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    s_i32(q[0]);\n}\n"));
+    check_env.probe_stmt(e, "probe", 0);
     // There is no pointer arithmetic, and the hint names the spelling that
     // works for a pointer to an array.
-    assert(check_env.said(&e, "i32 mut* cannot be indexed: write '(*p)[i]'"));
+    assert(check_env.said(e, "i32 mut* cannot be indexed: write '(*p)[i]'"));
 }
 
 fn a_span_of_an_array_is_a_view_of_its_elements() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e,
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e,
         "fn probe() void {\n    s_span(nums[0..2]);\n    s_str(text[1..3]);\n}\n"));
-    check.expr view = check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_span, ""));
+    check.expr view = check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_span, ""));
     // The element mutability is the operand's and the view is never `own`.
-    assert(check_env.type_text(&e, view.ty) == "i32 mut@");
-    check.expr sub = check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 1), ast.ast_kind.k_span, ""));
+    assert(check_env.type_text(e, view.ty) == "i32 mut@");
+    check.expr sub = check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 1), ast.ast_kind.k_span, ""));
     // A span of a string is a string.
-    assert(check_env.type_text(&e, sub.ty) == "string");
+    assert(check_env.type_text(e, sub.ty) == "string");
 }
 
 // Outside str.from_cstr and rt.args_init, each span expression of a pointer is the error of D6.9,
 // the one-bound form as the two-bound one. check_raw_span_test holds the two functions.
 fn a_pointer_takes_no_span_outside_the_two_functions() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    s_span(q[0..]);\n    s_span(q[0..1]);\n}\n"));
-    check_env.probe_stmt(&e, "probe", 0);
-    assert(check_env.said(&e, "cannot take a span of i32 mut*: a pointer has no length"));
-    assert(!check_env.said(&e, "write 'p[lo..hi]'"));
-    assert(check_env.errors(&e) == 1);
-    check_env.probe_stmt(&e, "probe", 1);
-    assert(check_env.errors(&e) == 2);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    s_span(q[0..]);\n    s_span(q[0..1]);\n}\n"));
+    check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.said(e, "cannot take a span of i32 mut*: a pointer has no length"));
+    assert(!check_env.said(e, "write 'p[lo..hi]'"));
+    assert(check_env.errors(e) == 1);
+    check_env.probe_stmt(e, "probe", 1);
+    assert(check_env.errors(e) == 2);
 }
 
 // ---- the pseudo-fields -------------------------------------------------------------
 
 fn len_of_a_fixed_array_is_an_untyped_constant() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_decls(&e, "i32[3] nums = {1, 2, 3};\nu64 k = nums.len;\n"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_decls(e, "i32[3] nums = {1, 2, 3};\nu64 k = nums.len;\n"));
     i64 mut v = 0;
-    assert(check_env.init_int(&e, "k", &v));
+    assert(check_env.init_int(e, "k", &v));
     assert(v == 3);
 }
 
 fn len_of_a_string_is_a_u64_and_ptr_is_a_char_pointer() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    s_u64(text.len);\n    s_ptr(text.ptr);\n}\n"));
-    check.expr len = check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_field, "len"));
-    assert(check_env.type_text(&e, len.ty) == "u64");
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    s_u64(text.len);\n    s_ptr(text.ptr);\n}\n"));
+    check.expr len = check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_field, "len"));
+    assert(check_env.type_text(e, len.ty) == "u64");
     // An argument of a fort function is no position of `.ptr` (D3.5), so the probe of the node
     // alone reports it. In a position that allows it, such as an operand of `==`, `.ptr`
     // carries the element level's mutability and is never `own`. A string's bytes are immutable.
     ast.node mut* field =
-        check_env.node_find(check_env.body_expr(&e, "probe", 1), ast.ast_kind.k_field, "ptr");
-    check.expr refused = check_env.probe_expr(&e, field);
-    assert(check_env.said(&e, "'.ptr' can name the byte after the last element: write '&s[0]'"));
-    assert(check_env.type_text(&e, refused.ty) == "<error>");
-    e.ck.ptr_ok = field;
-    check.expr ptr = check_env.probe_expr(&e, field);
-    e.ck.ptr_ok = null;
-    assert(check_env.type_text(&e, ptr.ty) == "char*");
+        check_env.node_find(check_env.body_expr(e, "probe", 1), ast.ast_kind.k_field, "ptr");
+    check.expr refused = check_env.probe_expr(e, field);
+    assert(check_env.said(e, "'.ptr' can name the byte after the last element: write '&s[0]'"));
+    assert(check_env.type_text(e, refused.ty) == "<error>");
+    e->ck.ptr_ok = field;
+    check.expr ptr = check_env.probe_expr(e, field);
+    e->ck.ptr_ok = null;
+    assert(check_env.type_text(e, ptr.ty) == "char*");
     // Neither is an lvalue.
     assert(!len.lvalue && !ptr.lvalue);
 }
 
 fn a_fixed_array_has_no_ptr() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    s_ptr(nums.ptr);\n}\n"));
-    check_env.probe_stmt(&e, "probe", 0);
-    assert(check_env.said(&e, "a fixed array has no '.ptr'"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    s_ptr(nums.ptr);\n}\n"));
+    check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.said(e, "a fixed array has no '.ptr'"));
 }
 
 // ---- fields ------------------------------------------------------------------------
 
 fn a_field_is_reached_with_a_dot_and_a_pointer_field_with_an_arrow() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_lines(&e, "    s_i32(p.x);\n", "    s_i32(pp->x);\n", "    s_i32(pp.x);\n", "",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_lines(e, "    s_i32(p.x);\n", "    s_i32(pp->x);\n", "    s_i32(pp.x);\n", "",
                       "point mut* pp = &p;\n"));
-    assert(probe_type(&e, 0) == "void");
-    check.expr direct = check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_field, "x"));
-    assert(check_env.type_text(&e, direct.ty) == "i32");
+    assert(probe_type(e, 0) == "void");
+    check.expr direct = check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_field, "x"));
+    assert(check_env.type_text(e, direct.ty) == "i32");
     assert(direct.lvalue && direct.is_mut);
-    check.expr through = check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 1), ast.ast_kind.k_arrow, "x"));
-    assert(check_env.type_text(&e, through.ty) == "i32");
-    check_env.probe_stmt(&e, "probe", 2);
-    assert(check_env.said(&e, "'.' on a pointer of type point mut*: use '->'"));
+    check.expr through = check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 1), ast.ast_kind.k_arrow, "x"));
+    assert(check_env.type_text(e, through.ty) == "i32");
+    check_env.probe_stmt(e, "probe", 2);
+    assert(check_env.said(e, "'.' on a pointer of type point mut*: use '->'"));
 }
 
 fn an_unknown_field_names_the_struct() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    s_i32(p.z);\n}\n"));
-    check_env.probe_stmt(&e, "probe", 0);
-    assert(check_env.said(&e, "struct point has no field 'z'"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    s_i32(p.z);\n}\n"));
+    check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.said(e, "struct point has no field 'z'"));
 }
 
 // ---- literals ----------------------------------------------------------------------
 
 fn a_positional_literal_has_every_field_in_order() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_decls(&e,
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_decls(e,
         "struct point {\n    i32 x;\n    i32 y;\n}\npoint p = point{1, 2};\n"));
-    assert(check_env.errors(&e) == 0);
-    check_env.env mut f = check_env.env{};
-    check_env.open(&f);
-    defer check_env.close(&f);
-    assert(!check_env.check_decls(&f,
+    assert(check_env.errors(e) == 0);
+    check_env.env mut* own f = check_env.make();
+    defer check_env.drop_made(move(f));
+    assert(!check_env.check_decls(f,
         "struct point {\n    i32 x;\n    i32 y;\n}\npoint p = point{1};\n"));
-    assert(check_env.said(&f, "a positional literal of struct point needs its 2 fields, 1 given"));
+    assert(check_env.said(f, "a positional literal of struct point needs its 2 fields, 1 given"));
 }
 
 fn a_designated_literal_names_its_fields_once_each() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_decls(&e,
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_decls(e,
         "struct point {\n    i32 x;\n    i32 y;\n}\npoint p = point{.y = 2};\n"));
-    assert(check_env.errors(&e) == 0);
-    check_env.env mut f = check_env.env{};
-    check_env.open(&f);
-    defer check_env.close(&f);
-    assert(!check_env.check_decls(&f,
+    assert(check_env.errors(e) == 0);
+    check_env.env mut* own f = check_env.make();
+    defer check_env.drop_made(move(f));
+    assert(!check_env.check_decls(f,
         "struct point {\n    i32 x;\n    i32 y;\n}\npoint p = point{.x = 1, .x = 2};\n"));
-    assert(check_env.said(&f, "duplicate field 'x'"));
-    check_env.env mut g = check_env.env{};
-    check_env.open(&g);
-    defer check_env.close(&g);
-    assert(!check_env.check_decls(&g, "struct point {\n    i32 x;\n}\npoint p = point{.z = 1};\n"));
-    assert(check_env.said(&g, "struct point has no field 'z'"));
+    assert(check_env.said(f, "duplicate field 'x'"));
+    check_env.env mut* own g = check_env.make();
+    defer check_env.drop_made(move(g));
+    assert(!check_env.check_decls(g, "struct point {\n    i32 x;\n}\npoint p = point{.z = 1};\n"));
+    assert(check_env.said(g, "struct point has no field 'z'"));
 }
 
 fn an_array_literal_has_exactly_its_elements_or_is_empty() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_decls(&e, "i32[3] nums = {1, 2};\n"));
-    assert(check_env.said(&e, "an array literal for i32[3] needs 3 elements, 2 given"));
-    check_env.env mut f = check_env.env{};
-    check_env.open(&f);
-    defer check_env.close(&f);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_decls(e, "i32[3] nums = {1, 2};\n"));
+    assert(check_env.said(e, "an array literal for i32[3] needs 3 elements, 2 given"));
+    check_env.env mut* own f = check_env.make();
+    defer check_env.drop_made(move(f));
     // `{}` zero-initializes any aggregate, span, string or enum.
-    assert(check_env.check_decls(&f, "i32[3] nums = {};\nstring s = {};\n"));
-    assert(check_env.errors(&f) == 0);
-    check_env.env mut g = check_env.env{};
-    check_env.open(&g);
-    defer check_env.close(&g);
-    assert(!check_env.check_decls(&g, "i32 k = {};\n"));
-    assert(check_env.said(&g, "'{}' initializes an aggregate, span, string or enum, not i32"));
+    assert(check_env.check_decls(f, "i32[3] nums = {};\nstring s = {};\n"));
+    assert(check_env.errors(f) == 0);
+    check_env.env mut* own g = check_env.make();
+    defer check_env.drop_made(move(g));
+    assert(!check_env.check_decls(g, "i32 k = {};\n"));
+    assert(check_env.said(g, "'{}' initializes an aggregate, span, string or enum, not i32"));
 }
 
 fn a_span_literal_does_not_exist() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_decls(&e, "i32@ s = {1, 2};\n"));
-    assert(check_env.said(&e, "a span literal does not exist: write '{}' for the zero span"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_decls(e, "i32@ s = {1, 2};\n"));
+    assert(check_env.said(e, "a span literal does not exist: write '{}' for the zero span"));
 }
 
 // ---- calls -------------------------------------------------------------------------
 
 fn a_call_takes_its_parameters_by_position() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_lines(&e, "    s_i32(add(1, 2));\n", "    s_i32(add(1));\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_lines(e, "    s_i32(add(1, 2));\n", "    s_i32(add(1));\n",
                       "    s_i32(add(1, p));\n", "",
                       "fn add(i32 a, i32 b) i32 {\n    return a + b;\n}\n"));
-    check.expr call = check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_call, ""));
-    assert(check_env.type_text(&e, call.ty) == "void");
-    check_env.probe_stmt(&e, "probe", 1);
-    assert(check_env.said(&e, "'add' takes 2 arguments, 1 given"));
-    check_env.probe_stmt(&e, "probe", 2);
-    assert(check_env.said(&e, "the argument expects i32, not point"));
+    check.expr call = check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_call, ""));
+    assert(check_env.type_text(e, call.ty) == "void");
+    check_env.probe_stmt(e, "probe", 1);
+    assert(check_env.said(e, "'add' takes 2 arguments, 1 given"));
+    check_env.probe_stmt(e, "probe", 2);
+    assert(check_env.said(e, "the argument expects i32, not point"));
 }
 
 fn a_value_that_is_not_a_function_cannot_be_called() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    s_i32(p(1));\n}\n"));
-    check_env.probe_stmt(&e, "probe", 0);
-    assert(check_env.said(&e, "cannot call a value of type point"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    s_i32(p(1));\n}\n"));
+    check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.said(e, "cannot call a value of type point"));
 }
 
 // ---- the universe functions --------------------------------------------------------
 
 fn the_print_family_takes_printable_arguments() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_lines(&e, "    println(\"n=\", 1, true);\n", "    println(p);\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_lines(e, "    println(\"n=\", 1, true);\n", "    println(p);\n",
                       "    fprintln(2, \"x\");\n", "    fprintln();\n", ""));
-    assert(probe_type(&e, 0) == "void");
-    assert(check_env.errors(&e) == 0);
-    check_env.probe_stmt(&e, "probe", 1);
+    assert(probe_type(e, 0) == "void");
+    assert(check_env.errors(e) == 0);
+    check_env.probe_stmt(e, "probe", 1);
     // A struct is not printable (8.3).
-    assert(check_env.said(&e, "cannot print a value of type point"));
-    check_env.probe_stmt(&e, "probe", 2);
-    check_env.probe_stmt(&e, "probe", 3);
-    assert(check_env.said(&e, "'fprintln' takes a descriptor and then its arguments"));
+    assert(check_env.said(e, "cannot print a value of type point"));
+    check_env.probe_stmt(e, "probe", 2);
+    check_env.probe_stmt(e, "probe", 3);
+    assert(check_env.said(e, "'fprintln' takes a descriptor and then its arguments"));
 }
 
 fn assert_and_panic_take_one_argument_each() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_lines(&e, "    assert(true);\n", "    assert(1);\n", "    panic(\"x\");\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_lines(e, "    assert(true);\n", "    assert(1);\n", "    panic(\"x\");\n",
                       "    panic();\n", ""));
-    assert(probe_type(&e, 0) == "void");
-    check_env.probe_stmt(&e, "probe", 1);
+    assert(probe_type(e, 0) == "void");
+    check_env.probe_stmt(e, "probe", 1);
     // There is no truthiness.
-    assert(check_env.said(&e, "'assert' must be bool, not i32"));
-    ast.node mut* panics = check_env.body_expr(&e, "probe", 2);
-    check_env.probe_expr(&e, panics);
+    assert(check_env.said(e, "'assert' must be bool, not i32"));
+    ast.node mut* panics = check_env.body_expr(e, "probe", 2);
+    check_env.probe_expr(e, panics);
     // `panic` never returns, so a `panic(...)` statement terminates.
     assert(check_env.has_ann(panics, check.ANN_NORETURN));
-    check_env.probe_stmt(&e, "probe", 3);
-    assert(check_env.said(&e, "'panic' takes 1 argument, 0 given"));
+    check_env.probe_stmt(e, "probe", 3);
+    assert(check_env.said(e, "'panic' takes 1 argument, 0 given"));
 }
 
 fn a_universe_function_is_callable_and_nothing_else() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    s_i32(move);\n}\n"));
-    check_env.probe_stmt(&e, "probe", 0);
-    assert(check_env.said(&e, "'move' cannot be used as a value"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    s_i32(move);\n}\n"));
+    check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.said(e, "'move' cannot be used as a value"));
 }
 
 // ---- the lvalue and move marks ----------------------------------------------------
@@ -1956,11 +1894,10 @@ fn probe_all(check_env.env mut* e, u64 count) void {
 }
 
 fn the_five_place_forms_carry_the_lvalue_mark() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     strbuf.append(&b, "fn probe() void {\n");
     strbuf.append(&b, "    s_str(text);\n");
     strbuf.append(&b, "    s_i32(nums[1]);\n");
@@ -1968,25 +1905,25 @@ fn the_five_place_forms_carry_the_lvalue_mark() void {
     strbuf.append(&b, "    s_i32(pp->x);\n");
     strbuf.append(&b, "    s_i32(*q);\n");
     strbuf.append(&b, "}\n");
-    assert(open_probe2(&e, strbuf.view(&b), "point mut* pp = &p;\n"));
-    probe_all(&e, 5);
-    assert(check_env.errors(&e) == 0);
+    assert(open_probe2(e, strbuf.view(&b), "point mut* pp = &p;\n"));
+    probe_all(e, 5);
+    assert(check_env.errors(e) == 0);
     // D6.7: a name, an index, a field, an arrow and a dereference designate
     // storage. The emitter reads the mark to decide whether `del` empties.
-    assert(check_env.has_ann(probe_node(&e, 0, ast.ast_kind.k_ident, "text"), check.ANN_LVALUE));
-    assert(check_env.has_ann(probe_node(&e, 1, ast.ast_kind.k_index, ""), check.ANN_LVALUE));
-    assert(check_env.has_ann(probe_node(&e, 2, ast.ast_kind.k_field, "x"), check.ANN_LVALUE));
-    assert(check_env.has_ann(probe_node(&e, 3, ast.ast_kind.k_arrow, "x"), check.ANN_LVALUE));
-    assert(check_env.has_ann(probe_node(&e, 4, ast.ast_kind.k_unary, ""), check.ANN_LVALUE));
+    assert(check_env.has_ann(probe_node(e, 0, ast.ast_kind.k_ident, "text"), check.ANN_LVALUE));
+    assert(check_env.has_ann(probe_node(e, 1, ast.ast_kind.k_index, ""), check.ANN_LVALUE));
+    assert(check_env.has_ann(probe_node(e, 2, ast.ast_kind.k_field, "x"), check.ANN_LVALUE));
+    assert(check_env.has_ann(probe_node(e, 3, ast.ast_kind.k_arrow, "x"), check.ANN_LVALUE));
+    assert(check_env.has_ann(probe_node(e, 4, ast.ast_kind.k_unary, ""), check.ANN_LVALUE));
     // The call that holds a place is not a place.
-    assert(!check_env.has_ann(check_env.body_expr(&e, "probe", 0), check.ANN_LVALUE));
+    assert(!check_env.has_ann(check_env.body_expr(e, "probe", 0), check.ANN_LVALUE));
 }
 
 // The probe of the test below, one statement for each rvalue form, as one owned string (see
 // nested).
 fn rvalue_probe() string own {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, "fn probe() void {\n");
     strbuf.append(&b, "    del(new(point));\n");
     strbuf.append(&b, "    s_i32(one());\n");
@@ -2021,24 +1958,23 @@ fn the_five_rvalue_forms_carry_no_lvalue_mark(check_env.env mut* e) void {
 }
 
 fn an_index_or_field_of_an_rvalue_and_a_function_name_are_not_lvalues() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
     strbuf.str_buf mut x = strbuf.create();
-    defer strbuf.free(&x);
+    defer del(x.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     strbuf.append(&x, "fn three() i32[3] {\n    return nums;\n}\n");
     strbuf.append(&x, "fn mk() point {\n    return point{1, 2};\n}\n");
-    assert(open_lines(&e, "    s_i32(three()[0]);\n", "    s_i32(mk().x);\n", "", "",
+    assert(open_lines(e, "    s_i32(three()[0]);\n", "    s_i32(mk().x);\n", "", "",
                       strbuf.view(&x)));
-    probe_all(&e, 2);
-    assert(check_env.errors(&e) == 0);
+    probe_all(e, 2);
+    assert(check_env.errors(e) == 0);
     // D6.7: a field of an rvalue struct is a copy, as an index of one is.
-    assert(!check_env.has_ann(probe_node(&e, 1, ast.ast_kind.k_field, "x"), check.ANN_LVALUE));
+    assert(!check_env.has_ann(probe_node(e, 1, ast.ast_kind.k_field, "x"), check.ANN_LVALUE));
     // D6.7: an index of an rvalue array yields a copy. The kind of the node
     // alone does not say this, so the emitter reads the mark and not the kind.
-    assert(!check_env.has_ann(probe_node(&e, 0, ast.ast_kind.k_index, ""), check.ANN_LVALUE));
+    assert(!check_env.has_ann(probe_node(e, 0, ast.ast_kind.k_index, ""), check.ANN_LVALUE));
     // A function is not storage.
-    assert(!check_env.has_ann(probe_node(&e, 0, ast.ast_kind.k_ident, "three"), check.ANN_LVALUE));
+    assert(!check_env.has_ann(probe_node(e, 0, ast.ast_kind.k_ident, "three"), check.ANN_LVALUE));
 }
 
 fn a_call_of_move_carries_the_move_mark_and_no_other_call_does(check_env.env mut* e) void {
@@ -2067,7 +2003,7 @@ fn a_call_of_move_carries_the_move_mark_and_no_other_call_does(check_env.env mut
 // of `probe` declare locals. Each later statement passes one place to a sink.
 fn open_places(check_env.env mut* e) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, "struct point {\n    i32 x;\n    i32 y;\n}\n");
     strbuf.append(&b, "struct holder {\n    point pt;\n}\n");
     strbuf.append(&b, "i32 K = 7;\n");
@@ -2117,24 +2053,23 @@ fn empty_at(check_env.env mut* e, u64 i, ast.ast_kind kind) check.empty_kind {
 }
 
 fn own_storage_and_a_mutable_indirection_are_emptiable() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_places(&e));
-    assert(check_env.errors(&e) == 0);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_places(e));
+    assert(check_env.errors(e) == 0);
     check.empty_kind ok = check.empty_kind.empty_ok;
     // A local is its own storage, whether or not it is `mut` (D17.9).
-    assert(empty_at(&e, 3, ast.ast_kind.k_ident) == ok);
+    assert(empty_at(e, 3, ast.ast_kind.k_ident) == ok);
     // An element and a field of a local count as the local.
-    assert(empty_at(&e, 4, ast.ast_kind.k_index) == ok);
-    assert(empty_at(&e, 5, ast.ast_kind.k_field) == ok);
+    assert(empty_at(e, 4, ast.ast_kind.k_index) == ok);
+    assert(empty_at(e, 5, ast.ast_kind.k_field) == ok);
     // A mutable level 1 lets the store through the pointer or span.
-    assert(empty_at(&e, 6, ast.ast_kind.k_arrow) == ok);
-    assert(empty_at(&e, 7, ast.ast_kind.k_unary) == ok);
-    assert(empty_at(&e, 16, ast.ast_kind.k_index) == ok);
+    assert(empty_at(e, 6, ast.ast_kind.k_arrow) == ok);
+    assert(empty_at(e, 7, ast.ast_kind.k_unary) == ok);
+    assert(empty_at(e, 16, ast.ast_kind.k_index) == ok);
     // An emptiable lvalue carries neither bit.
-    assert(!check_env.has_ann(place(&e, 3), check.ANN_EMPTY_READONLY));
-    assert(!check_env.has_ann(place(&e, 3), check.ANN_EMPTY_IMMUTABLE));
+    assert(!check_env.has_ann(place(e, 3), check.ANN_EMPTY_READONLY));
+    assert(!check_env.has_ann(place(e, 3), check.ANN_EMPTY_IMMUTABLE));
 }
 
 fn a_constant_and_a_member_of_one_are_read_only(check_env.env mut* e) void {
@@ -2198,17 +2133,16 @@ fn an_rvalue_carries_no_emptiability_mark(check_env.env mut* e) void {
 // `string` is never emptied through it. A qualified constant takes its own
 // path through the checker.
 fn a_string_element_and_an_imported_constant_carry_their_marks() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
     strbuf.str_buf mut l = strbuf.create();
-    defer strbuf.free(&l);
+    defer del(l.data);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     strbuf.append(&l, "struct point {\n    i32 x;\n    i32 y;\n}\n");
     strbuf.append(&l, "i32 LK = 7;\n");
     strbuf.append(&l, "point LP = {1, 2};\n");
-    check_env.add(&e, "lib.ft", strbuf.view(&l));
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    check_env.add(e, "lib.ft", strbuf.view(&l));
     strbuf.append(&b, "import lib;\n");
     strbuf.append(&b, "string S = \"abc\";\n");
     strbuf.append(&b, "fn s_i32(i32 v) void {\n    return;\n}\n");
@@ -2222,80 +2156,77 @@ fn a_string_element_and_an_imported_constant_carry_their_marks() void {
     strbuf.append(&b, "    s_i32(lib.LP.x);\n");
     strbuf.append(&b, "}\n");
     strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
-    check_env.add(&e, "main.ft", strbuf.view(&b));
-    assert(check_env.check_entry(&e, "main.ft"));
-    assert(check_env.errors(&e) == 0);
+    check_env.add(e, "main.ft", strbuf.view(&b));
+    assert(check_env.check_entry(e, "main.ft"));
+    assert(check_env.errors(e) == 0);
     check.empty_kind im = check.empty_kind.empty_immutable;
     check.empty_kind ro = check.empty_kind.empty_readonly;
     u64 mut i = 0;
     while (i < 5) {
-        assert(check_env.has_ann(place(&e, i), check.ANN_LVALUE));
+        assert(check_env.has_ann(place(e, i), check.ANN_LVALUE));
         i += 1;
     }
     // The element of a `string`, whether the `string` is a parameter, the
     // result of a call or a module constant.
-    assert(check.empty_of(place(&e, 0)) == im);
-    assert(check.empty_of(place(&e, 1)) == im);
-    assert(check.empty_of(place(&e, 2)) == im);
+    assert(check.empty_of(place(e, 0)) == im);
+    assert(check.empty_of(place(e, 1)) == im);
+    assert(check.empty_of(place(e, 2)) == im);
     // A constant of another module, and a field of one (D7.10).
-    assert(check.empty_of(place(&e, 3)) == ro);
-    assert(check.empty_of(place(&e, 4)) == ro);
+    assert(check.empty_of(place(e, 3)) == ro);
+    assert(check.empty_of(place(e, 4)) == ro);
 }
 
 fn move_and_del_read_the_mark_on_their_operand() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_lines(&e, "    del(move(owned));\n", "    del(KEPT);\n", "", "",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_lines(e, "    del(move(owned));\n", "    del(KEPT);\n", "", "",
                       "point mut* own mut owned = null;\npoint mut* own KEPT = null;\n"));
-    probe_all(&e, 2);
+    probe_all(e, 2);
     // The operand of `move` is emptiable, and the checker accepts it.
-    ast.node* moved = ast.ast_child(check_env.body_expr(&e, "probe", 0), 0);
+    ast.node* moved = ast.ast_child(check_env.body_expr(e, "probe", 0), 0);
     assert(check.empty_of(ast.ast_child(moved, 0)) == check.empty_kind.empty_ok);
     // The operand of the second `del` is a constant, and the diagnostic gives
     // the reason that the node carries.
-    ast.node* kept = ast.ast_child(check_env.body_expr(&e, "probe", 1), 0);
+    ast.node* kept = ast.ast_child(check_env.body_expr(e, "probe", 1), 0);
     assert(check.empty_of(kept) == check.empty_kind.empty_readonly);
-    assert(check_env.errors(&e) == 1);
-    assert(check_env.said(&e, "'del' cannot empty a module-level constant"));
+    assert(check_env.errors(e) == 1);
+    assert(check_env.said(e, "'del' cannot empty a module-level constant"));
 }
 
 // ---- qualified names ---------------------------------------------------------------
 
 fn a_declaration_of_an_imported_module_is_reached_through_its_name() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    check_env.add(&e, "other.ft", "i32 ONE = 1;\nstruct thing {\n    i32 v;\n}\n");
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    check_env.add(e, "other.ft", "i32 ONE = 1;\nstruct thing {\n    i32 v;\n}\n");
     strbuf.append(&b, "import other;\n");
     strbuf.append(&b, "i32 k = other.ONE;\n");
     strbuf.append(&b, "other.thing t = {2};\n");
     strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
-    check_env.add(&e, "main.ft", strbuf.view(&b));
-    assert(check_env.check_entry(&e, "main.ft"));
+    check_env.add(e, "main.ft", strbuf.view(&b));
+    assert(check_env.check_entry(e, "main.ft"));
     i64 mut v = 0;
-    assert(check_env.init_int(&e, "k", &v));
+    assert(check_env.init_int(e, "k", &v));
     assert(v == 1);
     // A qualified type name denotes the declaration of the other module,
     // which is one type however it is spelled.
-    assert(check_env.decl_type(&e, "t") == "thing");
+    assert(check_env.decl_type(e, "t") == "thing");
 }
 
 fn a_name_a_module_does_not_declare_is_reported_with_the_module() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    check_env.add(&e, "other.ft", "i32 ONE = 1;\n");
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    check_env.add(e, "other.ft", "i32 ONE = 1;\n");
     strbuf.append(&b, "import other;\n");
     strbuf.append(&b, "i32 k = other.TWO;\n");
     strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
-    check_env.add(&e, "main.ft", strbuf.view(&b));
-    assert(!check_env.check_entry(&e, "main.ft"));
-    assert(check_env.said(&e, "module 'other' has no declaration named 'TWO'"));
+    check_env.add(e, "main.ft", strbuf.view(&b));
+    assert(!check_env.check_entry(e, "main.ft"));
+    assert(check_env.said(e, "module 'other' has no declaration named 'TWO'"));
 }
 
 // ---- the conditional operator ------------------------------------------------------
@@ -2303,166 +2234,156 @@ fn a_name_a_module_does_not_declare_is_reported_with_the_module() void {
 // The condition is `bool` and the two arms have one type. The type is the
 // arms' type, and the conditional is an rvalue, so it is not assignable.
 fn a_conditional_takes_a_bool_condition_and_two_arms_of_one_type() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_body(&e, "    bool t = true;\n    i32 c = t ? 4 : 5;"));
-    assert(check_env.errors(&e) == 0);
-    check_env.reopen(&e);
-    assert(!check_env.check_body(&e, "    i32 c = 1 ? 4 : 5;"));
-    assert(check_env.said(&e, "a condition must be bool, not i32"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_body(e, "    bool t = true;\n    i32 c = t ? 4 : 5;"));
+    assert(check_env.errors(e) == 0);
+    check_env.reopen(e);
+    assert(!check_env.check_body(e, "    i32 c = 1 ? 4 : 5;"));
+    assert(check_env.said(e, "a condition must be bool, not i32"));
 }
 
 // There is no promotion, so two arms of different types are an error and the
 // message names both. Mutability is part of the type, which is what
 // fail/operators/008_mixed_mutability_ternary.ft asserts as a program.
 fn two_arms_of_different_types_are_an_error() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_body(&e,
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_body(e,
         "    bool t = true;\n    string s = \"x\";\n    i32 n = 1;\n    i32 c = t ? n : s;"));
-    assert(check_env.said(&e, "'?:' takes two operands of the same type, not i32 and string"));
-    check_env.reopen(&e);
+    assert(check_env.said(e, "'?:' takes two operands of the same type, not i32 and string"));
+    check_env.reopen(e);
     // An untyped arm adopts the other arm's type first. So a constant that
     // cannot take it is reported as the arm and not as a pair.
-    assert(!check_env.check_body(&e,
+    assert(!check_env.check_body(e,
         "    bool t = true;\n    string s = \"x\";\n    i32 c = t ? 1 : s;"));
-    assert(check_env.said(&e, "the arm of '?:' expects string, not a constant"));
-    check_env.reopen(&e);
-    assert(!check_env.check_body(&e,
+    assert(check_env.said(e, "the arm of '?:' expects string, not a constant"));
+    check_env.reopen(e);
+    assert(!check_env.check_body(e,
         "    i32 mut x = 1;\n    i32 mut* p = &x;\n    i32* q = &x;\n    i32* r = true ? p : q;"));
-    assert(check_env.said(&e,
+    assert(check_env.said(e,
         "'?:' takes two operands of the same type, not i32 mut* and i32*"));
 }
 
 // An untyped arm adopts the other arm's type, and two untyped arms leave the
 // conditional untyped, so the context types it.
 fn an_untyped_arm_adopts_the_other_arm_s_type() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_body(&e, "    bool t = true;\n    i64 n = 7;\n    i64 c = t ? n : 1;"));
-    assert(check_env.errors(&e) == 0);
-    check_env.reopen(&e);
-    assert(check_env.check_body(&e, "    bool t = true;\n    u8 c = t ? 1 : 2;"));
-    assert(check_env.errors(&e) == 0);
-    check_env.reopen(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_body(e, "    bool t = true;\n    i64 n = 7;\n    i64 c = t ? n : 1;"));
+    assert(check_env.errors(e) == 0);
+    check_env.reopen(e);
+    assert(check_env.check_body(e, "    bool t = true;\n    u8 c = t ? 1 : 2;"));
+    assert(check_env.errors(e) == 0);
+    check_env.reopen(e);
     // The context is what the arms must fit, so an arm that does not fit it
     // is reported there.
-    assert(!check_env.check_body(&e, "    bool t = true;\n    u8 c = t ? 1 : 300;"));
-    assert(check_env.said(&e, "300"));
+    assert(!check_env.check_body(e, "    bool t = true;\n    u8 c = t ? 1 : 300;"));
+    assert(check_env.said(e, "300"));
 }
 
 // An arm must have a value, which a call of a `noreturn` function and a call
 // of a void function do not. That is also what keeps every block the emitter
 // opens for a conditional open until its own branch: no arm can end a block.
 fn an_arm_with_no_value_is_refused() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     strbuf.append(&b, "fn die() noreturn {\n    panic(\"x\");\n}\n");
     strbuf.append(&b, "fn main() i32 {\n    i32 c = true ? 1 : die();\n    return c;\n}\n");
-    assert(!check_env.check_src(&e, strbuf.view(&b)));
-    assert(check_env.said(&e, "'die' has no value"));
+    assert(!check_env.check_src(e, strbuf.view(&b)));
+    assert(check_env.said(e, "'die' has no value"));
 }
 
 // `null` has no type of its own, so two `null` arms leave the conditional
 // untyped and the context types both. An arm of pointer type gives the other
 // one that type.
 fn the_arms_may_be_null_when_the_context_is_a_pointer() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_body(&e, "    bool t = true;\n    i32* p = t ? null : null;"));
-    assert(check_env.errors(&e) == 0);
-    check_env.reopen(&e);
-    assert(check_env.check_body(&e,
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_body(e, "    bool t = true;\n    i32* p = t ? null : null;"));
+    assert(check_env.errors(e) == 0);
+    check_env.reopen(e);
+    assert(check_env.check_body(e,
         "    bool t = true;\n    i32 mut x = 1;\n    i32* q = t ? &x : null;"));
-    assert(check_env.errors(&e) == 0);
-    check_env.reopen(&e);
-    assert(!check_env.check_body(&e, "    bool t = true;\n    i32 d = t ? null : 1;"));
-    assert(check_env.said(&e, "'null' needs a pointer type, not i32"));
+    assert(check_env.errors(e) == 0);
+    check_env.reopen(e);
+    assert(!check_env.check_body(e, "    bool t = true;\n    i32 d = t ? null : 1;"));
+    assert(check_env.said(e, "'null' needs a pointer type, not i32"));
 }
 
 // `?:` is right-associative, so a conditional in the else arm is one
 // expression and the checker types it like any other arm.
 fn a_conditional_nests_in_either_arm() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_body(&e, "    bool t = true;\n    i32 c = t ? 1 : t ? 2 : 3;"));
-    assert(check_env.errors(&e) == 0);
-    check_env.reopen(&e);
-    assert(check_env.check_body(&e,
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_body(e, "    bool t = true;\n    i32 c = t ? 1 : t ? 2 : 3;"));
+    assert(check_env.errors(e) == 0);
+    check_env.reopen(e);
+    assert(check_env.check_body(e,
         "    bool t = true;\n    string s = t ? \"a\" : t ? \"b\" : \"c\";"));
-    assert(check_env.errors(&e) == 0);
-    check_env.reopen(&e);
+    assert(check_env.errors(e) == 0);
+    check_env.reopen(e);
     // The inner conditional decides the type of the arm it stands in, so a
     // mismatch inside it is reported there.
-    assert(!check_env.check_body(&e,
+    assert(!check_env.check_body(e,
         "    string s = \"a\";\n    i32 n = 1;\n    i32 c = true ? n : true ? n : s;"));
-    assert(check_env.said(&e, "'?:' takes two operands of the same type, not i32 and string"));
+    assert(check_env.said(e, "'?:' takes two operands of the same type, not i32 and string"));
 }
 
 // `?:` is a constant expression, so a conditional whose three parts are
 // constants folds to the arm the condition selects.
 fn a_conditional_of_constants_folds_to_the_selected_arm() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_init_of(&e, "i32", "true ? 4 : 5"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_init_of(e, "i32", "true ? 4 : 5"));
     i64 mut v = 0;
-    assert(check_env.init_int(&e, "probe", &v));
+    assert(check_env.init_int(e, "probe", &v));
     assert(v == 4);
-    check_env.reopen(&e);
-    assert(check_env.check_init_of(&e, "i32", "1 > 2 ? 4 : 5"));
-    assert(check_env.init_int(&e, "probe", &v));
+    check_env.reopen(e);
+    assert(check_env.check_init_of(e, "i32", "1 > 2 ? 4 : 5"));
+    assert(check_env.init_int(e, "probe", &v));
     assert(v == 5);
-    check_env.reopen(&e);
+    check_env.reopen(e);
     // A conditional whose condition is not constant does not fold, so it is
     // not a module-level initializer.
-    assert(!check_env.check_decls(&e, "i32 mut g = 1;\ni32 probe = g > 0 ? 4 : 5;\n"));
+    assert(!check_env.check_decls(e, "i32 mut g = 1;\ni32 probe = g > 0 ? 4 : 5;\n"));
 }
 
 // ---- the entry module --------------------------------------------------------------
 
 fn the_entry_module_defines_main() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(!check_env.check_src(&e, "fn main() void {\n    return;\n}\n"));
-    assert(check_env.said(&e,
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_env.check_src(e, "fn main() void {\n    return;\n}\n"));
+    assert(check_env.said(e,
         "entry module 'main' must define 'fn main() i32' or 'fn main(string@ args) i32'"));
 }
 
 fn a_module_under_inspection_is_not_held_to_the_entry_rule() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     // `--check` inspects a file rather than building a program, so the rule
     // does not apply to it at all.
-    e.want_main = false;
-    assert(check_env.check_src(&e, "i32 k = 1;\n"));
-    assert(check_env.errors(&e) == 0);
+    e->want_main = false;
+    assert(check_env.check_src(e, "i32 k = 1;\n"));
+    assert(check_env.errors(e) == 0);
 }
 
 // ---- the muted mode ----------------------------------------------------------------
 
 fn a_muted_checker_annotates_without_reporting() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    e.want_mute = true;
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    e->want_mute = true;
     // The errors are counted, so the run still answers "this module did not
     // check". And nothing is written or recorded: an editor mode indexes a
     // file it is not compiling.
-    assert(!check_env.check_decls(&e, "i32 k = nosuch;\n"));
-    assert(check_env.errors(&e) == 0);
-    assert(check_env.reports(&e) == 0);
-    assert(e.ck.errors > 0);
+    assert(!check_env.check_decls(e, "i32 k = nosuch;\n"));
+    assert(check_env.errors(e) == 0);
+    assert(check_env.reports(e) == 0);
+    assert(e->ck.errors > 0);
 }
 
 fn main() i32 {

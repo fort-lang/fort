@@ -41,7 +41,7 @@ fn open_probe(check_env.env mut* e, string body) bool {
 // the callee most of the probes need.
 fn open_probe2(check_env.env mut* e, string body, string extra) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, "struct cell {\n    i32 v;\n}\n");
     strbuf.append(&b, "struct holder {\n    cell mut* own inner;\n}\n");
     strbuf.append(&b, "cell mut* own mine = null;\n");
@@ -58,31 +58,29 @@ fn open_probe2(check_env.env mut* e, string body, string extra) bool {
 // ---- `empty` is not `is_mut` -------------------------------------------------------
 
 fn an_owning_global_may_be_emptied_and_a_constant_may_not() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    del(theirs);\n    del(mine);\n}\n"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    del(theirs);\n    del(mine);\n}\n"));
     // `theirs` is a `mut` global: its own storage is emptiable.
-    check_env.probe_stmt(&e, "probe", 0);
-    assert(check_env.errors(&e) == 0);
+    check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.errors(e) == 0);
     // `mine` is a module-level constant: it lives in read-only memory, and
     // that, and not its level-0 mutability, is what refuses the `del`.
-    check_env.probe_stmt(&e, "probe", 1);
-    assert(check_env.said(&e, "'del' cannot empty a module-level constant"));
+    check_env.probe_stmt(e, "probe", 1);
+    assert(check_env.said(e, "'del' cannot empty a module-level constant"));
 }
 
 fn an_owning_constant_is_an_immutable_lvalue_whose_reason_is_read_only_memory() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    del(mine);\n}\n"));
-    check.expr o = check_env.probe_stmt(&e, "probe", 0);
-    assert(check_env.said(&e, "read-only memory"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    del(mine);\n}\n"));
+    check.expr o = check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.said(e, "read-only memory"));
     // The operand is the `del` call, which yields nothing. What the fields
     // below answer for is the name inside it, read through the same path the
     // checker took.
-    check.expr name = check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_ident, "mine"));
+    check.expr name = check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_ident, "mine"));
     assert(name.lvalue);
     // Immutable and read-only are two answers, and the second is the one
     // `move` and `del` ask for.
@@ -92,29 +90,27 @@ fn an_owning_constant_is_an_immutable_lvalue_whose_reason_is_read_only_memory() 
 }
 
 fn a_mutable_global_is_emptiable_although_it_is_not_read_only() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    del(theirs);\n}\n"));
-    check.expr name = check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_ident, "theirs"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    del(theirs);\n}\n"));
+    check.expr name = check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_ident, "theirs"));
     assert(name.lvalue && name.is_mut);
     assert(name.empty == check.empty_kind.empty_ok);
 }
 
 fn an_immutable_indirection_may_not_be_emptied() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    del(ph->inner);\n    del(qh->inner);\n}\n"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    del(ph->inner);\n    del(qh->inner);\n}\n"));
     // Level 1 of `ph` is mutable, so what it designates is emptiable. The
     // read-only memory of the constant `ph` stops at the indirection.
-    check_env.probe_stmt(&e, "probe", 0);
-    assert(check_env.errors(&e) == 0);
+    check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.errors(e) == 0);
     // Level 1 of `qh` is not, so nothing may be taken out of what was only
     // lent.
-    check_env.probe_stmt(&e, "probe", 1);
-    assert(check_env.said(&e, "'del' cannot empty an immutable indirection"));
+    check_env.probe_stmt(e, "probe", 1);
+    assert(check_env.said(e, "'del' cannot empty an immutable indirection"));
 }
 
 // ---- what owns an allocation -------------------------------------------------------
@@ -124,7 +120,7 @@ fn an_immutable_indirection_may_not_be_emptied() void {
 // pointer after the call. The test keeps this string, whose address it lends to no call.
 fn owning_decls() string own {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, "struct cell {\n    i32 v;\n}\n");
     strbuf.append(&b, "struct holder {\n    cell mut* own inner;\n}\n");
     strbuf.append(&b, "cell mut* own owner = null;\n");
@@ -145,42 +141,39 @@ fn an_own_reference_and_an_owning_aggregate_own_and_a_view_does_not(check_env.en
 }
 
 fn move_needs_an_owning_lvalue() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe2(&e, "fn probe() void {\n    sink(move(hh));\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe2(e, "fn probe() void {\n    sink(move(hh));\n}\n",
         "fn sink(i32 x) void {\n    return;\n}\n"));
     // `hh` is an owning aggregate, so `move` takes it and yields the one
     // universe function with a value. An `own` rvalue of its operand's type,
     // which is not an lvalue and which nothing else could free.
-    ast.node mut* call = check_env.body_expr(&e, "probe", 0);
-    check.expr o = check_env.probe_expr(&e, ast.ast_child_mut(call, 0));
-    assert(check_env.type_text(&e, o.ty) == "holder");
+    ast.node mut* call = check_env.body_expr(e, "probe", 0);
+    check.expr o = check_env.probe_expr(e, ast.ast_child_mut(call, 0));
+    assert(check_env.type_text(e, o.ty) == "holder");
     assert(!o.lvalue);
     assert(check.check_owning(o.ty));
-    assert(check_env.errors(&e) == 0);
+    assert(check_env.errors(e) == 0);
 }
 
 fn move_refuses_a_value_that_owns_nothing() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    del(move(ph));\n}\n"));
-    check_env.probe_stmt(&e, "probe", 0);
-    assert(check_env.said(&e, "'move' needs an owning operand, not holder mut*"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    del(move(ph));\n}\n"));
+    check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.said(e, "'move' needs an owning operand, not holder mut*"));
 }
 
 fn del_takes_an_owning_reference_and_nothing_else() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    del(ph);\n    del(hh);\n}\n"));
-    check_env.probe_stmt(&e, "probe", 0);
-    assert(check_env.said(&e, "'del' needs an owning operand, not holder mut*"));
-    check_env.probe_stmt(&e, "probe", 1);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe() void {\n    del(ph);\n    del(hh);\n}\n"));
+    check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.said(e, "'del' needs an owning operand, not holder mut*"));
+    check_env.probe_stmt(e, "probe", 1);
     // An owning aggregate is not a reference: `del` frees an allocation and a
     // struct is not one.
-    assert(check_env.said(&e, "'del' takes a reference, not holder"));
+    assert(check_env.said(e, "'del' takes a reference, not holder"));
 }
 
 // ---- owning temporaries ------------------------------------------------------------
@@ -195,33 +188,30 @@ fn a_field_of_an_owning_rvalue_would_leak(check_env.env mut* e) void {
 }
 
 fn an_owning_rvalue_that_reaches_a_borrowing_context_would_leak() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe2(&e, "fn probe() void {\n    borrow(new(cell));\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe2(e, "fn probe() void {\n    borrow(new(cell));\n}\n",
         "fn borrow(cell mut* p) void {\n    return;\n}\n"));
-    check_env.probe_stmt(&e, "probe", 0);
-    assert(check_env.said(&e, "owning temporary would leak: the argument expects cell mut*"));
+    check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.said(e, "owning temporary would leak: the argument expects cell mut*"));
 }
 
 fn copying_an_owning_lvalue_into_an_own_place_requires_move() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe2(&e, "fn probe() void {\n    take(theirs);\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe2(e, "fn probe() void {\n    take(theirs);\n}\n",
         "fn take(cell mut* own p) void {\n    del(p);\n}\n"));
-    check_env.probe_stmt(&e, "probe", 0);
+    check_env.probe_stmt(e, "probe", 0);
     // Transfer is written, and the hint spells the expression because the
     // operand is a name.
-    assert(check_env.said(&e, "copying an owning value requires 'move': write move(theirs)"));
+    assert(check_env.said(e, "copying an owning value requires 'move': write move(theirs)"));
 }
 
 fn casting_an_owning_lvalue_to_an_owning_type_requires_move() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     strbuf.append(&b, "struct cell {\n    i32 v;\n}\n");
     strbuf.append(&b, "struct holder {\n    cell mut* own inner;\n}\n");
     strbuf.append(&b, "holder hh = {};\n");
@@ -229,45 +219,57 @@ fn casting_an_owning_lvalue_to_an_owning_type_requires_move() void {
     // A cast is `own` exactly when its target says so, so an owning lvalue
     // reaches an owning target only through `move`. The hint spells the whole
     // expression because the operand is a name.
-    assert(!check_env.check_decls(&e, strbuf.view(&b)));
-    assert(check_env.said(&e,
+    assert(!check_env.check_decls(e, strbuf.view(&b)));
+    assert(check_env.said(e,
         "casting an owning value to an owning type requires 'move': write move(hh)"));
 }
 
 fn casting_an_owning_rvalue_to_a_type_that_does_not_own_would_leak() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe2(&e, "fn probe() void {\n    borrow(cast(new(cell), cell mut*));\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe2(e, "fn probe() void {\n    borrow(cast(new(cell), cell mut*));\n}\n",
                       "fn borrow(cell mut* p) void {\n    return;\n}\n"));
-    check_env.probe_stmt(&e, "probe", 0);
+    check_env.probe_stmt(e, "probe", 0);
     // Nothing could free the temporary once the cast has dropped its `own`.
-    assert(check_env.said(&e, "owning temporary would leak: the cast target does not own it"));
+    assert(check_env.said(e, "owning temporary would leak: the cast target does not own it"));
 }
 
 fn an_owning_lvalue_lends_to_a_borrowing_parameter() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe2(&e, "fn probe() void {\n    borrow(theirs);\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe2(e, "fn probe() void {\n    borrow(theirs);\n}\n",
         "fn borrow(cell mut* p) void {\n    return;\n}\n"));
-    check_env.probe_stmt(&e, "probe", 0);
+    check_env.probe_stmt(e, "probe", 0);
     // A target that does not own takes the lend of an owning lvalue.
-    assert(check_env.errors(&e) == 0);
+    assert(check_env.errors(e) == 0);
 }
 
 fn equality_lends_both_operands() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe2(&e, "fn probe() void {\n    yes(mine == theirs);\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe2(e, "fn probe() void {\n    yes(mine == theirs);\n}\n",
         "fn yes(bool b) void {\n    return;\n}\n"));
-    check.expr o = check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_binary, ""));
+    check.expr o = check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_binary, ""));
     // `own` never blocks a comparison: both operands are lent, so two pointers
     // of one element type compare whatever their ownership.
-    assert(check_env.errors(&e) == 0);
-    assert(check_env.type_text(&e, o.ty) == "bool");
+    assert(check_env.errors(e) == 0);
+    assert(check_env.type_text(e, o.ty) == "bool");
+}
+
+// A parameter scope in an allocation of its own: open_params lends it to the checker.
+fn params_make() scope.scope mut* own {
+    return new(scope.scope);
+}
+
+// Ends a parameter scope of params_make that the caller moves in, as check_env.close_params ends
+// one: the checker forgets the scope, the value moves out before the `del` of the allocation, and
+// scope.drop frees it.
+fn params_drop_made(check_env.env mut* e, scope.scope mut* own p) void {
+    e->ck.scope = null;
+    scope.scope kept = move(*p);
+    del(p);
+    scope.drop(move(kept));
 }
 
 // ---- the arms of the conditional ---------------------------------------------------
@@ -275,52 +277,49 @@ fn equality_lends_both_operands() void {
 // The arms of `?:` lend, so two owning lvalue arms yield a view and the
 // conditional owns nothing.
 fn the_arms_of_a_conditional_lend() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe2(&e, "fn probe(bool go) void {\n    borrow(go ? mine : theirs);\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe2(e, "fn probe(bool go) void {\n    borrow(go ? mine : theirs);\n}\n",
         "fn borrow(cell mut* p) void {\n    return;\n}\n"));
-    scope.scope mut params = scope.scope{};
-    check_env.open_params(&e, &params, "probe");
-    check.expr o = check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_ternary, ""));
-    check_env.close_params(&e, &params);
-    assert(check_env.errors(&e) == 0);
-    assert(check_env.type_text(&e, o.ty) == "cell mut*");
+    scope.scope mut* own params = params_make();
+    check_env.open_params(e, params, "probe");
+    check.expr o = check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_ternary, ""));
+    params_drop_made(e, move(params));
+    assert(check_env.errors(e) == 0);
+    assert(check_env.type_text(e, o.ty) == "cell mut*");
 }
 
 // It yields `own` when both arms are `own` rvalues or `null`. Only this case
 // gives the conditional result an owner. It is an
 // rvalue, so it must land in an `own` place.
 fn two_owning_rvalue_arms_yield_an_owning_rvalue() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe2(&e, "fn probe(bool go) void {\n    keep(go ? new(cell) : null);\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe2(e, "fn probe(bool go) void {\n    keep(go ? new(cell) : null);\n}\n",
         "fn keep(cell mut* own p) void {\n    del(p);\n}\n"));
-    scope.scope mut params = scope.scope{};
-    check_env.open_params(&e, &params, "probe");
-    check.expr o = check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_ternary, ""));
-    check_env.close_params(&e, &params);
-    assert(check_env.type_text(&e, o.ty) == "cell mut* own");
+    scope.scope mut* own params = params_make();
+    check_env.open_params(e, params, "probe");
+    check.expr o = check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_ternary, ""));
+    params_drop_made(e, move(params));
+    assert(check_env.type_text(e, o.ty) == "cell mut* own");
     assert(!o.lvalue);
 }
 
 // An `own` rvalue beside an arm that does not own would be lent, and nothing
 // would be left to free it, which is the error.
 fn an_owning_rvalue_arm_beside_a_lending_one_would_leak() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe2(&e, "fn probe(bool go) void {\n    borrow(go ? theirs : new(cell));\n}\n",
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe2(e, "fn probe(bool go) void {\n    borrow(go ? theirs : new(cell));\n}\n",
         "fn borrow(cell mut* p) void {\n    return;\n}\n"));
-    scope.scope mut params = scope.scope{};
-    check_env.open_params(&e, &params, "probe");
-    check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_ternary, ""));
-    check_env.close_params(&e, &params);
-    assert(check_env.said(&e, "owning temporary would leak: the other arm does not own"));
+    scope.scope mut* own params = params_make();
+    check_env.open_params(e, params, "probe");
+    check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_ternary, ""));
+    params_drop_made(e, move(params));
+    assert(check_env.said(e, "owning temporary would leak: the other arm does not own"));
 }
 
 // Lending strips the `own` of a reference and not the `own` a struct holds by
@@ -329,80 +328,76 @@ fn an_owning_rvalue_arm_beside_a_lending_one_would_leak() void {
 // yield an owning rvalue that no arm was emptied for, and `del` of each would
 // free one allocation twice.
 fn an_owning_aggregate_arm_is_a_transfer_and_needs_move() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe(bool go) void {\n    hh = go ? hh : hh;\n}\n"));
-    scope.scope mut params = scope.scope{};
-    check_env.open_params(&e, &params, "probe");
-    check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_ternary, ""));
-    check_env.close_params(&e, &params);
-    assert(check_env.said(&e, "copying an owning value requires 'move'"));
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe(bool go) void {\n    hh = go ? hh : hh;\n}\n"));
+    scope.scope mut* own params = params_make();
+    check_env.open_params(e, params, "probe");
+    check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_ternary, ""));
+    params_drop_made(e, move(params));
+    assert(check_env.said(e, "copying an owning value requires 'move'"));
 }
 
 // `move` in each arm is what the rule asks for, and two `move`s are two owning
 // rvalues. So the conditional yields an owning value that must land in an
 // owning place.
 fn two_moved_aggregate_arms_yield_an_owning_rvalue() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe(bool go) void {\n    hh = go ? move(hh) : move(hh);\n}\n"));
-    scope.scope mut params = scope.scope{};
-    check_env.open_params(&e, &params, "probe");
-    check.expr o = check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_ternary, ""));
-    check_env.close_params(&e, &params);
-    assert(check_env.errors(&e) == 0);
-    assert(check_env.type_text(&e, o.ty) == "holder");
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, "fn probe(bool go) void {\n    hh = go ? move(hh) : move(hh);\n}\n"));
+    scope.scope mut* own params = params_make();
+    check_env.open_params(e, params, "probe");
+    check.expr o = check_env.probe_expr(e,
+        check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_ternary, ""));
+    params_drop_made(e, move(params));
+    assert(check_env.errors(e) == 0);
+    assert(check_env.type_text(e, o.ty) == "holder");
     assert(!o.lvalue);
 }
 
 // ---- the return of an owning value -------------------------------------------------
 
 fn returning_an_own_parameter_outright_is_an_implicit_move() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     strbuf.append(&b, "struct cell {\n    i32 v;\n}\n");
     strbuf.append(&b, "fn take(cell mut* own p) cell mut* own {\n    return p;\n}\n");
     strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
-    assert(check_env.open_module(&e, strbuf.view(&b)));
+    assert(check_env.open_module(e, strbuf.view(&b)));
     // The result type is the one own place an owning lvalue reaches without
     // `move`, and only when it names a local or a parameter outright. The
     // emitter empties the operand after reading it, which is what lets a
     // `defer del(p)` written above see the zero value.
-    scope.scope mut params = scope.scope{};
-    check_env.open_params(&e, &params, "take");
-    ast.node mut* ret = check_env.return_in(&e, "take");
+    scope.scope mut* own params = params_make();
+    check_env.open_params(e, params, "take");
+    ast.node mut* ret = check_env.return_in(e, "take");
     check.expr mut out = check.expr{};
-    check.check_return_value(&e.ck, ret, check_env.result_type(&e, "take"), &out);
-    check_env.close_params(&e, &params);
-    assert(check_env.errors(&e) == 0);
-    assert(check_env.type_text(&e, out.ty) == "cell mut* own");
+    check.check_return_value(&e->ck, ret, check_env.result_type(e, "take"), &out);
+    params_drop_made(e, move(params));
+    assert(check_env.errors(e) == 0);
+    assert(check_env.type_text(e, out.ty) == "cell mut* own");
     assert(check_env.has_ann(ret, check.ANN_MOVE));
 }
 
 fn returning_an_owning_value_that_names_no_local_needs_move() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     strbuf.append(&b, "struct cell {\n    i32 v;\n}\n");
     strbuf.append(&b, "cell mut* own mut kept = null;\n");
     strbuf.append(&b, "fn give() cell mut* own {\n    return kept;\n}\n");
     strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
-    assert(check_env.open_module(&e, strbuf.view(&b)));
-    ast.node mut* ret = check_env.return_in(&e, "give");
+    assert(check_env.open_module(e, strbuf.view(&b)));
+    ast.node mut* ret = check_env.return_in(e, "give");
     check.expr mut out = check.expr{};
-    check.check_return_value(&e.ck, ret, check_env.result_type(&e, "give"), &out);
+    check.check_return_value(&e->ck, ret, check_env.result_type(e, "give"), &out);
     // A global is not a local or a parameter, so the transfer is written and
     // the emitter is told nothing.
-    assert(check_env.said(&e, "copying an owning value requires 'move': write move(kept)"));
+    assert(check_env.said(e, "copying an owning value requires 'move': write move(kept)"));
     assert(!check_env.has_ann(ret, check.ANN_MOVE));
 }
 
@@ -467,17 +462,16 @@ fn the_sentinel_bit_is_one_past_the_highest_one() void {
 }
 
 fn a_call_of_a_noreturn_function_is_marked() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
     strbuf.append(&b, "fn stop() noreturn {\n    panic(\"no\");\n}\n");
     strbuf.append(&b, "fn probe() void {\n    stop();\n}\n");
     strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
-    assert(check_env.open_module(&e, strbuf.view(&b)));
-    ast.node mut* call = check_env.body_expr(&e, "probe", 0);
-    check_env.probe_expr(&e, call);
+    assert(check_env.open_module(e, strbuf.view(&b)));
+    ast.node mut* call = check_env.body_expr(e, "probe", 0);
+    check_env.probe_expr(e, call);
     // A call to a `noreturn` function terminates its statement, which the
     // emitter and the statement checker read off this bit.
     assert(check_env.has_ann(call, check.ANN_NORETURN));

@@ -35,14 +35,13 @@ u64 THIRD_F32 = 0x3FD5555560000000;
 
 // The type of `T probe = <expr>;` as the checker resolved it.
 fn want_type(string type_text, string expr_text, string want) void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    if (!check_env.check_init_of(&e, type_text, expr_text)) {
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    if (!check_env.check_init_of(e, type_text, expr_text)) {
         println("check_float: ", type_text, " probe = ", expr_text, "; did not check clean");
     }
-    assert(check_env.errors(&e) == 0);
-    string got = check_env.probe_type(&e);
+    assert(check_env.errors(e) == 0);
+    string got = check_env.probe_type(e);
     if (got != want) {
         println("type of ", expr_text, " = ", got, ", want ", want);
     }
@@ -51,15 +50,14 @@ fn want_type(string type_text, string expr_text, string want) void {
 
 // The value the checker folded for the same declaration.
 fn want_value(string type_text, string expr_text, u64 bits) void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    if (!check_env.check_init_of(&e, type_text, expr_text)) {
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    if (!check_env.check_init_of(e, type_text, expr_text)) {
         println("check_float: ", type_text, " probe = ", expr_text, "; did not check clean");
     }
-    assert(check_env.errors(&e) == 0);
+    assert(check_env.errors(e) == 0);
     u64 mut got = 0;
-    bool ok = check_env.init_float(&e, "probe", &got);
+    bool ok = check_env.init_float(e, "probe", &got);
     if (!ok || got != bits) {
         println("value of ", expr_text, " = ", got, " ok ", ok, ", want ", bits);
     }
@@ -69,16 +67,15 @@ fn want_value(string type_text, string expr_text, u64 bits) void {
 
 // The diagnostic that declaration reports.
 fn want_error(string type_text, string expr_text, string text) void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    bool clean = check_env.check_init_of(&e, type_text, expr_text);
-    if (clean || !check_env.said(&e, text)) {
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    bool clean = check_env.check_init_of(e, type_text, expr_text);
+    if (clean || !check_env.said(e, text)) {
         println(type_text, " probe = ", expr_text, "; clean ", clean, ", want ", text);
-        println("  said: ", check_env.report_text(&e, 0));
+        println("  said: ", check_env.report_text(e, 0));
     }
     assert(!clean);
-    assert(check_env.said(&e, text));
+    assert(check_env.said(e, text));
 }
 
 // ---- the types -------------------------------------------------------------------
@@ -166,18 +163,17 @@ fn argument_type(check_env.env mut* e, ast.node* call) string {
 
 // The type the rule gave that argument.
 fn want_default_type(string arg, string want) void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    if (!check_env.check_decls(&e, probe_program(&b, arg))) {
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    if (!check_env.check_decls(e, probe_program(&b, arg))) {
         println("check_float: println(", arg, "); did not check clean");
-        println("  said: ", check_env.report_text(&e, 0));
+        println("  said: ", check_env.report_text(e, 0));
     }
-    assert(check_env.errors(&e) == 0);
-    ast.node* call = check_env.body_expr(&e, "probe", 0);
-    string got = argument_type(&e, call);
+    assert(check_env.errors(e) == 0);
+    ast.node* call = check_env.body_expr(e, "probe", 0);
+    string got = argument_type(e, call);
     if (got != want) {
         println("default type of ", arg, " = ", got, ", want ", want);
     }
@@ -186,18 +182,17 @@ fn want_default_type(string arg, string want) void {
 
 // The diagnostic that argument reports.
 fn want_default_error(string arg, string text) void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    bool clean = check_env.check_decls(&e, probe_program(&b, arg));
-    if (clean || !check_env.said(&e, text)) {
+    defer del(b.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    bool clean = check_env.check_decls(e, probe_program(&b, arg));
+    if (clean || !check_env.said(e, text)) {
         println("println(", arg, "); clean ", clean, ", want ", text);
-        println("  said: ", check_env.report_text(&e, 0));
+        println("  said: ", check_env.report_text(e, 0));
     }
     assert(!clean);
-    assert(check_env.said(&e, text));
+    assert(check_env.said(e, text));
 }
 
 // The second clause of the rule: with no context an untyped float becomes f64.

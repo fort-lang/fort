@@ -12,17 +12,30 @@ import fort.check_stmt;
 import fort.modules;
 import modules_env;
 
+// A checker in an allocation of its own: the test lends it to calls, and gives it no module set.
+fn checker_make() check.checker mut* own {
+    return new(check.checker);
+}
+
+// Ends a checker of checker_make that the caller moves in: the value moves out before the `del` of
+// the allocation, and check.drop frees it.
+fn checker_drop_made(check.checker mut* own p) void {
+    check.checker kept = move(*p);
+    del(p);
+    check.drop(move(kept));
+}
+
 fn main() i32 {
-    modules_env.env mut m = modules_env.open();
-    defer modules_env.close(&m);
-    modules_env.add(&m, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
-    modules_env.add(&m, "util.ft", modules_env.src_add());
-    assert(modules_env.load(&m, "main.ft"));
-    check.checker mut ck = check.checker{};
-    check.check_init(&ck, &m.s);
-    defer check.check_free(&ck);
+    modules_env.env mut* own m = modules_env.make();
+    defer modules_env.drop_made(move(m));
+    modules_env.add(m, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
+    modules_env.add(m, "util.ft", modules_env.src_add());
+    assert(modules_env.load(m, "main.ft"));
+    check.checker mut* own ck = checker_make();
+    defer checker_drop_made(move(ck));
+    check.check_init(ck, &m->s);
     // util imports nothing, so its check reads no module binding
-    println(check_stmt.check_module(&ck, modules.find(&m.set, "util")));
-    check_stmt.check_module(&ck, modules.find(&m.set, "main"));
+    println(check_stmt.check_module(ck, modules.find(&m->set, "util")));
+    check_stmt.check_module(ck, modules.find(&m->set, "main"));
     return 0;
 }

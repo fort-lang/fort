@@ -42,6 +42,11 @@ without a rewrite.
   Stop only a scheduler and child processes that the current agent owns.
   After a stopped scheduler's child finishes, terminate and resume that scheduler to release it.
   Give each retry a distinct receipt path. Do not overwrite the first attempt.
+  A TERM to a guest process can end the ssh of a `tools/vm run` with status 255, and the wrapper
+  then runs the whole command again through `vagrant ssh`. On 2026-11-02 a guest `pkill -f` that
+  stopped a loop also matched the guest shell of its own command, and the command ran a second
+  time: a command that holds `rm -rf` removes its files twice. Stop a guest process by its PID
+  (`ps -eo pid,args`, then `kill -TERM <pid>`) and not by a pattern.
 - **A per-ticket VM (`FORT_VM_DIR="$PWD"` inside a worktree) is retired; use a slot instead**
   (T-114, below). It is kept here as history because its measurements still hold: on 2026-09-12,
   on a host with 10 CPUs and 32 GiB, `FORT_VM_DIR="$PWD" FORT_VM_CPUS=4 FORT_VM_MEMORY=8192

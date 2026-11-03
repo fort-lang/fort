@@ -28,83 +28,83 @@ import std.str;
 // ---- cycles ---------------------------------------------------------------------
 
 fn a_cycle_is_reported_at_the_import_that_closes_it() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import other;\nfn main() i32 { return other.value(); }\n");
-    modules_env.add(&e, "other.ft", "import main;\nfn value() i32 { return 1; }\n");
-    assert(!modules_env.load(&e, "main.ft"));
-    assert(modules_env.said(&e, "circular import: 'main' imports 'other' imports 'main'"));
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import other;\nfn main() i32 { return other.value(); }\n");
+    modules_env.add(e, "other.ft", "import main;\nfn value() i32 { return 1; }\n");
+    assert(!modules_env.load(e, "main.ft"));
+    assert(modules_env.said(e, "circular import: 'main' imports 'other' imports 'main'"));
     // At the import that closes the cycle, which is the one in other.ft.
-    diag.record rec = modules_env.report_at(&e, 0);
+    diag.record rec = modules_env.report_at(e, 0);
     assert(str.find(rec.loc.file, "other.ft") >= 0);
     assert(rec.loc.line == 1);
     assert(rec.loc.col == 1);
 }
 
 fn a_module_importing_itself_is_a_cycle_of_length_one() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import main;\nfn main() i32 { return 0; }\n");
-    assert(!modules_env.load(&e, "main.ft"));
-    assert(modules_env.said(&e, "circular import: 'main' imports 'main'"));
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import main;\nfn main() i32 { return 0; }\n");
+    assert(!modules_env.load(e, "main.ft"));
+    assert(modules_env.said(e, "circular import: 'main' imports 'main'"));
 }
 
 fn a_longer_cycle_names_every_module_on_the_path() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import a;\nfn main() i32 { return 0; }\n");
-    modules_env.add(&e, "a.ft", "import b;\nfn f() i32 { return 0; }\n");
-    modules_env.add(&e, "b.ft", "import a;\nfn g() i32 { return 0; }\n");
-    assert(!modules_env.load(&e, "main.ft"));
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import a;\nfn main() i32 { return 0; }\n");
+    modules_env.add(e, "a.ft", "import b;\nfn f() i32 { return 0; }\n");
+    modules_env.add(e, "b.ft", "import a;\nfn g() i32 { return 0; }\n");
+    assert(!modules_env.load(e, "main.ft"));
     // The walk is named from the module reached again, not from the entry.
-    assert(modules_env.said(&e, "circular import: 'a' imports 'b' imports 'a'"));
+    assert(modules_env.said(e, "circular import: 'a' imports 'b' imports 'a'"));
 }
 
 fn a_diamond_is_not_a_cycle() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add2(&e, "main.ft", "import a;\nimport b;\n", "fn main() i32 { return 0; }\n");
-    modules_env.add(&e, "a.ft", "import c;\nfn f() i32 { return 0; }\n");
-    modules_env.add(&e, "b.ft", "import c;\nfn g() i32 { return 0; }\n");
-    modules_env.add(&e, "c.ft", "fn h() i32 { return 0; }\n");
-    assert(modules_env.load(&e, "main.ft"));
-    assert(modules.count(&e.set) == 4);
-    assert(modules_env.ordered(&e, 0) == "c");
-    assert(modules_env.ordered(&e, 1) == "a");
-    assert(modules_env.ordered(&e, 2) == "b");
-    assert(modules_env.ordered(&e, 3) == "main");
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add2(e, "main.ft", "import a;\nimport b;\n", "fn main() i32 { return 0; }\n");
+    modules_env.add(e, "a.ft", "import c;\nfn f() i32 { return 0; }\n");
+    modules_env.add(e, "b.ft", "import c;\nfn g() i32 { return 0; }\n");
+    modules_env.add(e, "c.ft", "fn h() i32 { return 0; }\n");
+    assert(modules_env.load(e, "main.ft"));
+    assert(modules.count(&e->set) == 4);
+    assert(modules_env.ordered(e, 0) == "c");
+    assert(modules_env.ordered(e, 1) == "a");
+    assert(modules_env.ordered(e, 2) == "b");
+    assert(modules_env.ordered(e, 3) == "main");
 }
 
 // ---- identity by the real path --------------------------------------------------
 
 fn one_file_reached_through_two_paths_is_an_error() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add2(&e, "main.ft", "import sub.x;\nimport x;\n", "fn main() i32 { return 0; }\n");
-    modules_env.add(&e, "sub/x.ft", "fn f() i32 { return 0; }\n");
-    modules_env.root(&e, "sub");
-    assert(!modules_env.load(&e, "main.ft"));
-    assert(modules_env.said(&e, "module 'x' is the same file as module 'sub.x'"));
-    assert(modules_env.said(&e, "both name "));
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add2(e, "main.ft", "import sub.x;\nimport x;\n", "fn main() i32 { return 0; }\n");
+    modules_env.add(e, "sub/x.ft", "fn f() i32 { return 0; }\n");
+    modules_env.root(e, "sub");
+    assert(!modules_env.load(e, "main.ft"));
+    assert(modules_env.said(e, "module 'x' is the same file as module 'sub.x'"));
+    assert(modules_env.said(e, "both name "));
 }
 
 fn a_symbolic_link_reaches_the_same_module() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add2(&e, "main.ft", "import util;\nimport link;\n",
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add2(e, "main.ft", "import util;\nimport link;\n",
                      "fn main() i32 { return 0; }\n");
-    modules_env.add(&e, "util.ft", modules_env.src_add());
+    modules_env.add(e, "util.ft", modules_env.src_add());
     // The target is relative to the directory the link is made in, which is
     // the sandbox itself, so it is the bare file name.
-    string own link_path = modules_env.in_sandbox(&e, "link.ft");
+    string own link_path = modules_env.in_sandbox(e, "link.ft");
     defer del(link_path);
     char mut@ own c_target = str.to_cstr("util.ft");
     defer del(c_target);
     char mut@ own c_link = str.to_cstr(link_path);
     defer del(c_link);
     assert(libc.symlink(c_target.ptr, c_link.ptr) == 0);
-    assert(!modules_env.load(&e, "main.ft"));
-    assert(modules_env.said(&e, "is the same file as module 'util'"));
+    assert(!modules_env.load(e, "main.ft"));
+    assert(modules_env.said(e, "is the same file as module 'util'"));
 }
 
 fn one_module_may_be_imported_under_several_names(modules_env.env mut* e) void {
@@ -144,62 +144,62 @@ fn every_kind_of_declaration_enters_the_namespace(modules_env.env mut* e) void {
 }
 
 fn enum_members_are_not_in_the_namespace() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "enum color { red, green }\nfn main() i32 { return 0; }\n");
-    assert(modules_env.load(&e, "main.ft"));
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "enum color { red, green }\nfn main() i32 { return 0; }\n");
+    assert(modules_env.load(e, "main.ft"));
     // `color.red` is the only spelling, so a scope never holds a member.
-    assert(modules_env.bound(&e, "main", "red") == null);
+    assert(modules_env.bound(e, "main", "red") == null);
 }
 
 fn two_declarations_of_one_name_collide() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add2(&e, "main.ft", "fn add(i32 a) i32 { return a; }\nstruct add { i32 x; }\n",
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add2(e, "main.ft", "fn add(i32 a) i32 { return a; }\nstruct add { i32 x; }\n",
                      "fn main() i32 { return 0; }\n");
-    assert(!modules_env.load(&e, "main.ft"));
-    assert(modules_env.said(&e, "redeclaration of 'add'"));
-    assert(modules_env.said(&e, "previous declaration of 'add' here"));
+    assert(!modules_env.load(e, "main.ft"));
+    assert(modules_env.said(e, "redeclaration of 'add'"));
+    assert(modules_env.said(e, "previous declaration of 'add' here"));
     // The note belongs to the error before it and is not counted.
-    assert(modules_env.errors(&e) == 1);
-    assert(modules_env.reports(&e) == 2);
-    assert(modules_env.report_at(&e, 1).severity == diag.severity.note);
+    assert(modules_env.errors(e) == 1);
+    assert(modules_env.reports(e) == 2);
+    assert(modules_env.report_at(e, 1).severity == diag.severity.note);
 }
 
 fn a_declaration_colliding_with_an_import_is_reported_at_the_declaration() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add2(&e, "main.ft", "import util;\nfn util(i32 a) i32 { return a; }\n",
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add2(e, "main.ft", "import util;\nfn util(i32 a) i32 { return a; }\n",
                      "fn main() i32 { return 0; }\n");
-    modules_env.add(&e, "util.ft", modules_env.src_add());
-    assert(!modules_env.load(&e, "main.ft"));
+    modules_env.add(e, "util.ft", modules_env.src_add());
+    assert(!modules_env.load(e, "main.ft"));
     // The later of the two positions carries the error and the earlier the
     // note, whichever was bound first.
-    assert(modules_env.said(&e, "redeclaration of 'util'"));
-    assert(modules_env.report_at(&e, 0).loc.line == 2);
-    assert(modules_env.report_at(&e, 1).loc.line == 1);
+    assert(modules_env.said(e, "redeclaration of 'util'"));
+    assert(modules_env.report_at(e, 0).loc.line == 2);
+    assert(modules_env.report_at(e, 1).loc.line == 1);
 }
 
 fn two_imports_binding_one_name_collide() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add2(&e, "main.ft", "import util;\nimport other as util;\n",
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add2(e, "main.ft", "import util;\nimport other as util;\n",
                      "fn main() i32 { return 0; }\n");
-    modules_env.add(&e, "util.ft", modules_env.src_add());
-    modules_env.add(&e, "other.ft", "fn one() i32 { return 1; }\n");
-    assert(!modules_env.load(&e, "main.ft"));
-    assert(modules_env.said(&e, "redeclaration of 'util'"));
-    assert(modules_env.report_at(&e, 0).loc.line == 2);
+    modules_env.add(e, "util.ft", modules_env.src_add());
+    modules_env.add(e, "other.ft", "fn one() i32 { return 1; }\n");
+    assert(!modules_env.load(e, "main.ft"));
+    assert(modules_env.said(e, "redeclaration of 'util'"));
+    assert(modules_env.report_at(e, 0).loc.line == 2);
 }
 
 fn a_namespace_holds_the_files_imports_and_its_declarations() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add2(&e, "main.ft", "import util;\nimport util.add as plus;\n",
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add2(e, "main.ft", "import util;\nimport util.add as plus;\n",
                      "fn main() i32 { return plus(1, 2); }\n");
-    modules_env.add(&e, "util.ft", modules_env.src_add());
-    assert(modules_env.load(&e, "main.ft"));
-    modules.module* m = modules.find(&e.set, "main");
+    modules_env.add(e, "util.ft", modules_env.src_add());
+    assert(modules_env.load(e, "main.ft"));
+    modules.module* m = modules.find(&e->set, "main");
     assert(m != null);
     assert(scope.count(&m->names) == 3);
 }
@@ -207,26 +207,26 @@ fn a_namespace_holds_the_files_imports_and_its_declarations() void {
 // ---- the closure ------------------------------------------
 
 fn a_module_with_nothing_in_it_loads_with_an_empty_namespace() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import empty;\nfn main() i32 { return 0; }\n");
-    modules_env.add(&e, "empty.ft", "");
-    assert(modules_env.load(&e, "main.ft"));
-    modules.module* empty = modules.find(&e.set, "empty");
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import empty;\nfn main() i32 { return 0; }\n");
+    modules_env.add(e, "empty.ft", "");
+    assert(modules_env.load(e, "main.ft"));
+    modules.module* empty = modules.find(&e->set, "empty");
     assert(empty != null);
     assert(scope.count(&empty->names) == 0);
 }
 
 fn a_module_is_read_once_however_many_modules_import_it() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add2(&e, "main.ft", "import a;\nimport util;\n", "fn main() i32 { return 0; }\n");
-    modules_env.add(&e, "a.ft", "import util;\nfn f() i32 { return util.add(1, 2); }\n");
-    modules_env.add(&e, "util.ft", modules_env.src_add());
-    assert(modules_env.load(&e, "main.ft"));
-    assert(modules.count(&e.set) == 3);
-    assert(modules.file_count(&e.set) == 3);
-    assert(modules_env.ordered(&e, 0) == "util");
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add2(e, "main.ft", "import a;\nimport util;\n", "fn main() i32 { return 0; }\n");
+    modules_env.add(e, "a.ft", "import util;\nfn f() i32 { return util.add(1, 2); }\n");
+    modules_env.add(e, "util.ft", modules_env.src_add());
+    assert(modules_env.load(e, "main.ft"));
+    assert(modules.count(&e->set) == 3);
+    assert(modules.file_count(&e->set) == 3);
+    assert(modules_env.ordered(e, 0) == "util");
 }
 
 fn the_symbol_reading_works_at_any_depth(modules_env.env mut* e) void {
@@ -250,26 +250,26 @@ fn the_file_of_a_module_is_its_root_joined_path(modules_env.env mut* e) void {
 // <sandbox>/sub/../sub/x.ft and <sandbox>/sub/x.ft are one file, since a
 // module's identity is the real path of its file, `..` resolved.
 fn a_root_spelled_with_dot_dot_reaches_the_same_module() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add2(&e, "main.ft", "import sub.x;\nimport x;\n", "fn main() i32 { return 0; }\n");
-    modules_env.add(&e, "sub/x.ft", "fn f() i32 { return 0; }\n");
-    modules_env.root(&e, "sub/../sub");
-    assert(!modules_env.load(&e, "main.ft"));
-    assert(modules_env.said(&e, "module 'x' is the same file as module 'sub.x'"));
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add2(e, "main.ft", "import sub.x;\nimport x;\n", "fn main() i32 { return 0; }\n");
+    modules_env.add(e, "sub/x.ft", "fn f() i32 { return 0; }\n");
+    modules_env.root(e, "sub/../sub");
+    assert(!modules_env.load(e, "main.ft"));
+    assert(modules_env.said(e, "module 'x' is the same file as module 'sub.x'"));
 }
 
 fn the_notes_of_a_missing_module_name_every_root_and_reading() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import util.strings;\nfn main() i32 { return 0; }\n");
-    modules_env.root(&e, "lib");
-    assert(!modules_env.load(&e, "main.ft"));
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import util.strings;\nfn main() i32 { return 0; }\n");
+    modules_env.root(e, "lib");
+    assert(!modules_env.load(e, "main.ft"));
     // One note appears for each root and reading: two roots and two readings.
     u64 mut notes = 0;
     u64 mut i = 0;
-    while (i < modules_env.reports(&e)) {
-        if (modules_env.report_at(&e, i).severity == diag.severity.note) {
+    while (i < modules_env.reports(e)) {
+        if (modules_env.report_at(e, i).severity == diag.severity.note) {
             notes += 1;
         }
         i += 1;
@@ -280,59 +280,59 @@ fn the_notes_of_a_missing_module_name_every_root_and_reading() void {
 // ---- the pass order -------------------------------------------------------------
 
 fn a_chain_is_ordered_from_the_deepest_module_up() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import a;\nfn main() i32 { return 0; }\n");
-    modules_env.add(&e, "a.ft", "import b;\nfn f() i32 { return 0; }\n");
-    modules_env.add(&e, "b.ft", "import c;\nfn g() i32 { return 0; }\n");
-    modules_env.add(&e, "c.ft", "fn h() i32 { return 0; }\n");
-    assert(modules_env.load(&e, "main.ft"));
-    assert(modules_env.ordered(&e, 0) == "c");
-    assert(modules_env.ordered(&e, 1) == "b");
-    assert(modules_env.ordered(&e, 2) == "a");
-    assert(modules_env.ordered(&e, 3) == "main");
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import a;\nfn main() i32 { return 0; }\n");
+    modules_env.add(e, "a.ft", "import b;\nfn f() i32 { return 0; }\n");
+    modules_env.add(e, "b.ft", "import c;\nfn g() i32 { return 0; }\n");
+    modules_env.add(e, "c.ft", "fn h() i32 { return 0; }\n");
+    assert(modules_env.load(e, "main.ft"));
+    assert(modules_env.ordered(e, 0) == "c");
+    assert(modules_env.ordered(e, 1) == "b");
+    assert(modules_env.ordered(e, 2) == "a");
+    assert(modules_env.ordered(e, 3) == "main");
 }
 
 fn the_pass_order_is_the_dependency_order_when_every_module_loaded() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import a;\nfn main() i32 { return 0; }\n");
-    modules_env.add(&e, "a.ft", "fn f() i32 { return 0; }\n");
-    assert(modules_env.load(&e, "main.ft"));
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import a;\nfn main() i32 { return 0; }\n");
+    modules_env.add(e, "a.ft", "fn f() i32 { return 0; }\n");
+    assert(modules_env.load(e, "main.ft"));
     // A closure that resolved is ordered end to end, so the pass order is the
     // dependency order and nothing more.
-    assert(modules.pass_count(&e.set) == modules.count(&e.set));
-    assert(modules_env.passed(&e, 0) == "a");
-    assert(modules_env.passed(&e, 1) == "main");
-    assert(modules.is_ordered(&e.set, modules.find(&e.set, "main")));
+    assert(modules.pass_count(&e->set) == modules.count(&e->set));
+    assert(modules_env.passed(e, 0) == "a");
+    assert(modules_env.passed(e, 1) == "main");
+    assert(modules.is_ordered(&e->set, modules.find(&e->set, "main")));
 }
 
 fn the_pass_order_ends_with_the_modules_the_loader_never_ordered() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import a;\nfn main() i32 { return 0; }\n");
-    modules_env.add(&e, "a.ft", "import nothere;\nfn f() i32 { return 0; }\n");
-    assert(!modules_env.load(&e, "main.ft"));
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import a;\nfn main() i32 { return 0; }\n");
+    modules_env.add(e, "a.ft", "import nothere;\nfn f() i32 { return 0; }\n");
+    assert(!modules_env.load(e, "main.ft"));
     // `a` never resolved and `main` was never reached, so neither is in the
     // dependency order. Both parsed, so a pass still visits them, the
     // imported module first.
-    assert(modules.count(&e.set) == 0);
-    assert(modules.pass_count(&e.set) == 2);
-    assert(modules_env.passed(&e, 0) == "a");
-    assert(modules_env.passed(&e, 1) == "main");
-    assert(!modules.is_ordered(&e.set, modules.find(&e.set, "main")));
+    assert(modules.count(&e->set) == 0);
+    assert(modules.pass_count(&e->set) == 2);
+    assert(modules_env.passed(e, 0) == "a");
+    assert(modules_env.passed(e, 1) == "main");
+    assert(!modules.is_ordered(&e->set, modules.find(&e->set, "main")));
 }
 
 fn a_module_that_did_not_parse_is_not_in_the_pass_order() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import a;\nfn main() i32 { return 0; }\n");
-    modules_env.add(&e, "a.ft", "fn f() i32 { return 0\n");
-    assert(!modules_env.load(&e, "main.ft"));
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import a;\nfn main() i32 { return 0; }\n");
+    modules_env.add(e, "a.ft", "fn f() i32 { return 0\n");
+    assert(!modules_env.load(e, "main.ft"));
     // A file with a syntax error is not checked, so no pass visits it. The
     // importer that parsed is visited.
-    assert(modules.pass_count(&e.set) == 1);
-    assert(modules_env.passed(&e, 0) == "main");
+    assert(modules.pass_count(&e->set) == 1);
+    assert(modules_env.passed(e, 0) == "main");
 }
 
 // ---- the files the loader read --------------------------------------------------
@@ -341,27 +341,27 @@ fn a_module_that_did_not_parse_is_not_in_the_pass_order() void {
 // closure is complete. The "files" array of the check mode's document tells a
 // client which files it may clear stale diagnostics for.
 fn the_file_list_is_every_file_read_in_read_order() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import a;\nfn main() i32 { return 0; }\n");
-    modules_env.add(&e, "a.ft", "fn f() i32 { return 0\n");
-    assert(!modules_env.load(&e, "main.ft"));
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import a;\nfn main() i32 { return 0; }\n");
+    modules_env.add(e, "a.ft", "fn f() i32 { return 0\n");
+    assert(!modules_env.load(e, "main.ft"));
     // The entry was read first and the module it imports second, and the one
     // that did not parse is listed too.
-    assert(modules.file_count(&e.set) == 2);
-    assert(str.ends_with(modules.file_at(&e.set, 0), "main.ft"));
-    assert(str.ends_with(modules.file_at(&e.set, 1), "a.ft"));
+    assert(modules.file_count(&e->set) == 2);
+    assert(str.ends_with(modules.file_at(&e->set, 0), "main.ft"));
+    assert(str.ends_with(modules.file_at(&e->set, 1), "a.ft"));
 }
 
 // A file that could not be read is not among them: a module is recorded only
 // once its bytes are in hand.
 fn a_file_that_could_not_be_read_is_not_listed() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import nothere;\nfn main() i32 { return 0; }\n");
-    assert(!modules_env.load(&e, "main.ft"));
-    assert(modules.file_count(&e.set) == 1);
-    assert(str.ends_with(modules.file_at(&e.set, 0), "main.ft"));
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import nothere;\nfn main() i32 { return 0; }\n");
+    assert(!modules_env.load(e, "main.ft"));
+    assert(modules.file_count(&e->set) == 1);
+    assert(str.ends_with(modules.file_at(&e->set, 0), "main.ft"));
 }
 
 // ---- lifetime -------------------------------------------------------------------
@@ -369,23 +369,23 @@ fn a_file_that_could_not_be_read_is_not_listed() void {
 // free empties the set and leaves it usable, which is what a second analysis
 // through one value needs.
 fn free_empties_the_set_and_leaves_it_usable() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import util;\nfn main() i32 { return 0; }\n");
-    modules_env.add(&e, "util.ft", modules_env.src_add());
-    assert(modules_env.load(&e, "main.ft"));
-    assert(modules.count(&e.set) == 2);
-    modules.free(&e.set);
-    modules.free(&e.set);
-    assert(modules.count(&e.set) == 0);
-    assert(modules.file_count(&e.set) == 0);
-    assert(modules.pass_count(&e.set) == 0);
-    assert(modules.find(&e.set, "util") == null);
-    assert(modules.entry(&e.set) == null);
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import util;\nfn main() i32 { return 0; }\n");
+    modules_env.add(e, "util.ft", modules_env.src_add());
+    assert(modules_env.load(e, "main.ft"));
+    assert(modules.count(&e->set) == 2);
+    modules.free(&e->set);
+    modules.free(&e->set);
+    assert(modules.count(&e->set) == 0);
+    assert(modules.file_count(&e->set) == 0);
+    assert(modules.pass_count(&e->set) == 0);
+    assert(modules.find(&e->set, "util") == null);
+    assert(modules.entry(&e->set) == null);
     // The same set loads the same closure again, and the roots it was given
     // are gone with the rest.
-    assert(modules_env.load(&e, "main.ft"));
-    assert(modules.count(&e.set) == 2);
+    assert(modules_env.load(e, "main.ft"));
+    assert(modules.count(&e->set) == 2);
 }
 
 // The set owns modules, namespaces, two module-pointer
@@ -400,19 +400,14 @@ fn free_empties_the_set_and_leaves_it_usable() void {
 // same order. A round that keeps a block moves the view by the bytes of that
 // block, however small the block is and wherever the allocator put it.
 //
-// At d2f5b2b6 a deletion of each of these releases moved the live view or
-// stopped the program, under glibc 2.39 and 2.43: `del(set->modules.items)`,
-// `del(set->order.items)` and `del(set->stack.items)` by 7840 bytes or more,
-// `strbuf.free(&set->msg)` by 3136 or more, `containers.pool_free(&set->pool)`
-// by 407680, `ast.ast_arena_free(&set->arena)` by 987840, and `free(&s)` in
-// scope.drop by 28224. A deletion of `strmap.free(&set->by_path)` or
-// `strmap.free(&set->by_real)` stopped the program at a bounds check. The
-// program break and the three addresses that the probe read before then did
-// not see the deletion of `free(&s)` in scope.drop. Under glibc 2.43 they did
-// not see the deletion of `strbuf.free(&set->msg)` or of `del(n->list.items)`
-// in ast.ast_arena_free either.
-// A deletion of the other releases of modules.free moved no view. The
-// compiler refuses a deletion of the `del(m)` of a module (D17.11).
+// Each round ends its set through set_drop_made, so modules.drop holds the releases that the view
+// watches. Each release of modules.drop, scope.drop, ast.arena_drop and containers.pool_drop was
+// deleted one at a time under glibc 2.39 and 2.43. This test turns red for the releases of the
+// namespaces, the vectors of the modules, the order and the stack, the two path maps, the message,
+// the tree arena, the pool, the bindings and the index of a namespace, the list and the node
+// vector of the arena and the bytes of a pool block. The view does not move for the releases of
+// the roots, the used libraries, the outside modules and the listed files. The compiler refuses a
+// deleted `del` of a module, a binding, a node or a pool block (D17.11).
 u64 LEAK_ROUNDS = 200;
 u64 LEAK_EARLY = 100;
 u64 LEAK_BOUND = 1024;
@@ -429,17 +424,31 @@ fn moved(u64 early, u64 late, u64 last) u64 {
     return other;
 }
 
+// A set in an allocation of its own, for a round that loads it through the session of the
+// environment. The round lends the set to calls, and no call changes the `own` pointer.
+fn set_make() modules.module_set mut* own {
+    return new(modules.module_set);
+}
+
+// Ends a set of set_make that the caller moves in: the value moves out before the `del` of the
+// allocation, and modules.drop frees it.
+fn set_drop_made(modules.module_set mut* own p) void {
+    modules.module_set kept = move(*p);
+    del(p);
+    modules.drop(move(kept));
+}
+
 fn everything_a_set_holds_is_released_with_it(modules_env.env mut* e) void {
     modules_env.add(e, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
     modules_env.add(e, "util.ft", modules_env.src_add());
     u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < LEAK_ROUNDS) {
-        modules.module_set mut set = modules.create();
+        modules.module_set mut* own set = set_make();
         string own entry = modules_env.in_sandbox(e, "main.ft");
-        assert(modules.load(&e->s, &set, entry));
+        assert(modules.load(&e->s, set, entry));
         del(entry);
-        modules.free(&set);
+        set_drop_made(move(set));
         u64 mut slot = 3;
         if (round == LEAK_EARLY) {
             slot = 0;

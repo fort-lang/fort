@@ -32,25 +32,24 @@ fn add_each(library_env.env mut* e, string@ files, string@ texts) void {
 // `texts[i]`, built in an environment of its own. `used` is the interface text of `std` that the
 // library uses, or empty for `std` itself.
 fn interface_of(string name, string@ files, string@ texts, string used) string own {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    add_each(&e, files, texts);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    add_each(e, files, texts);
     if (used.len > 0) {
-        library_env.add(&e, "std.ft.txt", used);
-        string own file = modules_env.in_sandbox(&e.m, "std.ft.txt");
+        library_env.add(e, "std.ft.txt", used);
+        string own file = modules_env.in_sandbox(&e->m, "std.ft.txt");
         defer del(file);
-        assert(modules.use_library(&e.m.s, &e.m.set, "std", file, used));
+        assert(modules.use_library(&e->m.s, &e->m.set, "std", file, used));
     }
-    assert(library_env.emit(&e, name, name));
-    return str.dup(library_env.text(&e));
+    assert(library_env.emit(e, name, name));
+    return str.dup(library_env.text(e));
 }
 
 // Adds the interface text `text` to `*e` as the used library `name`, at the file `<name>.ft.txt`
 // of the sandbox.
 fn use(library_env.env mut* e, string name, string text) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, name);
     strbuf.append(&b, ".ft.txt");
     library_env.add(e, strbuf.view(&b), text);
@@ -98,10 +97,10 @@ fn report(library_env.env mut* e, u64 i, strbuf.str_buf mut* out) string {
 // Whether diagnostic `i` is `<where>: <what>`.
 fn report_is(library_env.env mut* e, u64 i, string where, string what) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string got = report(e, i, &b);
     strbuf.str_buf mut w = strbuf.create();
-    defer strbuf.free(&w);
+    defer del(w.data);
     strbuf.append(&w, where);
     strbuf.append(&w, ": ");
     strbuf.append(&w, what);
@@ -128,19 +127,18 @@ string[4] STD_TEXTS = {
 fn the_outside_modules_enter_no_order_of_a_later_pass() void {
     string own std_text = interface_of("std", STD_FILES[..], STD_TEXTS[..], "");
     defer del(std_text);
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    use(&e, "std", std_text);
-    check_closure(&e, "import std.b;\ni32 Y = b.X;\n");
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    use(e, "std", std_text);
+    check_closure(e, "import std.b;\ni32 Y = b.X;\n");
     // the closure: std.rt, std.b and main
-    assert(modules.count(&e.m.set) == 3);
-    u64 passes = modules.pass_count(&e.m.set);
+    assert(modules.count(&e->m.set) == 3);
+    u64 passes = modules.pass_count(&e->m.set);
     string[1] names = {"std"};
-    assert(check_outside(&e, names[..]));
-    assert(modules.count(&e.m.set) == 3);
-    assert(modules.pass_count(&e.m.set) == passes);
-    expect_std_outside(&e.m.set);
+    assert(check_outside(e, names[..]));
+    assert(modules.count(&e->m.set) == 3);
+    assert(modules.pass_count(&e->m.set) == passes);
+    expect_std_outside(&e->m.set);
 }
 
 // Holds the modules outside the closure of `set` after the check of the library std.
@@ -161,27 +159,25 @@ fn expect_std_outside(modules.module_set* set) void {
 fn a_closure_that_holds_every_section_loads_none() void {
     string own std_text = interface_of("std", STD_FILES[..], STD_TEXTS[..], "");
     defer del(std_text);
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    use(&e, "std", std_text);
-    check_closure(&e, "import std.a;\nimport std.b;\ni32 Y = a.A + b.X;\n");
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    use(e, "std", std_text);
+    check_closure(e, "import std.a;\nimport std.b;\ni32 Y = a.A + b.X;\n");
     string[1] names = {"std"};
-    assert(check_outside(&e, names[..]));
-    assert(modules.outside_count(&e.m.set) == 0);
+    assert(check_outside(e, names[..]));
+    assert(modules.outside_count(&e->m.set) == 0);
 }
 
 fn a_name_that_no_library_holds_loads_nothing() void {
     string own std_text = interface_of("std", STD_FILES[..], STD_TEXTS[..], "");
     defer del(std_text);
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    use(&e, "std", std_text);
-    check_closure(&e, "i32 Y = 1;\n");
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    use(e, "std", std_text);
+    check_closure(e, "i32 Y = 1;\n");
     string[1] names = {"geom"};
-    assert(check_outside(&e, names[..]));
-    assert(modules.outside_count(&e.m.set) == 0);
+    assert(check_outside(e, names[..]));
+    assert(modules.outside_count(&e->m.set) == 0);
 }
 
 // An interface text whose first section does not parse. `\x2F` is the second `/` of each header
@@ -196,19 +192,18 @@ string[6] BROKEN_LINES = {
 };
 
 fn a_section_that_does_not_parse_is_reported() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
     library_env.join(BROKEN_LINES[..], &text);
-    use(&e, "std", strbuf.view(&text));
-    check_closure(&e, "i32 Y = 1;\n");
+    use(e, "std", strbuf.view(&text));
+    check_closure(e, "i32 Y = 1;\n");
     string[1] names = {"std"};
-    assert(!modules.load_outside(&e.m.s, &e.m.set, names[..]));
-    assert(library_env.reports(&e) == 1);
-    assert(report_is(&e, 0, "std.ft.txt:4:6", "error: expected a type, found ';'"));
-    assert(modules.outside_count(&e.m.set) == 0);
+    assert(!modules.load_outside(&e->m.s, &e->m.set, names[..]));
+    assert(library_env.reports(e) == 1);
+    assert(report_is(e, 0, "std.ft.txt:4:6", "error: expected a type, found ';'"));
+    assert(modules.outside_count(&e->m.set) == 0);
 }
 
 // ---- the extern check ------------------------------------------------------------------
@@ -231,21 +226,20 @@ string F_NOTE = "note: previous declaration of 'f' here";
 fn an_extern_of_an_unimported_module_is_held_against_the_closure() void {
     string own std_text = interface_of("std", PUTS_FILES[..], PUTS_TEXTS[..], "");
     defer del(std_text);
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    use(&e, "std", std_text);
-    check_closure(&e, "extern fn puts(i32* s) i32;\n");
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    use(e, "std", std_text);
+    check_closure(e, "extern fn puts(i32* s) i32;\n");
     string[1] names = {"std"};
-    assert(!check_outside(&e, names[..]));
+    assert(!check_outside(e, names[..]));
     // Each section of the library declares `puts` in another form than the closure, and each
     // error stands at the section in byte order of the path: std.out before std.pipe, though
     // the checker read std.out first only because std.pipe imports it.
-    assert(library_env.reports(&e) == 4);
-    assert(report_is(&e, 0, "std.ft.txt:5:16", PUTS_CONFLICT));
-    assert(report_is(&e, 1, "main.ft:1:11", PUTS_NOTE));
-    assert(report_is(&e, 2, "std.ft.txt:9:16", PUTS_CONFLICT));
-    assert(report_is(&e, 3, "main.ft:1:11", PUTS_NOTE));
+    assert(library_env.reports(e) == 4);
+    assert(report_is(e, 0, "std.ft.txt:5:16", PUTS_CONFLICT));
+    assert(report_is(e, 1, "main.ft:1:11", PUTS_NOTE));
+    assert(report_is(e, 2, "std.ft.txt:9:16", PUTS_CONFLICT));
+    assert(report_is(e, 3, "main.ft:1:11", PUTS_NOTE));
 }
 
 // The same library, whose module `std.pipe` the byte order puts after `std.out`. The checker
@@ -260,48 +254,45 @@ string[3] LATE_TEXTS = {
 fn the_extern_check_reads_a_library_in_byte_order_of_the_path() void {
     string own std_text = interface_of("std", LATE_FILES[..], LATE_TEXTS[..], "");
     defer del(std_text);
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    use(&e, "std", std_text);
-    check_closure(&e, "extern fn puts(i32* s) i32;\n");
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    use(e, "std", std_text);
+    check_closure(e, "extern fn puts(i32* s) i32;\n");
     string[1] names = {"std"};
-    assert(!check_outside(&e, names[..]));
-    assert(modules_env.path_of(modules.outside_at(&e.m.set, 0)) == "std.z");
-    assert(library_env.reports(&e) == 4);
+    assert(!check_outside(e, names[..]));
+    assert(modules_env.path_of(modules.outside_at(&e->m.set, 0)) == "std.z");
+    assert(library_env.reports(e) == 4);
     // std.a comes before std.z in byte order, though the checker read std.z first
-    assert(report_is(&e, 0, "std.ft.txt:6:16", PUTS_CONFLICT));
-    assert(report_is(&e, 2, "std.ft.txt:11:16", PUTS_CONFLICT));
+    assert(report_is(e, 0, "std.ft.txt:6:16", PUTS_CONFLICT));
+    assert(report_is(e, 2, "std.ft.txt:11:16", PUTS_CONFLICT));
 }
 
 fn an_agreeing_extern_of_an_unimported_module_passes() void {
     string own std_text = interface_of("std", PUTS_FILES[..], PUTS_TEXTS[..], "");
     defer del(std_text);
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    use(&e, "std", std_text);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    use(e, "std", std_text);
     // `u8` and `char` are one C type (D9.8)
-    check_closure(&e, "extern fn puts(u8* s) i32;\n");
+    check_closure(e, "extern fn puts(u8* s) i32;\n");
     string[1] names = {"std"};
-    assert(check_outside(&e, names[..]));
-    assert(library_env.reports(&e) == 0);
-    assert(modules.outside_count(&e.m.set) == 2);
+    assert(check_outside(e, names[..]));
+    assert(library_env.reports(e) == 0);
+    assert(modules.outside_count(&e->m.set) == 2);
 }
 
 fn an_imported_module_is_checked_in_the_closure_alone() void {
     string own std_text = interface_of("std", PUTS_FILES[..], PUTS_TEXTS[..], "");
     defer del(std_text);
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    use(&e, "std", std_text);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    use(e, "std", std_text);
     // the closure holds std.out, which declares `puts` first; std.pipe agrees with it
-    check_closure(&e, "import std.out;\ni32 Y = out.O;\n");
+    check_closure(e, "import std.out;\ni32 Y = out.O;\n");
     string[1] names = {"std"};
-    assert(check_outside(&e, names[..]));
-    assert(modules.outside_count(&e.m.set) == 1);
-    assert(modules_env.path_of(modules.outside_at(&e.m.set, 0)) == "std.pipe");
+    assert(check_outside(e, names[..]));
+    assert(modules.outside_count(&e->m.set) == 1);
+    assert(modules_env.path_of(modules.outside_at(&e->m.set, 0)) == "std.pipe");
 }
 
 // Two libraries `x` and `y` that each declare `f` in another form, and use `std`.
@@ -330,21 +321,19 @@ fn check_two_libraries(library_env.env mut* e, string@ names) void {
 }
 
 fn the_later_library_in_the_given_order_takes_the_error() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
     // the reverse of the link order `x y std`
     string[3] names = {"std", "y", "x"};
-    check_two_libraries(&e, names[..]);
-    assert(report_is(&e, 0, "x.ft.txt:4:13", F_CONFLICT));
-    assert(report_is(&e, 1, "y.ft.txt:4:11", F_NOTE));
-    library_env.env mut other = library_env.env{};
-    library_env.open(&other);
-    defer library_env.close(&other);
+    check_two_libraries(e, names[..]);
+    assert(report_is(e, 0, "x.ft.txt:4:13", F_CONFLICT));
+    assert(report_is(e, 1, "y.ft.txt:4:11", F_NOTE));
+    library_env.env mut* own other = library_env.make();
+    defer library_env.drop_made(move(other));
     string[3] reversed = {"std", "x", "y"};
-    check_two_libraries(&other, reversed[..]);
-    assert(report_is(&other, 0, "y.ft.txt:4:13", F_CONFLICT));
-    assert(report_is(&other, 1, "x.ft.txt:4:11", F_NOTE));
+    check_two_libraries(other, reversed[..]);
+    assert(report_is(other, 0, "y.ft.txt:4:13", F_CONFLICT));
+    assert(report_is(other, 1, "x.ft.txt:4:11", F_NOTE));
 }
 
 // ---- more of the extern check ----------------------------------------------------------
@@ -366,55 +355,50 @@ fn check_zz(library_env.env mut* e, string zz, string client) bool {
 string CELL = "struct cell {\n    i32 v;\n}\nextern fn take(cell* c) void;\n";
 
 fn a_struct_of_another_unit_is_another_type() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
     // one spelling and two declarations: the struct of the client is not the struct of std.zz
-    assert(!check_zz(&e, CELL, CELL));
-    assert(library_env.reports(&e) == 3);
-    assert(report_is(&e, 0, "std.ft.txt:7:16",
+    assert(!check_zz(e, CELL, CELL));
+    assert(library_env.reports(e) == 3);
+    assert(report_is(e, 0, "std.ft.txt:7:16",
                      "error: conflicting declarations of extern 'take': parameter 1 differs"));
-    assert(report_is(&e, 1, "main.ft:4:11", "note: previous declaration of 'take' here"));
-    assert(library_env.said(&e, "a struct or an enum stands here"));
+    assert(report_is(e, 1, "main.ft:4:11", "note: previous declaration of 'take' here"));
+    assert(library_env.said(e, "a struct or an enum stands here"));
 }
 
 fn a_variable_tail_of_another_unit_differs_at_its_mark() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    assert(!check_zz(&e, "extern fn logf(char* f, ...) i32;\n",
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    assert(!check_zz(e, "extern fn logf(char* f, ...) i32;\n",
                      "extern fn logf(char* f) i32;\n"));
-    assert(library_env.reports(&e) == 2);
+    assert(library_env.reports(e) == 2);
     string what =
         "error: conflicting declarations of extern 'logf': the variable-tail mark differs";
-    assert(report_is(&e, 0, "std.ft.txt:6:25", what));
+    assert(report_is(e, 0, "std.ft.txt:6:25", what));
 }
 
 fn a_parameter_count_of_another_unit_differs_at_its_name() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    assert(!check_zz(&e, "extern fn two(i32 a, i32 b) i32;\n", "extern fn two(i32 a) i32;\n"));
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    assert(!check_zz(e, "extern fn two(i32 a, i32 b) i32;\n", "extern fn two(i32 a) i32;\n"));
     string what =
         "error: conflicting declarations of extern 'two': the number of parameters differs";
-    assert(report_is(&e, 0, "std.ft.txt:6:11", what));
+    assert(report_is(e, 0, "std.ft.txt:6:11", what));
 }
 
 fn a_result_of_another_unit_differs_at_its_type() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    assert(!check_zz(&e, "extern fn r(i32 a) i64;\n", "extern fn r(i32 a) i32;\n"));
-    assert(report_is(&e, 0, "std.ft.txt:6:20",
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    assert(!check_zz(e, "extern fn r(i32 a) i64;\n", "extern fn r(i32 a) i32;\n"));
+    assert(report_is(e, 0, "std.ft.txt:6:20",
                      "error: conflicting declarations of extern 'r': the result type differs"));
 }
 
 fn an_own_of_another_unit_differs() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    assert(!check_zz(&e, "extern fn rel(void* own p) void;\n", "extern fn rel(void* p) void;\n"));
-    assert(report_is(&e, 0, "std.ft.txt:6:15",
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    assert(!check_zz(e, "extern fn rel(void* own p) void;\n", "extern fn rel(void* p) void;\n"));
+    assert(report_is(e, 0, "std.ft.txt:6:15",
                      "error: conflicting declarations of extern 'rel': parameter 1 differs"));
 }
 
@@ -431,13 +415,12 @@ fn use_each(library_env.env mut* e, string@ names, string@ texts) void {
 // interface texts are `used_texts`.
 fn interface_against(string name, string@ files, string@ texts, string@ used_names,
                      string@ used_texts) string own {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    add_each(&e, files, texts);
-    use_each(&e, used_names, used_texts);
-    assert(library_env.emit(&e, name, name));
-    return str.dup(library_env.text(&e));
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    add_each(e, files, texts);
+    use_each(e, used_names, used_texts);
+    assert(library_env.emit(e, name, name));
+    return str.dup(library_env.text(e));
 }
 
 string[2] A_FILES = {"a/m.ft", "a/n.ft"};
@@ -457,65 +440,62 @@ fn a_section_outside_may_import_a_section_of_the_closure() void {
     string[2] a_uses = {std_text, a_text};
     string own b_text = interface_against("b", B_FILES[..], B_TEXTS[..], a_names[..], a_uses[..]);
     defer del(b_text);
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    use(&e, "std", std_text);
-    use(&e, "a", a_text);
-    use(&e, "b", b_text);
-    check_closure(&e, "import a.n;\ni32 Y = n.N;\nextern fn g(i32 x) void;\n");
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    use(e, "std", std_text);
+    use(e, "a", a_text);
+    use(e, "b", b_text);
+    check_closure(e, "import a.n;\ni32 Y = n.N;\nextern fn g(i32 x) void;\n");
     string[3] names = {"std", "a", "b"};
-    assert(!check_outside(&e, names[..]));
+    assert(!check_outside(e, names[..]));
     // b.k alone is outside: its import a.n, and a.m behind it, are in the closure
-    assert(modules.outside_count(&e.m.set) == 1);
-    assert(modules_env.path_of(modules.outside_at(&e.m.set, 0)) == "b.k");
-    assert(report_is(&e, 0, "b.ft.txt:6:13",
+    assert(modules.outside_count(&e->m.set) == 1);
+    assert(modules_env.path_of(modules.outside_at(&e->m.set, 0)) == "b.k");
+    assert(report_is(e, 0, "b.ft.txt:6:13",
                      "error: conflicting declarations of extern 'g': parameter 1 differs"));
-    assert(report_is(&e, 1, "main.ft:3:11", "note: previous declaration of 'g' here"));
+    assert(report_is(e, 1, "main.ft:3:11", "note: previous declaration of 'g' here"));
 }
 
 fn an_empty_list_loads_nothing() void {
     string own std_text = interface_of("std", PUTS_FILES[..], PUTS_TEXTS[..], "");
     defer del(std_text);
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    use(&e, "std", std_text);
-    check_closure(&e, "extern fn puts(i32* s) i32;\n");
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    use(e, "std", std_text);
+    check_closure(e, "extern fn puts(i32* s) i32;\n");
     string[1] names = {"std"};
-    assert(check_outside(&e, names[..0]));
-    assert(modules.outside_count(&e.m.set) == 0);
-    assert(library_env.reports(&e) == 0);
+    assert(check_outside(e, names[..0]));
+    assert(modules.outside_count(&e->m.set) == 0);
+    assert(library_env.reports(e) == 0);
 }
 
 fn a_freed_set_holds_no_module_outside_the_closure() void {
     string own std_text = interface_of("std", STD_FILES[..], STD_TEXTS[..], "");
     defer del(std_text);
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    use(&e, "std", std_text);
-    check_closure(&e, "import std.b;\ni32 Y = b.X;\n");
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    use(e, "std", std_text);
+    check_closure(e, "import std.b;\ni32 Y = b.X;\n");
     string[1] names = {"std"};
-    assert(check_outside(&e, names[..]));
-    assert(modules.outside_count(&e.m.set) == 2);
+    assert(check_outside(e, names[..]));
+    assert(modules.outside_count(&e->m.set) == 2);
     // the checker points into the trees, so it goes first
-    check.check_free(&e.ck);
-    check.check_init(&e.ck, &e.m.s);
-    modules.free(&e.m.set);
-    assert(modules.outside_count(&e.m.set) == 0);
-    assert(modules.count(&e.m.set) == 0);
-    assert(!e.m.set.outside);
+    check.check_free(&e->ck);
+    check.check_init(&e->ck, &e->m.s);
+    modules.free(&e->m.set);
+    assert(modules.outside_count(&e->m.set) == 0);
+    assert(modules.count(&e->m.set) == 0);
+    assert(!e->m.set.outside);
     // the set reads again: the closure and the modules outside it. The session keeps the text
     // of each file that it read, so the second entry has a name of its own.
-    use(&e, "std", std_text);
-    library_env.add(&e, "again.ft", "import std.a;\ni32 Y = a.A;\n");
-    assert(modules_env.load(&e.m, "again.ft"));
-    e.ck.require_main = false;
-    assert(check_stmt.check_program(&e.ck, &e.m.set));
-    assert(check_outside(&e, names[..]));
-    assert(modules.outside_count(&e.m.set) == 1);
-    assert(modules_env.path_of(modules.outside_at(&e.m.set, 0)) == "std.b");
+    use(e, "std", std_text);
+    library_env.add(e, "again.ft", "import std.a;\ni32 Y = a.A;\n");
+    assert(modules_env.load(&e->m, "again.ft"));
+    e->ck.require_main = false;
+    assert(check_stmt.check_program(&e->ck, &e->m.set));
+    assert(check_outside(e, names[..]));
+    assert(modules.outside_count(&e->m.set) == 1);
+    assert(modules_env.path_of(modules.outside_at(&e->m.set, 0)) == "std.b");
 }
 
 fn main() i32 {

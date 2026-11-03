@@ -19,22 +19,36 @@ import std.str;
 // candidate file exists before it reads anything. A buffer that stands for no file resolves as
 // an entry file, which is named on the command line, and not as an import.
 
+// A second set in an allocation of its own, for a test that loads it through the session of its
+// environment. The test lends the set to calls, and no call changes the `own` pointer.
+fn set_make() modules.module_set mut* own {
+    return new(modules.module_set);
+}
+
+// Ends a set of set_make that the caller moves in: the value moves out before the `del` of the
+// allocation, and modules.drop frees it.
+fn set_drop_made(modules.module_set mut* own p) void {
+    modules.module_set kept = move(*p);
+    del(p);
+    modules.drop(move(kept));
+}
+
 // ---- the session is where the bytes come from -----------------------------------
 
 // The entry file's bytes are the session's, so a load leaves them in it and a
 // second load of the same closure opens nothing.
 fn a_load_leaves_every_source_in_the_session() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
-    modules_env.add(&e, "util.ft", modules_env.src_add());
-    assert(session.source_count(&e.s) == 0);
-    assert(modules_env.load(&e, "main.ft"));
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
+    modules_env.add(e, "util.ft", modules_env.src_add());
+    assert(session.source_count(&e->s) == 0);
+    assert(modules_env.load(e, "main.ft"));
     // One entry of the source table per file the closure read.
-    assert(session.source_count(&e.s) == 2);
-    string own entry = modules_env.in_sandbox(&e, "main.ft");
+    assert(session.source_count(&e->s) == 2);
+    string own entry = modules_env.in_sandbox(e, "main.ft");
     defer del(entry);
-    assert(session.has_source(&e.s, entry));
+    assert(session.has_source(&e->s, entry));
 }
 
 // The address of the source of `m`: the address of its first byte, because no cast takes a `.ptr`
@@ -52,43 +66,43 @@ fn a_file_is_read_once_for_the_life_of_the_session(modules_env.env mut* e) void 
     defer del(entry);
     assert(modules.load(&e->s, &e->set, entry));
     u64 address = source_address(modules.at(&e->set, 0));
-    modules.module_set mut second = modules.create();
-    defer modules.free(&second);
-    assert(modules.load(&e->s, &second, entry));
-    assert(source_address(modules.at(&second, 0)) == address);
+    modules.module_set mut* own second = set_make();
+    defer set_drop_made(move(second));
+    assert(modules.load(&e->s, second, entry));
+    assert(source_address(modules.at(second, 0)) == address);
     assert(session.source_count(&e->s) == 1);
 }
 
 // The probe of the symbol reading reads through the session too. A file it looked at is
 // remembered and the module reading that follows costs no second read.
 fn the_prefix_probe_reads_through_the_session() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import a.b.c;\nfn main() i32 { return 0; }\n");
-    modules_env.add(&e, "a/b.ft", "fn other() i32 { return 0; }\n");
-    modules_env.add(&e, "a/b/c.ft", "fn f() i32 { return 0; }\n");
-    assert(modules_env.load(&e, "main.ft"));
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import a.b.c;\nfn main() i32 { return 0; }\n");
+    modules_env.add(e, "a/b.ft", "fn other() i32 { return 0; }\n");
+    modules_env.add(e, "a/b/c.ft", "fn f() i32 { return 0; }\n");
+    assert(modules_env.load(e, "main.ft"));
     // The probe reads main.ft, a/b.ft, and
     // a/b/c.ft. Only two files are modules in the closure.
-    assert(session.source_count(&e.s) == 3);
-    assert(modules.file_count(&e.set) == 2);
+    assert(session.source_count(&e->s) == 3);
+    assert(modules.file_count(&e->set) == 2);
 }
 
 // An inactive import performs no source read. The file can exist, but only the
 // entry source reaches the session table and the module closure.
 fn an_inactive_import_does_not_read_its_source() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
     modules_env.add(
-        &e, "main.ft", "$if (false) {\n    import inactive;\n}\nfn main() i32 { return 0; }\n");
-    modules_env.add(&e, "inactive.ft", "fn unused() i32 { return 1; }\n");
-    assert(session.source_count(&e.s) == 0);
-    assert(modules_env.load(&e, "main.ft"));
-    assert(session.source_count(&e.s) == 1);
-    assert(modules.file_count(&e.set) == 1);
-    string own inactive = modules_env.in_sandbox(&e, "inactive.ft");
+        e, "main.ft", "$if (false) {\n    import inactive;\n}\nfn main() i32 { return 0; }\n");
+    modules_env.add(e, "inactive.ft", "fn unused() i32 { return 1; }\n");
+    assert(session.source_count(&e->s) == 0);
+    assert(modules_env.load(e, "main.ft"));
+    assert(session.source_count(&e->s) == 1);
+    assert(modules.file_count(&e->set) == 1);
+    string own inactive = modules_env.in_sandbox(e, "inactive.ft");
     defer del(inactive);
-    assert(!session.has_source(&e.s, inactive));
+    assert(!session.has_source(&e->s, inactive));
 }
 
 // ---- editor buffers -------------------------------------------------------------
@@ -96,58 +110,58 @@ fn an_inactive_import_does_not_read_its_source() void {
 // An entry file installed with set_source is what the analysis reads. And the
 // file on disk is not opened: the text the loader lexes is the buffer's.
 fn an_entry_buffer_is_what_the_analysis_reads() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "fn main() i32 {\n    return 0\n}\n");
-    string own entry = modules_env.in_sandbox(&e, "main.ft");
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "fn main() i32 {\n    return 0\n}\n");
+    string own entry = modules_env.in_sandbox(e, "main.ft");
     defer del(entry);
     // The file on disk has a syntax error. The buffer does not.
-    session.set_source(&e.s, entry, "fn main() i32 {\n    return 0;\n}\n");
-    assert(modules.load(&e.s, &e.set, entry));
-    assert(modules_env.errors(&e) == 0);
+    session.set_source(&e->s, entry, "fn main() i32 {\n    return 0;\n}\n");
+    assert(modules.load(&e->s, &e->set, entry));
+    assert(modules_env.errors(e) == 0);
 }
 
 // An erroneous buffer overrides the clean disk
 // file. This proves that the loader read the buffer.
 fn a_buffer_with_an_error_is_the_one_reported() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", modules_env.src_main());
-    string own entry = modules_env.in_sandbox(&e, "main.ft");
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", modules_env.src_main());
+    string own entry = modules_env.in_sandbox(e, "main.ft");
     defer del(entry);
-    session.set_source(&e.s, entry, "fn main() i32 {\n    return 0\n}\n");
-    assert(!modules.load(&e.s, &e.set, entry));
-    assert(modules_env.errors(&e) == 1);
+    session.set_source(&e->s, entry, "fn main() i32 {\n    return 0\n}\n");
+    assert(!modules.load(&e->s, &e->set, entry));
+    assert(modules_env.errors(e) == 1);
     // Reported against the path the buffer was installed under.
-    assert(str.ends_with(modules_env.report_at(&e, 0).loc.file, "main.ft"));
+    assert(str.ends_with(modules_env.report_at(e, 0).loc.file, "main.ft"));
 }
 
 // An imported module's buffer is read as well, as long as a file of that name exists. The
 // loader looks the candidate up on disk and then reads through the session.
 fn an_imported_buffer_is_read_when_the_file_exists() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
-    modules_env.add(&e, "util.ft", "fn add(i32 a, i32 b) i32 { return a + b\n}\n");
-    string own util = modules_env.in_sandbox(&e, "util.ft");
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
+    modules_env.add(e, "util.ft", "fn add(i32 a, i32 b) i32 { return a + b\n}\n");
+    string own util = modules_env.in_sandbox(e, "util.ft");
     defer del(util);
-    session.set_source(&e.s, util, modules_env.src_add());
-    assert(modules_env.load(&e, "main.ft"));
-    assert(modules_env.errors(&e) == 0);
+    session.set_source(&e->s, util, modules_env.src_add());
+    assert(modules_env.load(e, "main.ft"));
+    assert(modules_env.errors(e) == 0);
 }
 
 // A buffer that stands for no file does not resolve as an import. Existence is asked of the
 // file system, so an unsaved new module is not importable until it is written. This test keeps
 // that limit explicit for server users.
 fn a_buffer_that_is_no_file_does_not_resolve_as_an_import() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import ghost;\nfn main() i32 { return 0; }\n");
-    string own ghost = modules_env.in_sandbox(&e, "ghost.ft");
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import ghost;\nfn main() i32 { return 0; }\n");
+    string own ghost = modules_env.in_sandbox(e, "ghost.ft");
     defer del(ghost);
-    session.set_source(&e.s, ghost, "fn boo() i32 { return 0; }\n");
-    assert(!modules_env.load(&e, "main.ft"));
-    assert(modules_env.said(&e, "module 'ghost' not found"));
+    session.set_source(&e->s, ghost, "fn boo() i32 { return 0; }\n");
+    assert(!modules_env.load(e, "main.ft"));
+    assert(modules_env.said(e, "module 'ghost' not found"));
 }
 
 // ---- what a set shares with a session -------------------------------------------
@@ -162,16 +176,16 @@ fn two_sets_over_one_session_share_only_the_sources(modules_env.env mut* e) void
     defer del(entry);
     string own other = modules_env.in_sandbox(e, "other.ft");
     defer del(other);
-    modules.module_set mut second = modules.create();
-    defer modules.free(&second);
+    modules.module_set mut* own second = set_make();
+    defer set_drop_made(move(second));
     assert(modules.load(&e->s, &e->set, entry));
-    assert(modules.load(&e->s, &second, other));
+    assert(modules.load(&e->s, second, other));
     assert(modules.count(&e->set) == 1);
-    assert(modules.count(&second) == 1);
+    assert(modules.count(second) == 1);
     assert(modules_env.path_of(modules.at(&e->set, 0)) == "main");
-    assert(modules_env.path_of(modules.at(&second, 0)) == "other");
+    assert(modules_env.path_of(modules.at(second, 0)) == "other");
     assert(modules.find(&e->set, "other") == null);
-    assert(modules.find(&second, "main") == null);
+    assert(modules.find(second, "main") == null);
     assert(session.source_count(&e->s) == 2);
 }
 
@@ -179,17 +193,17 @@ fn two_sets_over_one_session_share_only_the_sources(modules_env.env mut* e) void
 // the session's and the modules that pointed into them are gone, which is the
 // order a driver releases them in.
 fn a_set_freed_before_its_session_leaves_the_sources() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", modules_env.src_main());
-    string own entry = modules_env.in_sandbox(&e, "main.ft");
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", modules_env.src_main());
+    string own entry = modules_env.in_sandbox(e, "main.ft");
     defer del(entry);
-    assert(modules.load(&e.s, &e.set, entry));
-    modules.free(&e.set);
-    assert(session.source_count(&e.s) == 1);
-    assert(session.has_source(&e.s, entry));
+    assert(modules.load(&e->s, &e->set, entry));
+    modules.free(&e->set);
+    assert(session.source_count(&e->s) == 1);
+    assert(session.has_source(&e->s, entry));
     string mut text = "";
-    assert(session.read_source(&e.s, entry, &text));
+    assert(session.read_source(&e->s, entry, &text));
     assert(text == modules_env.src_main());
 }
 
@@ -198,23 +212,23 @@ fn a_set_freed_before_its_session_leaves_the_sources() void {
 // Two sessions share nothing: the second reads the file itself and reports
 // its own diagnostics, whatever the first did with the same path.
 fn two_sessions_share_nothing() void {
-    modules_env.env mut first = modules_env.open();
-    defer modules_env.close(&first);
-    modules_env.add(&first, "main.ft", modules_env.src_main());
-    string own entry = modules_env.in_sandbox(&first, "main.ft");
+    modules_env.env mut* own first = modules_env.make();
+    defer modules_env.drop_made(move(first));
+    modules_env.add(first, "main.ft", modules_env.src_main());
+    string own entry = modules_env.in_sandbox(first, "main.ft");
     defer del(entry);
     // The first session analyses a buffer with an error under that path.
-    session.set_source(&first.s, entry, "fn main() i32 {\n    return 0\n}\n");
-    assert(!modules.load(&first.s, &first.set, entry));
-    assert(modules_env.errors(&first) == 1);
+    session.set_source(&first->s, entry, "fn main() i32 {\n    return 0\n}\n");
+    assert(!modules.load(&first->s, &first->set, entry));
+    assert(modules_env.errors(first) == 1);
 
-    session.session mut second = session.create();
-    defer session.free(&second);
-    modules.module_set mut set = modules.create();
-    defer modules.free(&set);
+    session.session mut* own second = session.make();
+    defer session.drop_made(move(second));
+    modules.module_set mut* own set = set_make();
+    defer set_drop_made(move(set));
     // The second knows nothing of that buffer and reads the file.
-    assert(modules.load(&second, &set, entry));
-    assert(session.error_count(&second) == 0);
+    assert(modules.load(second, set, entry));
+    assert(session.error_count(second) == 0);
 }
 
 // A hundred loads through one session neither grow the source table nor
@@ -229,11 +243,11 @@ fn a_hundred_loads_through_one_session_answer_alike(modules_env.env mut* e) void
     defer del(entry);
     u64 mut round = 0;
     while (round < RELOADS) {
-        modules.module_set mut set = modules.create();
-        assert(modules.load(&e->s, &set, entry));
-        assert(modules.count(&set) == 2);
-        assert(modules_env.path_of(modules.at(&set, 0)) == "util");
-        modules.free(&set);
+        modules.module_set mut* own set = set_make();
+        assert(modules.load(&e->s, set, entry));
+        assert(modules.count(set) == 2);
+        assert(modules_env.path_of(modules.at(set, 0)) == "util");
+        set_drop_made(move(set));
         round += 1;
     }
     // The two files were read once between them and nothing was reported.
