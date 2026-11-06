@@ -16,9 +16,8 @@ import lower_env;
 // The six comparisons on a signed and an unsigned integer, a float and a `char`: one rvalue of
 // type `bool`, whose signedness and float form come from the type of the operands.
 fn a_comparison_is_one_rvalue() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[8] source = {
         "fn c(i32 x, i32 y, u64 m, f64 a, char p) bool {",
         "    bool r1 = x < y;",
@@ -71,14 +70,13 @@ fn a_comparison_is_one_rvalue() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "c"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "c"), want[..]);
 }
 
 // `==` and `!=` on an own pointer, which the operands lend (D17.4), on a `bool` and on an enum.
 fn equality_lends_an_owning_operand() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[9] source = {
         "enum color {",
         "    red,",
@@ -114,7 +112,7 @@ fn equality_lends_an_owning_operand() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "q"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "q"), want[..]);
 }
 
 // ---- strings ----------------------------------------------------------------------------------
@@ -123,9 +121,8 @@ fn equality_lends_an_owning_operand() void {
 // is `not` of it. A string constant fills a temporary first, because a constant of an aggregate
 // type fills a place (spec/fir.md 6).
 fn string_equality_calls_the_runtime() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[7] source = {
         "string NAME = \"abc\";",
         "fn s(string a, string b) bool {",
@@ -173,15 +170,14 @@ fn string_equality_calls_the_runtime() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "s"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "s"), want[..]);
 }
 
 // The lowering refuses a string equality in a closure whose runtime has no str_eq, such as a
 // sandbox. A function of that name in another module is not the runtime's.
 fn string_equality_needs_the_runtime() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[6] source = {
         "fn s(string a, string b) bool {",
         "    return a == b;",
@@ -190,7 +186,7 @@ fn string_equality_needs_the_runtime() void {
         "    return false;",
         "}",
     };
-    string got = lower_env.refused_with(&e, source[..], "s", false);
+    string got = lower_env.refused_with(e, source[..], "s", false);
     assert(got == "// not supported: binary at 2:14\n");
 }
 
@@ -200,9 +196,8 @@ fn string_equality_needs_the_runtime() void {
 // `&&` goes to the right operand when its left one is true and `||` when it is false. The inner
 // `&&` makes its temporary after the outer `||` made its own.
 fn and_and_or_assign_one_temporary_in_two_blocks() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[4] source = {
         "fn l(bool a, bool b, bool c) bool {",
         "    bool x = a || b;",
@@ -250,7 +245,7 @@ fn and_and_or_assign_one_temporary_in_two_blocks() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "l"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "l"), want[..]);
 }
 
 // ---- the conditional --------------------------------------------------------------------------
@@ -258,9 +253,8 @@ fn and_and_or_assign_one_temporary_in_two_blocks() void {
 // `c ? a : b` writes a temporary of its type in each arm, and the nested case of the ticket,
 // `(a && b) ? 1 : 2`, switches on the temporary of the `&&`.
 fn a_conditional_writes_its_temporary_in_each_arm() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[4] source = {
         "fn t(bool a, bool b, i32 x) i32 {",
         "    i32 v = a ? x : 2;",
@@ -314,16 +308,15 @@ fn a_conditional_writes_its_temporary_in_each_arm() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "t"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "t"), want[..]);
 }
 
 // Arms that lend give the conditional the lent type, so the temporary owns nothing and a copy
 // fills it. Arms that are owning rvalues or `null` keep `own`, so the temporary owns and `move`
 // reads it (D17.4, spec/fir.md 9.4).
 fn a_conditional_owns_only_when_its_arms_own() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[7] source = {
         "fn own_arms(bool c, u8 mut* own p) u8 mut* own {",
         "    return c ? move(p) : null;",
@@ -355,7 +348,7 @@ fn a_conditional_owns_only_when_its_arms_own() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "own_arms"), owning[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "own_arms"), owning[..]);
     string[26] lending = {
         "fn main.lend_arms(_1 (c): bool, _2 (p): u8 mut* own, _3 (q): u8 mut* own) -> bool {",
         "    let _0: bool;",
@@ -384,7 +377,7 @@ fn a_conditional_owns_only_when_its_arms_own() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "lend_arms"), lending[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "lend_arms"), lending[..]);
 }
 
 // ---- casts ------------------------------------------------------------------------------------
@@ -394,9 +387,8 @@ fn a_conditional_owns_only_when_its_arms_own() void {
 // to a number, so `cast(300, u8)` is the constant `u8 44`. No cast makes a pointer from an integer
 // (D3.14), so a cast to a pointer takes a place.
 fn a_cast_takes_the_operand_of_its_expression() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[7] source = {
         "fn k(i32 x, u8 mut* own p) i64 {",
         "    u64 a = cast(p, u64);",
@@ -440,16 +432,15 @@ fn a_cast_takes_the_operand_of_its_expression() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "k"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "k"), want[..]);
 }
 
 // A cast to an owning type takes `move p` for `move(lv)` and `move _t` for an owning rvalue in a
 // temporary: the inner cast, and the conditional whose arms own. A cast never adds `own`
 // (D3.14), so the owner moves through each cast into the result.
 fn a_cast_to_an_owning_type_moves_its_operand() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[6] source = {
         "fn m(u8 mut* own p) void* own {",
         "    return cast(cast(move(p), u8* own), void* own);",
@@ -472,7 +463,7 @@ fn a_cast_to_an_owning_type_moves_its_operand() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "m"), nested[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "m"), nested[..]);
     string[22] conditional = {
         "fn main.n(_1 (c): bool, _2 (p): u8 mut* own, _3 (q): u8 mut* own) -> u8* own {",
         "    let _0: u8* own;",
@@ -497,7 +488,7 @@ fn a_cast_to_an_owning_type_moves_its_operand() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "n"), conditional[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "n"), conditional[..]);
 }
 
 // ---- nested forms -----------------------------------------------------------------------------
@@ -505,9 +496,8 @@ fn a_cast_to_an_owning_type_moves_its_operand() void {
 // `!=` on two pointers and `==` on a function value and a function, which is a constant. The
 // operands of `&&` are names.
 fn pointers_and_functions_compare_by_value() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[8] source = {
         "fn one() i32 {",
         "    return 1;",
@@ -549,7 +539,7 @@ fn pointers_and_functions_compare_by_value() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "same"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "same"), want[..]);
 }
 
 // A conditional inside an arm of a conditional, and a check inside an arm: each construct makes
@@ -557,9 +547,8 @@ fn pointers_and_functions_compare_by_value() void {
 // the continuation of the check in the other arm. `!` and `~` take the temporary of the
 // operation under them.
 fn nested_forms_make_their_blocks_in_walk_order() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[5] source = {
         "fn nest(bool a, bool b, i32 x, i32 y) i32 {",
         "    bool n = !(a && b);",
@@ -631,15 +620,14 @@ fn nested_forms_make_their_blocks_in_walk_order() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "nest"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "nest"), want[..]);
 }
 
 // An `if` whose arms both end in `return` has a `done` block that no edge reaches, and the
 // statements after the `if` stand in it. The condition is a `&&` of two comparisons.
 fn the_statements_after_an_if_that_returns_stand_in_its_done_block() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[9] source = {
         "fn after(i32 x, i32 y) i32 {",
         "    if (x < y && y < 10) {",
@@ -689,7 +677,7 @@ fn the_statements_after_an_if_that_returns_stand_in_its_done_block() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "after"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "after"), want[..]);
 }
 
 fn main() i32 {

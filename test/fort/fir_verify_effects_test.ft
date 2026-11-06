@@ -118,9 +118,8 @@ fn expect_effects_of(lower_env.env mut* e, string@ text, string@ want_parts) voi
 // ---- the effect list -----------------------------------------------------------------------
 
 fn the_effects_follow_the_items_in_order() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     // a fill, a move that reads and empties before the fill of its destination, a write into a
     // part that fills nothing, a move into a named local, and a `del` of a named local, which
     // is no temporary
@@ -137,7 +136,7 @@ fn the_effects_follow_the_items_in_order() void {
         "}",
         "",
     };
-    expect_effects(&e, moves[..], " bb0.0:f1 bb0.1:r1 bb0.1:e1 bb0.1:f2 bb0.3:r2 bb0.3:e2");
+    expect_effects(e, moves[..], " bb0.0:f1 bb0.1:r1 bb0.1:e1 bb0.1:f2 bb0.3:r2 bb0.3:e2");
     // an index local and a deref pointer are reads; a move through a deref empties nothing; a
     // terminator reads at the position after the last statement
     string[11] places = {
@@ -157,7 +156,7 @@ fn the_effects_follow_the_items_in_order() void {
         " bb0.0:f1 bb0.1:r1 bb0.2:r1 bb0.2:f3 bb0.3:r3 bb0.3:f4 bb0.4:r4 bb0.4:f5",
         " bb0.5:r5 bb1.0:r4",
     };
-    expect_effects_of(&e, places[..], places_want[..]);
+    expect_effects_of(e, places[..], places_want[..]);
     // a move of a part empties the temporary, a move through a deref does not, and a global is
     // no temporary
     string[11] parts = {
@@ -173,7 +172,7 @@ fn the_effects_follow_the_items_in_order() void {
         "",
         "",
     };
-    expect_effects(&e, parts[..],
+    expect_effects(e, parts[..],
                    " bb0.1:f1 bb0.2:r1 bb0.2:f2 bb0.3:f3 bb0.4:r2 bb0.4:e2 bb0.4:f4");
 }
 
@@ -385,9 +384,8 @@ string LETS = "    let _1: u8 mut* own; let _2: u8 mut* own; let _3: u8 mut*; le
 
 // The order of the effects inside a block decides what the next block finds.
 fn a_block_hands_on_the_state_its_last_effect_left() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     // moved and then filled again: the next block reads a filled temporary
     string[8] refilled = {
         "fn main.f() -> void {", LETS,
@@ -396,7 +394,7 @@ fn a_block_hands_on_the_state_its_last_effect_left() void {
         "           _4 = call fn main.take(move _2); return; }",
         "}", "", "",
     };
-    expect_verdict(&e, refilled[..], "none");
+    expect_verdict(e, refilled[..], "none");
     // filled and then moved: the next block reads an emptied temporary
     string[8] emptied = {
         "fn main.f() -> void {", LETS,
@@ -404,7 +402,7 @@ fn a_block_hands_on_the_state_its_last_effect_left() void {
         "    bb1: { _3 = copy _1; _4 = call fn main.take(move _2); return; }",
         "}", "", "", "",
     };
-    expect_verdict(&e, emptied[..], "V12 bb1 0");
+    expect_verdict(e, emptied[..], "V12 bb1 0");
     // one arm moves and the join reads, through a block that changes nothing
     string[9] arm = {
         "fn main.f() -> void {", LETS, "    let _5: bool;",
@@ -415,7 +413,7 @@ fn a_block_hands_on_the_state_its_last_effect_left() void {
         "    bb3: { _4 = call fn main.take(move _1); return; }",
         "}",
     };
-    expect_verdict(&e, arm[..], "V12 bb2 0");
+    expect_verdict(e, arm[..], "V12 bb2 0");
     // a temporary that one arm fills is unassigned at the join for V13
     string[9] fill = {
         "fn main.f() -> void {", "    let _1: i32; let _2: i32; let _3: bool;",
@@ -425,7 +423,7 @@ fn a_block_hands_on_the_state_its_last_effect_left() void {
         "    bb3: { _2 = copy _1; return; }",
         "}", "", "",
     };
-    expect_verdict(&e, fill[..], "V13 bb3 0");
+    expect_verdict(e, fill[..], "V13 bb3 0");
     // both arms fill it, one of them after a move out of it: V13 counts the fill
     string[9] both = {
         "fn main.f() -> void {", LETS, "    let _5: bool;",
@@ -435,7 +433,7 @@ fn a_block_hands_on_the_state_its_last_effect_left() void {
         "    bb3: { _3 = copy _1; _4 = call fn main.take(move _1); return; }",
         "}", "",
     };
-    expect_verdict(&e, both[..], "none");
+    expect_verdict(e, both[..], "none");
 }
 
 fn main() i32 {

@@ -93,17 +93,16 @@ fn constant_is(strbuf.str_buf mut* b, fir.constant c, string want) void {
 fn a_type_prints_as_the_checker_spells_it() void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    types.table mut* tt = fir_env.tt(&e);
-    fir_print.print_type(fir_env.i32_ty(&e), &b);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    types.table mut* tt = fir_env.tt(e);
+    fir_print.print_type(fir_env.i32_ty(e), &b);
     fir_env.expect_text(&b, "i32");
-    fir_print.print_type(types.type_ptr(tt, fir_env.i32_ty(&e), true, true), &b);
+    fir_print.print_type(types.type_ptr(tt, fir_env.i32_ty(e), true, true), &b);
     fir_env.expect_text(&b, "i32 mut* own");
-    fir_print.print_type(types.type_span(tt, fir_env.ty(&e, "pair"), false, false), &b);
+    fir_print.print_type(types.type_span(tt, fir_env.ty(e, "pair"), false, false), &b);
     fir_env.expect_text(&b, "pair@");
-    fir_print.print_type(fir_env.ty(&e, "add"), &b);
+    fir_print.print_type(fir_env.ty(e, "add"), &b);
     fir_env.expect_text(&b, "fn (i32, i64) u64");
 }
 
@@ -112,34 +111,32 @@ fn a_type_prints_as_the_checker_spells_it() void {
 fn a_place_prints_its_base_and_projections() void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     // `x` lives in an allocation, so that the leak rule proves its end: no call changes the
     // pointer, and drop_made holds each release once.
-    fixture mut* own x = make(&e);
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     fir.func mut* f = &x->f;
     // The two bases.
     place_is(x, &b, fir.place_local(1), "_1");
     place_is(x, &b, fir.place_local(0), "_0");
-    place_is(x, &b, fir.place_global(fir_env.sym(&e, "LIMIT")), "global main.LIMIT");
+    place_is(x, &b, fir.place_global(fir_env.sym(e, "LIMIT")), "global main.LIMIT");
     // A field and an index.
     place_is(x, &b, fir.place_field(f, fir.place_local(x->pair_local), 1), "_3.1");
     place_is(x, &b, fir.place_index(f, fir.place_local(x->array_local), x->n), "_5[_6]");
     place_is(x, &b, fir.place_index(f, fir.place_local(x->span_local), x->n), "_8[_6]");
     // A field of a global.
-    fir.place origin = fir.place_global(fir_env.sym(&e, "origin"));
+    fir.place origin = fir.place_global(fir_env.sym(e, "origin"));
     place_is(x, &b, fir.place_field(f, origin, 1), "global main.origin.1");
 }
 
 fn a_deref_wraps_what_comes_before_it() void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     fir.func mut* f = &x->f;
     fir.place target = fir.place_deref(f, fir.place_local(x->ptr_local));
@@ -164,17 +161,16 @@ fn a_deref_wraps_what_comes_before_it() void {
 fn an_operand_prints_its_kind() void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     fir_print.print_operand(&x->f, copy(1), &b);
     fir_env.expect_text(&b, "copy _1");
     fir.place held = fir.place_field(&x->f, fir.place_local(x->holder_local), 0);
     fir_print.print_operand(&x->f, fir.operand_move(held), &b);
     fir_env.expect_text(&b, "move _12.0");
-    fir.constant minus = fir.const_int(fir_env.i32_ty(&e), consts.cv_from_i64(-1));
+    fir.constant minus = fir.const_int(fir_env.i32_ty(e), consts.cv_from_i64(-1));
     fir_print.print_operand(&x->f, fir.operand_const(minus), &b);
     fir_env.expect_text(&b, "const i32 -1");
     fir_print.print_operand(&x->f, fir.operand_const(fir.const_bool(true)), &b);
@@ -184,28 +180,27 @@ fn an_operand_prints_its_kind() void {
 fn an_integer_constant_prints_its_type_and_decimal_value() void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    constant_is(&b, fir.const_int(fir_env.i32_ty(&e), consts.cv_from_i64(-1)), "i32 -1");
-    constant_is(&b, fir.const_int(fir_env.i32_ty(&e), consts.cv_from_i64(0)), "i32 0");
-    types.node* u8t = fir_env.prim_ty(&e, prim.prim_kind.prim_u8);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    constant_is(&b, fir.const_int(fir_env.i32_ty(e), consts.cv_from_i64(-1)), "i32 -1");
+    constant_is(&b, fir.const_int(fir_env.i32_ty(e), consts.cv_from_i64(0)), "i32 0");
+    types.node* u8t = fir_env.prim_ty(e, prim.prim_kind.prim_u8);
     constant_is(&b, fir.const_int(u8t, consts.cv_from_u64(255)), "u8 255");
     // The two ends of the constant range.
-    constant_is(&b, fir.const_int(fir_env.u64_ty(&e), consts.cv_from_u64(18446744073709551615)),
+    constant_is(&b, fir.const_int(fir_env.u64_ty(e), consts.cv_from_u64(18446744073709551615)),
                 "u64 18446744073709551615");
     i64 low = -9223372036854775807 - 1;
-    constant_is(&b, fir.const_int(fir_env.i64_ty(&e), consts.cv_from_i64(low)),
+    constant_is(&b, fir.const_int(fir_env.i64_ty(e), consts.cv_from_i64(low)),
                 "i64 -9223372036854775808");
     // No constant holds a negative zero: consts.int_make clears `neg` when the magnitude is 0,
     // and every integer constant comes from it. So the negation of 0 prints `0`.
     consts.cval mut minus_zero = consts.cv_none();
     assert(consts.cv_neg(consts.cv_from_i64(0), &minus_zero));
     assert(!minus_zero.neg);
-    constant_is(&b, fir.const_int(fir_env.i32_ty(&e), minus_zero), "i32 0");
+    constant_is(&b, fir.const_int(fir_env.i32_ty(e), minus_zero), "i32 0");
     // A `char` prints its code point, and an enum its value.
-    constant_is(&b, fir.const_int(fir_env.char_ty(&e), consts.cv_from_char(65)), "char 65");
-    constant_is(&b, fir.const_int(fir_env.ty(&e, "color"), consts.cv_from_u64(1)), "color 1");
+    constant_is(&b, fir.const_int(fir_env.char_ty(e), consts.cv_from_char(65)), "char 65");
+    constant_is(&b, fir.const_int(fir_env.ty(e, "color"), consts.cv_from_u64(1)), "color 1");
 }
 
 fn a_boolean_constant_prints_its_word() void {
@@ -219,11 +214,10 @@ fn a_boolean_constant_prints_its_word() void {
 fn a_float_constant_prints_its_bit_pattern() void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    types.node* f64t = fir_env.prim_ty(&e, prim.prim_kind.prim_f64);
-    types.node* f32t = fir_env.prim_ty(&e, prim.prim_kind.prim_f32);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    types.node* f64t = fir_env.prim_ty(e, prim.prim_kind.prim_f64);
+    types.node* f32t = fir_env.prim_ty(e, prim.prim_kind.prim_f32);
     // 1.5
     constant_is(&b, fir.const_float(f64t, consts.cv_from_float(0x3FF8000000000000)),
                 "f64 0x3FF8000000000000");
@@ -236,14 +230,13 @@ fn a_float_constant_prints_its_bit_pattern() void {
 fn a_null_and_a_zero_constant_print_their_type() void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    types.table mut* tt = fir_env.tt(&e);
-    types.node* pair_ptr = types.type_ptr(tt, fir_env.ty(&e, "pair"), false, true);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    types.table mut* tt = fir_env.tt(e);
+    types.node* pair_ptr = types.type_ptr(tt, fir_env.ty(e, "pair"), false, true);
     constant_is(&b, fir.const_null(pair_ptr), "null pair mut*");
-    constant_is(&b, fir.const_zero(fir_env.ty(&e, "pair")), "zero pair");
-    constant_is(&b, fir.const_zero(types.type_ptr(tt, fir_env.i32_ty(&e), true, true)),
+    constant_is(&b, fir.const_zero(fir_env.ty(e, "pair")), "zero pair");
+    constant_is(&b, fir.const_zero(types.type_ptr(tt, fir_env.i32_ty(e), true, true)),
                 "zero i32 mut* own");
 }
 
@@ -270,15 +263,14 @@ fn a_string_constant_escapes_its_bytes() void {
 fn a_symbol_constant_prints_the_dotted_name() void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    types.node* member = types.type_ptr(fir_env.tt(&e), fir_env.ty(&e, "enum_member"), false,
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    types.node* member = types.type_ptr(fir_env.tt(e), fir_env.ty(e, "enum_member"), false,
                                         false);
-    constant_is(&b, fir.const_enum_table(fir_env.sym(&e, "color"), member),
+    constant_is(&b, fir.const_enum_table(fir_env.sym(e, "color"), member),
                 "enum_table main.color");
-    constant_is(&b, fir.const_fn(fir_env.sym(&e, "add")), "fn main.add");
-    constant_is(&b, fir.const_fn(fir_env.sym(&e, "stop")), "fn main.stop");
+    constant_is(&b, fir.const_fn(fir_env.sym(e, "add")), "fn main.add");
+    constant_is(&b, fir.const_fn(fir_env.sym(e, "stop")), "fn main.stop");
 }
 
 // ---- rvalues --------------------------------------------------------------------------------
@@ -401,17 +393,16 @@ fn sample(fir_env.env mut* e, fixture mut* x, fir.rvalue_kind kind, fir.rvalue m
 fn every_rvalue_kind_prints_its_spelling() void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     u32 last = cast(fir.rvalue_kind.rv_call, u32);
     u32 mut k = 0;
     while (k <= last) {
         fir.rvalue_kind kind = cast(k, fir.rvalue_kind);
         fir.rvalue mut r = fir.rvalue{};
-        string want = sample(&e, x, kind, &r);
+        string want = sample(e, x, kind, &r);
         assert(r.kind == kind);
         fir_print.print_rvalue(&x->f, r, &b);
         fir_env.expect_text(&b, want);
@@ -424,14 +415,13 @@ fn every_rvalue_kind_prints_its_spelling() void {
 fn a_call_prints_its_callee() void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     fir.func mut* f = &x->f;
     u32 text = fir.operand_push(f, fir.operand_const(fir.const_bytes("hi")));
-    fir_print.print_rvalue(f, fir.rvalue_call_extern(fir_env.sym(&e, "puts"), text, 1), &b);
+    fir_print.print_rvalue(f, fir.rvalue_call_extern(fir_env.sym(e, "puts"), text, 1), &b);
     fir_env.expect_text(&b, "call extern puts(const bytes \"hi\")");
     u32 args = fir.operand_push(f, copy(1));
     fir.operand_push(f, copy(2));
@@ -439,10 +429,10 @@ fn a_call_prints_its_callee() void {
     fir_env.expect_text(&b, "call copy _9(copy _1, copy _2)");
     // A call with no argument.
     u32 none = next_operand(f);
-    fir_print.print_rvalue(f, fir.rvalue_call_fn(fir_env.sym(&e, "nothing"), none, 0), &b);
+    fir_print.print_rvalue(f, fir.rvalue_call_fn(fir_env.sym(e, "nothing"), none, 0), &b);
     fir_env.expect_text(&b, "call fn main.nothing()");
     // A function constant as the callee operand.
-    fir.operand callee = fir.operand_const(fir.const_fn(fir_env.sym(&e, "make")));
+    fir.operand callee = fir.operand_const(fir.const_fn(fir_env.sym(e, "make")));
     fir_print.print_rvalue(f, fir.rvalue_call_value(callee, none, 0), &b);
     fir_env.expect_text(&b, "call const fn main.make()");
 }
@@ -450,18 +440,17 @@ fn a_call_prints_its_callee() void {
 fn the_edge_forms_of_an_rvalue_print_in_full() void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     fir.func mut* f = &x->f;
     // An aggregate with no member, such as a struct with no field, has empty parentheses.
     u32 none = next_operand(f);
-    fir_print.print_rvalue(f, fir.rvalue_aggregate_new(fir_env.ty(&e, "pair"), none, 0), &b);
+    fir_print.print_rvalue(f, fir.rvalue_aggregate_new(fir_env.ty(e, "pair"), none, 0), &b);
     fir_env.expect_text(&b, "aggregate pair()");
     // The use of a constant and of a move.
-    fir.constant zero = fir.const_zero(fir_env.ty(&e, "pair"));
+    fir.constant zero = fir.const_zero(fir_env.ty(e, "pair"));
     fir_print.print_rvalue(f, fir.rvalue_use(f, fir.operand_const(zero)), &b);
     fir_env.expect_text(&b, "const zero pair");
     fir_print.print_rvalue(f, fir.rvalue_use(f, fir.operand_move(fir.place_local(3))), &b);
@@ -474,10 +463,10 @@ fn the_edge_forms_of_an_rvalue_print_in_full() void {
     fir_print.print_rvalue(f, fir.rvalue_slice(f, text, copy(x->n), copy(x->n), false), &b);
     fir_env.expect_text(&b, "slice(_7, copy _6, copy _6)");
     // A cast to an aggregate type and an alloc of a pointer type spell the type in full.
-    types.node* span = types.type_span(fir_env.tt(&e), fir_env.i32_ty(&e), false, true);
+    types.node* span = types.type_span(fir_env.tt(e), fir_env.i32_ty(e), false, true);
     fir_print.print_rvalue(f, fir.rvalue_cast(f, span, copy(x->span_local)), &b);
     fir_env.expect_text(&b, "cast<i32 mut@>(copy _8)");
-    types.node* ptr = types.type_ptr(fir_env.tt(&e), fir_env.i32_ty(&e), true, true);
+    types.node* ptr = types.type_ptr(fir_env.tt(e), fir_env.i32_ty(e), true, true);
     fir_print.print_rvalue(f, fir.rvalue_alloc(f, ptr, copy(x->n)), &b);
     fir_env.expect_text(&b, "alloc<i32 mut* own>(copy _6)");
 }
@@ -487,10 +476,9 @@ fn the_edge_forms_of_an_rvalue_print_in_full() void {
 fn mut_marks_addr_and_slice() void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     fir.func mut* f = &x->f;
     fir.place field = fir.place_field(f, fir.place_local(x->pair_local), 1);
@@ -502,14 +490,14 @@ fn mut_marks_addr_and_slice() void {
     fir_print.print_rvalue(f, fir.rvalue_addr(f, target, true), &b);
     fir_env.expect_text(&b, "addr mut((*_4))");
     fir.place cells = fir.place_local(x->array_local);
-    fir.rvalue whole = fir.rvalue_slice(f, cells, u64_const(&e, 0), copy(x->n), true);
+    fir.rvalue whole = fir.rvalue_slice(f, cells, u64_const(e, 0), copy(x->n), true);
     fir_print.print_rvalue(f, whole, &b);
     fir_env.expect_text(&b, "slice mut(_5, const u64 0, copy _6)");
-    fir.rvalue view = fir.rvalue_slice(f, cells, u64_const(&e, 0), copy(x->n), false);
+    fir.rvalue view = fir.rvalue_slice(f, cells, u64_const(e, 0), copy(x->n), false);
     fir_print.print_rvalue(f, view, &b);
     fir_env.expect_text(&b, "slice(_5, const u64 0, copy _6)");
     // No other rvalue writes `mut`, whatever the field holds.
-    fir.rvalue mut cast_mut = fir.rvalue_cast(f, fir_env.i64_ty(&e), copy(1));
+    fir.rvalue mut cast_mut = fir.rvalue_cast(f, fir_env.i64_ty(e), copy(1));
     cast_mut.is_mut = true;
     fir_print.print_rvalue(f, cast_mut, &b);
     fir_env.expect_text(&b, "cast<i64>(copy _1)");
@@ -523,10 +511,9 @@ fn mut_marks_addr_and_slice() void {
 fn a_printer_appends_to_the_buffer() void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     strbuf.append(&b, "<");
     fir_print.print_operand(&x->f, copy(2), &b);

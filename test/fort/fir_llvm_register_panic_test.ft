@@ -28,23 +28,22 @@ string[10] TEXT = {
 
 // A panic ends the program, so the case stands in a file of its own.
 fn main() i32 {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[1] prelude = {"i32 UNUSED = 0;"};
     // `m` lives in an allocation, so that the leak rule proves its end: no call changes the
     // pointer, and drop_made holds each release once.
     fir.module mut* own m = fir.module_make();
-    *m = llvm_env.parse(&e, prelude[..], TEXT[..]);
+    *m = llvm_env.parse(e, prelude[..], TEXT[..]);
     defer fir.module_drop_made(move(m));
     fir.func* f = fir.module_function_at(m, 0);
     assert(llvm_env.storage_of(f, 1) == fir_llvm.storage.sk_register);
     // in order, the store of `_0` names the constant that `_1` holds
     string[1] want = {"  store i32 7, ptr %result, align 4"};
     string[3] whole = {"entry:", "  %result = alloca i32, align 4", want[0]};
-    llvm_env.expect(&e, llvm_env.translate(&e, f), whole[..]);
+    llvm_env.expect(e, llvm_env.translate(e, f), whole[..]);
     println("in order");
     // the second statement alone reads `_1` before its assignment
-    llvm_env.statement_text(&e, f, 0, 1);
+    llvm_env.statement_text(e, f, 0, 1);
     return 0;
 }

@@ -25,13 +25,12 @@ fn int_value(u64 v) consts.cval {
 // ---- constructors and targets -----------------------------------------------------------
 
 fn a_goto_names_its_target() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     // `f` lives in an allocation, so that the leak rule proves its end: no call changes the
     // pointer, and drop_made holds each release once.
     fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(&e, "add");
+    *f = fir_env.func_of(e, "add");
     defer fir.func_drop_made(move(f));
     fir.terminator t = fir.term_goto(3, fir_env.at(4, 2), 5);
     assert(t.kind == fir.term_kind.tk_goto);
@@ -44,11 +43,10 @@ fn a_goto_names_its_target() void {
 }
 
 fn a_switch_names_its_arms_then_otherwise() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(&e, "add");
+    *f = fir_env.func_of(e, "add");
     defer fir.func_drop_made(move(f));
     u32 first = fir.arm_push(f, int_value(1), 4);
     fir.arm_push(f, int_value(2), 2);
@@ -72,11 +70,10 @@ fn a_switch_names_its_arms_then_otherwise() void {
 }
 
 fn a_check_names_its_continuation() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(&e, "add");
+    *f = fir_env.func_of(e, "add");
     defer fir.func_drop_made(move(f));
     u32 first = fir.operand_push(f, copy(1));
     fir.operand_push(f, copy(2));
@@ -93,11 +90,10 @@ fn a_check_names_its_continuation() void {
 }
 
 fn an_overwrite_check_names_its_place_and_its_continuation() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(&e, "keep");
+    *f = fir_env.func_of(e, "keep");
     defer fir.func_drop_made(move(f));
     fir.place held = fir.place_field(f, fir.place_local(1), 0);
     fir.terminator t = fir.term_check_overwrite(held, 2, fir_env.at(3, 3), 3);
@@ -110,11 +106,10 @@ fn an_overwrite_check_names_its_place_and_its_continuation() void {
 }
 
 fn return_fail_trap_and_unreachable_name_no_block() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(&e, "add");
+    *f = fir_env.func_of(e, "add");
     defer fir.func_drop_made(move(f));
     u32 first = fir.operand_push(f, fir.operand_const(fir.const_bytes("x")));
     fir.terminator[4] ends = {
@@ -237,36 +232,35 @@ fn row(fir_env.env mut* e, fir.check_kind kind, string name, string sig, bool bo
 }
 
 fn every_check_kind_calls_its_runtime_entry() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     u32 mut rows = 0;
     fn (char*, u32, u32) noreturn overflow = rt.fail_overflow;
-    row(&e, fir.check_kind.chk_overflow, "fail_overflow", "fn (char*, u32, u32) noreturn",
+    row(e, fir.check_kind.chk_overflow, "fail_overflow", "fn (char*, u32, u32) noreturn",
         overflow != null);
     rows += 1;
     fn (i64, char*, char*, u32, u32) noreturn shift = rt.fail_shift;
-    row(&e, fir.check_kind.chk_shift, "fail_shift",
+    row(e, fir.check_kind.chk_shift, "fail_shift",
         "fn (i64, char*, char*, u32, u32) noreturn", shift != null);
     rows += 1;
     fn (char*, u32, u32) noreturn div_zero = rt.fail_div_zero;
-    row(&e, fir.check_kind.chk_div_zero, "fail_div_zero", "fn (char*, u32, u32) noreturn",
+    row(e, fir.check_kind.chk_div_zero, "fail_div_zero", "fn (char*, u32, u32) noreturn",
         div_zero != null);
     rows += 1;
     fn (char*, u32, u32) noreturn div_overflow = rt.fail_div_overflow;
-    row(&e, fir.check_kind.chk_div_overflow, "fail_div_overflow",
+    row(e, fir.check_kind.chk_div_overflow, "fail_div_overflow",
         "fn (char*, u32, u32) noreturn", div_overflow != null);
     rows += 1;
     fn (i64, u64, char*, u32, u32) noreturn bounds = rt.fail_bounds;
-    row(&e, fir.check_kind.chk_bounds, "fail_bounds", "fn (i64, u64, char*, u32, u32) noreturn",
+    row(e, fir.check_kind.chk_bounds, "fail_bounds", "fn (i64, u64, char*, u32, u32) noreturn",
         bounds != null);
     rows += 1;
     fn (i64, i64, u64, char*, u32, u32) noreturn span = rt.fail_span;
-    row(&e, fir.check_kind.chk_span, "fail_span",
+    row(e, fir.check_kind.chk_span, "fail_span",
         "fn (i64, i64, u64, char*, u32, u32) noreturn", span != null);
     rows += 1;
     fn (i64, char*, u32, u32) noreturn alloc_count = rt.fail_alloc_count;
-    row(&e, fir.check_kind.chk_alloc_count, "fail_alloc_count",
+    row(e, fir.check_kind.chk_alloc_count, "fail_alloc_count",
         "fn (i64, char*, u32, u32) noreturn", alloc_count != null);
     rows += 1;
     // The overwrite check names no runtime entry: the emptiness pass proves it, and the build-mode
@@ -275,15 +269,15 @@ fn every_check_kind_calls_its_runtime_entry() void {
     assert(fir.check_reported_count(fir.check_kind.chk_overwrite) == 0);
     rows += 1;
     fn (i64, char*, char*, u32, u32) noreturn bad_enum = rt.fail_enum;
-    row(&e, fir.check_kind.chk_enum, "fail_enum", "fn (i64, char*, char*, u32, u32) noreturn",
+    row(e, fir.check_kind.chk_enum, "fail_enum", "fn (i64, char*, char*, u32, u32) noreturn",
         bad_enum != null);
     rows += 1;
     fn (char*, char*, u32, u32) noreturn user = rt.assert_fail;
-    row(&e, fir.check_kind.chk_user, "assert_fail", "fn (char*, char*, u32, u32) noreturn",
+    row(e, fir.check_kind.chk_user, "assert_fail", "fn (char*, char*, u32, u32) noreturn",
         user != null);
     rows += 1;
     fn (string, char*, u32, u32) noreturn stop = rt.panic;
-    row(&e, fir.check_kind.chk_panic, "panic", "fn (string, char*, u32, u32) noreturn",
+    row(e, fir.check_kind.chk_panic, "panic", "fn (string, char*, u32, u32) noreturn",
         stop != null);
     rows += 1;
     assert(rows == CHECK_KINDS);
@@ -291,11 +285,10 @@ fn every_check_kind_calls_its_runtime_entry() void {
 }
 
 fn a_reported_text_is_the_interned_char_pointer() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    types.table mut* tt = fir_env.tt(&e);
-    assert(fir.check_reported(fir.check_kind.chk_user, 0, tt) == fir_env.char_ptr(&e));
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    types.table mut* tt = fir_env.tt(e);
+    assert(fir.check_reported(fir.check_kind.chk_user, 0, tt) == fir_env.char_ptr(e));
     // The message of `panic` is one `string`, and nothing follows it.
     types.node* message = fir.check_reported(fir.check_kind.chk_panic, 0, tt);
     assert(message == types.type_string(tt, false));
@@ -364,10 +357,9 @@ fn reads_place(fir.func* f, fir.terminator* t, u32 k, fir.place want) bool {
 }
 
 fn a_switch_reads_its_operand_after_its_index_local() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    reader mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    reader mut* own x = make(e);
     defer drop_made(move(x));
     // `switch(copy _a[_i])`: `_i`, then `_a[_i]`.
     fir.place elem = fir.place_index(&x->f, fir.place_local(x->a), x->i);
@@ -382,10 +374,9 @@ fn a_switch_reads_its_operand_after_its_index_local() void {
 }
 
 fn a_check_reads_its_condition_then_its_reported_operands() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    reader mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    reader mut* own x = make(e);
     defer drop_made(move(x));
     // `check(copy _flag, enum, copy _a[_j], bytes "color")`: `_flag`, `_j`, `_a[_j]`.
     fir.place elem = fir.place_index(&x->f, fir.place_local(x->a), x->j);
@@ -405,10 +396,9 @@ fn a_check_reads_its_condition_then_its_reported_operands() void {
 }
 
 fn an_overwrite_check_reads_its_place_after_its_index_locals() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    reader mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    reader mut* own x = make(e);
     defer drop_made(move(x));
     // `check(overwrite: _holders[_i].0)` reads `_i`, then the place, whose pointer word the check
     // loads (spec/fir.md 12.4). Section 14 counts the test as no use of the place.
@@ -443,14 +433,13 @@ fn reads_same(fir.func* f, fir.terminator* t, u32 k, fir.place want) bool {
 // header before each index on a span. Those loads are uses, and they come before the test of `p`,
 // which is no use.
 fn an_overwrite_check_reads_the_pointers_of_its_address_as_uses() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    reader mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    reader mut* own x = make(e);
     defer drop_made(move(x));
-    types.table mut* tt = fir_env.tt(&e);
+    types.table mut* tt = fir_env.tt(e);
     // `check(overwrite: (*_p).0)` with `_p: holder mut*`: `_p`, then `(*_p).0`.
-    u32 p = temp(&x->f, types.type_ptr(tt, fir_env.ty(&e, "holder"), false, true));
+    u32 p = temp(&x->f, types.type_ptr(tt, fir_env.ty(e, "holder"), false, true));
     fir.place held = fir.place_field(&x->f, fir.place_deref(&x->f, fir.place_local(p)), 0);
     fir.terminator t = fir.term_check_overwrite(held, 1, fir_env.at(1, 1), 1);
     assert(reads(&x->f, &t) == 2);
@@ -463,7 +452,7 @@ fn an_overwrite_check_reads_the_pointers_of_its_address_as_uses() void {
     assert(!fir.term_read(&x->f, &t, 2, &r));
     // `check(overwrite: _s[_i])` with `_s: u8 mut* own mut@`: `_i`, then the header `_s`, then
     // `_s[_i]`.
-    types.node* u8_ty = fir_env.prim_ty(&e, prim.prim_kind.prim_u8);
+    types.node* u8_ty = fir_env.prim_ty(e, prim.prim_kind.prim_u8);
     types.node* owner = types.type_ptr(tt, u8_ty, true, true);
     u32 s = temp(&x->f, types.type_span(tt, owner, false, true));
     fir.place slot = fir.place_index(&x->f, fir.place_local(s), x->i);
@@ -479,7 +468,7 @@ fn an_overwrite_check_reads_the_pointers_of_its_address_as_uses() void {
     r = fir.read{.empties = true, .is_use = true};
     assert(fir.term_read(&x->f, &u, 2, &r) && !r.is_use && !r.empties);
     // a span in a field of a struct behind a pointer: `_q`, then `(*_q).0`, the header
-    types.node* box = types.type_ptr(tt, fir_env.ty(&e, "viewer"), false, true);
+    types.node* box = types.type_ptr(tt, fir_env.ty(e, "viewer"), false, true);
     u32 q = temp(&x->f, box);
     fir.place items = fir.place_field(&x->f, fir.place_deref(&x->f, fir.place_local(q)), 0);
     fir.place cell = fir.place_index(&x->f, items, x->j);
@@ -494,10 +483,9 @@ fn an_overwrite_check_reads_the_pointers_of_its_address_as_uses() void {
 }
 
 fn a_move_in_a_terminator_empties_its_place() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    reader mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    reader mut* own x = make(e);
     defer drop_made(move(x));
     // V6 refuses a `move` in a terminator; the read reports it all the same
     fir.place row = fir.place_index(&x->f, fir.place_local(x->holders), x->i);
@@ -511,10 +499,9 @@ fn a_move_in_a_terminator_empties_its_place() void {
 }
 
 fn every_other_read_of_a_terminator_is_a_use() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    reader mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    reader mut* own x = make(e);
     defer drop_made(move(x));
     // `check(copy _flag, enum, copy _a[_j], bytes "color")` and `return`
     fir.place elem = fir.place_index(&x->f, fir.place_local(x->a), x->j);
@@ -535,25 +522,23 @@ fn every_other_read_of_a_terminator_is_a_use() void {
 }
 
 fn a_return_reads_the_return_place_unless_it_is_void() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    reader mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    reader mut* own x = make(e);
     defer drop_made(move(x));
     fir.terminator ret = fir.term_return(fir_env.at(1, 1), 1);
     assert(reads(&x->f, &ret) == 1);
     assert(reads_local(&x->f, &ret, 0, 0));
     fir.func mut* own g = fir.func_make();
-    *g = fir_env.func_of(&e, "nothing");
+    *g = fir_env.func_of(e, "nothing");
     defer fir.func_drop_made(move(g));
     assert(reads(g, &ret) == 0);
 }
 
 fn goto_trap_and_unreachable_read_nothing() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    reader mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    reader mut* own x = make(e);
     defer drop_made(move(x));
     fir.terminator jump = fir.term_goto(1, fir_env.at(1, 1), 1);
     fir.terminator trap = fir.term_trap(fir_env.at(1, 1), 1);

@@ -127,31 +127,29 @@ fn sample(fir_env.env mut* e, fixture mut* x, fir.rvalue_kind kind, fir.rvalue m
 }
 
 fn every_kind_has_its_result_type() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     // `x` lives in an allocation, so that the leak rule proves its end: no call changes the
     // pointer, and drop_made holds each release once.
-    fixture mut* own x = make(&e);
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     u32 last = cast(fir.rvalue_kind.rv_call, u32);
     u32 mut k = 0;
     while (k <= last) {
         fir.rvalue_kind kind = cast(k, fir.rvalue_kind);
         fir.rvalue mut r = fir.rvalue{};
-        string want = sample(&e, x, kind, &r);
+        string want = sample(e, x, kind, &r);
         assert(r.kind == kind);
-        fir_env.expect(&e, fir.rvalue_type(&x->f, r), want);
+        fir_env.expect(e, fir.rvalue_type(&x->f, r), want);
         k += 1;
     }
     println(k, " kinds");
 }
 
 fn a_binary_rvalue_keeps_its_two_operands_in_order() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     fir.rvalue r = fir.rvalue_binary(&x->f, fir.rvalue_kind.rv_sub, copy(1), copy(x->n));
     assert(r.ops_len == 2);
@@ -159,45 +157,43 @@ fn a_binary_rvalue_keeps_its_two_operands_in_order() void {
     assert(fir.rvalue_operand(&x->f, r, 1).place.local == x->n);
     // The type is the type of the first operand.
     fir.rvalue s = fir.rvalue_binary(&x->f, fir.rvalue_kind.rv_shl, copy(x->n), copy(1));
-    fir_env.expect(&e, fir.rvalue_type(&x->f, s), "u64");
+    fir_env.expect(e, fir.rvalue_type(&x->f, s), "u64");
 }
 
 fn addr_gives_a_pointer_to_the_type_of_the_place() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     fir.place p = fir.place_field(&x->f, fir.place_local(x->pair_local), 1);
-    fir_env.expect(&e, fir.rvalue_type(&x->f, fir.rvalue_addr(&x->f, p, false)), "u64*");
-    fir_env.expect(&e, fir.rvalue_type(&x->f, fir.rvalue_addr(&x->f, p, true)), "u64 mut*");
+    fir_env.expect(e, fir.rvalue_type(&x->f, fir.rvalue_addr(&x->f, p, false)), "u64*");
+    fir_env.expect(e, fir.rvalue_type(&x->f, fir.rvalue_addr(&x->f, p, true)), "u64 mut*");
 }
 
 fn a_slice_gives_the_span_of_its_place() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     fir.operand n = copy(x->n);
     // A fixed array gives a span whose `mut` the constructor states.
     fir.place arr = fir.place_local(x->array_local);
-    fir_env.expect(&e, fir.rvalue_type(&x->f, fir.rvalue_slice(&x->f, arr, n, n, false)), "i32@");
-    fir_env.expect(&e, fir.rvalue_type(&x->f, fir.rvalue_slice(&x->f, arr, n, n, true)),
+    fir_env.expect(e, fir.rvalue_type(&x->f, fir.rvalue_slice(&x->f, arr, n, n, false)), "i32@");
+    fir_env.expect(e, fir.rvalue_type(&x->f, fir.rvalue_slice(&x->f, arr, n, n, true)),
                    "i32 mut@");
     // A span keeps its own `mut` and drops `own`, whatever the constructor states.
     fir.place span = fir.place_local(x->span_local);
-    fir_env.expect(&e, fir.rvalue_type(&x->f, fir.rvalue_slice(&x->f, span, n, n, true)),
+    fir_env.expect(e, fir.rvalue_type(&x->f, fir.rvalue_slice(&x->f, span, n, n, true)),
                    "i32 mut@");
     // A string gives a string.
     fir.place str = fir.place_local(x->str_local);
-    fir_env.expect(&e, fir.rvalue_type(&x->f, fir.rvalue_slice(&x->f, str, n, n, false)),
+    fir_env.expect(e, fir.rvalue_type(&x->f, fir.rvalue_slice(&x->f, str, n, n, false)),
                    "string");
     // A slice is a view, so a slice of a `string own` drops `own`.
-    types.node* owned = types.type_string(fir_env.tt(&e), true);
+    types.node* owned = types.type_string(fir_env.tt(e), true);
     fir.place own_str = fir.place_local(temp(&x->f, owned));
     fir.rvalue view = fir.rvalue_slice(&x->f, own_str, n, n, false);
-    fir_env.expect(&e, fir.rvalue_type(&x->f, view), "string");
+    fir_env.expect(e, fir.rvalue_type(&x->f, view), "string");
     assert(!fir.rvalue_owns(&x->f, view));
 }
 
@@ -208,59 +204,56 @@ fn kind_of(types.node* t) types.type_kind {
 }
 
 fn a_call_gives_the_result_of_its_callee() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     u32 first = fir.operand_push(&x->f, copy(1));
     fir.operand_push(&x->f, copy(2));
-    fir.rvalue direct = fir.rvalue_call_fn(fir_env.sym(&e, "add"), first, 2);
+    fir.rvalue direct = fir.rvalue_call_fn(fir_env.sym(e, "add"), first, 2);
     assert(direct.callee == fir.callee_kind.cl_fn);
-    fir_env.expect(&e, fir.rvalue_type(&x->f, direct), "u64");
+    fir_env.expect(e, fir.rvalue_type(&x->f, direct), "u64");
     // An `extern fn`.
     u32 arg = fir.operand_push(&x->f, fir.operand_const(fir.const_bytes("x")));
-    fir.rvalue ext = fir.rvalue_call_extern(fir_env.sym(&e, "puts"), arg, 1);
+    fir.rvalue ext = fir.rvalue_call_extern(fir_env.sym(e, "puts"), arg, 1);
     assert(ext.callee == fir.callee_kind.cl_extern);
-    fir_env.expect(&e, fir.rvalue_type(&x->f, ext), "i32");
+    fir_env.expect(e, fir.rvalue_type(&x->f, ext), "i32");
     // An operand of function type.
     fir.rvalue value = fir.rvalue_call_value(copy(x->fn_local), first, 2);
     assert(value.callee == fir.callee_kind.cl_value);
-    fir_env.expect(&e, fir.rvalue_type(&x->f, value), "u64");
+    fir_env.expect(e, fir.rvalue_type(&x->f, value), "u64");
     // A `noreturn` callee gives `void`.
-    fir.rvalue stop = fir.rvalue_call_fn(fir_env.sym(&e, "stop"), first, 0);
+    fir.rvalue stop = fir.rvalue_call_fn(fir_env.sym(e, "stop"), first, 0);
     assert(kind_of(fir.rvalue_type(&x->f, stop)) == types.type_kind.k_void);
 }
 
 // ---- rvalue_owns ------------------------------------------------------------------------
 
 fn five_forms_produce_an_owning_value() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     fir.func mut* f = &x->f;
-    assert(fir.rvalue_owns(f, fir.rvalue_alloc(f, fir_env.ty(&e, "pair"), copy(x->n))));
+    assert(fir.rvalue_owns(f, fir.rvalue_alloc(f, fir_env.ty(e, "pair"), copy(x->n))));
     // An aggregate of an owning struct.
     u32 first = fir.operand_push(f, fir.operand_move(fir.place_local(x->own_local)));
     fir.operand_push(f, copy(x->n));
-    assert(fir.rvalue_owns(f, fir.rvalue_aggregate_new(fir_env.ty(&e, "holder"), first, 2)));
+    assert(fir.rvalue_owns(f, fir.rvalue_aggregate_new(fir_env.ty(e, "holder"), first, 2)));
     // A cast to an owning type owns; the checker admits one only from an owning operand (D3.14).
     types.node* owned = fir_env.local_type(f, x->own_local);
     assert(fir.rvalue_owns(f, fir.rvalue_cast(f, owned, copy(x->n))));
     // A call with an owning result.
-    assert(fir.rvalue_owns(f, fir.rvalue_call_fn(fir_env.sym(&e, "grab"), first, 0)));
+    assert(fir.rvalue_owns(f, fir.rvalue_call_fn(fir_env.sym(e, "grab"), first, 0)));
     // A move operand.
     fir.operand taken = fir.operand_move(fir.place_local(x->own_local));
     assert(fir.rvalue_owns(f, fir.rvalue_use(f, taken)));
 }
 
 fn other_forms_do_not_own() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     fir.func mut* f = &x->f;
     // A copy of an owning place lends it.
@@ -268,9 +261,9 @@ fn other_forms_do_not_own() void {
     // An aggregate, a cast and a call whose types do not own.
     u32 first = fir.operand_push(f, copy(1));
     fir.operand_push(f, copy(x->n));
-    assert(!fir.rvalue_owns(f, fir.rvalue_aggregate_new(fir_env.ty(&e, "pair"), first, 2)));
-    assert(!fir.rvalue_owns(f, fir.rvalue_cast(f, fir_env.i64_ty(&e), copy(1))));
-    assert(!fir.rvalue_owns(f, fir.rvalue_call_fn(fir_env.sym(&e, "add"), first, 2)));
+    assert(!fir.rvalue_owns(f, fir.rvalue_aggregate_new(fir_env.ty(e, "pair"), first, 2)));
+    assert(!fir.rvalue_owns(f, fir.rvalue_cast(f, fir_env.i64_ty(e), copy(1))));
+    assert(!fir.rvalue_owns(f, fir.rvalue_call_fn(fir_env.sym(e, "add"), first, 2)));
     assert(!fir.rvalue_owns(f, fir.rvalue_binary(f, fir.rvalue_kind.rv_add, copy(1), copy(1))));
     // An address and a slice are views.
     fir.place own_place = fir.place_local(x->own_local);
@@ -282,39 +275,37 @@ fn other_forms_do_not_own() void {
 // ---- rvalue_aggregate -------------------------------------------------------------------
 
 fn aggregate_results_are_the_ones_of_the_rule() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     fir.func mut* f = &x->f;
     u32 first = fir.operand_push(f, copy(1));
     fir.operand_push(f, copy(x->n));
-    assert(fir.rvalue_aggregate(f, fir.rvalue_aggregate_new(fir_env.ty(&e, "pair"), first, 2)));
+    assert(fir.rvalue_aggregate(f, fir.rvalue_aggregate_new(fir_env.ty(e, "pair"), first, 2)));
     fir.place span = fir.place_local(x->span_local);
     assert(fir.rvalue_aggregate(f, fir.rvalue_slice(f, span, copy(x->n), copy(x->n), true)));
     fir.operand text = fir.operand_const(fir.const_string("hi"));
     assert(fir.rvalue_aggregate(f, fir.rvalue_use(f, text)));
-    assert(fir.rvalue_aggregate(f, fir.rvalue_call_fn(fir_env.sym(&e, "make"), first, 0)));
+    assert(fir.rvalue_aggregate(f, fir.rvalue_call_fn(fir_env.sym(e, "make"), first, 0)));
     // A scalar result is not an aggregate.
     assert(!fir.rvalue_aggregate(f, fir.rvalue_binary(f, fir.rvalue_kind.rv_add, copy(1),
                                                        copy(1))));
-    assert(!fir.rvalue_aggregate(f, fir.rvalue_call_fn(fir_env.sym(&e, "add"), first, 2)));
+    assert(!fir.rvalue_aggregate(f, fir.rvalue_call_fn(fir_env.sym(e, "add"), first, 2)));
     assert(!fir.rvalue_aggregate(f, fir.rvalue_addr(f, span, false)));
 }
 
 // ---- constructors -----------------------------------------------------------------------
 
 fn each_constructor_fills_the_fields_of_its_form() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     fir.func mut* f = &x->f;
-    types.node* pair = fir_env.ty(&e, "pair");
-    fir.rvalue conv = fir.rvalue_cast(f, fir_env.i64_ty(&e), copy(1));
-    assert(conv.kind == fir.rvalue_kind.rv_cast && conv.ty == fir_env.i64_ty(&e));
+    types.node* pair = fir_env.ty(e, "pair");
+    fir.rvalue conv = fir.rvalue_cast(f, fir_env.i64_ty(e), copy(1));
+    assert(conv.kind == fir.rvalue_kind.rv_cast && conv.ty == fir_env.i64_ty(e));
     assert(conv.ops_len == 1);
     fir.rvalue addr = fir.rvalue_addr(f, fir.place_local(x->pair_local), true);
     assert(addr.kind == fir.rvalue_kind.rv_addr && addr.is_mut);
@@ -334,18 +325,17 @@ fn each_constructor_fills_the_fields_of_its_form() void {
     fir.rvalue agg = fir.rvalue_aggregate_new(pair, first, 2);
     assert(agg.kind == fir.rvalue_kind.rv_aggregate && agg.ty == pair);
     assert(agg.ops_first == first && agg.ops_len == 2);
-    fir.rvalue call = fir.rvalue_call_extern(fir_env.sym(&e, "abs"), first, 1);
+    fir.rvalue call = fir.rvalue_call_extern(fir_env.sym(e, "abs"), first, 1);
     assert(call.kind == fir.rvalue_kind.rv_call && call.callee == fir.callee_kind.cl_extern);
-    assert(call.callee_sym == fir_env.sym(&e, "abs"));
+    assert(call.callee_sym == fir_env.sym(e, "abs"));
     fir.rvalue value = fir.rvalue_call_value(copy(x->fn_local), first, 2);
     assert(value.callee_sym == null && value.callee_op.place.local == x->fn_local);
 }
 
 fn operands_of_consecutive_rvalues_do_not_mix() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     fir.func mut* f = &x->f;
     // Forty rvalues grow the operand vector past its first capacity. Each keeps its own two.
@@ -367,25 +357,24 @@ fn operands_of_consecutive_rvalues_do_not_mix() void {
 }
 
 fn an_owning_array_aggregate_owns() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    fixture mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
     defer drop_made(move(x));
     fir.func mut* f = &x->f;
-    types.table mut* tt = fir_env.tt(&e);
+    types.table mut* tt = fir_env.tt(e);
     // `holder[2]` holds an `own` pointer in each element; `pair[2]` holds none.
-    types.node* holders = types.type_array(tt, fir_env.ty(&e, "holder"), 2);
-    types.node* pairs = types.type_array(tt, fir_env.ty(&e, "pair"), 2);
+    types.node* holders = types.type_array(tt, fir_env.ty(e, "holder"), 2);
+    types.node* pairs = types.type_array(tt, fir_env.ty(e, "pair"), 2);
     u32 first = fir.operand_push(f, copy(1));
     assert(fir.rvalue_owns(f, fir.rvalue_aggregate_new(holders, first, 0)));
     assert(!fir.rvalue_owns(f, fir.rvalue_aggregate_new(pairs, first, 0)));
     // A call whose result struct holds an `own` field owns.
-    fir.rvalue keep = fir.rvalue_call_fn(fir_env.sym(&e, "keep"), first, 0);
+    fir.rvalue keep = fir.rvalue_call_fn(fir_env.sym(e, "keep"), first, 0);
     assert(fir.rvalue_owns(f, keep));
     assert(fir.rvalue_aggregate(f, keep));
     // A cast to an owning span owns; a cast to its view does not.
-    types.node* u8t = fir_env.prim_ty(&e, prim.prim_kind.prim_u8);
+    types.node* u8t = fir_env.prim_ty(e, prim.prim_kind.prim_u8);
     assert(fir.rvalue_owns(f, fir.rvalue_cast(f, types.type_span(tt, u8t, true, true), copy(1))));
     assert(!fir.rvalue_owns(f, fir.rvalue_cast(f, types.type_span(tt, u8t, false, true),
                                                copy(1))));

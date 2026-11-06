@@ -14,9 +14,8 @@ import lower_env;
 // `G + bump()` reads `G` into a temporary before `bump` runs, and `a + b` over two parameters reads
 // them where the `add` stands, since no writer follows (spec/fir.md 9.4, principle 4).
 fn a_place_is_read_before_a_later_writer() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[12] source = {
         "i32 mut G = 1;",
         "fn bump() i32 {",
@@ -63,15 +62,14 @@ fn a_place_is_read_before_a_later_writer() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // With `+%`, which has no check, `G +% bump()` is the three statements of spec/fir.md 9.4:
 // `_1 = copy global G`, `_2 = call fn m.bump()`, `_3 = add(copy _1, copy _2)`.
 fn the_three_statements_of_the_criterion() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[12] source = {
         "i32 mut G = 1;",
         "fn bump() i32 {",
@@ -102,15 +100,14 @@ fn the_three_statements_of_the_criterion() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "g"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "g"), want[..]);
 }
 
 // `G += 1` reads the old value first, `_old = copy global G`, and writes the global after the
 // check of `+` (spec/fir.md 9.3).
 fn a_compound_assignment_to_a_global() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[12] source = {
         "i32 mut G = 1;",
         "fn bump() i32 {",
@@ -143,15 +140,14 @@ fn a_compound_assignment_to_a_global() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "bump"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "bump"), want[..]);
 }
 
 // `tbl[i].f(g())` reads the callee into a temporary, after the bounds check of `tbl[i]` and before
 // `g` runs (D6.3). A function type takes no array suffix, so the table holds a struct.
 fn a_callee_value_is_read_before_the_arguments() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[9] source = {
         "struct op {",
         "    fn (i32) i32 f;",
@@ -188,7 +184,7 @@ fn a_callee_value_is_read_before_the_arguments() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "h"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "h"), want[..]);
 }
 
 // `take(move(p), p)` moves `p` and then reads it, as the order of D6.3 says, so the second argument
@@ -196,9 +192,8 @@ fn a_callee_value_is_read_before_the_arguments() void {
 // `move`, which is a writer. An owning rvalue enters an `own` parameter as `move _t`, and a `move`
 // before a writer moves into a temporary (spec/fir.md 9.4, D17.4, D17.5).
 fn an_argument_moves_or_lends() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[22] source = {
         "struct pair {",
         "    i32 a;",
@@ -248,16 +243,15 @@ fn an_argument_moves_or_lends() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // `call extern` for an `extern fn`, its variable tail included, `call copy _g` for a function
 // value, and a statement call into a temporary that nothing reads. An aggregate argument is a
 // place: a parameter as it stands, and a literal or a string constant in a temporary first.
 fn an_extern_a_value_and_an_aggregate_argument() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[28] source = {
         "struct pair {",
         "    i32 a;",
@@ -338,15 +332,14 @@ fn an_extern_a_value_and_an_aggregate_argument() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // A call of a `noreturn` function writes a `void` temporary and ends its block with `trap` (D8.5,
 // rule V8), so the arm of the `if` needs no `goto`.
 fn a_noreturn_call_ends_its_block() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[28] source = {
         "struct pair {",
         "    i32 a;",
@@ -395,15 +388,14 @@ fn a_noreturn_call_ends_its_block() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "e"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "e"), want[..]);
 }
 
 // `panic("stop")` puts the literal into the `string` temporary `_1` and is `fail(panic, copy _1)`
 // at the name `panic`, and it ends the body.
 fn a_panic_of_a_literal_ends_the_body() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[28] source = {
         "struct pair {",
         "    i32 a;",
@@ -445,16 +437,15 @@ fn a_panic_of_a_literal_ends_the_body() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "stop"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "stop"), want[..]);
 }
 
 // `println(x, e)`: `fd` once, `print_i64` of `cast<i64>(x)`, `print_enum` of `cast<i32>(e)` with
 // the span of the member table and the member count in a temporary, then `print_char` of `const
 // char 10` (spec/fir.md 9.4, spec/toolchain.md 6 item 19).
 fn println_of_an_integer_and_an_enum() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[7] source = {
         "enum color {",
         "    red,",
@@ -485,15 +476,14 @@ fn println_of_an_integer_and_an_enum() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // An unsigned integer narrower than 64 bits widens to `u64`, and an `i64` or a `u64` goes to its
 // print function as it stands; `f32` has a function of its own.
 fn print_of_each_integer_and_float() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[17] source = {
         "fn next(i32 mut* fd) i32 {",
         "    return 7;",
@@ -532,14 +522,13 @@ fn print_of_each_integer_and_float() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // `f64`, `bool` and `char` go to their print functions as they stand.
 fn print_of_a_float_a_bool_and_a_char() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[17] source = {
         "fn next(i32 mut* fd) i32 {",
         "    return 7;",
@@ -574,7 +563,7 @@ fn print_of_a_float_a_bool_and_a_char() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "k"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "k"), want[..]);
 }
 
 // `eprint` writes to descriptor 2. A `string` place is one operand, and a literal, the empty one
@@ -582,9 +571,8 @@ fn print_of_a_float_a_bool_and_a_char() void {
 // and `void*` stands as it is. `fprintln(fd, next(&fd))` reads `fd` once, into a temporary, before
 // `next` runs.
 fn print_of_strings_pointers_and_a_descriptor() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[17] source = {
         "fn next(i32 mut* fd) i32 {",
         "    return 7;",
@@ -647,16 +635,15 @@ fn print_of_strings_pointers_and_a_descriptor() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "g"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "g"), want[..]);
 }
 
 // `assert(c)` is `check(a, user, bytes "<text>")` at the name `assert`, with the source text of the
 // argument; a constant condition stays a constant. `panic(m)` of a place gives the place, and
 // each `fail` ends its block (spec/fir.md 9.4).
 fn an_assert_and_a_panic() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[8] source = {
         "fn f(i32 x, string m) void {",
         "    assert(x > 0);",
@@ -694,16 +681,15 @@ fn an_assert_and_a_panic() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // `s = inc(&s)` and `t = swap(&t)` write fixed storage, so the place stands after the call. A
 // scalar result goes into a temporary first, and an aggregate result writes `t` itself (spec/fir.md
 // 9.3).
 fn an_assignment_from_a_call_of_its_address() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[20] source = {
         "struct pair {",
         "    i32 a;",
@@ -743,7 +729,7 @@ fn an_assignment_from_a_call_of_its_address() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // `w[i] = inc(&s)` indexes a span, whose storage a writer can move, so the address is held before
@@ -751,9 +737,8 @@ fn an_assignment_from_a_call_of_its_address() void {
 // read before the call, and the target is computed once. `s++` and `w[0]--` are `+= 1` and `-= 1`
 // (spec/fir.md 9.3, D6.3).
 fn an_assignment_holds_the_address_of_a_moving_place() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[20] source = {
         "struct pair {",
         "    i32 a;",
@@ -847,15 +832,14 @@ fn an_assignment_holds_the_address_of_a_moving_place() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "g"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "g"), want[..]);
 }
 
 // The left operand of a string equality is read into a temporary of type `string` before the call
 // on the right runs.
 fn a_string_equality_before_a_writer() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[24] source = {
         "fn get() string {",
         "    return \"x\";",
@@ -899,7 +883,7 @@ fn a_string_equality_before_a_writer() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "cmp"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "cmp"), want[..]);
 }
 
 // The module std.str of a sandbox, whose from_cstr may take `p[lo..hi]` of a raw pointer (D6.9):
@@ -916,9 +900,8 @@ string[6] SPAN_BEFORE_WRITER = {
 // `p[0..bump(&p)]`: the pointer is read into a temporary before the bound that holds a writer, and
 // the constant bound needs none.
 fn a_span_of_a_pointer_before_a_writer() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[14] want = {
         "fn std.str.from_cstr(_1 (p): u8*) -> u8@ {",
         "    let _0: u8@;",
@@ -935,7 +918,7 @@ fn a_span_of_a_pointer_before_a_writer() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower_str(&e, SPAN_BEFORE_WRITER[..], "from_cstr"), want[..]);
+    lower_env.expect(lower_env.lower_str(e, SPAN_BEFORE_WRITER[..], "from_cstr"), want[..]);
 }
 
 // The same, with the low bound a parameter.
@@ -951,9 +934,8 @@ string[6] BOUND_BEFORE_WRITER = {
 // `p[k..bump(&p)]`: the pointer and the low bound, both places, are read into temporaries before
 // the high bound runs its writer.
 fn a_bound_before_a_writer() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[16] want = {
         "fn std.str.from_cstr(_1 (p): u8*, _2 (k): i32) -> u8@ {",
         "    let _0: u8@;",
@@ -972,15 +954,14 @@ fn a_bound_before_a_writer() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower_str(&e, BOUND_BEFORE_WRITER[..], "from_cstr"), want[..]);
+    lower_env.expect(lower_env.lower_str(e, BOUND_BEFORE_WRITER[..], "from_cstr"), want[..]);
 }
 
 // A temporary is out of reach of a writer only as fixed storage: `cellp()->v` reads memory that
 // the temporary points to, so it is read into a temporary of its own before `bump(&p)` runs.
 fn a_temporary_behind_a_pointer_before_a_writer() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[24] source = {
         "fn get() string {",
         "    return \"x\";",
@@ -1032,15 +1013,14 @@ fn a_temporary_behind_a_pointer_before_a_writer() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "cv"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "cv"), want[..]);
 }
 
 // A function `print_i64` of the program is no print function: the print family calls the one of
 // std.rt.
 fn print_calls_the_runtime_and_no_other_module() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[5] source = {
         "fn print_i64(i32 fd, i64 v) void {",
         "}",
@@ -1061,7 +1041,7 @@ fn print_calls_the_runtime_and_no_other_module() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // An owning struct that a call returns enters an owning parameter as `move _t`. Each argument read
@@ -1069,9 +1049,8 @@ fn print_calls_the_runtime_and_no_other_module() void {
 // mut@`, `string` and `u8 mut*[2]` drop the `own` of the top level and of the elements (spec/fir.md
 // 9.4). A writer inside a literal counts too, so `G` is read before `pair{bump(), 2}` runs.
 fn a_copy_before_a_writer_takes_the_lent_type() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[38] source = {
         "struct box {",
         "    u8 mut@ own data;",
@@ -1153,16 +1132,15 @@ fn a_copy_before_a_writer_takes_the_lent_type() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // Each compound operator reads the old value and writes the rvalue of its operator: the checked
 // forms after their checks, the wrapping and bitwise forms with none, and the shifts after the
 // shift check (spec/fir.md 9.3, 9.4).
 fn each_compound_operator() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[38] source = {
         "struct box {",
         "    u8 mut@ own data;",
@@ -1316,16 +1294,15 @@ fn each_compound_operator() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "ops"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "ops"), want[..]);
 }
 
 // `p->x = f(&k)`, `G = f(&k)` and `*q += f(&k)` write places that are no fixed storage: a deref and
 // a global. The address is held before the call, and the store and the old value go through it
 // (spec/fir.md 9.3, 5.5).
 fn an_assignment_through_memory_holds_its_address() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[13] source = {
         "struct point {",
         "    i32 x;",
@@ -1378,7 +1355,7 @@ fn an_assignment_through_memory_holds_its_address() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "g"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "g"), want[..]);
 }
 
 // `print()` writes nothing and `println()` only its newline. `fprint(next(&fd))` evaluates its
@@ -1386,9 +1363,8 @@ fn an_assignment_through_memory_holds_its_address() void {
 // `)`, so a `)` inside a string stays in it. A `noreturn` function value ends its block with
 // `trap` after its call.
 fn the_edges_of_the_builtins() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[14] source = {
         "fn next(i32 mut* fd) i32 {",
         "    return 2;",
@@ -1434,15 +1410,14 @@ fn the_edges_of_the_builtins() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // A folded enum member, `char`, negative and positive integer each print as any value of its type:
 // the enum and the integers through a cast into a temporary, the `char` as it stands.
 fn print_of_constants() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[7] source = {
         "enum color {",
         "    red,",
@@ -1479,15 +1454,14 @@ fn print_of_constants() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // The largest `u8` widens to `u64` and the least `i8` to `i64`, each a folded constant in a cast;
 // a `u64` constant enters `print_u64` as it stands.
 fn print_of_the_ends_of_narrow_types() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[10] source = {
         "fn f() void {",
         "    print(cast(255, u8), cast(-128, i8), cast(0, u64));",
@@ -1519,15 +1493,14 @@ fn print_of_the_ends_of_narrow_types() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // `a = move(b)` and `return move(a)` of a struct that owns move its place whole: `_a = move _b`
 // and `_0 = move _a` (D17.5).
 fn an_owning_struct_moves_by_assignment_and_return() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[10] source = {
         "fn f() void {",
         "    print(cast(255, u8), cast(-128, i8), cast(0, u64));",
@@ -1551,7 +1524,7 @@ fn an_owning_struct_moves_by_assignment_and_return() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "g"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "g"), want[..]);
 }
 
 fn main() i32 {

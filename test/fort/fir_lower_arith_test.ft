@@ -19,9 +19,8 @@ import std.str;
 // `+`, `-` and `*` on a signed integer: `_f = add_overflows(a, b)`, `check(copy _f, overflow)`,
 // then `add(a, b)` in the next block.
 fn signed_arithmetic_checks_for_overflow() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[5] source = {
         "fn f(i32 x, i32 y) i32 {",
         "    i32 a = x + y;",
@@ -68,15 +67,14 @@ fn signed_arithmetic_checks_for_overflow() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // An unsigned operation checks as a signed one does. The result of an inner operation is a
 // temporary, which the outer operation reads in both of its statements.
 fn a_nested_operation_reads_its_temporary() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[3] source = {
         "fn g(u64 x) u64 {",
         "    return (x + 1) * 2;",
@@ -106,15 +104,14 @@ fn a_nested_operation_reads_its_temporary() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "g"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "g"), want[..]);
 }
 
 // The operands of an operator lower left to right (D6.3), so the statements and the checks of
 // the left operand come first, and the temporaries take their numbers in that order.
 fn the_left_operand_lowers_first() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[3] source = {
         "fn o(i32 x, i32 y) i32 {",
         "    return (x + y) * (x - y);",
@@ -151,14 +148,13 @@ fn the_left_operand_lowers_first() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "o"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "o"), want[..]);
 }
 
 // `+%`, `-%` and `*%` wrap: `add`, `sub` and `mul` with no check (D11.1).
 fn the_wrapping_operators_skip_the_check() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[5] source = {
         "fn w(u8 x, u8 y) u8 {",
         "    u8 a = x +% y;",
@@ -190,15 +186,14 @@ fn the_wrapping_operators_skip_the_check() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "w"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "w"), want[..]);
 }
 
 // Unary `-` on an integer is `sub(const 0, x)` with the overflow check, which fails for the
 // smallest value of a signed type.
 fn integer_negation_subtracts_from_zero() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[4] source = {
         "fn m(i32 x, i64 y) i64 {",
         "    i32 a = -x;",
@@ -233,7 +228,7 @@ fn integer_negation_subtracts_from_zero() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "m"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "m"), want[..]);
 }
 
 // ---- floats -----------------------------------------------------------------------------------
@@ -241,9 +236,8 @@ fn integer_negation_subtracts_from_zero() void {
 // Float arithmetic is `fadd`, `fsub`, `fmul`, `fdiv` and `fneg` with no check: a float operation
 // does not trap (spec/fir.md 6).
 fn float_arithmetic_has_no_check() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[7] source = {
         "fn fl(f64 x, f64 y) f64 {",
         "    f64 a = x + y;",
@@ -289,20 +283,19 @@ fn float_arithmetic_has_no_check() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "fl"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "fl"), want[..]);
 }
 
 // `%` on a float never reaches the lowering: the checker refuses it (D6.12).
 fn the_checker_refuses_a_float_remainder() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[3] source = {
         "fn r(f64 x, f64 y) f64 {",
         "    return x % y;",
         "}",
     };
-    string got = lower_env.diagnostic(&e, source[..]);
+    string got = lower_env.diagnostic(e, source[..]);
     if (!str.starts_with(got, "2:14: ")) {
         eprintln("fir_lower_arith_test: got <", got, ">");
         panic("fir_lower_arith_test: the checker does not refuse the float remainder at `%`");
@@ -314,9 +307,8 @@ fn the_checker_refuses_a_float_remainder() void {
 // `/` and `%` on a signed integer: the zero test, then the test of MIN / -1, then `div` or `rem`
 // (D6.13). Both checks stay in every build mode.
 fn signed_division_checks_zero_and_overflow() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[4] source = {
         "fn d(i32 x, i32 y) i32 {",
         "    i32 q = x / y;",
@@ -369,7 +361,7 @@ fn signed_division_checks_zero_and_overflow() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "d"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "d"), want[..]);
 }
 
 u64 WIDTHS_LINES = 9;
@@ -389,9 +381,8 @@ string[WIDTHS_LINES] WIDTHS = {
 };
 
 fn division_uses_the_bounds_of_its_type() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[24] narrow = {
         "fn main.e1(_1 (x): i8, _2 (y): i8) -> i8 {",
         "    let _0: i8;",
@@ -418,7 +409,7 @@ fn division_uses_the_bounds_of_its_type() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, WIDTHS[..], "e1"), narrow[..]);
+    lower_env.expect(lower_env.lower(e, WIDTHS[..], "e1"), narrow[..]);
     string[24] wide = {
         "fn main.e2(_1 (a): i64, _2 (b): i64) -> i64 {",
         "    let _0: i64;",
@@ -445,7 +436,7 @@ fn division_uses_the_bounds_of_its_type() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, WIDTHS[..], "e2"), wide[..]);
+    lower_env.expect(lower_env.lower(e, WIDTHS[..], "e2"), wide[..]);
     string[15] unsigned = {
         "fn main.e3(_1 (m): u32, _2 (n): u32) -> u32 {",
         "    let _0: u32;",
@@ -463,7 +454,7 @@ fn division_uses_the_bounds_of_its_type() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, WIDTHS[..], "e3"), unsigned[..]);
+    lower_env.expect(lower_env.lower(e, WIDTHS[..], "e3"), unsigned[..]);
 }
 
 // ---- bitwise operators and shifts -------------------------------------------------------------
@@ -471,9 +462,8 @@ fn division_uses_the_bounds_of_its_type() void {
 // `&`, `|` and `^` are `and`, `or` and `xor`; `!` on a `bool` and `~` on an integer are `not`.
 // None of them has a check.
 fn bitwise_operators_have_no_check() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[7] source = {
         "fn b(u32 x, u32 y, bool p) u32 {",
         "    u32 a = x & y;",
@@ -519,16 +509,15 @@ fn bitwise_operators_have_no_check() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "b"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "b"), want[..]);
 }
 
 // `<<` and `>>`: the count widened to `i64` by its own signedness, the test of the count against
 // the width of the shifted type, the check that reports the count and the type, then the count
 // narrowed to the shifted type (spec/fir.md 9.4, toolchain.md 6 item 15).
 fn a_shift_checks_its_count_against_the_width() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[4] source = {
         "fn s(u8 v, i32 n, u8 m) u8 {",
         "    u8 a = v << n;",
@@ -575,15 +564,14 @@ fn a_shift_checks_its_count_against_the_width() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "s"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "s"), want[..]);
 }
 
 // The widest type, 64 bits, shifted by a `u64` count, which `cast<i64>` reinterprets and
 // `cast<u64>` gives back for the test, and by a constant count, which the lowering checks too.
 fn a_wide_shift_and_a_constant_count() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[4] source = {
         "fn t(i64 w, u64 k) i64 {",
         "    i64 c = w << 3;",
@@ -630,7 +618,7 @@ fn a_wide_shift_and_a_constant_count() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "t"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "t"), want[..]);
 }
 
 // ---- constants --------------------------------------------------------------------------------
@@ -638,9 +626,8 @@ fn a_wide_shift_and_a_constant_count() void {
 // The checker folds a constant expression, and the lowering writes its value: no statement
 // computes it and no check guards it.
 fn a_folded_expression_is_a_constant() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[5] source = {
         "fn k() i32 {",
         "    f32 h = 0.5;",
@@ -666,7 +653,7 @@ fn a_folded_expression_is_a_constant() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "k"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "k"), want[..]);
 }
 
 // ---- the bounds of the integer types ----------------------------------------------------------
@@ -674,9 +661,8 @@ fn a_folded_expression_is_a_constant() void {
 // The overflow check at each width: the flag is a `bool` and the result has the type of the
 // operands, from `i8` to `u32`.
 fn every_width_checks_for_overflow() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[6] source = {
         "fn widths(i8 a, i16 b, u16 c, u32 d) u32 {",
         "    i8 w = a * a;",
@@ -735,15 +721,14 @@ fn every_width_checks_for_overflow() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "widths"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "widths"), want[..]);
 }
 
 // The folded constants at the ends of the integer ranges: the smallest `i64` and `i8`, and the
 // largest `u8` and `u64`, which a constant holds exactly (spec/fir.md 5.6).
 fn the_bounds_of_the_integer_types_are_constants() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[6] source = {
         "fn lim() u64 {",
         "    i64 low = -9223372036854775808;",
@@ -774,7 +759,7 @@ fn the_bounds_of_the_integer_types_are_constants() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "lim"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "lim"), want[..]);
 }
 
 fn main() i32 {

@@ -81,9 +81,8 @@ fn assigned_local(fir.func* f, u32 b, u32 i) u32 {
 // the shift check reads the parameter `_2`, which nothing reads later, so the mask goes too. A
 // kept check keeps its block and its continuation.
 fn each_mode_removes_the_kinds_of_its_column() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[8] mut lines = KIND_LINES;
     u64 mut removed = 0;
     u64 mut kept = 0;
@@ -94,10 +93,10 @@ fn each_mode_removes_the_kinds_of_its_column() void {
             // `fm` lives in an allocation, so that the leak rule proves its end: no call changes
             // the pointer, and drop_made holds each release once.
             fir.module mut* own fm = fir.module_make();
-            *fm = pass_env.parse(&e, KIND_PRELUDE[..], lines[..]);
+            *fm = pass_env.parse(e, KIND_PRELUDE[..], lines[..]);
             fir.func mut* f = &fm->funcs.items[0];
             fir.term_kind before = fir_env.term_kind_of(f, 0);
-            pass_env.build(&e, f, m);
+            pass_env.build(e, f, m);
             if ((m.release && BY_RELEASE[k]) || (m.no_bounds && BY_NO_BOUNDS[k])) {
                 assert(fir.block_count(f) == 1);
                 assert(fir_env.term_kind_of(f, 0) == fir.term_kind.tk_return);
@@ -122,9 +121,8 @@ fn each_mode_removes_the_kinds_of_its_column() void {
 // statement index of the check. Here the continuation bb1 has a second predecessor, which rule V11
 // forbids, so the input is no verified function and the pass runs without the verifier.
 fn a_removed_check_leaves_goto_at_its_location() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[1] prelude = {"fn g(bool f) void {}"};
     string[11] text = {
         "fn main.g(_1 (f): bool) -> void {",
@@ -140,7 +138,7 @@ fn a_removed_check_leaves_goto_at_its_location() void {
         "}",
     };
     fir.module mut* own fm = fir.module_make();
-    *fm = pass_env.parse(&e, prelude[..], text[..]);
+    *fm = pass_env.parse(e, prelude[..], text[..]);
     defer fir.module_drop_made(move(fm));
     fir.func mut* f = &fm->funcs.items[0];
     build_unverified(f, pass_env.RELEASE);
@@ -221,9 +219,8 @@ fn expect_mask(fir.func* f, u64 mask) void {
 fn the_mask_is_the_width_of_the_named_type_less_one() void {
     strbuf.str_buf mut term = strbuf.create();
     defer del(term.data);
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[13] mut lines = WIDTH_LINES;
     u64 mut k = 0;
     while (k < WIDTH_COUNT) {
@@ -233,9 +230,9 @@ fn the_mask_is_the_width_of_the_named_type_less_one() void {
         strbuf.append(&term, "\") -> bb1 #3:7 exit 9:1 s2;");
         lines[6] = strbuf.view(&term);
         fir.module mut* own fm = fir.module_make();
-        *fm = pass_env.parse(&e, WIDTH_PRELUDE[..], lines[..]);
+        *fm = pass_env.parse(e, WIDTH_PRELUDE[..], lines[..]);
         fir.func mut* f = &fm->funcs.items[0];
-        pass_env.build(&e, f, pass_env.RELEASE);
+        pass_env.build(e, f, pass_env.RELEASE);
         expect_mask(f, WIDTH_MASKS[k]);
         fir.module_drop_made(move(fm));
         k += 1;
@@ -251,9 +248,8 @@ string[1] COUNT_PRELUDE = {"fn f(i32 a, i64 n, bool c) i32 { return 0; }"};
 // write of `_4` in bb3, the read of bb4, which the path from bb0 reaches with no mask, or the read
 // of bb5, which no terminator names and so starts with no mask.
 fn the_mask_replaces_the_reads_that_it_reaches() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[31] text = {
         "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
         "    let _4: i64;",
@@ -319,16 +315,15 @@ fn the_mask_replaces_the_reads_that_it_reaches() void {
         "    }",
         "}",
     };
-    lower_env.expect(pass_env.run(&e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE), want[..]);
+    lower_env.expect(pass_env.run(e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE), want[..]);
 }
 
 // A block that no terminator names starts with no mask, so its read of the count stays. A block
 // after it that only it names takes the same empty set, because the dataflow joins the empty end
 // of its one predecessor.
 fn a_block_that_nothing_names_keeps_the_count() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[21] text = {
         "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
         "    let _4: i64;",
@@ -375,16 +370,15 @@ fn a_block_that_nothing_names_keeps_the_count() void {
         "    }",
         "}",
     };
-    lower_env.expect(pass_env.run(&e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE), want[..]);
+    lower_env.expect(pass_env.run(e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE), want[..]);
 }
 
 // A loop whose header holds the check. The mask reaches the body, whose `add` reads the mask and
 // then writes the count, so the next round masks the new count. The exit after that write keeps
 // `_4`. The body merges into the header, which then names itself.
 fn a_mask_in_a_loop_masks_each_round() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[22] text = {
         "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
         "    let _4: i64;",
@@ -433,7 +427,7 @@ fn a_mask_in_a_loop_masks_each_round() void {
         "    }",
         "}",
     };
-    lower_env.expect(pass_env.run(&e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE),
+    lower_env.expect(pass_env.run(e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE),
                      want[..]);
 }
 
@@ -442,9 +436,8 @@ fn a_mask_in_a_loop_masks_each_round() void {
 // first round; each end starts with every mask, so the join keeps the mask and the body reads it.
 // An end that started empty would lose the mask at the head and keep `_4` in the body.
 fn a_mask_before_a_loop_reaches_its_body() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[24] text = {
         "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
         "    let _4: i64;",
@@ -497,16 +490,15 @@ fn a_mask_before_a_loop_reaches_its_body() void {
         "    }",
         "}",
     };
-    lower_env.expect(pass_env.run(&e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE), want[..]);
+    lower_env.expect(pass_env.run(e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE), want[..]);
 }
 
 // Two shift checks report one count. The second mask ends the first, so the read after both
 // reads the second mask, and the first mask has no reader and goes. A mask reads its count and
 // keeps that read.
 fn the_last_mask_of_a_count_wins() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[17] text = {
         "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
         "    let _4: i64;",
@@ -543,15 +535,14 @@ fn the_last_mask_of_a_count_wins() void {
         "    }",
         "}",
     };
-    lower_env.expect(pass_env.run(&e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE), want[..]);
+    lower_env.expect(pass_env.run(e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE), want[..]);
 }
 
 // The mask rewrites the operands of a terminator too: the operand of a `switch`, and the
 // condition and the reported operands of a `check` that stays.
 fn the_mask_rewrites_the_operands_of_a_terminator() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[20] text = {
         "fn main.f(_1 (a): i32, _2 (n): i64, _3 (c): bool) -> i32 {",
         "    let _4: i64;",
@@ -596,7 +587,7 @@ fn the_mask_rewrites_the_operands_of_a_terminator() void {
         "    }",
         "}",
     };
-    lower_env.expect(pass_env.run(&e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE),
+    lower_env.expect(pass_env.run(e, COUNT_PRELUDE[..], text[..], pass_env.RELEASE),
                      want[..]);
 }
 
@@ -605,9 +596,8 @@ fn the_mask_rewrites_the_operands_of_a_terminator() void {
 // The fields, the whole structs that hold them, the parameter, the named local and `_0` keep
 // their reads.
 fn a_count_that_is_no_local_replaces_nothing() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[4] prelude = {
         "struct wide {",
         "    i64 n;",
@@ -677,7 +667,7 @@ fn a_count_that_is_no_local_replaces_nothing() void {
         "    }",
         "}",
     };
-    lower_env.expect(pass_env.run(&e, prelude[..], text[..], pass_env.RELEASE), want[..]);
+    lower_env.expect(pass_env.run(e, prelude[..], text[..], pass_env.RELEASE), want[..]);
 }
 
 // ---- the dead temporaries -----------------------------------------------------------------------
@@ -754,9 +744,8 @@ fn a_pure_rvalue_goes_and_the_others_stay() void {
     defer del(assign.data);
     strbuf.str_buf mut let7 = strbuf.create();
     defer del(let7.data);
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[7] mut lines = {
         "fn main.d(_1: i32, _2: i32, _3: f64, _4: u8@, _5: u8*, _6: u8 mut* own) -> void {",
         "",
@@ -779,9 +768,9 @@ fn a_pure_rvalue_goes_and_the_others_stay() void {
         lines[1] = strbuf.view(&let7);
         lines[3] = strbuf.view(&assign);
         fir.module mut* own fm = fir.module_make();
-        *fm = pass_env.parse(&e, RVALUE_PRELUDE[..], lines[..]);
+        *fm = pass_env.parse(e, RVALUE_PRELUDE[..], lines[..]);
         fir.func mut* f = &fm->funcs.items[0];
-        pass_env.build(&e, f, pass_env.CHECKED);
+        pass_env.build(e, f, pass_env.CHECKED);
         if (k < RVALUE_PURE) {
             assert(fir.block_statement_count(f, 0) == 0);
         } else {
@@ -811,9 +800,8 @@ string[6] USE_PRELUDE = {
 // return place stay with no reader. The default mode leaves the module as it was: no check here
 // is removable but the bounds check, and the default mode keeps it.
 fn each_use_keeps_its_temporary() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[100] text = {
         "fn main.index(_1 (v): i32[4], _2 (i): i32) -> i32 {",
         "    let _0: i32;",
@@ -916,9 +904,9 @@ fn each_use_keeps_its_temporary() void {
         "    }",
         "}",
     };
-    assert(pass_env.unchanged(&e, USE_PRELUDE[..], text[..], pass_env.CHECKED));
+    assert(pass_env.unchanged(e, USE_PRELUDE[..], text[..], pass_env.CHECKED));
     // --no-bounds-check removes the bounds check of `branch`, and so changes the module
-    assert(!pass_env.unchanged(&e, USE_PRELUDE[..], text[..], pass_env.NO_BOUNDS));
+    assert(!pass_env.unchanged(e, USE_PRELUDE[..], text[..], pass_env.NO_BOUNDS));
 }
 
 // The pointer that the place of an overwrite check loads: the `del` empties `(*_2)`, so every
@@ -926,9 +914,8 @@ fn each_use_keeps_its_temporary() void {
 // `(*_2) = const null` keeps no temporary of its own, so no fold applies, and `_2` stays as the
 // pointer of the destination.
 fn the_pointer_of_an_overwrite_check_stays_as_the_pointer_of_its_store() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[14] text = {
         "fn main.owner(_1 (q): u8 mut* own mut*) -> void {",
         "    let _0: void;",
@@ -959,7 +946,7 @@ fn the_pointer_of_an_overwrite_check_stays_as_the_pointer_of_its_store() void {
         "}",
     };
     for (pass_env.mode m : pass_env.MODES) {
-        lower_env.expect(pass_env.run(&e, USE_PRELUDE[..], text[..], m), want[..]);
+        lower_env.expect(pass_env.run(e, USE_PRELUDE[..], text[..], m), want[..]);
     }
 }
 
@@ -969,9 +956,8 @@ fn the_pointer_of_an_overwrite_check_stays_as_the_pointer_of_its_store() void {
 // no build reaches the pass with it, and the translator refuses it
 // (fir_llvm_overwrite_check_panic_test).
 fn the_proof_decides_each_overwrite() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[22] text = {
         "fn main.both(_1 (p): u8 mut* own) -> void {",
         "    let _2 (q): u8 mut* own;",
@@ -1018,7 +1004,7 @@ fn the_proof_decides_each_overwrite() void {
         "}",
     };
     for (pass_env.mode m : pass_env.MODES) {
-        lower_env.expect(pass_env.run(&e, USE_PRELUDE[..], text[..], m), want[..]);
+        lower_env.expect(pass_env.run(e, USE_PRELUDE[..], text[..], m), want[..]);
     }
 }
 
@@ -1028,9 +1014,8 @@ fn the_proof_decides_each_overwrite() void {
 // temporary. In `call_mid` a store into a named local and then a call stand there, and the call
 // can fill `(*_1).0`, so the pass does not prove the store, and the check stays in every mode.
 fn a_check_takes_the_verdict_of_the_store_after_it() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[31] text = {
         "fn main.mid(_1 (q): holder mut*) -> void {",
         "    let _2 (n): u64;",
@@ -1100,16 +1085,15 @@ fn a_check_takes_the_verdict_of_the_store_after_it() void {
         "}",
     };
     for (pass_env.mode m : pass_env.MODES) {
-        lower_env.expect(pass_env.run(&e, USE_PRELUDE[..], text[..], m), want[..]);
+        lower_env.expect(pass_env.run(e, USE_PRELUDE[..], text[..], m), want[..]);
     }
 }
 
 // A temporary with two assignments and no reader loses both. A chain of four temporaries, each
 // read only by the next, goes in four rounds, the last one first.
 fn the_removal_repeats_until_nothing_changes() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[23] text = {
         "fn main.w(_1 (c): bool) -> void {",
         "    let _2: bool;",
@@ -1155,7 +1139,7 @@ fn the_removal_repeats_until_nothing_changes() void {
         "    }",
         "}",
     };
-    lower_env.expect(pass_env.run(&e, USE_PRELUDE[..], text[..], pass_env.CHECKED), want[..]);
+    lower_env.expect(pass_env.run(e, USE_PRELUDE[..], text[..], pass_env.CHECKED), want[..]);
 }
 
 fn main() i32 {
