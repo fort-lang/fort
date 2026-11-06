@@ -37,13 +37,14 @@ bullet at a time and without a rewrite.
   tests of `--check` over the fixture `test/mutate/strict_table.json`;
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fir-run`,
   `library-interface`, `library-artifact`, `library-use`, `library-cache`, `fixpoint`,
-  `aggregate-sites`, `aggregate-front`, `tty`, `stack_depth` and `lsp-binary`; bootstrap0 has
-  none, since building bootstrap-1 proves the C compiler. `aggregate-sites` holds the sites of
-  `--aggregate-report` in src/fort, src/lsp and std on both targets at none, each line of a report
-  at a known form, and a control program at the one site of the module that it imports.
+  `aggregate-sites`, `aggregate-front`, `aggregate-lsp`, `tty`, `stack_depth` and `lsp-binary`;
+  bootstrap0 has none, since building bootstrap-1 proves the C compiler. `aggregate-sites` holds
+  the sites of `--aggregate-report` in src/fort, src/lsp and std on both targets at none, each line
+  of a report at a known form, and a control program at the one site of the module that it imports.
   `aggregate-front` holds the sites of `--aggregate-report` and `--leak-report` in the suites
   test/fort/check_*, modules_* and session_* on both targets at none, and a control program at one
-  site of each report. The label `libraries` holds `library-compiler` and
+  site of each report. `aggregate-lsp` does the same for the suites of test/lsp. The label
+  `libraries` holds `library-compiler` and
   `fort-modules-libraries`, which carry no step label, so `unit` and `integration` leave them out;
   the CI job `libraries` runs them (`notes/environment.md` 7).
   `stack_depth` gives each compiler of the build a 1 MB stack and a type of 254 nested groups
@@ -324,6 +325,12 @@ bullet at a time and without a rewrite.
   the Linux and the Darwin target, so a site that is not in its lists turns it red; a change that
   ends a site removes it from the lists. To judge a drop, delete each release and each drop call,
   one at a time, and run that test, the language harness and the fir-run oracle.
+- **Put the drop of a type in the module of the type when a heap probe holds its free.** The three
+  probes of test/lsp reach each release of `json.free`, `docs.free`, `rpc.free` and `server.free`.
+  At dacafa1d a deletion of each of the 15 releases of those frees turned a test red. A drop that a
+  test holds would copy those releases, and the probes would then call the copy and not the free.
+  So the drops stand in src/lsp, each free moves its value into the drop of its type, and the
+  probes end each value through `drop_made`: each release stands once, and both paths reach it.
 
 ## 4. fort module tests
 
