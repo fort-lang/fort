@@ -36,7 +36,7 @@ bullet at a time and without a rewrite.
   `mutation_anchors_<table>` test for each table in `tools/mutations`, the three `mutate_`
   tests of `--check` over the fixture `test/mutate/strict_table.json`, and `drop-fields`
   (`test/drop_fields_test.py`: no function of src/fort, src/lsp or std dels the storage below a
-  field whose type has a value drop, and a control tree gives each of its three lines);
+  field or an element of a span whose type has a value drop, with a control tree);
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fir-run`,
   `library-interface`, `library-artifact`, `library-use`, `library-cache`, `fixpoint`,
   `aggregate-sites`, `aggregate-front`, `aggregate-lsp`, `aggregate-fir`, `aggregate-gen`,
