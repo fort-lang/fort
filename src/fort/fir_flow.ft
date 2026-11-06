@@ -207,9 +207,9 @@ fn dataflow_new(u32 count, join_kind join, fn (fir.func*, u32, bits mut*) void t
     return d;
 }
 
-/// A dataflow as dataflow_new makes it, in an allocation that dataflow_drop_made frees. A function
-/// that holds two dataflows to its end holds them so, because the leak rule reads no callee: a
-/// call that frees the one would come after the `del` of each owner of the other.
+/// A dataflow as dataflow_new makes it, in an allocation that dataflow_drop_made frees.
+// A function that lends a dataflow to calls holds it so: no call changes the `own` pointer of the
+// allocation, so the leak rule proves the end of the function.
 fn dataflow_make(u32 count, join_kind join, fn (fir.func*, u32, bits mut*) void transfer)
     dataflow mut* own {
     dataflow mut* own d = new(dataflow);
@@ -226,28 +226,22 @@ fn dataflow_drop_made(dataflow mut* own p) void {
 
 // Frees a dataflow that the caller moves in: the sets of each block, then `entry` and `init`.
 fn dataflow_drop(dataflow mut d) void {
-    u64 mut b = 0;
-    while (b < d.ins.len) {
-        bits_free(&d.ins[b]);
-        bits_free(&d.outs[b]);
-        b += 1;
-    }
-    del(d.ins);
-    del(d.outs);
-    del(d.entry.words);
-    del(d.init.words);
+    drop_sets(move(d.ins), move(d.outs));
+    bits_drop(move(d.entry));
+    bits_drop(move(d.init));
 }
 
-// Releases the sets of each block that dataflow_forward wrote.
-fn results_free(dataflow mut* d) void {
+// Frees the sets of each block that dataflow_forward wrote, which the caller moves in: each set,
+// then the two spans.
+fn drop_sets(bits mut@ own ins, bits mut@ own outs) void {
     u64 mut b = 0;
-    while (b < d->ins.len) {
-        bits_free(&d->ins[b]);
-        bits_free(&d->outs[b]);
+    while (b < ins.len) {
+        bits_free(&ins[b]);
+        bits_free(&outs[b]);
         b += 1;
     }
-    del(d->ins);
-    del(d->outs);
+    del(ins);
+    del(outs);
 }
 
 // dataflow_drop holds the releases. The dataflow keeps its count, its join, its transfer and its
@@ -271,6 +265,19 @@ struct edges {
     u32@ to;
     bits@ gens;
     bits joined;
+}
+
+// Frees the edge sets that the caller moves in: the joined set.
+fn edges_drop(edges mut e) void {
+    bits_drop(move(e.joined));
+}
+
+// Ends edge sets in an allocation of its own that the caller moves in, for a function that lends
+// it to calls.
+fn edges_drop_made(edges mut* own p) void {
+    edges kept = move(*p);
+    del(p);
+    edges_drop(move(kept));
 }
 
 // Sets the in-set of block `b`: the join of the entry set, for `bb0`, and of the out-set of each
@@ -317,6 +324,20 @@ struct work_list {
     u64 len;
 }
 
+// Frees a work list that the caller moves in: the ring, then the listed set.
+fn work_list_drop(work_list mut wl) void {
+    del(wl.ring);
+    bits_drop(move(wl.listed));
+}
+
+// Ends a work list in an allocation of its own that the caller moves in, for a function that
+// lends it to calls.
+fn work_list_drop_made(work_list mut* own p) void {
+    work_list kept = move(*p);
+    del(p);
+    work_list_drop(move(kept));
+}
+
 // Appends block `b` to `wl` unless `wl` holds it.
 fn work_push(work_list mut* wl, u32 b) void {
     if (bits_get(&wl->listed, b)) {
@@ -355,9 +376,9 @@ fn dataflow_forward(fir.func* f, dataflow mut* d) void {
 // transfer, so it changes at most once for each number, and the loop ends.
 fn dataflow_forward_with(fir.func* f, fir.pred_table* pt, dataflow mut* d) void {
     bits@ none = {};
-    edges mut e = edges{};
-    defer del(e.joined.words);
-    forward(f, pt, d, none, none, &e, false);
+    edges mut* own e = new(edges);
+    defer edges_drop_made(move(e));
+    forward(f, pt, d, none, none, e, false);
 }
 
 /// Runs the dataflow `d` as dataflow_forward_with does, with a transfer that two sets give:
@@ -371,9 +392,9 @@ fn dataflow_forward_sets(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits@
     if (gens.len != blocks || kills.len != blocks) {
         panic("fir_flow.dataflow_forward_sets: the set counts differ from the block count");
     }
-    edges mut e = edges{};
-    defer del(e.joined.words);
-    forward(f, pt, d, gens, kills, &e, true);
+    edges mut* own e = new(edges);
+    defer edges_drop_made(move(e));
+    forward(f, pt, d, gens, kills, e, true);
 }
 
 /// Runs the dataflow `d` as dataflow_forward_sets does, with one edge set for each block. Each
@@ -393,10 +414,11 @@ fn dataflow_forward_edges(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits
     if (edge_to.len != blocks || edge_gens.len != blocks) {
         panic("fir_flow.dataflow_forward_edges: the edge counts differ from the block count");
     }
-    edges mut e = edges{.to = edge_to, .gens = edge_gens};
-    e.joined = bits_new(d->count);
-    defer del(e.joined.words);
-    forward(f, pt, d, gens, kills, &e, true);
+    edges mut* own e = new(edges);
+    defer edges_drop_made(move(e));
+    *e = edges{.to = edge_to, .gens = edge_gens};
+    e->joined = bits_new(d->count);
+    forward(f, pt, d, gens, kills, e, true);
 }
 
 // The loop of dataflow_forward_with, dataflow_forward_sets and dataflow_forward_edges. `by_sets`
@@ -404,31 +426,34 @@ fn dataflow_forward_edges(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits
 // sets, or none.
 fn forward(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits@ gens, bits@ kills,
            edges mut* e, bool by_sets) void {
-    results_free(d);
     u32 n = fir.block_count(f);
     u64 size = cast(n, u64);
-    del(d->ins);
+    // The sets of the last run go after the stores: a call between the move and the store would
+    // kill the fact that the field is empty.
+    bits mut@ own old_ins = move(d->ins);
+    bits mut@ own old_outs = move(d->outs);
     d->ins = new(bits, size);
-    del(d->outs);
     d->outs = new(bits, size);
+    drop_sets(move(old_ins), move(old_outs));
     d->steps = 0;
-    work_list mut wl = work_list{};
-    wl.ring = new(u32, size);
-    wl.listed = bits_new(n);
-    defer del(wl.ring);
-    defer del(wl.listed.words);
+    // before the work list: the drop of the work list is a call, and it must come before the
+    // `del` of the set
+    bits mut next = bits_new(d->count);
+    defer del(next.words);
+    work_list mut* own wl = new(work_list);
+    defer work_list_drop_made(move(wl));
+    wl->ring = new(u32, size);
+    wl->listed = bits_new(n);
     u32 mut b = 0;
     while (b < n) {
         d->ins[cast(b, u64)] = bits_new(d->count);
         d->outs[cast(b, u64)] = bits_new(d->count);
         bits_copy(&d->outs[cast(b, u64)], &d->init);
-        work_push(&wl, b);
+        work_push(wl, b);
         b += 1;
     }
-    bits mut next = bits_new(d->count);
-    defer del(next.words);
-    while (wl.len > 0) {
-        u32 at = work_pop(&wl);
+    while (wl->len > 0) {
+        u32 at = work_pop(wl);
         block_in(d, pt, at, e);
         bits_copy(&next, &d->ins[cast(at, u64)]);
         if (by_sets) {
@@ -440,7 +465,7 @@ fn forward(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits@ gens, bits@ k
         d->steps += 1;
         if (!bits_equal(&next, &d->outs[cast(at, u64)])) {
             bits_copy(&d->outs[cast(at, u64)], &next);
-            push_successors(f, at, &wl);
+            push_successors(f, at, wl);
         }
     }
 }

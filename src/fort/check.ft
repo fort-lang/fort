@@ -256,13 +256,25 @@ fn drop(checker mut ck) void {
     }
     del(ck.syms);
     del(ck.values);
-    del(ck.bad_imports.entries);
-    del(ck.extern_first.entries);
+    strmap.drop(move(ck.bad_imports));
+    strmap.drop(move(ck.extern_first));
     del(ck.externs);
-    del(ck.msg.data);
+    strbuf.drop(move(ck.msg));
     types.table_drop(move(ck.types));
     del(ck.suffixes);
     del(ck.sized);
+}
+
+// An empty checker in an allocation of its own, for a function that lends the checker to calls.
+fn make() checker mut* own {
+    return new(checker);
+}
+
+// Ends a checker of make that the caller moves in.
+fn drop_made(checker mut* own p) void {
+    checker kept = move(*p);
+    del(p);
+    drop(move(kept));
 }
 
 // ---- the three vectors -------------------------------------------------------------
@@ -3443,14 +3455,29 @@ u8 MARK_WALKING = 1;
 u8 MARK_NONE = 2;
 u8 MARK_SOME = 3;
 
-fn memo_free(place_memo mut* m) void {
-    strmap.free(&m->held);
-    containers.pool_free(&m->keys);
-    strbuf.free(&m->text);
-    del(m->frames);
-    m->depth = 0;
-    del(m->entered);
-    m->entered_len = 0;
+// Frees a memo that the caller moves in: the map, the pool of its keys, the text, then the two
+// stacks of the walk of the marks.
+fn memo_drop(place_memo mut m) void {
+    strmap.drop(move(m.held));
+    containers.pool_drop(move(m.keys));
+    strbuf.drop(move(m.text));
+    del(m.frames);
+    del(m.entered);
+}
+
+// An empty memo in an allocation of its own, for a function that lends the memo to calls. `view`
+// is the field of the same name.
+fn memo_make(bool view) place_memo mut* own {
+    place_memo mut* own m = new(place_memo);
+    m->view = view;
+    return m;
+}
+
+// Ends a memo of memo_make that the caller moves in.
+fn memo_drop_made(place_memo mut* own p) void {
+    place_memo kept = move(*p);
+    del(p);
+    memo_drop(move(kept));
 }
 
 // Whether a value of `t` can write, free or call through a pointer (D3.14). It can when `t` is or
@@ -3893,31 +3920,20 @@ fn check_pointer_places(checker mut* ck, ast.node* n, types.node* src, types.nod
             return false;
         }
         if (d->is_mut) {
-            place_memo mut m = place_memo{};
-            defer {
-                memo_free(&m);
-                // The leak rule reads no callee: after the calls, the test of a loop proves each
-                // chain empty, and each other owner takes a `del`.
-                while (m.keys.head != null) {
-                    containers.pool_free(&m.keys);
-                }
-                del(m.held.entries);
-                del(m.text.data);
-                del(m.frames);
-                del(m.entered);
-            }
+            place_memo mut* own m = memo_make(false);
+            defer memo_drop_made(move(m));
             pointer_place mut h = pointer_place{};
-            bool hides = sp != null && first_hidden(&m, sp, 1, 0, dp, &h);
-            if (!m.over && hides) {
+            bool hides = sp != null && first_hidden(m, sp, 1, 0, dp, &h);
+            if (!m->over && hides) {
                 report_pointer_place(ck, n, src, dst, "a 'mut' cast", "hides", h, level);
                 return true;
             }
-            bool adds = !m.over && dp != null && first_hidden(&m, dp, 1, 0, sp, &h);
-            if (!m.over && adds) {
+            bool adds = !m->over && dp != null && first_hidden(m, dp, 1, 0, sp, &h);
+            if (!m->over && adds) {
                 report_pointer_place(ck, n, src, dst, "a 'mut' cast", "adds", h, level);
                 return true;
             }
-            if (m.over) {
+            if (m->over) {
                 report_pointer_limit(ck, n, src, dst, "a 'mut' cast");
                 return true;
             }
@@ -3971,22 +3987,11 @@ fn check_view_places(checker mut* ck, ast.node* n, types.node* src, types.node* 
     if (!has_layout(dp) || (sp != null && !has_layout(sp))) {
         return false;
     }
-    place_memo mut m = place_memo{.view = true};
-    defer {
-        memo_free(&m);
-        // The leak rule reads no callee: after the calls, the test of a loop proves each chain
-        // empty, and each other owner takes a `del`.
-        while (m.keys.head != null) {
-            containers.pool_free(&m.keys);
-        }
-        del(m.held.entries);
-        del(m.text.data);
-        del(m.frames);
-        del(m.entered);
-    }
+    place_memo mut* own m = memo_make(true);
+    defer memo_drop_made(move(m));
     pointer_place mut h = pointer_place{};
-    bool adds = first_hidden(&m, dp, 1, 0, sp, &h);
-    if (m.over) {
+    bool adds = first_hidden(m, dp, 1, 0, sp, &h);
+    if (m->over) {
         report_pointer_limit(ck, n, src, dst, "a cast");
         return true;
     }

@@ -19,20 +19,6 @@ import std.str;
 // candidate file exists before it reads anything. A buffer that stands for no file resolves as
 // an entry file, which is named on the command line, and not as an import.
 
-// A second set in an allocation of its own, for a test that loads it through the session of its
-// environment. The test lends the set to calls, and no call changes the `own` pointer.
-fn set_make() modules.module_set mut* own {
-    return new(modules.module_set);
-}
-
-// Ends a set of set_make that the caller moves in: the value moves out before the `del` of the
-// allocation, and modules.drop frees it.
-fn set_drop_made(modules.module_set mut* own p) void {
-    modules.module_set kept = move(*p);
-    del(p);
-    modules.drop(move(kept));
-}
-
 // ---- the session is where the bytes come from -----------------------------------
 
 // The entry file's bytes are the session's, so a load leaves them in it and a
@@ -66,8 +52,8 @@ fn a_file_is_read_once_for_the_life_of_the_session(modules_env.env mut* e) void 
     defer del(entry);
     assert(modules.load(&e->s, &e->set, entry));
     u64 address = source_address(modules.at(&e->set, 0));
-    modules.module_set mut* own second = set_make();
-    defer set_drop_made(move(second));
+    modules.module_set mut* own second = modules.make();
+    defer modules.drop_made(move(second));
     assert(modules.load(&e->s, second, entry));
     assert(source_address(modules.at(second, 0)) == address);
     assert(session.source_count(&e->s) == 1);
@@ -176,8 +162,8 @@ fn two_sets_over_one_session_share_only_the_sources(modules_env.env mut* e) void
     defer del(entry);
     string own other = modules_env.in_sandbox(e, "other.ft");
     defer del(other);
-    modules.module_set mut* own second = set_make();
-    defer set_drop_made(move(second));
+    modules.module_set mut* own second = modules.make();
+    defer modules.drop_made(move(second));
     assert(modules.load(&e->s, &e->set, entry));
     assert(modules.load(&e->s, second, other));
     assert(modules.count(&e->set) == 1);
@@ -224,8 +210,8 @@ fn two_sessions_share_nothing() void {
 
     session.session mut* own second = session.make();
     defer session.drop_made(move(second));
-    modules.module_set mut* own set = set_make();
-    defer set_drop_made(move(set));
+    modules.module_set mut* own set = modules.make();
+    defer modules.drop_made(move(set));
     // The second knows nothing of that buffer and reads the file.
     assert(modules.load(second, set, entry));
     assert(session.error_count(second) == 0);
@@ -243,11 +229,11 @@ fn a_hundred_loads_through_one_session_answer_alike(modules_env.env mut* e) void
     defer del(entry);
     u64 mut round = 0;
     while (round < RELOADS) {
-        modules.module_set mut* own set = set_make();
+        modules.module_set mut* own set = modules.make();
         assert(modules.load(&e->s, set, entry));
         assert(modules.count(set) == 2);
         assert(modules_env.path_of(modules.at(set, 0)) == "util");
-        set_drop_made(move(set));
+        modules.drop_made(move(set));
         round += 1;
     }
     // The two files were read once between them and nothing was reported.

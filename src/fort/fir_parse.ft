@@ -133,6 +133,19 @@ struct scanner {
     bool clean;
 }
 
+// Frees a scanner that the caller moves in: the message.
+fn scanner_drop(scanner mut sc) void {
+    strbuf.drop(move(sc.msg));
+}
+
+// Ends a scanner in an allocation of its own that the caller moves in, for a function that lends
+// it to calls.
+fn scanner_drop_made(scanner mut* own p) void {
+    scanner kept = move(*p);
+    del(p);
+    scanner_drop(move(kept));
+}
+
 // The byte `ahead` bytes after the next one, or -1 past the end.
 fn peek(scanner* sc, u64 ahead) i64 {
     u64 at = sc->pos + ahead;
@@ -308,7 +321,9 @@ fn scan_string(scanner mut* sc) bool {
     u32 col = sc->col;
     lexer.tok_vec mut one = lexer.tokvec_create();
     defer del(one.items);
-    lexer.lexer mut lx = lexer.lexer{
+    lexer.lexer mut* own lx = new(lexer.lexer);
+    defer lexer.drop_made(move(lx));
+    *lx = lexer.lexer{
         .sess = sc->sess,
         .file = sc->file,
         .src = sc->src,
@@ -319,9 +334,7 @@ fn scan_string(scanner mut* sc) bool {
         .buf = strbuf.create(),
         .msg = strbuf.create(),
     };
-    defer del(lx.buf.data);
-    defer del(lx.msg.data);
-    if (!lexer.lex_string(&lx)) {
+    if (!lexer.lex_string(lx)) {
         sc->clean = false;
         // the rest of the line holds no token that the string did not end
         while (peek(sc, 0) >= 0 && peek(sc, 0) != lexer.BYTE_LF) {
@@ -329,9 +342,9 @@ fn scan_string(scanner mut* sc) bool {
         }
         return false;
     }
-    sc->pos = lx.pos;
-    sc->line = lx.line;
-    sc->col = lx.col;
+    sc->pos = lx->pos;
+    sc->line = lx->line;
+    sc->col = lx->col;
     ftok mut t = scan_token(sc, ftok_kind.ft_string, start, line, col);
     t.text = lexer.tokvec_at(&one, 0).text;
     ftok_push(sc->out, t);
@@ -432,17 +445,18 @@ fn scan_one(scanner mut* sc) void {
 /// diagnostic, and the tokenizer continues at the next byte; a malformed integer or string is one
 /// diagnostic too. Returns true when no diagnostic was reported.
 fn tokenize(session.session mut* s, string file, string src, ftok_vec mut* out) bool {
-    scanner mut sc = scanner{s, file, src, 0, 1, 1, out, strbuf.create(), true};
-    defer del(sc.msg.data);
+    scanner mut* own sc = new(scanner);
+    defer scanner_drop_made(move(sc));
+    *sc = scanner{s, file, src, 0, 1, 1, out, strbuf.create(), true};
     // the tokens of one file share the diagnostics of that file, as the lexer's do
     diag.begin_file(session.diags(s));
     while (true) {
-        skip_blanks(&sc);
-        if (sc.pos >= src.len) {
-            ftok_push(out, scan_token(&sc, ftok_kind.ft_eof, sc.pos, sc.line, sc.col));
-            return sc.clean;
+        skip_blanks(sc);
+        if (sc->pos >= src.len) {
+            ftok_push(out, scan_token(sc, ftok_kind.ft_eof, sc->pos, sc->line, sc->col));
+            return sc->clean;
         }
-        scan_one(&sc);
+        scan_one(sc);
     }
 }
 
@@ -518,7 +532,7 @@ fn parser_drop(fir_parser mut p) void {
     del(p.toks.items);
     del(p.refs.items);
     ast.arena_drop(move(p.arena));
-    del(p.msg.data);
+    strbuf.drop(move(p.msg));
 }
 
 // A zero parser in an allocation of its own, for a function that lends the parser to calls.
@@ -906,7 +920,9 @@ fn parse_type_text(fir_parser mut* p, string text, diag.loc at) types.node* {
 fn parse_type_tree(fir_parser mut* p, string text, diag.loc at, u64 before) ast.node mut* {
     lexer.tok_vec mut toks = lexer.tokvec_create();
     defer del(toks.items);
-    lexer.lexer mut lx = lexer.lexer{
+    lexer.lexer mut* own lx = new(lexer.lexer);
+    defer lexer.drop_made(move(lx));
+    *lx = lexer.lexer{
         .sess = p->sess,
         .file = p->file,
         .src = text,
@@ -916,15 +932,13 @@ fn parse_type_tree(fir_parser mut* p, string text, diag.loc at, u64 before) ast.
         .buf = strbuf.create(),
         .msg = strbuf.create(),
     };
-    defer {
-        del(lx.buf.data);
-        del(lx.msg.data);
-    }
-    bool lexed = lexer.lex_all(&lx);
+    bool lexed = lexer.lex_all(lx);
     if (!lexed) {
         return null;
     }
-    parser.parser mut pp = parser.parser{
+    parser.parser mut* own pp = new(parser.parser);
+    defer parser.drop_made(move(pp));
+    *pp = parser.parser{
         .sess = p->sess,
         .file = p->file,
         .toks = &toks,
@@ -933,10 +947,9 @@ fn parse_type_tree(fir_parser mut* p, string text, diag.loc at, u64 before) ast.
         .last = diag.loc_make(p->file, 0, 0),
         .msg = strbuf.create(),
     };
-    defer del(pp.msg.data);
-    ast.node mut* n = parser.parse_type(&pp, false);
-    bool rest = parser.kind(&pp) != lexer.tok_kind.eof;
-    diag.loc rest_at = parser.here(&pp);
+    ast.node mut* n = parser.parse_type(pp, false);
+    bool rest = parser.kind(pp) != lexer.tok_kind.eof;
+    diag.loc rest_at = parser.here(pp);
     if (n == null) {
         if (session.error_count(p->sess) == before) {
             fail_at(p, at, "expected a type");
@@ -2148,20 +2161,11 @@ fn read_headers(fir_parser mut* p, fir.module mut* m, pos_vec mut* bodies) void 
             } else if (kind(p) != ftok_kind.ft_lbrace) {
                 fail_expected(p, "'{'");
             } else {
-                fir.func mut f = fir.func{};
-                defer {
-                    // A function that moved into `m` leaves `f` empty here.
-                    fir.func_free(&f);
-                    // The leak rule reads no callee, so each owner takes a `del` after the call.
-                    del(f.locals.items);
-                    del(f.projs.items);
-                    del(f.ops.items);
-                    del(f.arms.items);
-                    del(f.blocks.items);
-                }
-                if (function_of(p, &h, &f)) {
+                fir.func mut* own f = fir.func_make();
+                defer fir.func_drop_made(move(f));
+                if (function_of(p, &h, f)) {
                     pos_push(bodies, p->pos);
-                    fir.module_add_function(m, move(f));
+                    fir.module_add_function(m, move(*f));
                 }
             }
         }
@@ -2189,25 +2193,17 @@ fn parse_into(session.session mut* s, string file, string text, prelude pre, fir
     void {
     pos_vec mut bodies = pos_vec{};
     defer del(bodies.items);
-    fir_parser mut p = parser_create(s, file, text, pre);
-    defer {
-        parser_free(&p);
-        // The leak rule reads no callee: after the calls, the test of a loop proves each chain
-        // empty, and each other owner takes a `del`.
-        while (p.arena.last != null) {
-            ast.ast_arena_free(&p.arena);
-        }
-        del(p.toks.items);
-        del(p.refs.items);
-        del(p.arena.nodes);
-        del(p.msg.data);
-    }
-    if (!p.clean) {
+    // `new` and not parser_make: the pass knows the owners of a fresh `new` empty, so the store of
+    // parser_create passes the overwrite check.
+    fir_parser mut* own p = new(fir_parser);
+    defer parser_drop_made(move(p));
+    *p = parser_create(s, file, text, pre);
+    if (!p->clean) {
         // a malformed token is its one diagnostic, and no function is read
         return;
     }
-    read_headers(&p, m, &bodies);
-    parse_bodies(&p, m, &bodies);
+    read_headers(p, m, &bodies);
+    parse_bodies(p, m, &bodies);
     fir.module_collect_externs(m);
 }
 

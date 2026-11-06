@@ -9,9 +9,9 @@ over each of those suites, with the flags of the suite, for the Linux and the Da
 holds the sites in the files of the suites against EXPECTED, which gives none. A site in a support
 module or in src belongs to the test of that tree.
 
-Some suites hold drops of their own (`set_drop_made`, `params_drop_made`, `memo_drop`,
-`checker_drop_made`). A drop that misses a release leaves an owner of its value unproved at its
-exit, and that exit is a site. So this test also holds each release of those drops.
+The suites end their values through the drops of src and of test/fort/support, and hold no drop
+of their own. A drop of a suite that misses a release would leave an owner of its value unproved
+at its exit, and that exit would be a site. So this test also holds each release of such a drop.
 
 A control program gives one site of each report in a file of the scope. The test holds the
 control too, so it cannot pass when it reads no site.

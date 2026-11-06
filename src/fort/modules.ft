@@ -1104,19 +1104,12 @@ fn has_declaration(session.session mut* s, module_set mut* set, used_library* li
     bool mut declares = false;
     lexer.tok_vec mut toks = lexer.tokvec_create();
     defer del(toks.items);
-    ast.arena mut ar = ast.arena{};
-    defer {
-        // The leak rule reads no callee: after the calls, the test of a loop proves each chain
-        // empty, and each other owner takes a `del`.
-        while (ar.last != null) {
-            ast.ast_arena_free(&ar);
-        }
-        del(ar.nodes);
-    }
+    ast.arena mut* own ar = ast.arena_make();
+    defer ast.arena_drop_made(move(ar));
     copy_tokens(lib, k, &toks);
     diag.mute(session.diags(s));
     u64 before = session.error_count(s);
-    ast.node mut* probed = parser.parse_interface(s, lib->file, &toks, &ar);
+    ast.node mut* probed = parser.parse_interface(s, lib->file, &toks, ar);
     if (probed != null && session.error_count(s) == before) {
         declares = selected_declares(probed, name);
     }
@@ -1245,20 +1238,13 @@ fn prefix_declares(session.session mut* s, module_set mut* set, string path, str
     bool mut declares = false;
     lexer.tok_vec mut toks = lexer.tokvec_create();
     defer del(toks.items);
-    ast.arena mut ar = ast.arena{};
-    defer {
-        // The leak rule reads no callee: after the calls, the test of a loop proves each chain
-        // empty, and each other owner takes a `del`.
-        while (ar.last != null) {
-            ast.ast_arena_free(&ar);
-        }
-        del(ar.nodes);
-    }
+    ast.arena mut* own ar = ast.arena_make();
+    defer ast.arena_drop_made(move(ar));
     diag.mute(session.diags(s));
     u64 before = session.error_count(s);
     // a file that reported anything declares nothing
     lexer.lex_file(s, file, source, &toks);
-    ast.node mut* probed = parser.parse_module(s, file, &toks, &ar);
+    ast.node mut* probed = parser.parse_module(s, file, &toks, ar);
     if (probed != null && session.error_count(s) == before
         && comptime.select_module(s, probed)) {
         declares = selected_declares(probed, name);
@@ -1502,10 +1488,10 @@ fn drop(module_set mut set) void {
     del(set.order.items);
     del(set.stack.items);
     del(set.roots.items);
-    del(set.by_path.entries);
-    del(set.by_real.entries);
+    strmap.drop(move(set.by_path));
+    strmap.drop(move(set.by_real));
     ast.arena_drop(move(set.arena));
-    del(set.msg.data);
+    strbuf.drop(move(set.msg));
     while (set.used.last != null) {
         used_library mut* own lib = move(set.used.last);
         used_library kept = move(*lib);
@@ -1513,18 +1499,30 @@ fn drop(module_set mut set) void {
         set.used.last = move(kept.made_before);
         del(kept.toks.items);
         del(kept.paths.items);
-        del(kept.sections.entries);
-        del(kept.firsts.items);
-        del(kept.ends.items);
-        del(kept.lines.items);
-        del(kept.offsets.items);
+        strmap.drop(move(kept.sections));
+        vec.int_drop(move(kept.firsts));
+        vec.int_drop(move(kept.ends));
+        vec.int_drop(move(kept.lines));
+        vec.int_drop(move(kept.offsets));
     }
     del(set.used.items);
     del(set.outside_order.items);
     del(set.outside_listed.items);
-    del(set.listed.entries);
+    strmap.drop(move(set.listed));
     del(set.listed_files.items);
     containers.pool_drop(move(set.pool));
+}
+
+// An empty set in an allocation of its own, for a function that lends the set to calls.
+fn make() module_set mut* own {
+    return new(module_set);
+}
+
+// Ends a set of make that the caller moves in.
+fn drop_made(module_set mut* own p) void {
+    module_set kept = move(*p);
+    del(p);
+    drop(move(kept));
 }
 
 /// Appends a `-I` search root.

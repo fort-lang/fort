@@ -756,6 +756,7 @@ bytes `data[len..]` are spare room whose contents are unspecified.
 fn create() str_buf
 fn with_cap(u64 cap) str_buf
 fn free(str_buf mut* b) void
+fn drop(str_buf mut b) void
 fn reserve(str_buf mut* b, u64 extra) void
 fn cap(str_buf* b) u64
 fn push(str_buf mut* b, char ch) void
@@ -788,9 +789,11 @@ b->data = move(bigger);                 // the slot is zero, so the store passes
   is the same as `create`. Ownership: the result is an owning value that the caller keeps in
   a variable (`strbuf.str_buf mut b = strbuf.create();`, a call result needs no `move`, D17.5)
   and releases with `free`.
-- `free`: `del(b->data)`, which frees the storage and empties the field (D17.9), then sets
-  `b->len` to 0, leaving `str_buf{}`; calling it twice, or on `str_buf{}`, is harmless because
-  `del` of a zero span is a no-op.
+- `free`: `drop(move(*b))`. The `move` leaves `str_buf{}` in `*b` (D17.6), and `drop` frees the
+  storage; calling it twice, or on `str_buf{}`, is harmless because `del` of a zero span is a
+  no-op.
+- `drop`: `del(b.data)` of a buffer that the caller moves in (`strbuf.drop(move(b))`). It holds
+  the one release of the type, and `free` reaches it. Ownership: takes the buffer.
 - `reserve`: ensures `data.len >= len + extra`, growing per the policy. Ownership: none.
 - `cap`: `b->data.len`, the bytes the storage holds, so `cap(b) - b->len` is the room a further
   `append` uses without growing. It never shrinks except at `free`, and `create` answers 0. This
@@ -858,22 +861,23 @@ wants a bounds check indexes the live span.
 fn int_create() int_vec
 fn int_with_cap(u64 cap) int_vec
 fn int_free(int_vec mut* v) void
+fn int_drop(int_vec mut v) void
 fn int_reserve(int_vec mut* v, u64 extra) void
 fn int_push(int_vec mut* v, i64 x) void
 fn int_pop(int_vec mut* v) i64
 ```
 
-- `int_create`, `int_with_cap`, `int_free`, `int_reserve`: exactly as their `strbuf`
+- `int_create`, `int_with_cap`, `int_free`, `int_drop`, `int_reserve`: exactly as their `strbuf`
   counterparts, counting elements instead of bytes and using the same growth policy (16, then
   doubling). Growth copies the elements to fresh storage with an element loop, then `del`s the
   old span and stores the new one (`del(v->items); v->items = move(bigger);`, D17.11), which is
-  what makes the file usable as a template. Ownership: `int_free` `del`s the slots and leaves
-  `{}`.
+  what makes the file usable as a template. Ownership: `int_drop` `del`s the slots of a vector
+  that the caller moves in; `int_free` moves the vector into `int_drop` and leaves `{}`.
 - `int_push`: appends one element, growing as needed. `int_pop`: removes and returns the last
   element; panics with `"vec.int_pop: empty"` on an empty vector.
 
 This module is the non-generic container pattern (D15). To hold `token` values, copy `int_vec`
-and its six functions, replace `i64` with `token` and the prefix `int_` with `token_`: about
+and its seven functions, replace `i64` with `token` and the prefix `int_` with `token_`: about
 forty lines, type-checked like any other code. The module has no vector of `void*`: no cast gives
 a type to a `void*` (D3.14), so a pointer that went in as a `void*` could not come back as a
 typed pointer. A vector of pointers is a typed copy of the pattern. For pointers to elements that
@@ -961,6 +965,7 @@ Iteration is a walk over `entries` taking the slots whose `state == SLOT_FULL`, 
 ```fort
 fn create() str_map
 fn free(str_map mut* m) void
+fn drop(str_map mut m) void
 fn put(str_map mut* m, string key, i64 val) bool
 fn get(str_map* m, string key, i64 mut* out) bool
 fn has(str_map* m, string key) bool
@@ -968,9 +973,10 @@ fn remove(str_map mut* m, string key) bool
 fn count(str_map* m) u64
 ```
 
-- `create`: `str_map{}`; allocates nothing. `free`: `del(m->entries)`, which frees the table and
-  empties the field (D17.9), then zeroes `live` and `used`, leaving `str_map{}`; keys are
-  untouched, and a second call is harmless. Ownership: the caller calls `free`.
+- `create`: `str_map{}`; allocates nothing. `free`: `drop(move(*m))`. The `move` leaves
+  `str_map{}` in `*m` (D17.6), and `drop` frees the table; keys are untouched, and a second call
+  is harmless. `drop`: `del(m.entries)` of a map that the caller moves in
+  (`strmap.drop(move(m))`). Ownership: the caller calls `free`, or passes the map to `drop`.
 - `put`: inserts `key` with `val`, or replaces the value of an existing key. Returns `true` when
   the key was new. Keys are borrowed views (D13.5): the caller keeps the key's bytes alive and
   unchanged for as long as the entry exists (a literal, a sub-string of a source buffer that

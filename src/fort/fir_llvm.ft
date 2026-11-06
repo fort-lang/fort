@@ -898,13 +898,13 @@ fn not_value(translator mut* t, fir.operand x) gen.gen_val {
 // file, the line and the column (toolchain.md 6 item 17).
 fn alloc_value(translator mut* t, fir.statement* s) gen.gen_val {
     gen.gen_val n = operand_value(t, fir.rvalue_operand(t->f, s->value, 0));
-    gen.gen_args mut args = gen.gen_args_init();
-    defer del(args.text.data);
+    gen.gen_args mut* own args = gen.gen_args_make();
+    defer gen.gen_args_drop_made(move(args));
     u64 size = types.type_sizeof(s->value.ty);
-    gen.gen_args_add(&args, gen.gen_const_unsigned(t->g, "i64", size));
-    gen.gen_args_add(&args, n);
-    gen.gen_args_add_loc(t->g, &args, s->loc);
-    return gen.gen_call_rt_value(t->g, runtime_sig.rt_entry.rt_alloc, "ptr", &args);
+    gen.gen_args_add(args, gen.gen_const_unsigned(t->g, "i64", size));
+    gen.gen_args_add(args, n);
+    gen.gen_args_add_loc(t->g, args, s->loc);
+    return gen.gen_call_rt_value(t->g, runtime_sig.rt_entry.rt_alloc, "ptr", args);
 }
 
 // ---- calls -------------------------------------------------------------------------------------
@@ -948,15 +948,15 @@ fn call_of(translator mut* t, fir.statement* s) gen.gen_val {
         args[cast(k, u64)] = h;
         k += 1;
     }
-    gen.gen_args mut text = gen.gen_args_init();
-    defer del(text.text.data);
+    gen.gen_args mut* own text = gen.gen_args_make();
+    defer gen.gen_args_drop_made(move(text));
     if (sig.sret.len > 0) {
         gen.gen_val dst = place_addr(t, s->place);
-        gen.gen_args_add_ext(&text, dst, gen.sret_attr(g, &sig));
+        gen.gen_args_add_ext(text, dst, gen.sret_attr(g, &sig));
     }
-    add_arguments(&text, args, &sig);
+    add_arguments(text, args, &sig);
     bool pointer = r.callee == fir.callee_kind.cl_value;
-    return gen.gen_call_sig(g, &sig, callee, pointer, &text);
+    return gen.gen_call_sig(g, &sig, callee, pointer, text);
 }
 
 // Adds the held arguments `args` of call_of to `text`, each fixed argument with the extension
@@ -1131,10 +1131,10 @@ fn del_place(translator mut* t, fir.place p) void {
             ptr = gen.gen_load_place(t->g, gen.gen_place{at, ty});
         }
     }
-    gen.gen_args mut args = gen.gen_args_init();
-    defer del(args.text.data);
-    gen.gen_args_add(&args, ptr);
-    gen.gen_call_rt(t->g, runtime_sig.rt_entry.rt_free, &args);
+    gen.gen_args mut* own args = gen.gen_args_make();
+    defer gen.gen_args_drop_made(move(args));
+    gen.gen_args_add(args, ptr);
+    gen.gen_call_rt(t->g, runtime_sig.rt_entry.rt_free, args);
     if (reg || temporary_place(t, p)) {
         return;
     }
@@ -1288,11 +1288,11 @@ fn add_reported(translator mut* t, fir.terminator* term, gen.gen_args mut* args)
 // line and the column, then `unreachable` (toolchain.md 6 items 14 and 19).
 fn fail_call(translator mut* t, fir.terminator* term) void {
     gen.emitter mut* g = t->g;
-    gen.gen_args mut args = gen.gen_args_init();
-    defer del(args.text.data);
-    add_reported(t, term, &args);
-    gen.gen_args_add_loc(g, &args, term->loc);
-    gen.gen_call_rt(g, entry_of(term->check), &args);
+    gen.gen_args mut* own args = gen.gen_args_make();
+    defer gen.gen_args_drop_made(move(args));
+    add_reported(t, term, args);
+    gen.gen_args_add_loc(g, args, term->loc);
+    gen.gen_call_rt(g, entry_of(term->check), args);
     strbuf.append(&g->body, "  unreachable\n");
 }
 
@@ -1367,16 +1367,16 @@ fn return_to(translator mut* t) void {
 fn check_to(translator mut* t, fir.terminator* term, u64 bad) void {
     gen.emitter mut* g = t->g;
     gen.gen_val cond = operand_value(t, term->cond);
-    gen.gen_args mut args = gen.gen_args_init();
-    defer del(args.text.data);
-    add_reported(t, term, &args);
+    gen.gen_args mut* own args = gen.gen_args_make();
+    defer gen.gen_args_drop_made(move(args));
+    add_reported(t, term, args);
     u64 next = label_of(t, term->target);
     if (term->check == fir.check_kind.chk_user) {
         gen.gen_br_cond(g, cond, next, bad);
     } else {
         gen.gen_br_cond(g, cond, bad, next);
     }
-    gen.gen_fail_block(g, bad, entry_of(term->check), &args, term->loc);
+    gen.gen_fail_block(g, bad, entry_of(term->check), args, term->loc);
     // the failure block opened a block of its own; the block of the check ends in its `br`
 }
 

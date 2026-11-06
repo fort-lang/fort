@@ -12,8 +12,18 @@ import std.strbuf;
 
 // The map borrows its keys and never owns one (D13.5, stdlib.md 2.8): an owned
 // string and a sub-string of a buffer serve as keys while their owners keep
-// them alive, free(&m) leaves both alone, and the owners release them
+// them alive, strmap.free leaves both alone, and the owners release them
 // afterwards.
+
+// Ends a map in an allocation of `new`: the value moves out, the allocation goes, and strmap.drop
+// frees the table. The calls under test take the map by pointer, so the map lives in an
+// allocation: no call changes its pointer.
+fn drop_made(strmap.str_map mut* own p) void {
+    strmap.str_map kept = move(*p);
+    del(p);
+    strmap.drop(move(kept));
+}
+
 fn main() i32 {
     string own owned = str.dup("owned");
     defer del(owned);
@@ -26,28 +36,28 @@ fn main() i32 {
     // these bytes (stdlib.md 1.3).
     string borrowed = strbuf.view(&source)[2..5];
 
-    strmap.str_map mut m = strmap.create();
-    defer strmap.free(&m);
-    println(strmap.put(&m, owned, 10), " ", strmap.put(&m, borrowed, 20), " ",
-            strmap.count(&m));
+    strmap.str_map mut* own m = new(strmap.str_map);
+    defer drop_made(move(m));
+    println(strmap.put(m, owned, 10), " ", strmap.put(m, borrowed, 20), " ",
+            strmap.count(m));
 
     i64 mut a = 0;
     i64 mut b = 0;
-    strmap.get(&m, owned, &a);
-    strmap.get(&m, borrowed, &b);
+    strmap.get(m, owned, &a);
+    strmap.get(m, borrowed, &b);
     println(a, " ", b);
 
     // The entries answer to any string with the same bytes, whoever owns it.
-    println(strmap.has(&m, "owned"), " ", strmap.has(&m, "sub"));
+    println(strmap.has(m, "owned"), " ", strmap.has(m, "sub"));
     i64 mut c = 0;
     i64 mut d = 0;
-    strmap.get(&m, "owned", &c);
-    strmap.get(&m, "sub", &d);
-    println(c, " ", d, " ", strmap.count(&m));
+    strmap.get(m, "owned", &c);
+    strmap.get(m, "sub", &d);
+    println(c, " ", d, " ", strmap.count(m));
 
     // Freeing the map releases the table alone: both keys are as they were.
-    strmap.free(&m);
-    println(m.live, " ", m.used, " ", m.entries.ptr == null);
+    strmap.free(m);
+    println(m->live, " ", m->used, " ", m->entries.ptr == null);
     println(owned, " ", borrowed);
     return 0;
 }

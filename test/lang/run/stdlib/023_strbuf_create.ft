@@ -5,20 +5,33 @@
 //| 0 0 false
 //| 0 0 true
 //| 0 0 true
+//| 4 16
 import std.strbuf;
 
-// The three ways a str_buf comes into being and the one way it goes away
+// The three ways a str_buf comes into being and the two ways it goes away
 // (stdlib.md 2.6): create allocates nothing, with_cap allocates up front,
-// with_cap(0) is create with an allocation of length zero behind it, and free
-// leaves str_buf{} however often it is called.
+// with_cap(0) is create with an allocation of length zero behind it, free
+// leaves str_buf{} however often it is called, and drop frees the data of a
+// buffer that the caller moves in.
+
+// Ends a buffer in an allocation of `new`: the value moves out, the allocation goes, and
+// strbuf.drop frees the data. The calls under test take the buffer by pointer, so the buffer
+// lives in an allocation: no call changes its pointer.
+fn drop_made(strbuf.str_buf mut* own p) void {
+    strbuf.str_buf kept = move(*p);
+    del(p);
+    strbuf.drop(move(kept));
+}
+
 fn main() i32 {
     strbuf.str_buf mut empty = strbuf.create();
     defer del(empty.data);
     println(empty.len, " ", empty.data.len, " ", empty.data.ptr == null);
 
-    strbuf.str_buf mut b = strbuf.with_cap(32);
-    defer strbuf.free(&b);
-    println(b.len, " ", b.data.len, " ", b.data.ptr == null);
+    strbuf.str_buf mut* own b = new(strbuf.str_buf);
+    defer drop_made(move(b));
+    *b = strbuf.with_cap(32);
+    println(b->len, " ", b->data.len, " ", b->data.ptr == null);
 
     // new(u8, 0) hands out a non-null pointer to zero bytes (D10.2), so this
     // buffer differs from create() only in that it holds an allocation.
@@ -28,9 +41,15 @@ fn main() i32 {
 
     // free releases the storage and leaves the zero value, and doing it twice
     // frees once because del empties the field (D17.9).
-    strbuf.free(&b);
-    println(b.len, " ", b.data.len, " ", b.data.ptr == null);
-    strbuf.free(&b);
-    println(b.len, " ", b.data.len, " ", b.data.ptr == null);
+    strbuf.free(b);
+    println(b->len, " ", b->data.len, " ", b->data.ptr == null);
+    strbuf.free(b);
+    println(b->len, " ", b->data.len, " ", b->data.ptr == null);
+
+    // A buffer that ends with its data: drop_made gives strbuf.drop a live value.
+    strbuf.str_buf mut* own live = new(strbuf.str_buf);
+    defer drop_made(move(live));
+    strbuf.append(live, "data");
+    println(live->len, " ", live->data.len);
     return 0;
 }

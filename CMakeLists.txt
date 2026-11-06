@@ -399,6 +399,15 @@ set_tests_properties(aggregate-sites PROPERTIES
     LABELS "fort;integration"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# No function of src/fort, src/lsp or std dels the storage below a field whose type has a value
+# drop: such a field ends through the drop of its type, so each release stands once. A text scan
+# with a control tree; it needs no compiler.
+add_test(NAME drop-fields
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/drop_fields_test.py" --root "${CMAKE_SOURCE_DIR}")
+set_tests_properties(drop-fields PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # ---- the language server -------------------------------------------------------
 # fort_lsp is src/lsp compiled by the production compiler. It stands at the
 # build root. The C-started source chain builds that compiler for the native

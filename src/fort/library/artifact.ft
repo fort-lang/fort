@@ -693,12 +693,12 @@ fn free(contents mut* c) void {
 // each hold a chain, so each moves into the drop of its type: the leak rule proves a chain of a
 // local only when no call follows the proof.
 fn drop(contents mut c) void {
-    del(c.text.data);
-    del(c.interface.data);
-    del(c.summaries.data);
+    strbuf.drop(move(c.text));
+    strbuf.drop(move(c.interface));
+    strbuf.drop(move(c.summaries));
     summary.table_drop(move(c.ownership));
-    del(c.archive.data);
-    del(c.object.data);
+    strbuf.drop(move(c.archive));
+    strbuf.drop(move(c.object));
     containers.pool_drop(move(c.values));
     del(c.cfg_keys.items);
     del(c.cfg_values.items);
@@ -983,15 +983,9 @@ fn declares_each(string text, summary.table* t) bool {
     }
     strmap.str_map mut declared = strmap.create();
     defer del(declared.entries);
-    containers.pool mut names = containers.pool_create();
-    defer {
-        // The leak rule reads no callee: the test of the loop proves the pool empty, and the body
-        // runs at most once.
-        while (names.head != null) {
-            containers.pool_free(&names);
-        }
-    }
-    put_declared(text, &names, &declared);
+    containers.pool mut* own names = containers.pool_make();
+    defer containers.pool_drop_made(move(names));
+    put_declared(text, names, &declared);
     u64 mut i = 0;
     while (i < summary.entry_count(t)) {
         if (!strmap.has(&declared, summary.symbol(t, i))) {

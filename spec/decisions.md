@@ -2470,12 +2470,18 @@ Sections:
   (`str.dup`, `str.concat` and `strbuf.take` return `string own`, exact length, no NUL;
   `str.to_cstr` returns `char mut@ own` with a trailing NUL) or delivers it through an `own` slot
   (`io.read_file_bytes`); containers hold their storage as `own` fields (`str_buf { u8 mut@ own
-  data; u64 len; }`, `int_vec`, `str_map`) and expose a `free` function that `del`s them;
+  data; u64 len; }`, `int_vec`, `str_map`) and expose a value drop (`strbuf.drop`,
+  `vec.int_drop`, `strmap.drop`) that takes the container by `move` and `del`s its `own` fields,
+  and a `free`
+  function that moves the container into its drop and leaves the zero value;
   out-parameters that receive ownership are pointers to `own` slots (`u8 mut@ own mut* out`), which
   the caller initializes to `{}` or `null`; `sys.args()` and every `view`-style accessor return
   borrowed values.
 - history: Amended 2026-10-31: the list of containers held `ptr_vec`, which went with the ruling
   "(A) Close R1-R7" (user, 2026-10-31; D13.2).
+  Amended 2026-11-06: each container has a value drop, and its `free` moves the container into the
+  drop (the user ruling "Drop form everywhere", 2026-11-02; `spec/stdlib.md` 2.6 to 2.8). Before,
+  the `free` function `del`ed the storage itself.
 
 ## D14 Toolchain and test conventions
 

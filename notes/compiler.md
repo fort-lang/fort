@@ -1069,7 +1069,7 @@ came here.
   kills the fact of a field, which is reached through memory (`walk_then_call`). Two forms of a free
   that has owners to free pass, and `release_test.ft` holds both. First, a loop that frees a chain
   tests the place in memory (`while (h->last != null)`), moves the link and its tail into locals,
-  frees the link and then stores the tail back (`containers.pool_free`). Second, an object whose
+  frees the link and then stores the tail back (`containers.pool_drop`). Second, an object whose
   owners a call frees moves out whole into a local that is not memory (`module kept = move(*m);
   del(m);`), and a second local takes it for the call (`modules.free`). Since refinement R6 the
   second local is not needed: a store into a memory local keeps each fact through the `own` pointer
@@ -1116,41 +1116,55 @@ came here.
   statements (`spec/fir.md` 9.5), also after the move of a `return` operand (9.6). So each owner
   below the local needs a `del`, a `move` or a test on null after the last call of the exit. A
   call that takes the local by `move`, as `drop(move(x))`, kills the facts of `x` too when the
-  function takes the address of `x` anywhere. Eight forms remove a site. Del: a free that only
-  dels the owners of its parameter becomes the `del` of each owner (`defer del(buf.data)` for
-  `strbuf.free(&buf)` in `std/io.ft`). End: a free that must call stays, and after it each owner
-  takes a `del`, or a loop on `!= null` when its object holds owners, a chain such as
-  `pool.head`: a `del` of a chain is a site of part 2 (`--leak-report`), the loop proves the chain
-  null on its exit edge, and `assert(x == null)` does not (`check.check_pointer_places`; a pool
-  alone ends with the loop, `library/tree.walk_dir`). The form proves one chain of a local: the
-  call in the body of a second loop kills the fact of the first chain. Order: the deferred
-  statements run from the last, so write the `del`s first and the ends that call last; a scope
-  holds one end that calls and then dels, because its call kills the `del`s of a second one
-  (`prover.run_facts`, `driver.run_cc`). Block: two locals whose ends call end in blocks of their
-  own (`prover.find_causes`). Split: a function that returns a local holds no deferred
-  call after the move of its result, and a helper holds the other locals
-  (`fir_parse.parse_into`, `prover.prove_into`). Drop: a value that moves out of an allocation
-  into a local whose address no call takes ends with a free that takes it by `move`
-  (`fir.func_drop`, `scope.drop`). Allocation: a local that the function lends to calls lives in an
-  allocation, whose `own` pointer no call changes (`fir_flow.dataflow_make` and
-  `dataflow_drop_made` in `prover.run_dataflows`). Composite: the form end proves one chain of a
-  local, so a context with two or more chains (a session, a module set, an analysis, a test
-  environment) takes a `drop` that takes its value by `move`. Its parameter is a local whose
-  address no call takes, so no call kills its facts: the drop moves each field into the drop of
-  its type, or dels it, or drains a chain in a loop. Each release stands once, in the drop, and the
-  free by pointer moves its value into the drop (`gen.gen_free`, `check.check_free`), or keeps the
-  fields that its callers read after it (`diag.free` keeps the text mode for `diag.reset`). A drop
-  that called the free and then took a `del` of each owner again hid each release that a mutant
-  deleted from the free: the lifetime tests caught none of 5 such deletions, and the mutation rows
-  D13.5 to D13.5c of `tools/mutations/emitter_fort.json` survived (PR 206, review round 1). A drop
-  that called the free in a loop hid a free that releases one block of a chain
-  (`containers.pool_drop`, review round 2), so each drop drains its chain itself. A
-  function that lends such a context to calls holds it in an allocation of `make`, and
-  `drop_made` moves the value out, dels the allocation and drops the value
-  (`driver.compile_entry`, `check_env.run`). A buffer that a function declares after such an
-  allocation ends in a block of its own, so that its `del` comes before the drop and the frees
-  keep their order (`driver.tokens_entry`). No form stores the zero value over a live aggregate:
-  D17.11 checks no aggregate store field by field, so `x = T{}` would quiet the report and leak.
+  function takes the address of `x` anywhere. The end form is the drop form (the user, 2026-11-02,
+  "Drop form everywhere"): each owning type ends through a drop that takes its value by `move`
+  and holds each release of the type once, and the free by pointer moves its value into the drop.
+  No end frees a value and then dels an owner that the free releases, and no end loops on a chain
+  and calls its free in the body: that `del` or that loop hides a release that a mutant deletes
+  from the free. Five forms remove a site.
+  Del: a free that only dels the owners of its parameter becomes the `del` of each owner, when no
+  free of the local runs before the end (`defer del(buf.data)` for `strbuf.free(&buf)` in
+  `std/io.ft`).
+  Drop: a value whose address no call takes ends with the drop of its type (`fir.func_drop`,
+  `scope.drop`). A drop moves each field whose type has a value drop into that drop
+  (`strbuf.drop(move(g.out))`, `fir_flow.bits_drop(move(c.origins))`), dels each other owner of its
+  value, and drains each chain in a loop, in the order of the free that it replaces, so each release
+  of a type stands once, in the drop of the type. No function of src/fort, src/lsp or std, a drop or
+  another, dels the storage below a field whose type has a value drop, through a parameter or a
+  local: a local whose type holds such a field and that the function lends to calls lives in an
+  allocation and ends through the drop_made of its type (`gen.gen_args_make` in `gen.gen_main`,
+  `prover.probes_drop_made`). ctest `drop-fields` (`test/drop_fields_test.py`) holds that count at 0
+  by a scan of the text, with a control tree; its docstring names what the scan cannot see, and it
+  does not read test/fort/support. The parameter of a drop is a local whose address no call takes,
+  so no call kills its facts; a drop that takes the address of a field makes its parameter a memory
+  local, and its end a site. The free by pointer moves its value into the drop (`gen.gen_free`,
+  `fir_parse.parser_free`), or keeps the fields that its callers read after it (`diag.free` keeps
+  the text mode for `diag.reset`, `lsp.json.free` the limit), or frees each field through the free
+  of its type, which reaches the drop of that type (`session.free`).
+  Allocation: a local that the function lends to calls lives in an allocation of `make`, whose
+  `own` pointer no call changes, and `drop_made` moves the value out, dels the allocation and
+  drops the value (`scope.make` and `scope.drop_made` in `check_stmt.check_block`,
+  `containers.pool_make` and `pool_drop_made` in `driver.run_cc`, `driver.compile_entry`). A `make`
+  that fills the value stores into its fresh `new` (`prover.context_make`, `fir_parse.parser_make`):
+  the pass knows the owners of the allocation empty after a `new`, and a store after the call of
+  a `make` is the overwrite error of D17.11, because the pass reads no callee.
+  Order: the deferred statements run from the last, so write the `del`s first and the drops last
+  (`driver.run_cc`). A memory local that a function declares after an allocation ends in a block
+  of its own, so that its `del` comes before the call of the drop (`driver.tokens_entry`).
+  Split: a function that returns a local holds no deferred call after the move of its result, and
+  a helper holds the other locals (`fir_parse.parse_into`, `prover.prove_into`).
+  The old end form, a free by pointer and then a `del` of each owner or a loop on `!= null` that
+  called the free again, hid each release that a mutant deleted from the free. A drop that called
+  its free and then took a `del` of each owner again hid them the same way: the lifetime tests
+  caught none of 5 such deletions, and the mutation rows D13.5 to D13.5c of
+  `tools/mutations/emitter_fort.json` survived (PR 206, review round 1). A drop that called the free
+  in a loop hid a free that releases one block of a chain (`containers.pool_drop`, review round 2),
+  so each drop drains its chain itself. The drop form replaced the old end form at the 32 ends that
+  `src/fort` and `src/lsp` held at c04d6836. Before it, 44 of 78 deletions of a release of the frees
+  and drops of those ends turned a test red; after it, each of 103 did
+  (`test/fort/support/lifetime.ft` gives the run).
+  No form stores the zero value over a live aggregate: D17.11 checks no aggregate store field by
+  field, so `x = T{}` would quiet the report and leak.
 - **The ownership summaries come from the call graph of the proved functions**
   (`spec/ownership-design.md` 8, `src/fort/owner/summary.ft`). `summary.add` takes each function
   that the emptiness pass proves with no error, with `proof.inner_work` (the largest of the three

@@ -400,14 +400,14 @@ fn free_empties_the_set_and_leaves_it_usable() void {
 // same order. A round that keeps a block moves the view by the bytes of that
 // block, however small the block is and wherever the allocator put it.
 //
-// Each round ends its set through set_drop_made, so modules.drop holds the releases that the view
-// watches. Each release of modules.drop, scope.drop, ast.arena_drop and containers.pool_drop was
-// deleted one at a time under glibc 2.39 and 2.43. This test turns red for the releases of the
+// Each round ends its set through modules.drop_made, so modules.drop holds the releases that the
+// view watches. Each release of modules.drop, scope.drop, ast.arena_drop and containers.pool_drop
+// was deleted one at a time under glibc 2.39 and 2.43. This test turns red for the releases of the
 // namespaces, the vectors of the modules, the order and the stack, the two path maps, the message,
-// the tree arena, the pool, the bindings and the index of a namespace, the list and the node
-// vector of the arena and the bytes of a pool block. The view does not move for the releases of
-// the roots, the used libraries, the outside modules and the listed files. The compiler refuses a
-// deleted `del` of a module, a binding, a node or a pool block (D17.11).
+// the tree arena, the pool, the bindings and the index of a namespace, the list and the node vector
+// of the arena and the bytes of a pool block. The view does not move for the releases of the roots,
+// the used libraries, the outside modules and the listed files. The compiler refuses a deleted
+// `del` of a module, a binding, a node or a pool block (D17.11).
 u64 LEAK_ROUNDS = 200;
 u64 LEAK_EARLY = 100;
 u64 LEAK_BOUND = 1024;
@@ -424,31 +424,17 @@ fn moved(u64 early, u64 late, u64 last) u64 {
     return other;
 }
 
-// A set in an allocation of its own, for a round that loads it through the session of the
-// environment. The round lends the set to calls, and no call changes the `own` pointer.
-fn set_make() modules.module_set mut* own {
-    return new(modules.module_set);
-}
-
-// Ends a set of set_make that the caller moves in: the value moves out before the `del` of the
-// allocation, and modules.drop frees it.
-fn set_drop_made(modules.module_set mut* own p) void {
-    modules.module_set kept = move(*p);
-    del(p);
-    modules.drop(move(kept));
-}
-
 fn everything_a_set_holds_is_released_with_it(modules_env.env mut* e) void {
     modules_env.add(e, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
     modules_env.add(e, "util.ft", modules_env.src_add());
     u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < LEAK_ROUNDS) {
-        modules.module_set mut* own set = set_make();
+        modules.module_set mut* own set = modules.make();
         string own entry = modules_env.in_sandbox(e, "main.ft");
         assert(modules.load(&e->s, set, entry));
         del(entry);
-        set_drop_made(move(set));
+        modules.drop_made(move(set));
         u64 mut slot = 3;
         if (round == LEAK_EARLY) {
             slot = 0;

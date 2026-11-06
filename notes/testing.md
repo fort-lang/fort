@@ -33,8 +33,10 @@ bullet at a time and without a rewrite.
   and the `--use` and `--cache-dir` options of `run_tests.py`), `highlight_selftest`,
   `extension_selftest`, `fort_lint_std` (`tools/fort_lint.py` over one module of `std/` and over
   the modules of both targets), `panic_coverage`, `panic_coverage_selftest` and one
-  `mutation_anchors_<table>` test for each table in `tools/mutations`, and the three `mutate_`
-  tests of `--check` over the fixture `test/mutate/strict_table.json`;
+  `mutation_anchors_<table>` test for each table in `tools/mutations`, the three `mutate_`
+  tests of `--check` over the fixture `test/mutate/strict_table.json`, and `drop-fields`
+  (`test/drop_fields_test.py`: no function of src/fort, src/lsp or std dels the storage below a
+  field whose type has a value drop, and a control tree gives each of its three lines);
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fir-run`,
   `library-interface`, `library-artifact`, `library-use`, `library-cache`, `fixpoint`,
   `aggregate-sites`, `aggregate-front`, `aggregate-lsp`, `aggregate-fir`, `tty`, `stack_depth` and
@@ -321,18 +323,20 @@ bullet at a time and without a rewrite.
   library module is tested.
 - **A free under test hides a defect of the drop at the end of the same local.** The free empties
   the local, so the drop at the end runs on the zero value, and a deletion of the drop call from
-  the `drop_made` changes no stdout and gives no event of the fir-run oracle. In 6 programs of PR
-  212 only `--aggregate-report` saw such a deletion. `test/aggregate_lang_test.py` (ctest
-  `aggregate-lang`) holds the sites of `--aggregate-report` and `--leak-report` over test/lang on
-  the Linux and the Darwin target, so a site that is not in its lists turns it red; a change that
-  ends a site removes it from the lists. To judge a drop, delete each release and each drop call,
-  one at a time, and run that test, the language harness and the fir-run oracle.
-- **Put the drop of a type in the module of the type when a heap probe holds its free.** The three
-  probes of test/lsp reach each release of `json.free`, `docs.free`, `rpc.free` and `server.free`.
-  At dacafa1d a deletion of each of the 15 releases of those frees turned a test red. A drop that a
-  test holds would copy those releases, and the probes would then call the copy and not the free.
-  So the drops stand in src/lsp, each free moves its value into the drop of its type, and the
-  probes end each value through `drop_made`: each release stands once, and both paths reach it.
+  the `drop_made` changes no stdout and gives no event of the fir-run oracle. In 6 tests of PR 212,
+  2 programs and 4 run tests, only `--aggregate-report` saw such a deletion.
+  `test/aggregate_lang_test.py` (ctest `aggregate-lang`) holds the sites of `--aggregate-report`
+  and `--leak-report` over test/lang on the Linux and the Darwin target, so a site that is not in
+  its lists turns it red; a change that ends a site removes it from the lists. To judge a drop,
+  delete each release and each drop call, one at a time, and run that test, the language harness
+  and the fir-run oracle.
+- **Put the drop of a type in the module of the type when a heap probe holds its free.** At
+  dacafa1d the three probes of test/lsp reached each release of `json.free`, `docs.free`,
+  `rpc.free` and `server.free`, and a deletion of each of the 15 releases turned a test red. A drop
+  that a test holds would copy those releases, and a probe would then reach the copy and not the
+  release that src calls. So the drops stand in src/lsp, each free moves its value into the drop
+  of its type, and the probes end each value through `drop_made`, which reaches the same drops:
+  each release stands once.
 
 ## 4. fort module tests
 

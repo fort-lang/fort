@@ -196,15 +196,9 @@ fn walk_dir(tree mut* t, string dir, string prefix, i32 mut* error) bool {
     defer del(files.items);
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
-    containers.pool mut scratch = containers.pool_create();
-    defer {
-        // The leak rule reads no callee: the test of the loop proves the pool empty, and the body
-        // runs at most once.
-        while (scratch.head != null) {
-            containers.pool_free(&scratch);
-        }
-    }
-    list_entries(strbuf.view(&listed), dir, &b, &scratch, &dirs, &files);
+    containers.pool mut* own scratch = containers.pool_make();
+    defer containers.pool_drop_made(move(scratch));
+    list_entries(strbuf.view(&listed), dir, &b, scratch, &dirs, &files);
     u64 mut i = 0;
     while (i < files.len) {
         string name = containers.str_at(&files, i);
@@ -214,12 +208,12 @@ fn walk_dir(tree mut* t, string dir, string prefix, i32 mut* error) bool {
     i = 0;
     while (i < dirs.len) {
         string name = containers.str_at(&dirs, i);
-        string child = containers.pool_intern(&scratch, join(&b, dir, name));
+        string child = containers.pool_intern(scratch, join(&b, dir, name));
         strbuf.clear(&b);
         strbuf.append(&b, prefix);
         strbuf.push(&b, PATH_SEPARATOR);
         strbuf.append(&b, name);
-        string child_prefix = containers.pool_intern(&scratch, strbuf.view(&b));
+        string child_prefix = containers.pool_intern(scratch, strbuf.view(&b));
         if (!walk_dir(t, child, child_prefix, error)) {
             return false;
         }

@@ -1190,15 +1190,9 @@ fn wait_status(i32 status) i64 {
 fn run_cc(options* opts, string ir_path, string out_path) i32 {
     containers.str_vec mut argv = containers.str_create();
     defer del(argv.items);
-    containers.pool mut p = containers.pool_create();
-    defer {
-        // The leak rule reads no callee: the test of the loop proves the pool empty, and the body
-        // runs at most once.
-        while (p.head != null) {
-            containers.pool_free(&p);
-        }
-    }
-    cc_argv(&p, opts, ir_path, out_path, &argv);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    cc_argv(p, opts, ir_path, out_path, &argv);
     return run_tool("cc", &argv);
 }
 
@@ -1267,8 +1261,8 @@ fn libraries_drop(libraries mut libs) void {
     del(libs.items);
     del(libs.files.items);
     containers.pool_drop(move(libs.pool));
-    del(libs.order.items);
-    del(libs.compiler.data);
+    vec.int_drop(move(libs.order));
+    strbuf.drop(move(libs.compiler));
 }
 
 // No library, in an allocation of its own, for a build that lends its libraries to calls.
@@ -1386,22 +1380,18 @@ fn read_libraries(options* opts, libraries mut* libs) i32 {
         }
         i += 1;
     }
-    graph.graph mut g = graph.graph{};
-    defer {
-        del(g.names.items);
-        del(g.interfaces.items);
-        del(g.use_names.items);
-        del(g.use_hashes.items);
-        del(g.owners.items);
-    }
-    add_libraries(&g, opts, libs);
+    // The buffer comes before the graph: the drop of the graph is a call, and a `del` of the
+    // buffer after it would end a local that the call can change.
     strbuf.str_buf mut message = strbuf.create();
     defer del(message.data);
-    if (!graph.check(&g, &message)) {
+    graph.graph mut* own g = graph.make();
+    defer graph.drop_made(move(g));
+    add_libraries(g, opts, libs);
+    if (!graph.check(g, &message)) {
         error(strbuf.view(&message));
         return EXIT_USAGE;
     }
-    graph.link_order(&g, &libs->order);
+    graph.link_order(g, &libs->order);
     add_interface_files(opts, libs);
     return EXIT_OK;
 }
@@ -1540,18 +1530,12 @@ fn load_closure(session.session mut* s, options* opts, string program, analysis 
         modules.add_root(&an->set, containers.str_at(&opts->includes, i));
         i += 1;
     }
-    containers.pool mut p = containers.pool_create();
-    defer {
-        // The leak rule reads no callee: the test of the loop proves the pool empty, and the body
-        // runs at most once.
-        while (p.head != null) {
-            containers.pool_free(&p);
-        }
-    }
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
     // `std` is looked up in the standard library directory. A library build has none: its
     // `std` paths resolve in the interface file of the used library std (module-system.md 10.2).
     if (opts->use_names.len == 0) {
-        modules.set_std_dir(&an->set, std_dir(&p, opts, program));
+        modules.set_std_dir(&an->set, std_dir(p, opts, program));
     }
     return modules.load(s, &an->set, opts->entry);
 }
@@ -1757,35 +1741,20 @@ fn fir_entry(session.session mut* s, analysis mut* an, options* opts) i32 {
     // written from each function before it moves into the module.
     strbuf.str_buf mut text = strbuf.create();
     defer del(text.data);
-    fir.module mut m = fir.module_new();
-    defer {
-        fir.module_free(&m);
-        // The leak rule reads no callee, so each owner takes a `del` after the call.
-        del(m.funcs.items);
-        del(m.globals.items);
-        del(m.externs.items);
-    }
+    fir.module mut* own m = fir.module_make();
+    defer fir.module_drop_made(move(m));
     bool mut proved = true;
     u64 mut i = 0;
     while (i < decls.len) {
         if (i > 0) {
             strbuf.push(&text, '\n');
         }
-        fir.func mut f = fir.func{};
-        defer {
-            // A function that moved out leaves `f` empty here.
-            fir.func_free(&f);
-            // The leak rule reads no callee, so each owner takes a `del` after the call.
-            del(f.locals.items);
-            del(f.projs.items);
-            del(f.ops.items);
-            del(f.arms.items);
-            del(f.blocks.items);
-        }
+        fir.func mut* own f = fir.func_make();
+        defer fir.func_drop_made(move(f));
         fir_lower.report mut why = fir_lower.report{};
-        if (fir_lower.lower_function(&an->ck, gen.refs_at(&decls, i), &f, &why)) {
-            fir_verify.verify(&f, &rt);
-            prover.proof mut verdicts = run_emptiness(s, &f, false);
+        if (fir_lower.lower_function(&an->ck, gen.refs_at(&decls, i), f, &why)) {
+            fir_verify.verify(f, &rt);
+            prover.proof mut verdicts = run_emptiness(s, f, false);
             defer {
                 del(verdicts.proved);
                 del(verdicts.stores);
@@ -1798,11 +1767,11 @@ fn fir_entry(session.session mut* s, analysis mut* an, options* opts) i32 {
                 proved = false;
             }
             if (build) {
-                fir_passes.build_mode(&f, opts->release, opts->no_bounds_check, &verdicts);
-                fir_verify.verify(&f, &rt);
+                fir_passes.build_mode(f, opts->release, opts->no_bounds_check, &verdicts);
+                fir_verify.verify(f, &rt);
             }
-            fir_print.print_function(&f, &text);
-            fir.module_add_function(&m, move(f));
+            fir_print.print_function(f, &text);
+            fir.module_add_function(m, move(*f));
         } else {
             fir_lower.write_report(&why, &text);
         }
@@ -1881,19 +1850,11 @@ fn fir_report_entry(analysis mut* an, options* opts) i32 {
 // so a load through it reads no local owner of this function.
 fn report_declaration(analysis mut* an, options* opts, ast.node* decl, fir_verify.runtime* rt,
                       strbuf.str_buf mut* text) void {
-    fir.func mut f = fir.func{};
-    defer {
-        fir.func_free(&f);
-        // The leak rule reads no callee, so each owner takes a `del` after the call.
-        del(f.locals.items);
-        del(f.projs.items);
-        del(f.ops.items);
-        del(f.arms.items);
-        del(f.blocks.items);
-    }
+    fir.func mut* own f = fir.func_make();
+    defer fir.func_drop_made(move(f));
     fir_lower.report mut why = fir_lower.report{};
-    if (fir_lower.lower_function(&an->ck, decl, &f, &why)) {
-        report_function(&f, rt, decl->name_loc, opts->release, opts->no_bounds_check, text);
+    if (fir_lower.lower_function(&an->ck, decl, f, &why)) {
+        report_function(f, rt, decl->name_loc, opts->release, opts->no_bounds_check, text);
     }
 }
 
@@ -1938,22 +1899,14 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts,
     bool mut proved = true;
     u64 mut i = 0;
     while (i < decls.len) {
-        fir.func mut f = fir.func{};
-        defer {
-            fir.func_free(&f);
-            // The leak rule reads no callee, so each owner takes a `del` after the call.
-            del(f.locals.items);
-            del(f.projs.items);
-            del(f.ops.items);
-            del(f.arms.items);
-            del(f.blocks.items);
-        }
+        fir.func mut* own f = fir.func_make();
+        defer fir.func_drop_made(move(f));
         fir_lower.report mut why = fir_lower.report{};
-        if (fir_lower.lower_function(&an->ck, gen.refs_at(&decls, i), &f, &why)) {
+        if (fir_lower.lower_function(&an->ck, gen.refs_at(&decls, i), f, &why)) {
             fir.check_kind mut missing = fir.check_kind.chk_overflow;
-            if (fir_verify.runtime_holds(&f, &rt, &missing)) {
-                fir_verify.verify(&f, &rt);
-                prover.proof mut verdicts = run_emptiness(s, &f, opts->aggregate_report);
+            if (fir_verify.runtime_holds(f, &rt, &missing)) {
+                fir_verify.verify(f, &rt);
+                prover.proof mut verdicts = run_emptiness(s, f, opts->aggregate_report);
                 defer {
                     del(verdicts.proved);
                     del(verdicts.stores);
@@ -1963,15 +1916,15 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts,
                     del(verdicts.aggregates);
                 }
                 if (opts->leak_report) {
-                    report.write_inners(&f, &verdicts, s, &leaks);
+                    report.write_inners(f, &verdicts, s, &leaks);
                 }
                 if (opts->aggregate_report) {
-                    report.write_aggregates(&f, &verdicts, s, &leaks);
+                    report.write_aggregates(f, &verdicts, s, &leaks);
                 }
                 if (prover.has_error(&verdicts)) {
                     proved = false;
                 } else {
-                    summary.add(calls, &f, verdicts.inner_work);
+                    summary.add(calls, f, verdicts.inner_work);
                 }
             }
         }
@@ -1996,6 +1949,20 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts,
 struct fir_test {
     containers.str_vec passes;
     strbuf.str_buf prelude;
+}
+
+// Frees a test that the caller moves in: the prelude, then the passes.
+fn fir_test_drop(fir_test mut t) void {
+    strbuf.drop(move(t.prelude));
+    del(t.passes.items);
+}
+
+// Ends a test in an allocation of its own that the caller moves in, for a function that lends
+// it to calls.
+fn fir_test_drop_made(fir_test mut* own p) void {
+    fir_test kept = move(*p);
+    del(p);
+    fir_test_drop(move(kept));
 }
 
 // The kinds of a pass of a `.fir` test.
@@ -2300,19 +2267,18 @@ fn fir_test_entry(options* opts, string program) i32 {
     // the module: the leak rule proves a `del` that no call follows, and the frees keep their
     // order.
     {
-        fir_test mut t = fir_test{};
-        defer del(t.prelude.data);
-        defer del(t.passes.items);
-        read_fir_test(text, &t);
-        if (t.passes.len == 0) {
+        fir_test mut* own t = new(fir_test);
+        defer fir_test_drop_made(move(t));
+        read_fir_test(text, t);
+        if (t->passes.len == 0) {
             error("the .fir test has no '//! pass:' directive");
             return EXIT_USAGE;
         }
-        test_pass mut@ own passes = new(test_pass, t.passes.len);
+        test_pass mut@ own passes = new(test_pass, t->passes.len);
         defer del(passes);
         u64 mut k = 0;
-        while (k < t.passes.len) {
-            i32 pass = fir_test_pass(containers.str_at(&t.passes, k), &passes[k]);
+        while (k < t->passes.len) {
+            i32 pass = fir_test_pass(containers.str_at(&t->passes, k), &passes[k]);
             if (pass != EXIT_OK) {
                 return pass;
             }
@@ -2326,7 +2292,7 @@ fn fir_test_entry(options* opts, string program) i32 {
         }
         // The loader reads the prelude in place of the file, so a diagnostic of the prelude names
         // the line and the column of the file. No source line is shown under it.
-        session.set_source(s, opts->entry, strbuf.view(&t.prelude));
+        session.set_source(s, opts->entry, strbuf.view(&t->prelude));
         diag.set_text(session.diags(s), true);
         analysis mut* own an = analysis_make(s);
         defer analysis_drop_made(move(an));
@@ -2363,7 +2329,7 @@ fn fir_test_entry(options* opts, string program) i32 {
         }
         bool mut runs = false;
         k = 0;
-        while (k < t.passes.len) {
+        while (k < t->passes.len) {
             if (passes[k].kind == test_pass_kind.tp_run) {
                 runs = true;
                 i32 resolved = resolve_run(m, &an->ck, &passes[k]);
@@ -2602,16 +2568,10 @@ fn link_entry(options* opts, string object_path, containers.str_vec* archives, s
     i32 {
     containers.str_vec mut argv = containers.str_create();
     defer del(argv.items);
-    containers.pool mut p = containers.pool_create();
-    defer {
-        // The leak rule reads no callee: the test of the loop proves the pool empty, and the body
-        // runs at most once.
-        while (p.head != null) {
-            containers.pool_free(&p);
-        }
-    }
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
     containers.str_push(&argv, opts->cc);
-    containers.str_push(&argv, join_path(&p, "", "--target=", opts->target));
+    containers.str_push(&argv, join_path(p, "", "--target=", opts->target));
     containers.str_push(&argv, "-o");
     containers.str_push(&argv, out_path);
     containers.str_push(&argv, object_path);
@@ -2689,16 +2649,10 @@ fn build_entry_unit(options* opts, libraries* libs, cached_unit mut* u, i32 buil
     defer del(written.items);
     strbuf.str_buf mut object = strbuf.create();
     defer del(object.data);
-    containers.pool mut p = containers.pool_create();
-    defer {
-        // The leak rule reads no callee: the test of the loop proves the pool empty, and the body
-        // runs at most once.
-        while (p.head != null) {
-            containers.pool_free(&p);
-        }
-    }
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
     containers.str_push(&written, ir_path);
-    string object_path = join_path(&p, dir, entry_base(opts->entry), OBJECT_SUFFIX);
+    string object_path = join_path(p, dir, entry_base(opts->entry), OBJECT_SUFFIX);
     containers.str_push(&written, object_path);
     i32 mut status = built;
     if (status == EXIT_OK) {
@@ -2720,7 +2674,7 @@ fn build_entry_unit(options* opts, libraries* libs, cached_unit mut* u, i32 buil
     } else if (status == EXIT_OK) {
         containers.str_vec mut archives = containers.str_create();
         defer del(archives.items);
-        if (!copy_archives(opts, libs, &p, dir, &archives)) {
+        if (!copy_archives(opts, libs, p, dir, &archives)) {
             status = EXIT_USAGE;
         } else {
             status = link_entry(opts, object_path, &archives, out_path);
@@ -2760,10 +2714,10 @@ fn unit_drop(cached_unit mut u) void {
     del(u.cfg_keys.items);
     del(u.cfg_values.items);
     del(u.use_hashes.items);
-    del(u.source.data);
-    del(u.key.data);
-    del(u.dir.data);
-    del(u.entry_path.data);
+    strbuf.drop(move(u.source));
+    strbuf.drop(move(u.key));
+    strbuf.drop(move(u.dir));
+    strbuf.drop(move(u.entry_path));
     artifact.drop(move(u.entry));
 }
 
@@ -2889,15 +2843,9 @@ fn has_usable_target(options* opts) bool {
 fn compile_library(options* opts, string ir_path, string object_path) i32 {
     containers.str_vec mut argv = containers.str_create();
     defer del(argv.items);
-    containers.pool mut p = containers.pool_create();
-    defer {
-        // The leak rule reads no callee: the test of the loop proves the pool empty, and the body
-        // runs at most once.
-        while (p.head != null) {
-            containers.pool_free(&p);
-        }
-    }
-    push_cc_line(&p, opts, ir_path, object_path, true, &argv);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    push_cc_line(p, opts, ir_path, object_path, true, &argv);
     return run_tool("cc", &argv);
 }
 

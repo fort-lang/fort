@@ -231,21 +231,46 @@ struct context {
     u64 use_limit;
 }
 
-fn free_context(context mut* c) void {
-    place.free(&c->places);
-    del(c->facts);
-    del(c->block_fact);
-    del(c->store_fact);
-    del(c->exit_fact);
-    del(c->first_store);
-    del(c->inner_fact);
-    del(c->first_inner);
-    del(c->site_fact);
-    del(c->aggregate_fact);
-    del(c->tested);
-    del(c->tests);
-    alias.free(&c->aliases);
-    fir_flow.bits_free(&c->origins);
+// Frees a context that the caller moves in: the survey, the facts and their tables, the tests,
+// the alias map, then the origins.
+fn context_drop(context mut c) void {
+    place.drop(move(c.places));
+    del(c.facts);
+    del(c.block_fact);
+    del(c.store_fact);
+    del(c.exit_fact);
+    del(c.first_store);
+    del(c.inner_fact);
+    del(c.first_inner);
+    del(c.site_fact);
+    del(c.aggregate_fact);
+    del(c.tested);
+    del(c.tests);
+    alias.drop(move(c.aliases));
+    fir_flow.bits_drop(move(c.origins));
+}
+
+// A context for the proof of `f` in an allocation of its own, for a function that lends the
+// context to calls: `units` statements and terminators, `locals` locals, `blocks` blocks and
+// `stores` stores of the proof. `new` fills the context with zero, so the pass proves the stores
+// into its fields.
+fn context_make(fir.func* f, u64 units, u64 locals, u32 blocks, u64 stores) context mut* own {
+    context mut* own c = new(context);
+    c->places.f = f;
+    c->units = units;
+    c->places.locals = new(place.local_info, locals);
+    c->places.first_source = new(u32, locals);
+    c->block_fact = new(u32, cast(blocks, u64));
+    c->store_fact = new(u32, stores);
+    c->first_store = new(u64, cast(blocks, u64) + 1);
+    return c;
+}
+
+// Ends a context of context_make that the caller moves in.
+fn context_drop_made(context mut* own p) void {
+    context kept = move(*p);
+    del(p);
+    context_drop(move(kept));
 }
 
 // Appends `p` to the facts and returns its number.
@@ -279,6 +304,21 @@ struct probes {
     fir_flow.bits none;
     fir_flow.bits all;
     fir_flow.bits edge;
+}
+
+// Frees the probes that the caller moves in: the three sets.
+fn probes_drop(probes mut pr) void {
+    fir_flow.bits_drop(move(pr.none));
+    fir_flow.bits_drop(move(pr.all));
+    fir_flow.bits_drop(move(pr.edge));
+}
+
+// Ends probes in an allocation of its own that the caller moves in, for a function that lends
+// it to calls.
+fn probes_drop_made(probes mut* own p) void {
+    probes kept = move(*p);
+    del(p);
+    probes_drop(move(kept));
 }
 
 fn gen(probes mut* pr, u32 fact) void {
@@ -590,12 +630,9 @@ fn run_locals(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d, bool
     fir.func* f = c->places.f;
     u32 n = fir.block_count(f);
     u32 count = fir.local_count(f);
-    probes mut pr = make_probes(count);
-    defer {
-        del(pr.none.words);
-        del(pr.all.words);
-        del(pr.edge.words);
-    }
+    probes mut* own pr = new(probes);
+    defer probes_drop_made(move(pr));
+    *pr = make_probes(count);
     fir_flow.bits mut@ own gens = make_sets(n, count);
     fir_flow.bits mut@ own kills = make_sets(n, count);
     defer {
@@ -606,27 +643,27 @@ fn run_locals(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d, bool
     }
     u32 mut b = 0;
     while (b < n) {
-        reset_probes(&pr);
+        reset_probes(pr);
         u32 mut i = 0;
         while (i < fir.block_statement_count(f, b)) {
             fir.statement* s = fir.block_statement(f, b, i);
             if (fresh) {
-                place.apply_fresh_reads(&c->places, s, &pr.none);
-                place.apply_fresh_store(&c->places, s, &pr.none);
-                place.apply_fresh_reads(&c->places, s, &pr.all);
-                place.apply_fresh_store(&c->places, s, &pr.all);
+                place.apply_fresh_reads(&c->places, s, &pr->none);
+                place.apply_fresh_store(&c->places, s, &pr->none);
+                place.apply_fresh_reads(&c->places, s, &pr->all);
+                place.apply_fresh_store(&c->places, s, &pr->all);
             } else {
-                place.apply_stale(&c->places, s, &pr.none);
-                place.apply_stale(&c->places, s, &pr.all);
+                place.apply_stale(&c->places, s, &pr->none);
+                place.apply_stale(&c->places, s, &pr->all);
             }
             i += 1;
         }
         if (fresh) {
             fir.terminator* t = &fir.block_at(f, b)->term;
-            place.apply_fresh_term(&c->places, t, &pr.none);
-            place.apply_fresh_term(&c->places, t, &pr.all);
+            place.apply_fresh_term(&c->places, t, &pr->none);
+            place.apply_fresh_term(&c->places, t, &pr->all);
         }
-        split_probes(&pr, gens, kills, b);
+        split_probes(pr, gens, kills, b);
         b += 1;
     }
     if (fresh) {
@@ -714,18 +751,17 @@ fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
     u32 n = fir.block_count(f);
     u32 count = cast(c->fact_count, u32);
     u32 locals = fir.local_count(f);
-    probes mut pr = make_probes(count);
-    defer {
-        del(pr.none.words);
-        del(pr.all.words);
-        del(pr.edge.words);
-    }
     fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
     defer del(at_stale.words);
     fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
     defer del(at_fresh.words);
     fir_flow.bits mut at_alias = alias_state(c);
     defer del(at_alias.words);
+    // after the sets of the block: the drop of the probes is a call, and it must come before
+    // their `del`s
+    probes mut* own pr = new(probes);
+    defer probes_drop_made(move(pr));
+    *pr = make_probes(count);
     fir_flow.bits mut@ own gens = make_sets(n, count);
     fir_flow.bits mut@ own kills = make_sets(n, count);
     defer {
@@ -744,7 +780,7 @@ fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
     bool mut unused = false;
     u32 mut b = 0;
     while (b < n) {
-        reset_probes(&pr);
+        reset_probes(pr);
         fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
         fir_flow.bits_copy(&at_fresh, &fresh->ins[cast(b, u64)]);
         alias_in(c, b, &at_alias);
@@ -753,17 +789,17 @@ fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
         u32 mut i = 0;
         while (i < fir.block_statement_count(f, b)) {
             if (tested && i == t->index) {
-                add_test_facts(c, t, &at_stale, &pr);
+                add_test_facts(c, t, &at_stale, pr);
             }
-            apply_facts(c, fir.block_statement(f, b, i), &at_stale, &at_fresh, &at_alias, &pr,
+            apply_facts(c, fir.block_statement(f, b, i), &at_stale, &at_fresh, &at_alias, pr,
                         NO_FACT, &unused);
             i += 1;
         }
-        split_probes(&pr, gens, kills, b);
+        split_probes(pr, gens, kills, b);
         edge_to[cast(b, u64)] = fir_flow.NO_EDGE;
         if (tested) {
             edge_to[cast(b, u64)] = t->target;
-            fir_flow.bits_copy(&edge_gens[cast(b, u64)], &pr.edge);
+            fir_flow.bits_copy(&edge_gens[cast(b, u64)], &pr->edge);
         }
         b += 1;
     }
@@ -1080,66 +1116,32 @@ fn prove_into(fir.func* f, u64 limit, u64 use_limit, bool causes, proof mut* out
         return;
     }
     u64 locals = cast(fir.local_count(f), u64);
-    // `context{}` is the zero value of the struct, so the pass proves the stores into its fields
-    // below. A designated literal such as `context{.fact_count = n}` is no zero value.
-    context mut c = context{};
-    c.places.f = f;
-    c.units = units;
-    c.places.locals = new(place.local_info, locals);
-    c.places.first_source = new(u32, locals);
-    c.block_fact = new(u32, cast(n, u64));
-    c.store_fact = new(u32, out->stores.len);
-    c.first_store = new(u64, cast(n, u64) + 1);
-    defer {
-        free_context(&c);
-        // The leak rule reads no callee, so each owner takes a `del` after the call.
-        del(c.places.locals);
-        del(c.places.first_source);
-        del(c.places.first_reader);
-        del(c.places.readers);
-        del(c.places.held);
-        del(c.places.steps);
-        del(c.places.reads.items);
-        del(c.facts);
-        del(c.block_fact);
-        del(c.store_fact);
-        del(c.exit_fact);
-        del(c.first_store);
-        del(c.inner_fact);
-        del(c.first_inner);
-        del(c.site_fact);
-        del(c.aggregate_fact);
-        del(c.tested);
-        del(c.tests);
-        del(c.aliases.borrow_rank);
-        del(c.aliases.frame_rank);
-        del(c.aliases.ins);
-        del(c.origins.words);
-    }
-    index_stores(&c, out);
+    context mut* own c = context_make(f, units, locals, n, out->stores.len);
+    defer context_drop_made(move(c));
+    index_stores(c, out);
     if (emptiness) {
-        place.count_uses(&c.places);
+        place.count_uses(&c->places);
     } else {
-        place.count_stores(&c.places);
+        place.count_stores(&c->places);
     }
-    place.mark_memory(&c.places);
-    place.mark_sources(&c.places);
-    c.owners = owners;
-    c.use_limit = use_limit;
-    c.causes = causes;
+    place.mark_memory(&c->places);
+    place.mark_sources(&c->places);
+    c->owners = owners;
+    c->use_limit = use_limit;
+    c->causes = causes;
     if (!emptiness) {
-        prove_uses_alone(&c, out);
+        prove_uses_alone(c, out);
         return;
     }
-    u64 checked = cast(out->checks, u64) + count_alone(&c, check_of, out);
-    u64 sets = cast(n, u64) * locals + place.stale_steps(&c.places);
+    u64 checked = cast(out->checks, u64) + count_alone(c, check_of, out);
+    u64 sets = cast(n, u64) * locals + place.stale_steps(&c->places);
     // a function with no check and no store that needs a proof has no work (D17.11)
     if (overwrite) {
         out->work = units * checked + sets;
     }
-    out->leak_work = units * (checked + count_owner_facts(&c)) + sets;
+    out->leak_work = units * (checked + count_owner_facts(c)) + sets;
     // a separate count keeps each verdict of part 1 when only the inner owners pass the limit
-    out->inner_work = out->leak_work + types.capped_product(units, count_inner_steps(&c, out));
+    out->inner_work = out->leak_work + types.capped_product(units, count_inner_steps(c, out));
     out->over = out->work > limit;
     out->leak_over = out->leak_work > limit;
     out->inner_over = out->inner_work > limit;
@@ -1147,8 +1149,8 @@ fn prove_into(fir.func* f, u64 limit, u64 use_limit, bool causes, proof mut* out
                                            types.capped_product(units, count_aggregate_steps(f)));
     out->aggregate_over = out->aggregate_work > limit;
     if (out->leak_over) {
-        find_exits(&c, null, out);
-        pass_exits(&c, out);
+        find_exits(c, null, out);
+        pass_exits(c, out);
         // the aggregate work holds the leak work
         pass_aggregates(out);
     }
@@ -1156,11 +1158,11 @@ fn prove_into(fir.func* f, u64 limit, u64 use_limit, bool causes, proof mut* out
         pass_inners(out);
     }
     if (out->over) {
-        judge(&c, null, null, null, null, out);
-        prove_uses_alone(&c, out);
+        judge(c, null, null, null, null, out);
+        prove_uses_alone(c, out);
         return;
     }
-    run_dataflows(&c, out);
+    run_dataflows(c, out);
     return;
 }
 
@@ -1196,19 +1198,12 @@ fn run_dataflows(context mut* c, proof mut* out) void {
     if (!out->leak_over && has_owner(f, true)) {
         // the ended dataflow runs only for a function with a named owner local or a named local
         // of an owning aggregate type
-        fir_flow.dataflow mut ended = fir_flow.dataflow_new(locals,
-                                                            fir_flow.join_kind.join_intersect,
-                                                            transfer_none);
-        defer {
-            fir_flow.dataflow_free(&ended);
-            // The leak rule reads no callee, so each owner takes a `del` after the call.
-            del(ended.entry.words);
-            del(ended.init.words);
-            del(ended.ins);
-            del(ended.outs);
-        }
-        run_ended(c, &pt, &ended);
-        find_exits(c, &ended, out);
+        fir_flow.dataflow mut* own ended = fir_flow.dataflow_make(locals,
+                                                                  fir_flow.join_kind.join_intersect,
+                                                                  transfer_none);
+        defer fir_flow.dataflow_drop_made(move(ended));
+        run_ended(c, &pt, ended);
+        find_exits(c, ended, out);
     } else if (!out->leak_over) {
         find_exits(c, null, out);
     }
@@ -1256,8 +1251,12 @@ fn run_dataflows(context mut* c, proof mut* out) void {
 // local whose frame is an origin gets no map, because no kill rule reads one. The charge of the
 // fixpoint goes into out->alias_work, and out->alias_on says that the kill rules read the map.
 fn run_aliases(context mut* c, fir.pred_table* pt, proof mut* out) void {
-    alias.free(&c->aliases);
+    // run_aliases runs once for each context, so the map of the context is the zero map here. It
+    // moves out and goes through alias.drop after the store all the same: D17.11 checks no store
+    // of an aggregate, so a second run would lose a live map without the move.
+    alias.map old = move(c->aliases);
     c->aliases = alias.make(&c->places, c->units);
+    alias.drop(move(old));
     alias.run(&c->aliases, pt);
     out->alias_work = c->aliases.work;
     out->alias_on = c->aliases.on;
@@ -1326,12 +1325,6 @@ fn judge_stores(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
                 fir_flow.dataflow* d, fir_flow.dataflow* scratch, proof mut* out) void {
     fir.func* f = c->places.f;
     u32 locals = fir.local_count(f);
-    probes mut pr = make_probes(cast(c->fact_count, u32));
-    defer {
-        del(pr.none.words);
-        del(pr.all.words);
-        del(pr.edge.words);
-    }
     fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
     defer del(at_stale.words);
     fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
@@ -1340,14 +1333,19 @@ fn judge_stores(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
     defer del(at_scratch.words);
     fir_flow.bits mut at_alias = alias_state(c);
     defer del(at_alias.words);
+    // after the sets of the block: the drop of the probes is a call, and it must come before
+    // their `del`s
+    probes mut* own pr = new(probes);
+    defer probes_drop_made(move(pr));
+    *pr = make_probes(cast(c->fact_count, u32));
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         u64 mut k = c->first_store[cast(b, u64)];
         u64 end = c->first_store[cast(b, u64) + 1];
         if (k < end) {
             if (d != null) {
-                fir_flow.bits_copy(&pr.none, &d->ins[cast(b, u64)]);
-                fir_flow.bits_copy(&pr.all, &d->ins[cast(b, u64)]);
+                fir_flow.bits_copy(&pr->none, &d->ins[cast(b, u64)]);
+                fir_flow.bits_copy(&pr->all, &d->ins[cast(b, u64)]);
             }
             fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
             fir_flow.bits_copy(&at_fresh, &fresh->ins[cast(b, u64)]);
@@ -1364,7 +1362,7 @@ fn judge_stores(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
             }
             bool mut held = false;
             if (d != null) {
-                apply_facts(c, s, &at_stale, &at_fresh, &at_alias, &pr, fact, &held);
+                apply_facts(c, s, &at_stale, &at_fresh, &at_alias, pr, fact, &held);
             }
             apply_scratch_reads(c, s, &at_scratch);
             if (here) {
@@ -1436,12 +1434,9 @@ fn run_scratch(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d) voi
     fir.func* f = c->places.f;
     u32 n = fir.block_count(f);
     u32 count = fir.local_count(f);
-    probes mut pr = make_probes(count);
-    defer {
-        del(pr.none.words);
-        del(pr.all.words);
-        del(pr.edge.words);
-    }
+    probes mut* own pr = new(probes);
+    defer probes_drop_made(move(pr));
+    *pr = make_probes(count);
     fir_flow.bits mut@ own gens = make_sets(n, count);
     fir_flow.bits mut@ own kills = make_sets(n, count);
     fir_flow.bits mut@ own edge_gens = make_sets(n, count);
@@ -1457,7 +1452,7 @@ fn run_scratch(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d) voi
     }
     u32 mut b = 0;
     while (b < n) {
-        reset_probes(&pr);
+        reset_probes(pr);
         place.test* t = &c->tests[cast(b, u64)];
         bool tested = c->tested[cast(b, u64)] && place.is_local(t->place)
             && place.is_scratch(&c->places, t->place.local);
@@ -1465,21 +1460,21 @@ fn run_scratch(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d) voi
         while (i < fir.block_statement_count(f, b)) {
             fir.statement* s = fir.block_statement(f, b, i);
             if (tested && i == t->index) {
-                fir_flow.bits_set(&pr.edge, t->place.local);
+                fir_flow.bits_set(&pr->edge, t->place.local);
             }
-            apply_scratch_reads(c, s, &pr.none);
-            apply_scratch_store(c, s, &pr.none);
-            apply_scratch_reads(c, s, &pr.all);
-            apply_scratch_store(c, s, &pr.all);
-            apply_scratch_reads(c, s, &pr.edge);
-            apply_scratch_store(c, s, &pr.edge);
+            apply_scratch_reads(c, s, &pr->none);
+            apply_scratch_store(c, s, &pr->none);
+            apply_scratch_reads(c, s, &pr->all);
+            apply_scratch_store(c, s, &pr->all);
+            apply_scratch_reads(c, s, &pr->edge);
+            apply_scratch_store(c, s, &pr->edge);
             i += 1;
         }
-        split_probes(&pr, gens, kills, b);
+        split_probes(pr, gens, kills, b);
         edge_to[cast(b, u64)] = fir_flow.NO_EDGE;
         if (tested) {
             edge_to[cast(b, u64)] = t->target;
-            fir_flow.bits_copy(&edge_gens[cast(b, u64)], &pr.edge);
+            fir_flow.bits_copy(&edge_gens[cast(b, u64)], &pr->edge);
         }
         b += 1;
     }
@@ -1754,12 +1749,6 @@ fn judge_exits(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fres
                fir_flow.dataflow* d, fir_flow.dataflow* scratch, proof mut* out) void {
     fir.func* f = c->places.f;
     u32 locals = fir.local_count(f);
-    probes mut pr = make_probes(cast(c->fact_count, u32));
-    defer {
-        del(pr.none.words);
-        del(pr.all.words);
-        del(pr.edge.words);
-    }
     fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
     defer del(at_stale.words);
     fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
@@ -1768,13 +1757,18 @@ fn judge_exits(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fres
     defer del(at_scratch.words);
     fir_flow.bits mut at_alias = alias_state(c);
     defer del(at_alias.words);
+    // after the sets of the block: the drop of the probes is a call, and it must come before
+    // their `del`s
+    probes mut* own pr = new(probes);
+    defer probes_drop_made(move(pr));
+    *pr = make_probes(cast(c->fact_count, u32));
     bool mut unused = false;
     u64 mut k = 0;
     while (k < out->exits.len) {
         u32 b = out->exits[k].block;
         if (d != null) {
-            fir_flow.bits_copy(&pr.none, &d->ins[cast(b, u64)]);
-            fir_flow.bits_copy(&pr.all, &d->ins[cast(b, u64)]);
+            fir_flow.bits_copy(&pr->none, &d->ins[cast(b, u64)]);
+            fir_flow.bits_copy(&pr->all, &d->ins[cast(b, u64)]);
         }
         fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
         fir_flow.bits_copy(&at_fresh, &fresh->ins[cast(b, u64)]);
@@ -1786,7 +1780,7 @@ fn judge_exits(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fres
             while (i < e->index) {
                 fir.statement* s = fir.block_statement(f, b, i);
                 if (d != null) {
-                    apply_facts(c, s, &at_stale, &at_fresh, &at_alias, &pr, NO_FACT, &unused);
+                    apply_facts(c, s, &at_stale, &at_fresh, &at_alias, pr, NO_FACT, &unused);
                 }
                 apply_scratch_reads(c, s, &at_scratch);
                 apply_scratch_store(c, s, &at_scratch);
@@ -1796,7 +1790,7 @@ fn judge_exits(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fres
             if (fact == NO_FACT) {
                 e->proved = fir_flow.bits_get(&at_scratch, e->local);
             } else {
-                e->proved = d != null && fir_flow.bits_get(&pr.none, fact);
+                e->proved = d != null && fir_flow.bits_get(&pr->none, fact);
             }
             if (!e->proved) {
                 out->leaks += 1;
@@ -1892,23 +1886,22 @@ fn walk_aggregates(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* 
                    fir_flow.dataflow* d, proof* out, u64@ from, u64 mut@ first) void {
     fir.func* f = c->places.f;
     u32 locals = fir.local_count(f);
-    probes mut pr = make_probes(cast(c->fact_count, u32));
-    defer {
-        del(pr.none.words);
-        del(pr.all.words);
-        del(pr.edge.words);
-    }
     fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
     defer del(at_stale.words);
     fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
     defer del(at_fresh.words);
     fir_flow.bits mut at_alias = alias_state(c);
     defer del(at_alias.words);
+    // after the sets of the block: the drop of the probes is a call, and it must come before
+    // their `del`s
+    probes mut* own pr = new(probes);
+    defer probes_drop_made(move(pr));
+    *pr = make_probes(cast(c->fact_count, u32));
     bool mut unused = false;
     u64 mut k = 0;
     while (k < out->aggregates.len) {
         u32 b = out->aggregates[k].at.block;
-        fir_flow.bits_copy(&pr.none, &d->ins[cast(b, u64)]);
+        fir_flow.bits_copy(&pr->none, &d->ins[cast(b, u64)]);
         fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
         fir_flow.bits_copy(&at_fresh, &fresh->ins[cast(b, u64)]);
         alias_in(c, b, &at_alias);
@@ -1917,12 +1910,12 @@ fn walk_aggregates(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* 
             aggregate* a = &out->aggregates[k];
             while (i < a->at.index) {
                 fir.statement* s = fir.block_statement(f, b, i);
-                apply_facts(c, s, &at_stale, &at_fresh, &at_alias, &pr, NO_FACT, &unused);
+                apply_facts(c, s, &at_stale, &at_fresh, &at_alias, pr, NO_FACT, &unused);
                 i += 1;
             }
             u64 mut m = from[k];
             u32 base = c->aggregate_fact[k];
-            while (m < a->owners && fir_flow.bits_get(&pr.none, base + cast(m, u32))) {
+            while (m < a->owners && fir_flow.bits_get(&pr->none, base + cast(m, u32))) {
                 m += 1;
             }
             first[k] = m;
@@ -1965,22 +1958,15 @@ fn gen_addressed(context mut* c, fir.statement* s, fir_flow.bits* stale, probes 
 fn find_causes(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
                fir_flow.dataflow* fresh, proof mut* out, u64 mut@ from, u64 mut@ first) void {
     u32 count = cast(c->fact_count, u32);
-    // Each dataflow ends in a block of its own, so that the call that frees one comes before no
-    // `del` of the other.
+    // Each dataflow ends in a block of its own, so that the first ends before the second starts.
     {
-        fir_flow.dataflow mut r1 = fir_flow.dataflow_new(count, fir_flow.join_kind.join_intersect,
-                                                         transfer_none);
-        defer {
-            fir_flow.dataflow_free(&r1);
-            // The leak rule reads no callee, so each owner takes a `del` after the call.
-            del(r1.entry.words);
-            del(r1.init.words);
-            del(r1.ins);
-            del(r1.outs);
-        }
+        fir_flow.dataflow mut* own r1 = fir_flow.dataflow_make(count,
+                                                               fir_flow.join_kind.join_intersect,
+                                                               transfer_none);
+        defer fir_flow.dataflow_drop_made(move(r1));
         c->r1 = true;
-        run_facts(c, pt, stale, fresh, &r1);
-        walk_aggregates(c, stale, fresh, &r1, out, from, first);
+        run_facts(c, pt, stale, fresh, r1);
+        walk_aggregates(c, stale, fresh, r1, out, from, first);
         c->r1 = false;
     }
     u64 mut k = 0;
@@ -1993,18 +1979,12 @@ fn find_causes(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
         k += 1;
     }
     {
-        fir_flow.dataflow mut some = fir_flow.dataflow_new(count, fir_flow.join_kind.join_union,
-                                                           transfer_none);
-        defer {
-            fir_flow.dataflow_free(&some);
-            // The leak rule reads no callee, so each owner takes a `del` after the call.
-            del(some.entry.words);
-            del(some.init.words);
-            del(some.ins);
-            del(some.outs);
-        }
-        run_facts(c, pt, stale, fresh, &some);
-        walk_aggregates(c, stale, fresh, &some, out, from, first);
+        fir_flow.dataflow mut* own some = fir_flow.dataflow_make(count,
+                                                                 fir_flow.join_kind.join_union,
+                                                                 transfer_none);
+        defer fir_flow.dataflow_drop_made(move(some));
+        run_facts(c, pt, stale, fresh, some);
+        walk_aggregates(c, stale, fresh, some, out, from, first);
     }
     k = 0;
     while (k < out->aggregates.len) {
@@ -2051,12 +2031,9 @@ fn run_ended(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d) void 
     fir.func* f = c->places.f;
     u32 n = fir.block_count(f);
     u32 count = fir.local_count(f);
-    probes mut pr = make_probes(count);
-    defer {
-        del(pr.none.words);
-        del(pr.all.words);
-        del(pr.edge.words);
-    }
+    probes mut* own pr = new(probes);
+    defer probes_drop_made(move(pr));
+    *pr = make_probes(count);
     fir_flow.bits mut@ own gens = make_sets(n, count);
     fir_flow.bits mut@ own kills = make_sets(n, count);
     defer {
@@ -2067,15 +2044,15 @@ fn run_ended(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d) void 
     }
     u32 mut b = 0;
     while (b < n) {
-        reset_probes(&pr);
+        reset_probes(pr);
         u32 mut i = 0;
         while (i < fir.block_statement_count(f, b)) {
             fir.statement* s = fir.block_statement(f, b, i);
-            apply_ended(c, s, &pr.none);
-            apply_ended(c, s, &pr.all);
+            apply_ended(c, s, &pr->none);
+            apply_ended(c, s, &pr->all);
             i += 1;
         }
-        split_probes(&pr, gens, kills, b);
+        split_probes(pr, gens, kills, b);
         b += 1;
     }
     mark_named_owners(f, &d->entry);
@@ -2321,12 +2298,6 @@ fn judge_inners(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
                 fir_flow.dataflow* d, fir_flow.dataflow* scratch, proof mut* out) void {
     fir.func* f = c->places.f;
     u32 locals = fir.local_count(f);
-    probes mut pr = make_probes(cast(c->fact_count, u32));
-    defer {
-        del(pr.none.words);
-        del(pr.all.words);
-        del(pr.edge.words);
-    }
     fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
     defer del(at_stale.words);
     fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
@@ -2335,13 +2306,18 @@ fn judge_inners(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
     defer del(at_scratch.words);
     fir_flow.bits mut at_alias = alias_state(c);
     defer del(at_alias.words);
+    // after the sets of the block: the drop of the probes is a call, and it must come before
+    // their `del`s
+    probes mut* own pr = new(probes);
+    defer probes_drop_made(move(pr));
+    *pr = make_probes(cast(c->fact_count, u32));
     bool mut unused = false;
     u64 mut k = 0;
     while (k < out->inners.len) {
         u32 b = out->inners[k].block;
         if (d != null) {
-            fir_flow.bits_copy(&pr.none, &d->ins[cast(b, u64)]);
-            fir_flow.bits_copy(&pr.all, &d->ins[cast(b, u64)]);
+            fir_flow.bits_copy(&pr->none, &d->ins[cast(b, u64)]);
+            fir_flow.bits_copy(&pr->all, &d->ins[cast(b, u64)]);
         }
         fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
         fir_flow.bits_copy(&at_fresh, &fresh->ins[cast(b, u64)]);
@@ -2353,7 +2329,7 @@ fn judge_inners(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
             while (i < x->index) {
                 fir.statement* s = fir.block_statement(f, b, i);
                 if (d != null) {
-                    apply_facts(c, s, &at_stale, &at_fresh, &at_alias, &pr, NO_FACT, &unused);
+                    apply_facts(c, s, &at_stale, &at_fresh, &at_alias, pr, NO_FACT, &unused);
                 }
                 apply_scratch_reads(c, s, &at_scratch);
                 apply_scratch_store(c, s, &at_scratch);
@@ -2361,12 +2337,12 @@ fn judge_inners(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
             }
             x->first = x->owners;
             u64 mut m = 0;
-            if (releases_nothing(c, out, k, d, &pr, &at_scratch)) {
+            if (releases_nothing(c, out, k, d, pr, &at_scratch)) {
                 m = x->owners;
             }
             while (m < x->owners && x->first == x->owners) {
                 u32 fact = c->inner_fact[c->first_inner[k] + m];
-                if (fact == NO_FACT || d == null || !fir_flow.bits_get(&pr.none, fact)) {
+                if (fact == NO_FACT || d == null || !fir_flow.bits_get(&pr->none, fact)) {
                     x->first = m;
                 }
                 m += 1;
@@ -2558,19 +2534,12 @@ fn prove_uses_alone(context mut* c, proof mut* out) void {
         prove_uses(c, &pt, null, out);
         return;
     }
-    fir_flow.dataflow mut flow = fir_flow.dataflow_new(fir.local_count(f),
-                                                       fir_flow.join_kind.join_union,
-                                                       transfer_none);
-    defer {
-        fir_flow.dataflow_free(&flow);
-        // The leak rule reads no callee, so each owner takes a `del` after the call.
-        del(flow.entry.words);
-        del(flow.init.words);
-        del(flow.ins);
-        del(flow.outs);
-    }
-    run_locals(c, &pt, &flow, false);
-    prove_uses(c, &pt, &flow, out);
+    fir_flow.dataflow mut* own flow = fir_flow.dataflow_make(fir.local_count(f),
+                                                             fir_flow.join_kind.join_union,
+                                                             transfer_none);
+    defer fir_flow.dataflow_drop_made(move(flow));
+    run_locals(c, &pt, flow, false);
+    prove_uses(c, &pt, flow, out);
 }
 
 /// Proves rule (b) for the function of `c` within c->use_limit (D17.21) after the emptiness proof,
@@ -3304,6 +3273,21 @@ struct walk {
     bool edged;
 }
 
+// Frees a walk that the caller moves in: the two vectors of values, then the aliased set.
+fn walk_drop(walk mut w) void {
+    del(w.s);
+    del(w.edge);
+    fir_flow.bits_drop(move(w.aliased));
+}
+
+// Ends a walk in an allocation of its own that the caller moves in, for a function that lends
+// it to calls.
+fn walk_drop_made(walk mut* own p) void {
+    walk kept = move(*p);
+    del(p);
+    walk_drop(move(kept));
+}
+
 // Walks the acts of block `b` from the state in w.s, and moves w.s to the end of the block. With
 // an edge state, w.edge takes the state at the act of the test with the end of its owner, and each
 // later act; with no test, the state at the end of the block. With `judging`, each act of a use
@@ -3428,18 +3412,16 @@ fn iterate_uses(context mut* c, usage mut* u, fir.pred_table* pt, u64 limit, u64
     u64 mut@ own edges = new(u64, size * values);
     u32 mut@ own ring = new(u32, size);
     fir_flow.bits mut listed = fir_flow.bits_new(n);
-    walk mut w = walk{};
-    w.s = new(u64, values);
-    w.edge = new(u64, values);
-    w.aliased = alias_state(c);
+    walk mut* own w = new(walk);
+    w->s = new(u64, values);
+    w->edge = new(u64, values);
+    w->aliased = alias_state(c);
     defer {
+        walk_drop_made(move(w));
         del(outs);
         del(edges);
         del(ring);
         del(listed.words);
-        del(w.s);
-        del(w.edge);
-        del(w.aliased.words);
     }
     u64 mut i = 0;
     while (i < ins.len) {
@@ -3468,9 +3450,9 @@ fn iterate_uses(context mut* c, usage mut* u, fir.pred_table* pt, u64 limit, u64
         }
         u64 lo = cast(at, u64) * values;
         block_entry(c, pt, at, outs, edges, values, ins[lo..lo + values]);
-        start_walk(&w, ins[lo..lo + values]);
-        walk_block(c, u, at, &w, false, false);
-        if (keep_end(&w, outs[lo..lo + values], edges[lo..lo + values])) {
+        start_walk(w, ins[lo..lo + values]);
+        walk_block(c, u, at, w, false, false);
+        if (keep_end(w, outs[lo..lo + values], edges[lo..lo + values])) {
             list_successors(f, at, &listed, ring, head, &len);
         }
     }
@@ -3520,21 +3502,17 @@ fn judge_uses(context mut* c, usage mut* u, u64@ ins, bool over) void {
     fir.func* f = c->places.f;
     u64 values = u->values;
     bool stateless = over || u->ops.len == 0;
-    walk mut w = walk{};
-    w.s = new(u64, values);
-    w.aliased = alias_state(c);
-    defer {
-        del(w.s);
-        del(w.edge);
-        del(w.aliased.words);
-    }
+    walk mut* own w = new(walk);
+    defer walk_drop_made(move(w));
+    w->s = new(u64, values);
+    w->aliased = alias_state(c);
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         if (!stateless) {
             u64 lo = cast(b, u64) * values;
-            start_walk(&w, ins[lo..lo + values]);
+            start_walk(w, ins[lo..lo + values]);
         }
-        walk_block(c, u, b, &w, true, stateless);
+        walk_block(c, u, b, w, true, stateless);
         b += 1;
     }
 }
