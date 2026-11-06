@@ -1,0 +1,214 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| graph release ok
+//| freed graph release ok
+//| contents release ok
+//| freed contents release ok
+//| list release ok
+//| freed list release ok
+/// Checks that the allocations of src/fort/library give back every block that they take
+/// (notes/testing.md 4): a graph of graph.make, contents of artifact.make and a declaration list
+/// of interface.decls_make. Each value ends through its drop_made, after its free by pointer in
+/// the second probe of each type. Each round fills every owner of its value, so a release that a
+/// drop or a free misses keeps blocks in each round, and the live view of the heap moves.
+import fort.ast;
+import fort.diag;
+import fort.library.artifact;
+import fort.library.graph;
+import fort.library.interface;
+import heap;
+import std.strbuf;
+
+// The rounds of a probe, the round that it samples early, and how far a sample may move. A probe
+// samples the early round and the last two, as the probes of fir_env.ft do.
+u64 LEAK_ROUNDS = 200;
+u64 LEAK_EARLY = 100;
+u64 LEAK_BOUND = 8192;
+
+// The count of the libraries of a graph and of the declarations of a list in one round. Each owner
+// then grows past its first capacity of 16 items, so a kept span of one round is 256 bytes or
+// more, and the rounds between the samples keep more than LEAK_BOUND bytes.
+u64 ITEMS = 20;
+
+// The slot that round `round` samples into: 0 for the early round, 1 and 2 for the last two
+// rounds, and 3 for a round that samples nothing.
+fn slot_of(u64 round) u64 {
+    if (round == LEAK_EARLY) {
+        return 0;
+    }
+    if (round == LEAK_ROUNDS - 2) {
+        return 1;
+    }
+    if (round == LEAK_ROUNDS - 1) {
+        return 2;
+    }
+    return 3;
+}
+
+// The smaller of the distances from the early sample to the last two. A leak moves both late
+// samples, so the smaller distance costs a probe nothing. It keeps a late round in which the thread
+// cache of glibc holds one block more or less than at the early round from failing the probe.
+fn moved(u64[3] samples) u64 {
+    assert(samples[0] != 0 && samples[1] != 0 && samples[2] != 0);
+    u64 one = heap.distance(samples[1], samples[0]);
+    u64 other = heap.distance(samples[2], samples[0]);
+    if (one < other) {
+        return one;
+    }
+    return other;
+}
+
+// Runs `round` LEAK_ROUNDS times with `free_first`, and asserts that the live view of the heap
+// moves by less than LEAK_BOUND from the early round to the last two.
+fn probe(fn (bool) void round, bool free_first) void {
+    u64[3] mut live_at = {};
+    u64 mut i = 0;
+    while (i < LEAK_ROUNDS) {
+        round(free_first);
+        u64 slot = slot_of(i);
+        if (slot < 3) {
+            live_at[slot] = heap.live_view();
+        }
+        i += 1;
+    }
+    assert(moved(live_at) < LEAK_BOUND);
+}
+
+string HASH_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+string HASH_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+// Adds ITEMS libraries to `g`, each with one use of the first, so that each of the five owners of
+// the graph holds ITEMS items. The names are borrowed from the constants.
+fn fill(graph.graph mut* g) void {
+    graph.add(g, "std", HASH_A);
+    graph.add_use(g, "std", HASH_A);
+    u64 mut i = 1;
+    while (i < ITEMS) {
+        graph.add(g, "geom", HASH_B);
+        graph.add_use(g, "std", HASH_A);
+        i += 1;
+    }
+}
+
+// One round of the graph probes: a full graph of graph.make, which graph.free empties first when
+// `free_first` says so, and which graph.drop_made ends.
+fn graph_round(bool free_first) void {
+    graph.graph mut* own g = graph.make();
+    fill(g);
+    assert(graph.count(g) == ITEMS);
+    if (free_first) {
+        graph.free(g);
+        assert(graph.count(g) == 0);
+    }
+    graph.drop_made(move(g));
+}
+
+fn a_graph_in_an_allocation_leaves_the_heap_where_it_was() void {
+    probe(graph_round, false);
+}
+
+fn a_freed_graph_leaves_the_heap_where_it_was() void {
+    probe(graph_round, true);
+}
+
+// The pairs of the configuration map, the arguments of the C compiler and the uses of a manifest:
+// each list of the contents takes items, and the pool takes the decoded values.
+string[4] CFG_KEYS = {"target_os", "target_arch", "zone", "mode"};
+string[4] CFG_VALUES = {"linux", "x86_64", "a b", "x\\y"};
+string[3] XCC = {"-g0", "-DX=1", "-O0"};
+string[2] USE_NAMES = {"alpha", "zeta"};
+string[2] USE_HASHES = {
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+};
+
+// The text of a manifest with a field of each kind, every list among them, in `out`.
+fn manifest_text(strbuf.str_buf mut* out) string {
+    artifact.manifest mut m = artifact.manifest{};
+    m.library = "geom";
+    m.compiler = HASH_A;
+    m.target = "x86_64-linux-gnu";
+    m.cfg_keys = CFG_KEYS[..];
+    m.cfg_values = CFG_VALUES[..];
+    m.cc = "/opt/my clang";
+    m.cc_args = XCC[..];
+    m.ar = "llvm-ar";
+    m.source = HASH_B;
+    m.use_names = USE_NAMES[..];
+    m.use_hashes = USE_HASHES[..];
+    m.interface = HASH_A;
+    m.archive = HASH_B;
+    artifact.write_manifest(&m, out);
+    return strbuf.view(out);
+}
+
+// One round of the contents probes: contents of artifact.make that parse a manifest with each
+// list, which artifact.free empties first when `free_first` says so, and which artifact.drop_made
+// ends.
+fn contents_round(bool free_first) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    string text = manifest_text(&b);
+    artifact.contents mut* own c = artifact.make();
+    assert(artifact.parse_manifest(text, c));
+    assert(c->fields.cfg_keys.len == 4 && c->fields.use_names.len == 2);
+    if (free_first) {
+        artifact.free(c);
+        assert(c->cfg_keys.len == 0 && c->use_names.len == 0);
+    }
+    artifact.drop_made(move(c));
+}
+
+fn contents_in_an_allocation_leave_the_heap_where_they_were() void {
+    probe(contents_round, false);
+}
+
+fn freed_contents_leave_the_heap_where_they_were() void {
+    probe(contents_round, true);
+}
+
+// One round of the list probes: a list of interface.decls_make with ITEMS declarations, which
+// interface.free_decls empties first when `free_first` says so, and which
+// interface.decls_drop_made ends. The arena holds the one node that the list names ITEMS times.
+fn list_round(bool free_first) void {
+    ast.arena mut* own ar = ast.arena_make();
+    defer ast.arena_drop_made(move(ar));
+    ast.node mut* n = ast.ast_new(ar, ast.ast_kind.k_var_decl, diag.loc{});
+    interface.decl_list mut* own l = interface.decls_make();
+    u64 mut i = 0;
+    while (i < ITEMS) {
+        interface.push_decl(l, n);
+        i += 1;
+    }
+    assert(l->len == ITEMS);
+    if (free_first) {
+        interface.free_decls(l);
+        assert(l->len == 0);
+    }
+    interface.decls_drop_made(move(l));
+}
+
+fn a_list_in_an_allocation_leaves_the_heap_where_it_was() void {
+    probe(list_round, false);
+}
+
+fn a_freed_list_leaves_the_heap_where_it_was() void {
+    probe(list_round, true);
+}
+
+fn main() i32 {
+    a_graph_in_an_allocation_leaves_the_heap_where_it_was();
+    println("graph release ok");
+    a_freed_graph_leaves_the_heap_where_it_was();
+    println("freed graph release ok");
+    contents_in_an_allocation_leave_the_heap_where_they_were();
+    println("contents release ok");
+    freed_contents_leave_the_heap_where_they_were();
+    println("freed contents release ok");
+    a_list_in_an_allocation_leaves_the_heap_where_it_was();
+    println("list release ok");
+    a_freed_list_leaves_the_heap_where_it_was();
+    println("freed list release ok");
+    return 0;
+}

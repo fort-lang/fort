@@ -149,7 +149,7 @@ row[107] ROWS = {
 // The library module `geom.v`: the prelude, `A`, and `C<k>` for each case.
 fn add_cases(library_env.env mut* e) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     library_env.join(PRELUDE[..], &b);
     strbuf.append(&b, "i32 A = 2;\n");
     u64 mut k = 0;
@@ -179,19 +179,18 @@ fn line_of(u64 k, strbuf.str_buf mut* out) string {
 }
 
 fn each_case_has_its_folded_value() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    add_cases(&e);
-    assert(library_env.emit(&e, "geom", "lib/geom"));
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    add_cases(e);
+    assert(library_env.emit(e, "geom", "lib/geom"));
     u64 mut k = 0;
     while (k < ROWS.len) {
-        if (!library_env.holds(library_env.text(&e), line_of(k, &b))) {
+        if (!library_env.holds(library_env.text(e), line_of(k, &b))) {
             println("case ", k);
         }
-        assert(library_env.holds(library_env.text(&e), line_of(k, &b)));
+        assert(library_env.holds(library_env.text(e), line_of(k, &b)));
         k += 1;
     }
 }
@@ -199,7 +198,7 @@ fn each_case_has_its_folded_value() void {
 // The folded value of the initializer of `C<k>` in `geom.v` of the set of `e`.
 fn value_of(library_env.env* e, u64 k) consts.cval {
     strbuf.str_buf mut name = strbuf.create();
-    defer strbuf.free(&name);
+    defer del(name.data);
     strbuf.push(&name, 'C');
     strbuf.append_u64(&name, k);
     return value_named(e, strbuf.view(&name));
@@ -213,26 +212,24 @@ fn value_named(library_env.env* e, string name) consts.cval {
 }
 
 fn a_client_folds_each_scalar_to_the_value_of_the_source() void {
-    library_env.env mut lib = library_env.env{};
-    library_env.open(&lib);
-    defer library_env.close(&lib);
-    add_cases(&lib);
-    assert(library_env.emit(&lib, "geom", "lib/geom"));
-    library_env.env mut use = library_env.env{};
-    library_env.open(&use);
-    defer library_env.close(&use);
-    library_env.add(&use, "main.ft", "import geom.v;\n");
-    assert(library_env.check_against(&use, "geom", "geom.flib/interface.ft",
-                                     library_env.text(&lib), "main.ft"));
+    library_env.env mut* own lib = library_env.make();
+    defer library_env.drop_made(move(lib));
+    add_cases(lib);
+    assert(library_env.emit(lib, "geom", "lib/geom"));
+    library_env.env mut* own use = library_env.make();
+    defer library_env.drop_made(move(use));
+    library_env.add(use, "main.ft", "import geom.v;\n");
+    assert(library_env.check_against(use, "geom", "geom.flib/interface.ft",
+                                     library_env.text(lib), "main.ft"));
     u64 mut scalars = 0;
     u64 mut k = 0;
     while (k < ROWS.len) {
-        consts.cval source = value_of(&lib, k);
+        consts.cval source = value_of(lib, k);
         if (source.kind != consts.cval_kind.cv_none) {
-            assert(consts.cv_eq(value_of(&use, k), source));
+            assert(consts.cv_eq(value_of(use, k), source));
             if (consts.cv_is_float(source)) {
                 // cv_eq takes -0.0 for 0.0, and the bits tell them apart
-                assert(consts.cv_float_bits(value_of(&use, k)) == consts.cv_float_bits(source));
+                assert(consts.cv_float_bits(value_of(use, k)) == consts.cv_float_bits(source));
             }
             scalars += 1;
         }
@@ -243,18 +240,16 @@ fn a_client_folds_each_scalar_to_the_value_of_the_source() void {
 }
 
 fn the_interface_is_a_fixed_point_of_the_writer() void {
-    library_env.env mut lib = library_env.env{};
-    library_env.open(&lib);
-    defer library_env.close(&lib);
-    add_cases(&lib);
-    assert(library_env.emit(&lib, "geom", "lib/geom"));
-    library_env.env mut use = library_env.env{};
-    library_env.open(&use);
-    defer library_env.close(&use);
-    library_env.add(&use, "main.ft", "import geom.v;\n");
-    assert(library_env.check_against(&use, "geom", "geom.flib/interface.ft",
-                                     library_env.text(&lib), "main.ft"));
-    assert(library_env.rewrites_alike(&use, library_env.text(&lib)));
+    library_env.env mut* own lib = library_env.make();
+    defer library_env.drop_made(move(lib));
+    add_cases(lib);
+    assert(library_env.emit(lib, "geom", "lib/geom"));
+    library_env.env mut* own use = library_env.make();
+    defer library_env.drop_made(move(use));
+    library_env.add(use, "main.ft", "import geom.v;\n");
+    assert(library_env.check_against(use, "geom", "geom.flib/interface.ft",
+                                     library_env.text(lib), "main.ft"));
+    assert(library_env.rewrites_alike(use, library_env.text(lib)));
 }
 
 fn main() i32 {

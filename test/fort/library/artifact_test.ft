@@ -42,7 +42,7 @@ fn value_of(string text, strbuf.str_buf mut* out) string {
 
 fn the_printable_bytes_but_the_backslash_stay_as_they_are() void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     // 0x21 and 0x7E are the first and the last byte that a value keeps
     assert(same(value_of("!", &b), "!"));
     assert(same(value_of("~", &b), "~"));
@@ -56,7 +56,7 @@ fn the_printable_bytes_but_the_backslash_stay_as_they_are() void {
 
 fn every_other_byte_is_an_uppercase_hex_escape() void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     // 0x20, the byte before the first one a value keeps, and 0x7F, the byte after the last one
     assert(same(value_of(" ", &b), "\\x20"));
     assert(same(value_of("\x7F", &b), "\\x7F"));
@@ -87,14 +87,14 @@ fn printable(string text) bool {
 
 fn an_escaped_value_holds_no_byte_outside_the_kept_range() void {
     strbuf.str_buf mut all = strbuf.create();
-    defer strbuf.free(&all);
+    defer del(all.data);
     u64 mut i = 0;
     while (i < 256) {
         strbuf.push_byte(&all, cast(i, u8));
         i += 1;
     }
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string escaped = value_of(strbuf.view(&all), &b);
     // 94 bytes stay, `\` among them escaped, so 93 stay and 163 take four bytes each
     assert(escaped.len == 93 + 163 * 4);
@@ -109,7 +109,7 @@ string ABC_DIGEST = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20
 
 fn a_hash_is_64_lowercase_hex_digits() void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     artifact.append_hash(&b, cast("", u8@));
     assert(same(strbuf.view(&b), EMPTY_DIGEST));
     strbuf.clear(&b);
@@ -121,7 +121,7 @@ fn a_hash_is_64_lowercase_hex_digits() void {
 fn a_digest_writes_each_byte_high_digit_first() void {
     u8[5] bytes = {0x00, 0x0f, 0xf0, 0xff, 0xab};
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     artifact.append_digest(&b, bytes[..]);
     assert(same(strbuf.view(&b), "000ff0ffab"));
     strbuf.clear(&b);
@@ -148,16 +148,16 @@ fn interface_hash(string interface_text, string summaries_text, strbuf.str_buf m
 
 fn the_interface_hash_is_the_hash_of_both_files_with_names_and_counts() void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     assert(same(interface_hash("", "", &b), EMPTY_INTERFACE_HASH));
     assert(same(interface_hash("i32 A = 1;\n", "fort-summaries 1\nlibrary geom\n", &b),
                 GEOM_INTERFACE_HASH));
     // the string that the hash takes, written out
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     strbuf.append(&text, "interface.ft\n3\nab\nsummaries/ownership\n2\nc\n");
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     artifact.append_hash(&want, strbuf.bytes(&text));
     assert(same(interface_hash("ab\n", "c\n", &b), strbuf.view(&want)));
     // a hash appends after what the buffer holds
@@ -170,9 +170,9 @@ fn the_interface_hash_is_the_hash_of_both_files_with_names_and_counts() void {
 
 fn a_byte_of_either_file_moves_the_interface_hash() void {
     strbuf.str_buf mut base = strbuf.create();
-    defer strbuf.free(&base);
+    defer del(base.data);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string first = interface_hash("i32 A = 1;\n", "fort-summaries 1\nlibrary geom\n", &base);
     // a changed summary changes the hash, and so does a changed interface file
     assert(interface_hash("i32 A = 1;\n", "fort-summaries 1\nlibrary geom\nfn geom.a.f\nkeep _1\n",
@@ -189,9 +189,9 @@ fn a_byte_of_either_file_moves_the_interface_hash() void {
 
 fn the_bytes_of_one_file_cannot_move_to_the_other() void {
     strbuf.str_buf mut a = strbuf.create();
-    defer strbuf.free(&a);
+    defer del(a.data);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     assert(interface_hash("ab", "c", &a) != interface_hash("a", "bc", &b));
     assert(interface_hash("abc", "", &a) != interface_hash("", "abc", &b));
     assert(interface_hash("", "", &a) != interface_hash("x", "", &b));
@@ -201,21 +201,21 @@ fn the_bytes_of_one_file_cannot_move_to_the_other() void {
 
 fn the_compiler_identity_is_the_hash_of_the_running_executable() void {
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     strbuf.str_buf mut path = strbuf.create();
-    defer strbuf.free(&path);
+    defer del(path.data);
     assert(artifact.hash_compiler(&got, &path));
     // the executable here is the program of this test, which the same system call names
     strbuf.str_buf mut exe = strbuf.create();
-    defer strbuf.free(&exe);
+    defer del(exe.data);
     assert(os.exe_path(&exe));
     assert(same(strbuf.view(&path), strbuf.view(&exe)));
     strbuf.str_buf mut bytes = strbuf.create();
-    defer strbuf.free(&bytes);
+    defer del(bytes.data);
     assert(io.read_file(strbuf.view(&exe), &bytes));
     assert(strbuf.view(&bytes).len > 0);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     artifact.append_hash(&want, strbuf.bytes(&bytes));
     assert(same(strbuf.view(&got), strbuf.view(&want)));
     // a second call appends the same identity
@@ -312,9 +312,9 @@ fn text_of(artifact.manifest* m, strbuf.str_buf mut* out) string {
 fn the_manifest_has_each_line_in_the_order_of_the_table() void {
     artifact.manifest m = full();
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     assert(same(text_of(&m, &got), joined(FULL_LINES[..], &want)));
 }
 
@@ -349,9 +349,9 @@ fn release_off_and_empty_lists_give_no_line_for_a_list() void {
     m.interface = "0303030303030303030303030303030303030303030303030303030303030303";
     m.archive = "0404040404040404040404040404040404040404040404040404040404040404";
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     assert(same(text_of(&m, &got), joined(BARE_LINES[..], &want)));
 }
 
@@ -359,7 +359,7 @@ fn release_and_bounds_are_two_fields() void {
     artifact.manifest mut m = full();
     m.release = true;
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     string mut text = text_of(&m, &got);
     assert(str.find(text, "\nmode release\nbounds on\n") >= 0);
     m.release = false;
@@ -381,9 +381,9 @@ fn key_of(artifact.manifest* m, strbuf.str_buf mut* out) string {
 fn key_moves(artifact.manifest* changed) bool {
     artifact.manifest m = full();
     strbuf.str_buf mut a = strbuf.create();
-    defer strbuf.free(&a);
+    defer del(a.data);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     return key_of(&m, &a) != key_of(changed, &b);
 }
 
@@ -457,12 +457,12 @@ fn the_key_does_not_cover_the_outputs() void {
 fn the_key_is_the_hash_of_the_text_before_it() void {
     artifact.manifest m = full();
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     string text = text_of(&m, &got);
     i64 at = str.find(text, "key ");
     assert(at > 0);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     artifact.append_hash(&want, cast(text[0..cast(at, u64)], u8@));
     u64 from = cast(at, u64) + 4;
     assert(same(text[from..from + 64], strbuf.view(&want)));
@@ -471,11 +471,11 @@ fn the_key_is_the_hash_of_the_text_before_it() void {
 fn a_manifest_appends_after_what_the_buffer_holds() void {
     artifact.manifest m = full();
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     strbuf.append(&got, "prefix that the key does not cover\n");
     artifact.write_manifest(&m, &got);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     string lines = joined(FULL_LINES[..], &want);
     assert(same(strbuf.view(&got)[35..], lines));
 }
@@ -507,84 +507,80 @@ fn sandbox_value(library_env.env* e, string rel, strbuf.str_buf mut* out) void {
 }
 
 fn the_source_hash_takes_each_module_in_byte_order_of_its_path() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    library_env.add(&e, "lib/std/rt.ft", RT_SOURCE);
-    library_env.add(&e, "lib/std/a.ft", A_SOURCE);
-    library_env.add(&e, "lib/std/z.ft", Z_SOURCE);
-    library_env.add(&e, "lib/std/m.ft", "");
-    assert(library_env.build(&e, "std", "lib/std"));
-    // the dependency order of the set is not the order of the hash
-    assert(modules_env.ordered(&e.m, 0) == "std.rt");
-    assert(modules_env.ordered(&e.m, 1) == "std.z");
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     strbuf.str_buf mut file = strbuf.create();
-    defer strbuf.free(&file);
-    sandbox_value(&e, "lib/std/a.ft", &file);
+    defer del(file.data);
+    strbuf.str_buf mut want_hash = strbuf.create();
+    defer del(want_hash.data);
+    strbuf.str_buf mut got = strbuf.create();
+    defer del(got.data);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.add(e, "lib/std/rt.ft", RT_SOURCE);
+    library_env.add(e, "lib/std/a.ft", A_SOURCE);
+    library_env.add(e, "lib/std/z.ft", Z_SOURCE);
+    library_env.add(e, "lib/std/m.ft", "");
+    assert(library_env.build(e, "std", "lib/std"));
+    // the dependency order of the set is not the order of the hash
+    assert(modules_env.ordered(&e->m, 0) == "std.rt");
+    assert(modules_env.ordered(&e->m, 1) == "std.z");
+    sandbox_value(e, "lib/std/a.ft", &file);
     part(&want, "std.a", strbuf.view(&file), A_SOURCE);
     strbuf.clear(&file);
-    sandbox_value(&e, "lib/std/m.ft", &file);
+    sandbox_value(e, "lib/std/m.ft", &file);
     // an empty file has the byte count 0 and no byte
     part(&want, "std.m", strbuf.view(&file), "");
     strbuf.clear(&file);
-    sandbox_value(&e, "lib/std/rt.ft", &file);
+    sandbox_value(e, "lib/std/rt.ft", &file);
     part(&want, "std.rt", strbuf.view(&file), RT_SOURCE);
     strbuf.clear(&file);
-    sandbox_value(&e, "lib/std/z.ft", &file);
+    sandbox_value(e, "lib/std/z.ft", &file);
     part(&want, "std.z", strbuf.view(&file), Z_SOURCE);
-    strbuf.str_buf mut want_hash = strbuf.create();
-    defer strbuf.free(&want_hash);
     artifact.append_hash(&want_hash, strbuf.bytes(&want));
-    strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
-    artifact.hash_sources(&e.m.set, &got);
+    artifact.hash_sources(&e->m.set, &got);
     assert(same(strbuf.view(&got), strbuf.view(&want_hash)));
 }
 
 fn the_source_hash_escapes_the_opened_path() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    library_env.add(&e, "lib dir/std/rt.ft", RT_SOURCE);
-    assert(library_env.build(&e, "std", "lib dir/std"));
     strbuf.str_buf mut file = strbuf.create();
-    defer strbuf.free(&file);
-    sandbox_value(&e, "lib dir/std/rt.ft", &file);
-    assert(str.find(strbuf.view(&file), "lib\\x20dir/std/rt.ft") > 0);
+    defer del(file.data);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
-    part(&want, "std.rt", strbuf.view(&file), RT_SOURCE);
+    defer del(want.data);
     strbuf.str_buf mut want_hash = strbuf.create();
-    defer strbuf.free(&want_hash);
-    artifact.append_hash(&want_hash, strbuf.bytes(&want));
+    defer del(want_hash.data);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
-    artifact.hash_sources(&e.m.set, &got);
+    defer del(got.data);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.add(e, "lib dir/std/rt.ft", RT_SOURCE);
+    assert(library_env.build(e, "std", "lib dir/std"));
+    sandbox_value(e, "lib dir/std/rt.ft", &file);
+    assert(str.find(strbuf.view(&file), "lib\\x20dir/std/rt.ft") > 0);
+    part(&want, "std.rt", strbuf.view(&file), RT_SOURCE);
+    artifact.append_hash(&want_hash, strbuf.bytes(&want));
+    artifact.hash_sources(&e->m.set, &got);
     assert(same(strbuf.view(&got), strbuf.view(&want_hash)));
 }
 
 fn a_byte_of_a_source_moves_the_source_hash() void {
     strbuf.str_buf mut first = strbuf.create();
-    defer strbuf.free(&first);
+    defer del(first.data);
     strbuf.str_buf mut second = strbuf.create();
-    defer strbuf.free(&second);
+    defer del(second.data);
     {
-        library_env.env mut e = library_env.env{};
-        library_env.open(&e);
-        defer library_env.close(&e);
-        library_env.add(&e, "lib/std/rt.ft", "i32 B = 1;\n");
-        assert(library_env.build(&e, "std", "lib/std"));
-        artifact.hash_sources(&e.m.set, &first);
+        library_env.env mut* own e = library_env.make();
+        defer library_env.drop_made(move(e));
+        library_env.add(e, "lib/std/rt.ft", "i32 B = 1;\n");
+        assert(library_env.build(e, "std", "lib/std"));
+        artifact.hash_sources(&e->m.set, &first);
     }
     {
-        library_env.env mut e = library_env.env{};
-        library_env.open(&e);
-        defer library_env.close(&e);
-        library_env.add(&e, "lib/std/rt.ft", "i32 B = 2;\n");
-        assert(library_env.build(&e, "std", "lib/std"));
-        artifact.hash_sources(&e.m.set, &second);
+        library_env.env mut* own e = library_env.make();
+        defer library_env.drop_made(move(e));
+        library_env.add(e, "lib/std/rt.ft", "i32 B = 2;\n");
+        assert(library_env.build(e, "std", "lib/std"));
+        artifact.hash_sources(&e->m.set, &second);
     }
     assert(strbuf.view(&first).len == 64);
     assert(strbuf.view(&first) != strbuf.view(&second));
@@ -595,41 +591,38 @@ string GEOM_SOURCE = "i32 SIDE = 4;\nfn area(i32 side) i32 {\n    return side * 
 string CLIENT_SOURCE = "import geom.shapes;\nfn main() i32 {\n    return shapes.area(2);\n}\n";
 
 fn the_unit_of_a_client_holds_no_interface_module() void {
-    library_env.env mut lib = library_env.env{};
-    library_env.open(&lib);
-    defer library_env.close(&lib);
-    library_env.add(&lib, "lib/geom/shapes.ft", GEOM_SOURCE);
-    assert(library_env.emit(&lib, "geom", "lib/geom"));
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    library_env.add(&e, "main.ft", CLIENT_SOURCE);
-    assert(library_env.check_against(&e, "geom", "geom.flib/interface.ft", library_env.text(&lib),
+    strbuf.str_buf mut file = strbuf.create();
+    defer del(file.data);
+    strbuf.str_buf mut want = strbuf.create();
+    defer del(want.data);
+    strbuf.str_buf mut want_hash = strbuf.create();
+    defer del(want_hash.data);
+    strbuf.str_buf mut got = strbuf.create();
+    defer del(got.data);
+    library_env.env mut* own lib = library_env.make();
+    defer library_env.drop_made(move(lib));
+    library_env.add(lib, "lib/geom/shapes.ft", GEOM_SOURCE);
+    assert(library_env.emit(lib, "geom", "lib/geom"));
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.add(e, "main.ft", CLIENT_SOURCE);
+    assert(library_env.check_against(e, "geom", "geom.flib/interface.ft", library_env.text(lib),
                                      "main.ft"));
     // the closure holds the section of geom.shapes and the entry
-    assert(modules_env.ordered(&e.m, 0) == "geom.shapes");
-    strbuf.str_buf mut file = strbuf.create();
-    defer strbuf.free(&file);
-    sandbox_value(&e, "main.ft", &file);
-    strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    assert(modules_env.ordered(&e->m, 0) == "geom.shapes");
+    sandbox_value(e, "main.ft", &file);
     part(&want, "main", strbuf.view(&file), CLIENT_SOURCE);
-    strbuf.str_buf mut want_hash = strbuf.create();
-    defer strbuf.free(&want_hash);
     artifact.append_hash(&want_hash, strbuf.bytes(&want));
-    strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
-    artifact.hash_sources(&e.m.set, &got);
+    artifact.hash_sources(&e->m.set, &got);
     assert(same(strbuf.view(&got), strbuf.view(&want_hash)));
 }
 
 fn an_empty_unit_hashes_the_empty_string() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
-    artifact.hash_sources(&e.m.set, &got);
+    defer del(got.data);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    artifact.hash_sources(&e->m.set, &got);
     assert(same(strbuf.view(&got), EMPTY_DIGEST));
 }
 
@@ -667,7 +660,7 @@ fn is_dir(string path) bool {
 // Whether the file `path` holds `text`.
 fn holds(string path, string text) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     if (!io.read_file(path, &b)) {
         return false;
     }
@@ -678,10 +671,10 @@ fn holds(string path, string text) bool {
 fn entries(string path, strbuf.str_buf mut* out) string {
     strbuf.clear(out);
     strbuf.str_buf mut listed = strbuf.create();
-    defer strbuf.free(&listed);
+    defer del(listed.data);
     assert(os.list_dir(path, &listed));
     strbuf.str_buf mut names = strbuf.create();
-    defer strbuf.free(&names);
+    defer del(names.data);
     u64 mut count = 0;
     u64 mut at_entry = 0;
     os.dir_entry mut ent = {};
@@ -737,12 +730,12 @@ fn temp_name(string dir, string name, strbuf.str_buf mut* out) string {
 
 fn a_fresh_artifact_holds_the_four_entries() void {
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(write_to("fresh.flib", &failed, &error));
     assert(strbuf.view(&failed).len == 0);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     assert(same(entries("fresh.flib", &b), "interface.ft\nlib.a\nmanifest\nsummaries\n"));
     assert(holds("fresh.flib/interface.ft", IFACE_TEXT));
     assert(holds("fresh.flib/lib.a", ARCHIVE_TEXT));
@@ -755,7 +748,7 @@ fn a_fresh_artifact_holds_the_four_entries() void {
 
 fn a_trailing_separator_takes_no_second_one() void {
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(write_to("slash.flib/", &failed, &error));
     assert(holds("slash.flib/manifest", MANIFEST_TEXT));
@@ -778,7 +771,7 @@ fn a_second_write_replaces_each_file_and_empties_summaries() void {
     assert(io.write_file("again.flib/summaries/keep", cast("k", u8@)));
     assert(io.write_file("again.flib/notes", cast("n", u8@)));
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(write_to("again.flib", &failed, &error));
     assert(holds("again.flib/interface.ft", IFACE_TEXT));
@@ -788,7 +781,7 @@ fn a_second_write_replaces_each_file_and_empties_summaries() void {
     assert(!exists("again.flib/summaries/keep"));
     assert(holds("again.flib/notes", "n"));
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     // no temporary file is left
     assert(same(entries("again.flib", &b), "interface.ft\nlib.a\nmanifest\nnotes\nsummaries\n"));
     assert(same(entries("again.flib/summaries", &b), "ownership\n"));
@@ -801,11 +794,11 @@ fn summaries_loses_each_file_and_each_empty_directory() void {
     assert(io.write_file("old.flib/summaries/.hidden", cast("h", u8@)));
     make_dir("old.flib/summaries/empty");
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(write_to("old.flib", &failed, &error));
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     assert(same(entries("old.flib/summaries", &b), "ownership\n"));
     assert(holds("old.flib/manifest", MANIFEST_TEXT));
     // a second write over the summary file of a first one succeeds too
@@ -826,7 +819,7 @@ fn make_temp() string own {
 // `<dir>/<rel>`, a string the caller owns.
 fn under(string dir, string rel) string own {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, dir);
     strbuf.push(&b, '/');
     strbuf.append(&b, rel);
@@ -859,7 +852,7 @@ fn a_file_that_cannot_be_removed_gives_the_error_of_unlink() void {
     // a directory that its owner cannot write keeps its entries
     assert(libc.chmod(c_path.ptr, 0o555) == 0);
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     bool written = write_to(dir, &failed, &error);
     assert(libc.chmod(c_path.ptr, 0o700) == 0);
@@ -919,7 +912,7 @@ fn a_summaries_that_links_to_a_directory_is_refused() void {
     assert(io.write_file("linked.flib/lib.a", cast("old archive", u8@)));
     link("../outside_dir", "linked.flib/summaries");
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(!write_to("linked.flib", &failed, &error));
     assert(same(strbuf.view(&failed), "linked.flib/summaries"));
@@ -939,7 +932,7 @@ fn a_summaries_that_links_to_a_file_is_refused() void {
     make_dir("filelink.flib");
     link("../outside_file", "filelink.flib/summaries");
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(!write_to("filelink.flib", &failed, &error));
     assert(same(strbuf.view(&failed), "filelink.flib/summaries"));
@@ -969,11 +962,11 @@ fn a_link_in_summaries_goes_and_its_target_stays() void {
     defer del(c_fixed);
     assert(libc.chmod(c_fixed.ptr, 0o444) == 0);
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(write_to("inner.flib", &failed, &error));
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     assert(same(entries("inner.flib/summaries", &b), "ownership\n"));
     assert(holds("target_dir/t", "t"));
     assert(holds("target_file", "f"));
@@ -983,11 +976,11 @@ fn a_link_at_a_temporary_name_is_not_written_through() void {
     assert(io.write_file("victim", cast("old", u8@)));
     make_dir("trap.flib");
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     // a link at the temporary name of interface.ft would redirect a write that followed it
     link("../victim", temp_name("trap.flib", "interface.ft", &b));
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(write_to("trap.flib", &failed, &error));
     // the link goes, its target keeps its bytes, and the file of the build has its own
@@ -1001,12 +994,12 @@ fn a_link_at_a_temporary_name_is_not_written_through() void {
 fn a_stale_temporary_file_of_this_pid_does_not_stop_the_write() void {
     make_dir("stale_temp.flib");
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     // an earlier run with the same process id stopped after it made its temporary manifest
     assert(io.write_file(temp_name("stale_temp.flib", "manifest", &b), cast("partial", u8@)));
     assert(io.write_file(temp_name("stale_temp.flib", "lib.a", &b), cast("partial", u8@)));
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(write_to("stale_temp.flib", &failed, &error));
     assert(holds("stale_temp.flib/manifest", MANIFEST_TEXT));
@@ -1026,7 +1019,7 @@ fn a_directory_in_summaries_that_holds_a_file_stops_the_write() void {
     make_dir("deep.flib/summaries/sub");
     assert(io.write_file("deep.flib/summaries/sub/kept", cast("k", u8@)));
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(!write_to("deep.flib", &failed, &error));
     assert(same(strbuf.view(&failed), "deep.flib/summaries/sub"));
@@ -1041,7 +1034,7 @@ fn a_directory_in_summaries_that_holds_a_file_stops_the_write() void {
 
 fn a_directory_whose_parent_is_missing_is_the_failed_path() void {
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(!write_to("missing/std.flib", &failed, &error));
     assert(same(strbuf.view(&failed), "missing/std.flib"));
@@ -1052,7 +1045,7 @@ fn a_directory_whose_parent_is_missing_is_the_failed_path() void {
 fn a_file_in_place_of_the_directory_is_the_failed_path() void {
     assert(io.write_file("plain.flib", cast("a file", u8@)));
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(!write_to("plain.flib", &failed, &error));
     assert(same(strbuf.view(&failed), "plain.flib"));
@@ -1065,10 +1058,10 @@ fn the_manifest_goes_before_the_first_file_is_written() void {
     assert(io.write_file("stale.flib/manifest", cast("old manifest", u8@)));
     // a directory at the temporary name of interface.ft makes its write fail
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     make_dir(temp_name("stale.flib", "interface.ft", &b));
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(!write_to("stale.flib", &failed, &error));
     assert(same(strbuf.view(&failed), "stale.flib/interface.ft"));
@@ -1089,13 +1082,13 @@ fn a_failed_rename_leaves_no_temporary_file() void {
     make_dir("busy.flib/lib.a");
     assert(io.write_file("busy.flib/lib.a/member", cast("m", u8@)));
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(!write_to("busy.flib", &failed, &error));
     assert(same(strbuf.view(&failed), "busy.flib/lib.a"));
     assert(error != 0);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     assert(!exists(temp_name("busy.flib", "lib.a", &b)));
     // the steps before it are done and the manifest after it is not
     assert(holds("busy.flib/interface.ft", IFACE_TEXT));
@@ -1109,7 +1102,7 @@ fn a_manifest_that_cannot_be_removed_stops_the_write() void {
     // unlink(2) refuses a directory
     make_dir("fixed.flib/manifest");
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(!write_to("fixed.flib", &failed, &error));
     assert(same(strbuf.view(&failed), "fixed.flib/manifest"));
@@ -1121,10 +1114,10 @@ fn a_manifest_that_cannot_be_renamed_is_the_failed_path() void {
     make_dir("last.flib");
     // the temporary name of the manifest is a directory
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     make_dir(temp_name("last.flib", "manifest", &b));
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(!write_to("last.flib", &failed, &error));
     assert(same(strbuf.view(&failed), "last.flib/manifest"));
@@ -1151,7 +1144,7 @@ fn a_summary_file_that_cannot_be_written_is_the_failed_path() void {
     // temporary file of the summary file cannot be made
     assert(libc.chmod(c_sums.ptr, 0o555) == 0);
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     bool written = write_to(dir, &failed, &error);
     assert(libc.chmod(c_sums.ptr, 0o700) == 0);
@@ -1191,7 +1184,7 @@ fn a_directory_at_the_summary_file_stops_the_write_before_any_file() void {
     make_dir("nosum.flib/summaries/ownership");
     assert(io.write_file("nosum.flib/summaries/ownership/x", cast("x", u8@)));
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(!write_to("nosum.flib", &failed, &error));
     assert(same(strbuf.view(&failed), "nosum.flib/summaries/ownership"));
@@ -1211,25 +1204,25 @@ fn a_link_at_the_temporary_name_of_the_summary_file_is_not_written_through() voi
     make_dir("sumtrap.flib");
     make_dir("sumtrap.flib/summaries");
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     // the writer empties summaries/ first, so a link there goes before the temporary name is
     // made; a link that a run with this pid leaves at the temporary name goes too
     link("../../sum_victim", temp_name("sumtrap.flib/summaries", "ownership", &b));
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(write_to("sumtrap.flib", &failed, &error));
     assert(holds("sum_victim", "old"));
     assert(!exists(temp_name("sumtrap.flib/summaries", "ownership", &b)));
     assert(holds("sumtrap.flib/summaries/ownership", SUMMARY_TEXT));
     strbuf.str_buf mut names = strbuf.create();
-    defer strbuf.free(&names);
+    defer del(names.data);
     assert(same(entries("sumtrap.flib/summaries", &names), "ownership\n"));
 }
 
 fn the_failed_path_is_cleared_by_a_write_that_succeeds() void {
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     strbuf.append(&failed, "an older failure");
     i32 mut error = 0;
     assert(write_to("clear.flib", &failed, &error));

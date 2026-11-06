@@ -111,7 +111,7 @@ fn replaced(string text, string old, string new_text, strbuf.str_buf mut* out) s
 // replaced line can break a rule.
 fn rekeyed(string text, string old, string new_text, strbuf.str_buf mut* out) string {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string changed = replaced(text, old, new_text, &b);
     i64 at = str.find(changed, "\nkey ");
     assert(at >= 0);
@@ -125,9 +125,9 @@ fn rekeyed(string text, string old, string new_text, strbuf.str_buf mut* out) st
 }
 
 fn refused(string text) bool {
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
-    bool passed = artifact.parse_manifest(text, &c);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
+    bool passed = artifact.parse_manifest(text, c);
     if (passed) {
         print("parsed: ", text);
     }
@@ -139,43 +139,43 @@ fn refused(string text) bool {
 fn the_entry_form_has_its_lines_and_no_archiver() void {
     artifact.manifest m = entry_fields();
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     artifact.write_manifest(&m, &got);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     assert(same(strbuf.view(&got), entry_text(&want)));
 }
 
 fn the_entry_form_reads_back_to_its_fields() void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
-    assert(artifact.parse_manifest(entry_text(&b), &c));
-    assert(c.fields.entry_unit);
-    assert(same(c.fields.entry, "my main"));
-    assert(same(c.fields.object, HASH_D));
-    assert(same(c.key, ENTRY_KEY));
-    assert(same(c.fields.library, ""));
-    assert(same(c.fields.ar, ""));
-    assert(c.fields.release && c.fields.no_bounds_check);
+    defer del(b.data);
+    strbuf.str_buf mut text = strbuf.create();
+    defer del(text.data);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
+    assert(artifact.parse_manifest(entry_text(&b), c));
+    assert(c->fields.entry_unit);
+    assert(same(c->fields.entry, "my main"));
+    assert(same(c->fields.object, HASH_D));
+    assert(same(c->key, ENTRY_KEY));
+    assert(same(c->fields.library, ""));
+    assert(same(c->fields.ar, ""));
+    assert(c->fields.release && c->fields.no_bounds_check);
     // the same contents read a library manifest after it: the form is read again
     artifact.manifest mut lib = entry_fields();
     lib.entry_unit = false;
-    strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
     artifact.write_manifest(&lib, &text);
-    assert(artifact.parse_manifest(strbuf.view(&text), &c));
-    assert(!c.fields.entry_unit);
-    assert(same(c.fields.library, "geom"));
+    assert(artifact.parse_manifest(strbuf.view(&text), c));
+    assert(!c->fields.entry_unit);
+    assert(same(c->fields.library, "geom"));
 }
 
 fn a_mix_of_the_two_forms_is_refused() void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string text = entry_text(&b);
     strbuf.str_buf mut c = strbuf.create();
-    defer strbuf.free(&c);
+    defer del(c.data);
     // an archiver, a library line beside the entry line, and the outputs of a library
     assert(refused(rekeyed(text, "\nsource ", "\nar ar\nsource ", &c)));
     assert(refused(rekeyed(text, "entry my\\x20main\n", "entry my\\x20main\nlibrary geom\n", &c)));
@@ -186,7 +186,7 @@ fn a_mix_of_the_two_forms_is_refused() void {
     assert(refused(replaced(text, "\nobject ", "\n#", &c)));
     assert(refused(replaced(text, "object dddd", "object Dddd", &c)));
     strbuf.str_buf mut twice = strbuf.create();
-    defer strbuf.free(&twice);
+    defer del(twice.data);
     strbuf.append(&twice, text);
     strbuf.append(&twice, ENTRY_LINES[13]);
     strbuf.push(&twice, '\n');
@@ -205,16 +205,16 @@ fn key_of(artifact.manifest* m, strbuf.str_buf mut* out) string {
 fn the_key_is_the_hash_of_the_covered_lines() void {
     artifact.manifest m = entry_fields();
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     assert(same(key_of(&m, &b), ENTRY_KEY));
     // the key line of the manifest holds the same key
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     artifact.manifest mut lib = entry_fields();
     lib.entry_unit = false;
     artifact.write_manifest(&lib, &text);
     strbuf.str_buf mut line = strbuf.create();
-    defer strbuf.free(&line);
+    defer del(line.data);
     strbuf.append(&line, "\nkey ");
     strbuf.append(&line, key_of(&lib, &b));
     strbuf.push(&line, '\n');
@@ -224,7 +224,7 @@ fn the_key_is_the_hash_of_the_covered_lines() void {
 fn the_key_does_not_cover_the_outputs() void {
     artifact.manifest mut m = entry_fields();
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     m.object = HASH_A;
     m.interface = HASH_A;
     m.archive = HASH_B;
@@ -237,7 +237,7 @@ fn the_key_does_not_cover_the_outputs() void {
 // Whether the key of `m` differs from ENTRY_KEY.
 fn moves(artifact.manifest* m) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     return key_of(m, &b) != ENTRY_KEY;
 }
 
@@ -285,9 +285,9 @@ fn the_key_covers_each_field_before_it() void {
     m.entry_unit = false;
     assert(moves(&m));
     strbuf.str_buf mut first = strbuf.create();
-    defer strbuf.free(&first);
+    defer del(first.data);
     strbuf.str_buf mut second = strbuf.create();
-    defer strbuf.free(&second);
+    defer del(second.data);
     string before = key_of(&m, &first);
     m.ar = "other-ar";
     assert(key_of(&m, &second) != before);
@@ -306,7 +306,7 @@ string EMPTY_HASH = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b785
 
 fn the_source_hash_of_a_walk_covers_each_path_count_and_byte() void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     artifact.hash_texts(PATHS[..], FILES[..], TEXTS[..], &b);
     assert(same(strbuf.view(&b), WALK_HASH));
     strbuf.clear(&b);
@@ -355,7 +355,7 @@ fn link(string target, string path) void {
 
 fn holds(string path, string text) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     if (!io.read_file(path, &b)) {
         return false;
     }
@@ -378,7 +378,7 @@ string OBJECT_TEXT = "\x7FELF object\n";
 fn object_manifest(strbuf.str_buf mut* out) string {
     artifact.manifest mut m = entry_fields();
     strbuf.str_buf mut hash = strbuf.create();
-    defer strbuf.free(&hash);
+    defer del(hash.data);
     artifact.append_hash(&hash, cast(OBJECT_TEXT, u8@));
     m.object = strbuf.view(&hash);
     strbuf.clear(out);
@@ -389,30 +389,30 @@ fn object_manifest(strbuf.str_buf mut* out) string {
 // Writes the entry `dir` of an entry unit; true when each step succeeded.
 fn write_entry(string dir, strbuf.str_buf mut* failed, i32 mut* error) bool {
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     return artifact.write_object(dir, cast(OBJECT_TEXT, u8@), object_manifest(&text), failed,
                                  error);
 }
 
 fn read_of(string dir, i32 mut* error) artifact.verdict {
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
     *error = 0;
-    return artifact.read_object(dir, &c, error);
+    return artifact.read_object(dir, c, error);
 }
 
 fn an_entry_of_an_entry_unit_reads_its_files_once() void {
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(write_entry("unit", &failed, &error));
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
-    assert(artifact.read_object("unit", &c, &error) == artifact.verdict.v_valid);
-    assert(same(strbuf.view(&c.object), OBJECT_TEXT));
-    assert(same(c.key, ENTRY_KEY));
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
+    assert(artifact.read_object("unit", c, &error) == artifact.verdict.v_valid);
+    assert(same(strbuf.view(&c->object), OBJECT_TEXT));
+    assert(same(c->key, ENTRY_KEY));
     write_file("unit/object.o", "changed\n");
-    assert(same(strbuf.view(&c.object), OBJECT_TEXT));
+    assert(same(strbuf.view(&c->object), OBJECT_TEXT));
     // the changed object breaks rule 4, and so does an object that is gone
     assert(read_of("unit", &error) == artifact.verdict.v_corrupt);
     remove("unit/object.o");
@@ -424,30 +424,30 @@ fn an_entry_of_an_entry_unit_reads_its_files_once() void {
 
 fn the_two_readers_refuse_the_other_form() void {
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(write_entry("entry_form", &failed, &error));
     // the reader of a used library refuses the entry of an entry unit
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
-    assert(artifact.read("entry_form", &c, &error) == artifact.verdict.v_corrupt);
+    strbuf.str_buf mut iface = strbuf.create();
+    defer del(iface.data);
+    strbuf.str_buf mut arch = strbuf.create();
+    defer del(arch.data);
+    strbuf.str_buf mut text = strbuf.create();
+    defer del(text.data);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
+    assert(artifact.read("entry_form", c, &error) == artifact.verdict.v_corrupt);
     // and the reader of an entry unit refuses an artifact
     artifact.manifest mut m = entry_fields();
     m.entry_unit = false;
-    strbuf.str_buf mut iface = strbuf.create();
-    defer strbuf.free(&iface);
     artifact.append_interface_hash(&iface, "i32 A = 1;\n", "fort-summaries 1\nlibrary geom\n");
-    strbuf.str_buf mut arch = strbuf.create();
-    defer strbuf.free(&arch);
     artifact.append_hash(&arch, cast("!<arch>\n", u8@));
     m.interface = strbuf.view(&iface);
     m.archive = strbuf.view(&arch);
-    strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
     artifact.write_manifest(&m, &text);
     assert(artifact.write("library_form", "i32 A = 1;\n", "fort-summaries 1\nlibrary geom\n",
                           cast("!<arch>\n", u8@), strbuf.view(&text), &failed, &error));
-    assert(artifact.read("library_form", &c, &error) == artifact.verdict.v_valid);
+    assert(artifact.read("library_form", c, &error) == artifact.verdict.v_valid);
     assert(read_of("library_form", &error) == artifact.verdict.v_corrupt);
     // an object beside the files of an artifact does not make it an entry of an entry unit
     write_file("library_form/object.o", OBJECT_TEXT);
@@ -470,11 +470,11 @@ fn an_entry_that_cannot_be_read_is_unreadable_or_corrupt() void {
 
 fn the_writer_of_an_entry_follows_the_protocol() void {
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     i32 mut error = 0;
     // a new directory gets the object and the manifest, and no temporary file stays
     assert(write_entry("proto", &failed, &error));

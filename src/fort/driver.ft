@@ -194,14 +194,35 @@ fn options_create() options {
 }
 
 fn options_free(options mut* opts) void {
-    containers.str_free(&opts->includes);
-    containers.str_free(&opts->libs);
-    containers.str_free(&opts->cc_args);
-    containers.str_free(&opts->cfg_keys);
-    containers.str_free(&opts->cfg_values);
-    containers.str_free(&opts->use_names);
-    containers.str_free(&opts->use_paths);
-    containers.str_free(&opts->run_args);
+    options_drop(move(*opts));
+}
+
+// Frees options that the caller moves in: the eight lists. The strings are borrowed from the
+// arguments.
+fn options_drop(options mut opts) void {
+    del(opts.includes.items);
+    del(opts.libs.items);
+    del(opts.cc_args.items);
+    del(opts.cfg_keys.items);
+    del(opts.cfg_values.items);
+    del(opts.use_names.items);
+    del(opts.use_paths.items);
+    del(opts.run_args.items);
+}
+
+// The options of options_create in an allocation of their own, for a run that lends them to
+// calls.
+fn options_make() options mut* own {
+    options mut* own p = new(options);
+    *p = options_create();
+    return p;
+}
+
+// Ends options of options_make that the caller moves in.
+fn options_drop_made(options mut* own p) void {
+    options kept = move(*p);
+    del(p);
+    options_drop(move(kept));
 }
 
 // What --help prints after the usage line: the option table.
@@ -3127,18 +3148,9 @@ fn run(string@ args) i32 {
         eprintln(USAGE);
         return EXIT_USAGE;
     }
-    options mut opts = options_create();
-    defer {
-        del(opts.includes.items);
-        del(opts.libs.items);
-        del(opts.cc_args.items);
-        del(opts.cfg_keys.items);
-        del(opts.cfg_values.items);
-        del(opts.use_names.items);
-        del(opts.use_paths.items);
-        del(opts.run_args.items);
-    }
-    i32 parsed = parse(&opts, args);
+    options mut* own opts = options_make();
+    defer options_drop_made(move(opts));
+    i32 parsed = parse(opts, args);
     if (parsed == PARSE_ERROR) {
         return EXIT_USAGE;
     }
@@ -3147,17 +3159,17 @@ fn run(string@ args) i32 {
     }
     // --tokens stops after the lexer, and --ast stops after the parser.
     // Every other run goes through the front end.
-    if (opts.tokens) {
-        return tokens_entry(&opts);
+    if (opts->tokens) {
+        return tokens_entry(opts);
     }
-    if (opts.ast) {
-        return ast_entry(&opts);
+    if (opts->ast) {
+        return ast_entry(opts);
     }
-    if (opts.fir_test) {
-        return fir_test_entry(&opts, args[0]);
+    if (opts->fir_test) {
+        return fir_test_entry(opts, args[0]);
     }
-    if (opts.have_lib) {
-        return library_entry(&opts);
+    if (opts->have_lib) {
+        return library_entry(opts);
     }
-    return compile_entry(&opts, args[0]);
+    return compile_entry(opts, args[0]);
 }

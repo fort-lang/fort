@@ -95,8 +95,25 @@ fn push_decl(decl_list mut* v, ast.node* decl) void {
 }
 
 fn free_decls(decl_list mut* v) void {
-    del(v->items);
-    v->len = 0;
+    decls_drop(move(*v));
+}
+
+// Frees a list that the caller moves in. The nodes belong to the tree, so the list frees its span
+// alone.
+fn decls_drop(decl_list mut v) void {
+    del(v.items);
+}
+
+// An empty list in an allocation of its own, for a function that lends the list to calls.
+fn decls_make() decl_list mut* own {
+    return new(decl_list);
+}
+
+// Ends a list of decls_make that the caller moves in.
+fn decls_drop_made(decl_list mut* own p) void {
+    decl_list kept = move(*p);
+    del(p);
+    decls_drop(move(kept));
 }
 
 // Appends each declaration of `list` that `$if` selects (D21.2), as the checker collects them.
@@ -753,23 +770,23 @@ fn write_decl(section mut* sec, ast.node* decl, strbuf.str_buf mut* out) void {
 
 // Writes the section of the module `m`: its `//! module` line, its imports and its declarations.
 fn write_section(check.checker* ck, modules.module* m, strbuf.str_buf mut* out) void {
-    decl_list mut decls = decl_list{};
-    defer del(decls.items);
-    collect_list(m->ast, &decls);
-    sort_decls(&decls);
-    // The buffer comes before the section: the drop of the section is a call, and a `del` of the
-    // buffer after it would end a local that the call can change.
+    // The buffer comes before the list and the section: the drop of each is a call, and a `del`
+    // of the buffer after it would end a local that the call can change.
     strbuf.str_buf mut scratch = strbuf.create();
     defer del(scratch.data);
+    decl_list mut* own decls = decls_make();
+    defer decls_drop_made(move(decls));
+    collect_list(m->ast, decls);
+    sort_decls(decls);
     section mut* own sec = new(section);
     defer section_drop_made(move(sec));
     sec->ck = ck;
     sec->m = m;
-    choose_prefix(&decls, &sec->prefix);
+    choose_prefix(decls, &sec->prefix);
     add_source_imports(sec);
     // the collection pass: each module that a type or a value names
     sec->collecting = true;
-    write_decls(sec, &decls, &scratch);
+    write_decls(sec, decls, &scratch);
     sort_paths(&sec->imports);
     sec->collecting = false;
     strbuf.append(out, modules.INTERFACE_SECTION);
@@ -785,7 +802,7 @@ fn write_section(check.checker* ck, modules.module* m, strbuf.str_buf mut* out) 
         strbuf.append(out, ";\n");
         i += 1;
     }
-    write_decls(sec, &decls, out);
+    write_decls(sec, decls, out);
 }
 
 // Runs write_decl on each declaration of `decls`. The caller keeps `decls`, so it is no local owner

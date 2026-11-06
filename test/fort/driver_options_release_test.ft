@@ -1,0 +1,116 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| options release ok
+//| freed options release ok
+/// Checks that the options of src/fort/driver.ft give back every block that they take
+/// (notes/testing.md 4). Each round parses two command lines into options of
+/// driver.options_make, which fill the eight lists, and ends them through
+/// driver.options_drop_made, after driver.options_free in the second probe. A release that
+/// options_drop or options_free misses keeps a span in each round, and the live view of the heap
+/// moves.
+import fort.driver;
+import heap;
+
+// The rounds of a probe, the round that it samples early, and how far a sample may move. A probe
+// samples the early round and the last two, as the probes of fir_env.ft do. The first span of a
+// list holds 16 strings, 256 bytes, so a kept span of one round keeps more than LEAK_BOUND bytes
+// over the rounds between the samples.
+u64 LEAK_ROUNDS = 200;
+u64 LEAK_EARLY = 100;
+u64 LEAK_BOUND = 8192;
+
+// The slot that round `round` samples into: 0 for the early round, 1 and 2 for the last two
+// rounds, and 3 for a round that samples nothing.
+fn slot_of(u64 round) u64 {
+    if (round == LEAK_EARLY) {
+        return 0;
+    }
+    if (round == LEAK_ROUNDS - 2) {
+        return 1;
+    }
+    if (round == LEAK_ROUNDS - 1) {
+        return 2;
+    }
+    return 3;
+}
+
+// The smaller of the distances from the early sample to the last two, as fir_env.moved gives it.
+fn moved(u64[3] samples) u64 {
+    assert(samples[0] != 0 && samples[1] != 0 && samples[2] != 0);
+    u64 one = heap.distance(samples[1], samples[0]);
+    u64 other = heap.distance(samples[2], samples[0]);
+    if (one < other) {
+        return one;
+    }
+    return other;
+}
+
+// A command line that fills seven of the lists: the roots, the configuration pairs, the
+// arguments of the C compiler, the libraries of the link and the used libraries. --fir-run does
+// not take --use, so the arguments of the program come from a second command line.
+string[15] BUILD = {
+    "fort", "-I", "a", "-I", "b", "--cfg", "mode=x,zone=y", "-Xcc", "-g0", "-lm", "--use",
+    "std=std.flib", "--use", "geom=geom.flib", "entry.ft",
+};
+string[6] RUN = {"fort", "--fir-run", "entry.ft", "--", "x", "y"};
+
+// Parses `args` into options of options_make, which options_free empties first when
+// `free_first` says so, and which options_drop_made ends.
+fn parse_round(string@ args, bool free_first) driver.options mut* own {
+    driver.options mut* own opts = driver.options_make();
+    assert(driver.parse(opts, args) == driver.PARSE_OK);
+    if (free_first) {
+        driver.options_free(opts);
+        assert(opts->includes.len == 0 && opts->run_args.len == 0);
+    }
+    return opts;
+}
+
+// One round: the two command lines, each in options of its own.
+fn round(bool free_first) void {
+    driver.options mut* own build = parse_round(BUILD[..], free_first);
+    defer driver.options_drop_made(move(build));
+    if (!free_first) {
+        assert(build->includes.len == 2 && build->cfg_keys.len == 2 && build->cfg_values.len == 2);
+        assert(build->cc_args.len == 1 && build->libs.len == 1);
+        assert(build->use_names.len == 2 && build->use_paths.len == 2);
+    }
+    driver.options mut* own run = parse_round(RUN[..], free_first);
+    defer driver.options_drop_made(move(run));
+    if (!free_first) {
+        assert(run->run_args.len == 2);
+    }
+}
+
+// Runs `round` LEAK_ROUNDS times with `free_first`, and asserts that the live view of the heap
+// moves by less than LEAK_BOUND from the early round to the last two.
+fn probe(bool free_first) void {
+    u64[3] mut live_at = {};
+    u64 mut i = 0;
+    while (i < LEAK_ROUNDS) {
+        round(free_first);
+        u64 slot = slot_of(i);
+        if (slot < 3) {
+            live_at[slot] = heap.live_view();
+        }
+        i += 1;
+    }
+    assert(moved(live_at) < LEAK_BOUND);
+}
+
+fn options_in_an_allocation_leave_the_heap_where_they_were() void {
+    probe(false);
+}
+
+fn freed_options_leave_the_heap_where_they_were() void {
+    probe(true);
+}
+
+fn main() i32 {
+    options_in_an_allocation_leave_the_heap_where_they_were();
+    println("options release ok");
+    freed_options_leave_the_heap_where_they_were();
+    println("freed options release ok");
+    return 0;
+}

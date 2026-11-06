@@ -62,7 +62,7 @@ fn add_library(library_env.env mut* e) void {
 // The client: the imports, then `body` inside `fn main() i32`.
 fn add_client(library_env.env mut* e, string body) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, "import geom.shapes;\nimport geom.paint;\n");
     strbuf.append(&b, "import geom.shapes.{vector, color};\n");
     strbuf.append(&b, "fn main() i32 {\n");
@@ -73,39 +73,36 @@ fn add_client(library_env.env mut* e, string body) void {
 
 // The error lines of the client with `body` against the sources.
 fn against_sources(string body, strbuf.str_buf mut* out) void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    add_library(&e);
-    add_client(&e, body);
-    library_env.check_with_sources(&e, "lib", "main.ft");
-    library_env.error_lines(&e, out);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    add_library(e);
+    add_client(e, body);
+    library_env.check_with_sources(e, "lib", "main.ft");
+    library_env.error_lines(e, out);
 }
 
 // The error lines of the client with `body` against the interface of the same library.
 fn against_interface(string body, strbuf.str_buf mut* out) void {
-    library_env.env mut lib = library_env.env{};
-    library_env.open(&lib);
-    defer library_env.close(&lib);
-    add_library(&lib);
-    assert(library_env.emit(&lib, "geom", "lib/geom"));
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    add_client(&e, body);
-    library_env.check_against(&e, "geom", "geom.flib/interface.ft", library_env.text(&lib),
+    library_env.env mut* own lib = library_env.make();
+    defer library_env.drop_made(move(lib));
+    add_library(lib);
+    assert(library_env.emit(lib, "geom", "lib/geom"));
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    add_client(e, body);
+    library_env.check_against(e, "geom", "geom.flib/interface.ft", library_env.text(lib),
                               "main.ft");
-    library_env.error_lines(&e, out);
+    library_env.error_lines(e, out);
 }
 
 // Whether the two checks of `body` give the same error lines, and whether there is one. A
 // difference prints both lists.
 fn alike(string body, bool erring) bool {
     strbuf.str_buf mut sources = strbuf.create();
-    defer strbuf.free(&sources);
+    defer del(sources.data);
     against_sources(body, &sources);
     strbuf.str_buf mut iface = strbuf.create();
-    defer strbuf.free(&iface);
+    defer del(iface.data);
     against_interface(body, &iface);
     bool same = strbuf.view(&sources) == strbuf.view(&iface);
     bool errs = strbuf.view(&sources).len > 0;
@@ -181,20 +178,18 @@ fn every_erring_body_reports_the_same_error_lines() void {
 // The diagnostics of a client with `body` against the interface, notes included, as
 // `<line>:<col>: <severity>` with the file of each, in `out`.
 fn notes_against_interface(string client, strbuf.str_buf mut* out) void {
-    library_env.env mut lib = library_env.env{};
-    library_env.open(&lib);
-    defer library_env.close(&lib);
-    add_library(&lib);
-    assert(library_env.emit(&lib, "geom", "lib/geom"));
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    library_env.add(&e, "main.ft", client);
-    library_env.check_against(&e, "geom", "geom.flib/interface.ft", library_env.text(&lib),
+    library_env.env mut* own lib = library_env.make();
+    defer library_env.drop_made(move(lib));
+    add_library(lib);
+    assert(library_env.emit(lib, "geom", "lib/geom"));
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.add(e, "main.ft", client);
+    library_env.check_against(e, "geom", "geom.flib/interface.ft", library_env.text(lib),
                               "main.ft");
     u64 mut i = 0;
-    while (i < library_env.reports(&e)) {
-        diag.record r = library_env.report_at(&e, i);
+    while (i < library_env.reports(e)) {
+        diag.record r = library_env.report_at(e, i);
         i += 1;
         if (str.ends_with(r.loc.file, "interface.ft")) {
             strbuf.append(out, "interface.ft:");
@@ -216,14 +211,14 @@ fn notes_against_interface(string client, strbuf.str_buf mut* out) void {
 fn a_note_can_point_into_the_interface_file() void {
     string client = "import geom.shapes;\nextern fn printf(char* fmt) i64;\n";
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     notes_against_interface(client, &b);
     // the extern of geom.shapes stands on line 21 of the interface file
     assert(library_env.holds(strbuf.view(&b), "main.ft:2: error\ninterface.ft:"));
     strbuf.str_buf mut sources = strbuf.create();
-    defer strbuf.free(&sources);
+    defer del(sources.data);
     strbuf.str_buf mut iface = strbuf.create();
-    defer strbuf.free(&iface);
+    defer del(iface.data);
     // the error lines are the same; the notes differ in their file only
     against_sources_text(client, &sources);
     against_interface_text(client, &iface);
@@ -232,28 +227,25 @@ fn a_note_can_point_into_the_interface_file() void {
 
 // against_sources and against_interface over a whole client text.
 fn against_sources_text(string client, strbuf.str_buf mut* out) void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    add_library(&e);
-    library_env.add(&e, "main.ft", client);
-    library_env.check_with_sources(&e, "lib", "main.ft");
-    library_env.error_lines(&e, out);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    add_library(e);
+    library_env.add(e, "main.ft", client);
+    library_env.check_with_sources(e, "lib", "main.ft");
+    library_env.error_lines(e, out);
 }
 
 fn against_interface_text(string client, strbuf.str_buf mut* out) void {
-    library_env.env mut lib = library_env.env{};
-    library_env.open(&lib);
-    defer library_env.close(&lib);
-    add_library(&lib);
-    assert(library_env.emit(&lib, "geom", "lib/geom"));
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    library_env.add(&e, "main.ft", client);
-    library_env.check_against(&e, "geom", "geom.flib/interface.ft", library_env.text(&lib),
+    library_env.env mut* own lib = library_env.make();
+    defer library_env.drop_made(move(lib));
+    add_library(lib);
+    assert(library_env.emit(lib, "geom", "lib/geom"));
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.add(e, "main.ft", client);
+    library_env.check_against(e, "geom", "geom.flib/interface.ft", library_env.text(lib),
                               "main.ft");
-    library_env.error_lines(&e, out);
+    library_env.error_lines(e, out);
 }
 
 // Bodies of a second kind: declarations of the client beside the library's.
@@ -286,10 +278,10 @@ fn more_bodies_check_alike() void {
     u64 mut k = 0;
     while (k < MORE.len) {
         strbuf.str_buf mut sources = strbuf.create();
-        defer strbuf.free(&sources);
+        defer del(sources.data);
         against_sources(MORE[k], &sources);
         strbuf.str_buf mut iface = strbuf.create();
-        defer strbuf.free(&iface);
+        defer del(iface.data);
         against_interface(MORE[k], &iface);
         if (strbuf.view(&sources) != strbuf.view(&iface)) {
             println("body: ", MORE[k]);

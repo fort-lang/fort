@@ -66,7 +66,7 @@ fn set_mode(string path, u32 mode) void {
 
 fn contents(string path) string own {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     assert(io.read_file(path, &b));
     return strbuf.take(&b);
 }
@@ -143,15 +143,15 @@ fn store_library(string dir, string source, string key, strbuf.str_buf mut* out)
     artifact.manifest mut m = fields(false, source);
     string own_key = key_of(&m, out);
     strbuf.str_buf mut interface = strbuf.create();
-    defer strbuf.free(&interface);
+    defer del(interface.data);
     artifact.append_interface_hash(&interface, INTERFACE_TEXT, SUMMARY_TEXT);
     strbuf.str_buf mut archive = strbuf.create();
-    defer strbuf.free(&archive);
+    defer del(archive.data);
     artifact.append_hash(&archive, cast(ARCHIVE_TEXT, u8@));
     m.interface = strbuf.view(&interface);
     m.archive = strbuf.view(&archive);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     artifact.write_manifest(&m, &text);
     string mut at = own_key;
     if (key.len > 0) {
@@ -167,20 +167,20 @@ fn store_object(string dir, string source, strbuf.str_buf mut* out) bool {
     artifact.manifest mut m = fields(true, source);
     string key = key_of(&m, out);
     strbuf.str_buf mut object = strbuf.create();
-    defer strbuf.free(&object);
+    defer del(object.data);
     artifact.append_hash(&object, cast(OBJECT_TEXT, u8@));
     m.object = strbuf.view(&object);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     artifact.write_manifest(&m, &text);
     return cache.store_object(dir, key, cast(OBJECT_TEXT, u8@), strbuf.view(&text));
 }
 
 // What a lookup of `key` in `dir` finds.
 fn found(string dir, string key, bool library) cache.outcome {
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
-    return cache.find(dir, key, library, &c);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
+    return cache.find(dir, key, library, c);
 }
 
 // ---- the words ----------------------------------------------------------------------
@@ -202,7 +202,7 @@ fn each_miss_has_its_cause() void {
 
 fn the_default_directory_is_beside_the_root_or_the_entry_file() void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     cache.append_default(&b, "lib/geom");
     assert(same(strbuf.view(&b), "lib/geom/.fort-cache"));
     strbuf.clear(&b);
@@ -219,9 +219,9 @@ fn the_default_directory_is_beside_the_root_or_the_entry_file() void {
 
 fn the_stats_line_names_the_unit_the_key_and_the_cause() void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     cache.append_stats(&b, true, "geom", HASH_A, cache.outcome.o_hit);
     strbuf.append(&want, "cache hit library geom ");
     strbuf.append(&want, HASH_A);
@@ -260,32 +260,32 @@ fn a_missing_directory_is_absent() void {
 
 fn a_stored_entry_is_a_hit_with_its_bytes() void {
     strbuf.str_buf mut key = strbuf.create();
-    defer strbuf.free(&key);
+    defer del(key.data);
     assert(store_library("c", SOURCE_ONE, "", &key));
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
-    assert(cache.find("c", strbuf.view(&key), true, &c) == cache.outcome.o_hit);
-    assert(same(strbuf.view(&c.interface), INTERFACE_TEXT));
-    assert(same(strbuf.view(&c.summaries), SUMMARY_TEXT));
-    assert(same(strbuf.view(&c.archive), ARCHIVE_TEXT));
-    assert(same(c.key, strbuf.view(&key)));
-    assert(same(c.fields.library, "geom"));
-    // the entry stands at `<dir>/1/<key>/`, with the four entries of an artifact
     strbuf.str_buf mut path = strbuf.create();
-    defer strbuf.free(&path);
+    defer del(path.data);
+    strbuf.str_buf mut object_key = strbuf.create();
+    defer del(object_key.data);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
+    assert(cache.find("c", strbuf.view(&key), true, c) == cache.outcome.o_hit);
+    assert(same(strbuf.view(&c->interface), INTERFACE_TEXT));
+    assert(same(strbuf.view(&c->summaries), SUMMARY_TEXT));
+    assert(same(strbuf.view(&c->archive), ARCHIVE_TEXT));
+    assert(same(c->key, strbuf.view(&key)));
+    assert(same(c->fields.library, "geom"));
+    // the entry stands at `<dir>/1/<key>/`, with the four entries of an artifact
     strbuf.append(&path, "c/1/");
     strbuf.append(&path, strbuf.view(&key));
     strbuf.append(&path, "/summaries/ownership");
     assert(exists(strbuf.view(&path)));
     // the entry of an entry unit holds the object
-    strbuf.str_buf mut object_key = strbuf.create();
-    defer strbuf.free(&object_key);
     assert(store_object("c", SOURCE_TWO, &object_key));
-    artifact.contents mut o = artifact.contents{};
-    defer artifact.free(&o);
-    assert(cache.find("c", strbuf.view(&object_key), false, &o) == cache.outcome.o_hit);
-    assert(same(strbuf.view(&o.object), OBJECT_TEXT));
-    assert(same(o.fields.entry, "main"));
+    artifact.contents mut* own o = artifact.make();
+    defer artifact.drop_made(move(o));
+    assert(cache.find("c", strbuf.view(&object_key), false, o) == cache.outcome.o_hit);
+    assert(same(strbuf.view(&o->object), OBJECT_TEXT));
+    assert(same(o->fields.entry, "main"));
     // a cache directory that ends in `/` names the same entries
     assert(found("c/", strbuf.view(&key), true) == cache.outcome.o_hit);
 }
@@ -297,27 +297,27 @@ fn a_hit_gives_the_summaries_of_its_entry() void {
         "/\x2F! fort interface 1\n/\x2F! library geom\n/\x2F! module geom.a\nfn f() void;\n";
     artifact.manifest mut m = fields(false, SOURCE_TWO);
     strbuf.str_buf mut key = strbuf.create();
-    defer strbuf.free(&key);
+    defer del(key.data);
     key_of(&m, &key);
     strbuf.str_buf mut interface = strbuf.create();
-    defer strbuf.free(&interface);
+    defer del(interface.data);
     artifact.append_interface_hash(&interface, iface, text);
     strbuf.str_buf mut archive = strbuf.create();
-    defer strbuf.free(&archive);
+    defer del(archive.data);
     artifact.append_hash(&archive, cast(ARCHIVE_TEXT, u8@));
     m.interface = strbuf.view(&interface);
     m.archive = strbuf.view(&archive);
     strbuf.str_buf mut manifest = strbuf.create();
-    defer strbuf.free(&manifest);
+    defer del(manifest.data);
     artifact.write_manifest(&m, &manifest);
     assert(cache.store_library("sums", strbuf.view(&key), iface, text, cast(ARCHIVE_TEXT, u8@),
                                strbuf.view(&manifest)));
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
-    assert(cache.find("sums", strbuf.view(&key), true, &c) == cache.outcome.o_hit);
-    assert(same(strbuf.view(&c.summaries), text));
-    assert(summary.entry_count(&c.ownership) == 1);
-    assert(same(summary.symbol(&c.ownership, 0), "geom.a.f"));
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
+    assert(cache.find("sums", strbuf.view(&key), true, c) == cache.outcome.o_hit);
+    assert(same(strbuf.view(&c->summaries), text));
+    assert(summary.entry_count(&c->ownership) == 1);
+    assert(same(summary.symbol(&c->ownership, 0), "geom.a.f"));
     // the same entry with a summary of a function that the interface lacks is corrupt
     string other = "fort-summaries 1\nlibrary geom\nfn geom.a.g\nkeep _1\n";
     strbuf.clear(&interface);
@@ -332,18 +332,18 @@ fn a_hit_gives_the_summaries_of_its_entry() void {
 
 fn the_bytes_of_a_hit_are_the_bytes_that_the_lookup_checked() void {
     strbuf.str_buf mut key = strbuf.create();
-    defer strbuf.free(&key);
+    defer del(key.data);
     assert(store_library("checked", SOURCE_ONE, "", &key));
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
-    assert(cache.find("checked", strbuf.view(&key), true, &c) == cache.outcome.o_hit);
     strbuf.str_buf mut path = strbuf.create();
-    defer strbuf.free(&path);
+    defer del(path.data);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
+    assert(cache.find("checked", strbuf.view(&key), true, c) == cache.outcome.o_hit);
     strbuf.append(&path, "checked/1/");
     strbuf.append(&path, strbuf.view(&key));
     strbuf.append(&path, "/lib.a");
     write_file(strbuf.view(&path), "replaced\n");
-    assert(same(strbuf.view(&c.archive), ARCHIVE_TEXT));
+    assert(same(strbuf.view(&c->archive), ARCHIVE_TEXT));
 }
 
 // ---- corrupt entries ----------------------------------------------------------------------
@@ -363,18 +363,18 @@ fn entry_file(string dir, string key, string name, strbuf.str_buf mut* out) stri
 
 fn an_entry_of_the_other_form_is_corrupt() void {
     strbuf.str_buf mut key = strbuf.create();
-    defer strbuf.free(&key);
+    defer del(key.data);
     assert(store_library("forms", SOURCE_ONE, "", &key));
     assert(found("forms", strbuf.view(&key), false) == cache.outcome.o_corrupt);
     strbuf.str_buf mut object_key = strbuf.create();
-    defer strbuf.free(&object_key);
+    defer del(object_key.data);
     assert(store_object("forms", SOURCE_TWO, &object_key));
     assert(found("forms", strbuf.view(&object_key), true) == cache.outcome.o_corrupt);
 }
 
 fn an_entry_whose_key_line_is_another_key_is_corrupt() void {
     strbuf.str_buf mut key = strbuf.create();
-    defer strbuf.free(&key);
+    defer del(key.data);
     // a valid entry of the key of its manifest, stored under the name HASH_B
     assert(store_library("keys", SOURCE_ONE, HASH_B, &key));
     assert(strbuf.view(&key) != HASH_B);
@@ -384,9 +384,9 @@ fn an_entry_whose_key_line_is_another_key_is_corrupt() void {
 
 fn an_entry_that_breaks_a_rule_is_corrupt() void {
     strbuf.str_buf mut key = strbuf.create();
-    defer strbuf.free(&key);
+    defer del(key.data);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     // a changed archive, a changed interface file, a changed or missing summary file, no
     // manifest, no summaries/
     assert(store_library("rules", SOURCE_ONE, "", &key));
@@ -419,7 +419,7 @@ fn an_entry_that_breaks_a_rule_is_corrupt() void {
     assert(found("rules", strbuf.view(&key), true) == cache.outcome.o_corrupt);
     // a changed object, and an object that is gone
     strbuf.str_buf mut object_key = strbuf.create();
-    defer strbuf.free(&object_key);
+    defer del(object_key.data);
     assert(store_object("rules", SOURCE_TWO, &object_key));
     write_file(entry_file("rules", strbuf.view(&object_key), "object.o", &b), "other\n");
     assert(found("rules", strbuf.view(&object_key), false) == cache.outcome.o_corrupt);
@@ -429,9 +429,9 @@ fn an_entry_that_breaks_a_rule_is_corrupt() void {
 
 fn an_entry_that_is_no_directory_or_a_link_is_corrupt() void {
     strbuf.str_buf mut key = strbuf.create();
-    defer strbuf.free(&key);
+    defer del(key.data);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     make_dir("shapes");
     make_dir("shapes/1");
     write_file(entry_file("shapes", HASH_A, "", &b), "a file\n");
@@ -439,7 +439,7 @@ fn an_entry_that_is_no_directory_or_a_link_is_corrupt() void {
     // a link to a valid entry of the same key is no entry that the compiler made
     assert(store_library("valid", SOURCE_ONE, "", &key));
     strbuf.str_buf mut target = strbuf.create();
-    defer strbuf.free(&target);
+    defer del(target.data);
     strbuf.append(&target, "../../");
     strbuf.append(&target, entry_file("valid", strbuf.view(&key), "", &b));
     link(strbuf.view(&target), entry_file("shapes", strbuf.view(&key), "", &b));
@@ -472,11 +472,11 @@ fn a_cache_that_is_no_directory_is_unreadable() void {
 
 fn a_cache_that_the_process_cannot_read_is_unreadable() void {
     strbuf.str_buf mut dir = strbuf.create();
-    defer strbuf.free(&dir);
+    defer del(dir.data);
     strbuf.str_buf mut key = strbuf.create();
-    defer strbuf.free(&key);
+    defer del(key.data);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string root = make_temp(&dir);
     assert(store_library(root, SOURCE_ONE, "", &key));
     // the layout directory, the entry and a file of the entry
@@ -502,7 +502,7 @@ fn a_cache_that_the_process_cannot_read_is_unreadable() void {
 
 fn a_store_makes_the_layout() void {
     strbuf.str_buf mut key = strbuf.create();
-    defer strbuf.free(&key);
+    defer del(key.data);
     assert(!exists("made"));
     assert(store_object("made", SOURCE_TWO, &key));
     assert(exists("made/1"));
@@ -518,9 +518,9 @@ fn a_store_makes_the_layout() void {
 
 fn a_store_writes_through_no_link_of_the_layout() void {
     strbuf.str_buf mut key = strbuf.create();
-    defer strbuf.free(&key);
+    defer del(key.data);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     // a link at `1` and a link at the entry: the store fails and writes nothing at the target
     make_dir("outside");
     make_dir("guarded");
@@ -546,9 +546,9 @@ fn a_store_writes_through_no_link_of_the_layout() void {
 
 fn a_store_replaces_a_corrupt_entry() void {
     strbuf.str_buf mut key = strbuf.create();
-    defer strbuf.free(&key);
+    defer del(key.data);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     assert(store_library("repair", SOURCE_ONE, "", &key));
     write_file(entry_file("repair", strbuf.view(&key), "lib.a", &b), "broken\n");
     assert(found("repair", strbuf.view(&key), true) == cache.outcome.o_corrupt);

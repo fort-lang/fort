@@ -88,9 +88,9 @@ fn parses(string text, artifact.contents mut* c) bool {
 
 // Whether `text` is refused as a manifest.
 fn refused(string text) bool {
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
-    bool passed = artifact.parse_manifest(text, &c);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
+    bool passed = artifact.parse_manifest(text, c);
     if (passed) {
         println("parsed: ", text);
     }
@@ -113,7 +113,7 @@ fn replaced(string text, string old, string new_text, strbuf.str_buf mut* out) s
 // lines before it again, so only the replaced line can make the text wrong.
 fn rekeyed(string text, string old, string new_text, strbuf.str_buf mut* out) string {
     strbuf.str_buf mut first = strbuf.create();
-    defer strbuf.free(&first);
+    defer del(first.data);
     string changed = replaced(text, old, new_text, &first);
     i64 at = str.find(changed, "\nkey ");
     assert(at > 0);
@@ -134,38 +134,38 @@ fn rekeyed(string text, string old, string new_text, strbuf.str_buf mut* out) st
 fn the_written_manifest_reads_back_to_its_fields() void {
     artifact.manifest m = full();
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string text = text_of(&m, &b);
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
-    assert(parses(text, &c));
-    assert(same(c.fields.library, "geom"));
-    assert(same(c.fields.compiler, HASH_A));
-    assert(same(c.fields.target, "x86_64-linux-gnu"));
-    assert(!c.fields.release);
-    assert(!c.fields.no_bounds_check);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
+    assert(parses(text, c));
+    assert(same(c->fields.library, "geom"));
+    assert(same(c->fields.compiler, HASH_A));
+    assert(same(c->fields.target, "x86_64-linux-gnu"));
+    assert(!c->fields.release);
+    assert(!c->fields.no_bounds_check);
     // the lists come back in the order of the text: the pairs in byte order of the key
-    assert(c.fields.cfg_keys.len == 5);
-    assert(same_at(c.fields.cfg_keys, 0, "mode"));
-    assert(same_at(c.fields.cfg_values, 0, "x\\y"));
-    assert(same_at(c.fields.cfg_keys, 1, "target_abi"));
-    assert(same_at(c.fields.cfg_values, 1, ""));
-    assert(same_at(c.fields.cfg_keys, 4, "zone"));
-    assert(same_at(c.fields.cfg_values, 4, "a b"));
-    assert(same(c.fields.cc, "/opt/my clang"));
-    assert(c.fields.cc_args.len == 3);
-    assert(same_at(c.fields.cc_args, 0, "-g0"));
-    assert(same_at(c.fields.cc_args, 2, "-O0"));
-    assert(same(c.fields.ar, "llvm-ar"));
-    assert(same(c.fields.source, HASH_B));
-    assert(c.fields.use_names.len == 2);
-    assert(same_at(c.fields.use_names, 0, "alpha"));
-    assert(same_at(c.fields.use_hashes, 0, USE_HASHES[1]));
-    assert(same_at(c.fields.use_names, 1, "zeta"));
-    assert(same(c.fields.interface, HASH_C));
-    assert(same(c.fields.archive, HASH_D));
-    assert(c.key.len == 64);
-    assert(str.find(text, c.key) > 0);
+    assert(c->fields.cfg_keys.len == 5);
+    assert(same_at(c->fields.cfg_keys, 0, "mode"));
+    assert(same_at(c->fields.cfg_values, 0, "x\\y"));
+    assert(same_at(c->fields.cfg_keys, 1, "target_abi"));
+    assert(same_at(c->fields.cfg_values, 1, ""));
+    assert(same_at(c->fields.cfg_keys, 4, "zone"));
+    assert(same_at(c->fields.cfg_values, 4, "a b"));
+    assert(same(c->fields.cc, "/opt/my clang"));
+    assert(c->fields.cc_args.len == 3);
+    assert(same_at(c->fields.cc_args, 0, "-g0"));
+    assert(same_at(c->fields.cc_args, 2, "-O0"));
+    assert(same(c->fields.ar, "llvm-ar"));
+    assert(same(c->fields.source, HASH_B));
+    assert(c->fields.use_names.len == 2);
+    assert(same_at(c->fields.use_names, 0, "alpha"));
+    assert(same_at(c->fields.use_hashes, 0, USE_HASHES[1]));
+    assert(same_at(c->fields.use_names, 1, "zeta"));
+    assert(same(c->fields.interface, HASH_C));
+    assert(same(c->fields.archive, HASH_D));
+    assert(c->key.len == 64);
+    assert(str.find(text, c->key) > 0);
 }
 
 fn release_and_bounds_off_read_back() void {
@@ -178,44 +178,44 @@ fn release_and_bounds_off_read_back() void {
     m.use_names = USE_NAMES[..0];
     m.use_hashes = USE_HASHES[..0];
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
-    assert(parses(text_of(&m, &b), &c));
-    assert(c.fields.release);
-    assert(c.fields.no_bounds_check);
-    assert(c.fields.cfg_keys.len == 0);
-    assert(c.fields.cc_args.len == 0);
-    assert(c.fields.use_names.len == 0);
+    defer del(b.data);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
+    assert(parses(text_of(&m, &b), c));
+    assert(c->fields.release);
+    assert(c->fields.no_bounds_check);
+    assert(c->fields.cfg_keys.len == 0);
+    assert(c->fields.cc_args.len == 0);
+    assert(c->fields.use_names.len == 0);
 }
 
 fn a_second_parse_replaces_the_fields_of_the_first() void {
     artifact.manifest m = full();
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
-    assert(parses(text_of(&m, &b), &c));
+    defer del(b.data);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
+    assert(parses(text_of(&m, &b), c));
     artifact.manifest mut bare = full();
     bare.cfg_keys = CFG_KEYS[..0];
     bare.cfg_values = CFG_VALUES[..0];
     bare.library = "std";
-    assert(parses(text_of(&bare, &b), &c));
-    assert(same(c.fields.library, "std"));
-    assert(c.fields.cfg_keys.len == 0);
-    assert(c.fields.use_names.len == 2);
+    assert(parses(text_of(&bare, &b), c));
+    assert(same(c->fields.library, "std"));
+    assert(c->fields.cfg_keys.len == 0);
+    assert(c->fields.use_names.len == 2);
 }
 
 // The manifest of `m` parsed again into `*c`, which must succeed.
 fn round_trip(artifact.manifest* m, artifact.contents mut* c) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     assert(parses(text_of(m, &b), c));
 }
 
 fn each_byte_of_a_value_reads_back() void {
     strbuf.str_buf mut all = strbuf.create();
-    defer strbuf.free(&all);
+    defer del(all.data);
     u64 mut i = 0;
     while (i < 256) {
         strbuf.push_byte(&all, cast(i, u8));
@@ -223,11 +223,11 @@ fn each_byte_of_a_value_reads_back() void {
     }
     artifact.manifest mut m = full();
     m.cc = strbuf.view(&all);
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
-    round_trip(&m, &c);
-    assert(c.fields.cc.len == 256);
-    assert(c.fields.cc == strbuf.view(&all));
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
+    round_trip(&m, c);
+    assert(c->fields.cc.len == 256);
+    assert(c->fields.cc == strbuf.view(&all));
 }
 
 string[2] ODD_KEYS = {"a b", "k\\x"};
@@ -246,21 +246,21 @@ fn the_values_of_each_list_read_back() void {
     m.cc_args = ODD_XCC[..];
     m.use_names = ODD_USES[..];
     m.use_hashes = USE_HASHES[..1];
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
-    round_trip(&m, &c);
-    assert(same(c.fields.library, "my lib"));
-    assert(same(c.fields.target, ""));
-    assert(same(c.fields.cc, ""));
-    assert(same(c.fields.ar, "x\\y"));
-    assert(same_at(c.fields.cfg_keys, 0, "a b"));
-    assert(same_at(c.fields.cfg_values, 0, ""));
-    assert(same_at(c.fields.cfg_keys, 1, "k\\x"));
-    assert(same_at(c.fields.cfg_values, 1, "\n"));
-    assert(same_at(c.fields.cc_args, 0, "-DNAME=a b"));
-    assert(same_at(c.fields.cc_args, 1, ""));
-    assert(same_at(c.fields.use_names, 0, "_lib9"));
-    assert(same_at(c.fields.use_hashes, 0, USE_HASHES[0]));
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
+    round_trip(&m, c);
+    assert(same(c->fields.library, "my lib"));
+    assert(same(c->fields.target, ""));
+    assert(same(c->fields.cc, ""));
+    assert(same(c->fields.ar, "x\\y"));
+    assert(same_at(c->fields.cfg_keys, 0, "a b"));
+    assert(same_at(c->fields.cfg_values, 0, ""));
+    assert(same_at(c->fields.cfg_keys, 1, "k\\x"));
+    assert(same_at(c->fields.cfg_values, 1, "\n"));
+    assert(same_at(c->fields.cc_args, 0, "-DNAME=a b"));
+    assert(same_at(c->fields.cc_args, 1, ""));
+    assert(same_at(c->fields.use_names, 0, "_lib9"));
+    assert(same_at(c->fields.use_hashes, 0, USE_HASHES[0]));
 }
 
 fn a_manifest_of_no_pair_reads_back() void {
@@ -268,25 +268,25 @@ fn a_manifest_of_no_pair_reads_back() void {
     artifact.manifest mut m = full();
     m.cfg_keys = CFG_KEYS[..0];
     m.cfg_values = CFG_VALUES[..0];
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
-    round_trip(&m, &c);
-    assert(c.fields.cfg_keys.len == 0);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
+    round_trip(&m, c);
+    assert(c->fields.cfg_keys.len == 0);
 }
 
 fn a_free_contents_is_empty_and_reads_again() void {
-    artifact.contents mut c = artifact.contents{};
-    artifact.free(&c);
-    artifact.free(&c);
+    artifact.contents mut* own c = artifact.make();
+    artifact.free(c);
+    artifact.free(c);
     artifact.manifest m = full();
-    round_trip(&m, &c);
-    artifact.free(&c);
-    assert(c.fields.library.len == 0);
-    assert(c.key.len == 0);
-    assert(c.cfg_keys.len == 0);
-    round_trip(&m, &c);
-    assert(same(c.fields.library, "geom"));
-    artifact.free(&c);
+    round_trip(&m, c);
+    artifact.free(c);
+    assert(c->fields.library.len == 0);
+    assert(c->key.len == 0);
+    assert(c->cfg_keys.len == 0);
+    round_trip(&m, c);
+    assert(same(c->fields.library, "geom"));
+    artifact.drop_made(move(c));
 }
 
 // ---- the forms that are corrupt ------------------------------------------------------
@@ -294,14 +294,14 @@ fn a_free_contents_is_empty_and_reads_again() void {
 fn an_empty_text_and_a_text_with_no_last_newline_are_refused() void {
     artifact.manifest m = full();
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string text = text_of(&m, &b);
     assert(refused(""));
     assert(refused("\n"));
     assert(refused(text[..text.len - 1]));
     // a line after the last one
     strbuf.str_buf mut more = strbuf.create();
-    defer strbuf.free(&more);
+    defer del(more.data);
     strbuf.append(&more, text);
     strbuf.append(&more, "summaries 2\n");
     assert(refused(strbuf.view(&more)));
@@ -314,10 +314,10 @@ fn an_empty_text_and_a_text_with_no_last_newline_are_refused() void {
 fn an_unknown_version_is_refused() void {
     artifact.manifest m = full();
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string text = text_of(&m, &b);
     strbuf.str_buf mut c = strbuf.create();
-    defer strbuf.free(&c);
+    defer del(c.data);
     assert(refused(rekeyed(text, "fort-manifest 1\n", "fort-manifest 2\n", &c)));
     assert(refused(rekeyed(text, "fort-manifest 1\n", "fort-manifest 01\n", &c)));
     // the version of summaries/ is 2 since it holds the summary file; 1 is a build before it
@@ -331,25 +331,25 @@ fn an_unknown_version_is_refused() void {
 fn a_key_that_is_not_the_hash_of_the_lines_before_it_is_refused() void {
     artifact.manifest m = full();
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string text = text_of(&m, &b);
     strbuf.str_buf mut c = strbuf.create();
-    defer strbuf.free(&c);
+    defer del(c.data);
     // a byte of a covered line changes and the key stays
     assert(refused(replaced(text, "target x86_64", "target x86_65", &c)));
     // with the key made again the text reads, and with another key it does not
-    artifact.contents mut parsed = artifact.contents{};
-    defer artifact.free(&parsed);
-    string good = rekeyed(text, "target x86_64", "target x86_65", &c);
-    assert(parses(good, &parsed));
     strbuf.str_buf mut d = strbuf.create();
-    defer strbuf.free(&d);
+    defer del(d.data);
     strbuf.str_buf mut line = strbuf.create();
-    defer strbuf.free(&line);
-    strbuf.append(&line, "key ");
-    strbuf.append(&line, parsed.key);
+    defer del(line.data);
     strbuf.str_buf mut other = strbuf.create();
-    defer strbuf.free(&other);
+    defer del(other.data);
+    artifact.contents mut* own parsed = artifact.make();
+    defer artifact.drop_made(move(parsed));
+    string good = rekeyed(text, "target x86_64", "target x86_65", &c);
+    assert(parses(good, parsed));
+    strbuf.append(&line, "key ");
+    strbuf.append(&line, parsed->key);
     strbuf.append(&other, "key ");
     strbuf.append(&other, HASH_A);
     assert(refused(replaced(good, strbuf.view(&line), strbuf.view(&other), &d)));
@@ -358,10 +358,10 @@ fn a_key_that_is_not_the_hash_of_the_lines_before_it_is_refused() void {
 fn an_unknown_field_or_the_entry_form_is_refused() void {
     artifact.manifest m = full();
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string text = text_of(&m, &b);
     strbuf.str_buf mut c = strbuf.create();
-    defer strbuf.free(&c);
+    defer del(c.data);
     // the manifest of an entry unit names `entry` in place of `library`
     assert(refused(rekeyed(text, "library geom\n", "entry main\n", &c)));
     assert(refused(rekeyed(text, "library geom\n", "library geom\nname geom\n", &c)));
@@ -372,12 +372,12 @@ fn an_unknown_field_or_the_entry_form_is_refused() void {
 fn a_line_out_of_its_order_or_twice_is_refused() void {
     artifact.manifest m = full();
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string text = text_of(&m, &b);
     strbuf.str_buf mut c = strbuf.create();
-    defer strbuf.free(&c);
+    defer del(c.data);
     strbuf.str_buf mut d = strbuf.create();
-    defer strbuf.free(&d);
+    defer del(d.data);
     // the two lines exchanged
     string swapped = rekeyed(text, "mode checked\nbounds on\n", "bounds on\nmode checked\n", &c);
     assert(refused(swapped));
@@ -391,19 +391,19 @@ fn a_line_out_of_its_order_or_twice_is_refused() void {
     assert(refused(uses));
     // the -Xcc lines keep the command-line order, so an exchange of two is a valid text
     string moved = rekeyed(text, "xcc -g0\nxcc -DX=1\n", "xcc -DX=1\nxcc -g0\n", &d);
-    artifact.contents mut parsed = artifact.contents{};
-    defer artifact.free(&parsed);
-    assert(parses(moved, &parsed));
-    assert(same_at(parsed.fields.cc_args, 0, "-DX=1"));
+    artifact.contents mut* own parsed = artifact.make();
+    defer artifact.drop_made(move(parsed));
+    assert(parses(moved, parsed));
+    assert(same_at(parsed->fields.cc_args, 0, "-DX=1"));
 }
 
 fn a_value_in_another_spelling_is_refused() void {
     artifact.manifest m = full();
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string text = text_of(&m, &b);
     strbuf.str_buf mut c = strbuf.create();
-    defer strbuf.free(&c);
+    defer del(c.data);
     // a space stands as `\x20`, a kept byte as itself, and a hex digit is uppercase
     assert(refused(rekeyed(text, "cc /opt/my\\x20clang\n", "cc /opt/my clang\n", &c)));
     assert(refused(rekeyed(text, "library geom\n", "library g\\x65om\n", &c)));
@@ -439,7 +439,7 @@ string[11] ENTRY_LINES = {
 
 fn the_manifest_of_an_entry_unit_reads_as_an_entry_unit() void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     u64 mut i = 0;
     while (i < ENTRY_LINES.len) {
         strbuf.append(&b, ENTRY_LINES[i]);
@@ -449,7 +449,7 @@ fn the_manifest_of_an_entry_unit_reads_as_an_entry_unit() void {
     string text = strbuf.view(&b);
     // with the key made right, the form is still refused
     strbuf.str_buf mut keyed = strbuf.create();
-    defer strbuf.free(&keyed);
+    defer del(keyed.data);
     i64 at = str.find(text, "\nkey ");
     u64 head = cast(at, u64) + 1;
     strbuf.append(&keyed, text[..head]);
@@ -457,23 +457,23 @@ fn the_manifest_of_an_entry_unit_reads_as_an_entry_unit() void {
     artifact.append_hash(&keyed, cast(text[..head], u8@));
     strbuf.append(&keyed, text[head + 68..]);
     // with the key made right, the text reads as the manifest of an entry unit
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
-    assert(parses(strbuf.view(&keyed), &c));
-    assert(c.fields.entry_unit);
-    assert(same(c.fields.entry, "main"));
-    assert(same(c.fields.object, HASH_D));
-    assert(same(c.fields.library, ""));
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
+    assert(parses(strbuf.view(&keyed), c));
+    assert(c->fields.entry_unit);
+    assert(same(c->fields.entry, "main"));
+    assert(same(c->fields.object, HASH_D));
+    assert(same(c->fields.library, ""));
     assert(refused(text));
 }
 
 fn a_missing_line_is_refused() void {
     artifact.manifest m = full();
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string text = text_of(&m, &b);
     strbuf.str_buf mut c = strbuf.create();
-    defer strbuf.free(&c);
+    defer del(c.data);
     assert(refused(replaced(text, "summaries 2\n", "", &c)));
     assert(refused(replaced(text, "\narchive ", "\n#", &c)));
     assert(refused(rekeyed(text, "\nar llvm-ar\n", "\n", &c)));
@@ -485,10 +485,10 @@ fn a_missing_line_is_refused() void {
 fn a_mode_or_a_bounds_mode_of_another_word_is_refused() void {
     artifact.manifest m = full();
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string text = text_of(&m, &b);
     strbuf.str_buf mut c = strbuf.create();
-    defer strbuf.free(&c);
+    defer del(c.data);
     assert(refused(rekeyed(text, "mode checked\n", "mode fast\n", &c)));
     assert(refused(rekeyed(text, "mode checked\n", "mode Checked\n", &c)));
     assert(refused(rekeyed(text, "mode checked\n", "mode \n", &c)));
@@ -499,10 +499,10 @@ fn a_mode_or_a_bounds_mode_of_another_word_is_refused() void {
 fn a_hash_that_is_not_64_lowercase_hex_digits_is_refused() void {
     artifact.manifest m = full();
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string text = text_of(&m, &b);
     strbuf.str_buf mut c = strbuf.create();
-    defer strbuf.free(&c);
+    defer del(c.data);
     // 63 digits, 65 digits, an uppercase digit and a byte that is no hex digit
     assert(refused(rekeyed(text, "compiler a", "compiler ", &c)));
     assert(refused(rekeyed(text, "compiler a", "compiler aa", &c)));
@@ -514,10 +514,10 @@ fn a_hash_that_is_not_64_lowercase_hex_digits_is_refused() void {
     assert(refused(replaced(text, "archive d", "archive x", &c)));
     // the outputs follow the key, so they need no new key to be read as a manifest
     strbuf.str_buf mut d = strbuf.create();
-    defer strbuf.free(&d);
-    artifact.contents mut parsed = artifact.contents{};
-    defer artifact.free(&parsed);
-    assert(parses(replaced(text, "interface c", "interface 0", &d), &parsed));
+    defer del(d.data);
+    artifact.contents mut* own parsed = artifact.make();
+    defer artifact.drop_made(move(parsed));
+    assert(parses(replaced(text, "interface c", "interface 0", &d), parsed));
 }
 
 // ---- the directory -------------------------------------------------------------------
@@ -572,19 +572,19 @@ string ARCHIVE_TEXT = "!<arch>\nmember bytes\n";
 // interface file is `interface_text` and whose summary file is `summary_text`.
 fn write_files(string dir, string interface_text, string summary_text) void {
     strbuf.str_buf mut interface = strbuf.create();
-    defer strbuf.free(&interface);
+    defer del(interface.data);
     artifact.append_interface_hash(&interface, interface_text, summary_text);
     strbuf.str_buf mut archive = strbuf.create();
-    defer strbuf.free(&archive);
+    defer del(archive.data);
     artifact.append_hash(&archive, cast(ARCHIVE_TEXT, u8@));
     artifact.manifest mut m = full();
     m.interface = strbuf.view(&interface);
     m.archive = strbuf.view(&archive);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     artifact.write_manifest(&m, &text);
     strbuf.str_buf mut failed = strbuf.create();
-    defer strbuf.free(&failed);
+    defer del(failed.data);
     i32 mut error = 0;
     assert(artifact.write(dir, interface_text, summary_text, cast(ARCHIVE_TEXT, u8@),
                           strbuf.view(&text), &failed, &error));
@@ -597,10 +597,10 @@ fn write_artifact(string dir) void {
 
 // The verdict of reading `dir`, with the errno value in `*error`.
 fn verdict_of(string dir, i32 mut* error) artifact.verdict {
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
     *error = 0;
-    return artifact.read(dir, &c, error);
+    return artifact.read(dir, c, error);
 }
 
 fn is_corrupt(string dir) bool {
@@ -610,20 +610,20 @@ fn is_corrupt(string dir) bool {
 
 fn a_valid_artifact_reads_its_files_once() void {
     write_artifact("valid.flib");
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
     i32 mut error = 0;
-    assert(artifact.read("valid.flib", &c, &error) == artifact.verdict.v_valid);
-    assert(same(c.fields.library, "geom"));
-    assert(same(strbuf.view(&c.interface), INTERFACE_TEXT));
-    assert(same(strbuf.view(&c.summaries), SUMMARY_TEXT));
-    assert(summary.entry_count(&c.ownership) == 0);
-    assert(same(strbuf.view(&c.archive), ARCHIVE_TEXT));
+    assert(artifact.read("valid.flib", c, &error) == artifact.verdict.v_valid);
+    assert(same(c->fields.library, "geom"));
+    assert(same(strbuf.view(&c->interface), INTERFACE_TEXT));
+    assert(same(strbuf.view(&c->summaries), SUMMARY_TEXT));
+    assert(summary.entry_count(&c->ownership) == 0);
+    assert(same(strbuf.view(&c->archive), ARCHIVE_TEXT));
     // the bytes that the read checked are the ones it keeps: a later change is not read
     write_file("valid.flib/interface.ft", "changed\n");
     write_file("valid.flib/summaries/ownership", "changed\n");
-    assert(same(strbuf.view(&c.interface), INTERFACE_TEXT));
-    assert(same(strbuf.view(&c.summaries), SUMMARY_TEXT));
+    assert(same(strbuf.view(&c->interface), INTERFACE_TEXT));
+    assert(same(strbuf.view(&c->summaries), SUMMARY_TEXT));
     // a trailing separator names the same directory
     write_artifact("valid.flib/");
     assert(verdict_of("valid.flib/", &error) == artifact.verdict.v_valid);
@@ -726,9 +726,9 @@ fn lines_text(string@ lines, strbuf.str_buf mut* out) string {
 // with the one line `keep _1`.
 fn verdict_of_summary(string name) artifact.verdict {
     strbuf.str_buf mut iface = strbuf.create();
-    defer strbuf.free(&iface);
+    defer del(iface.data);
     strbuf.str_buf mut sums = strbuf.create();
-    defer strbuf.free(&sums);
+    defer del(sums.data);
     strbuf.append(&sums, "fort-summaries 1\nlibrary geom\nfn ");
     strbuf.append(&sums, name);
     strbuf.append(&sums, "\nkeep _1\n");
@@ -739,34 +739,34 @@ fn verdict_of_summary(string name) artifact.verdict {
 
 fn a_summary_file_reads_into_the_summaries_of_the_artifact() void {
     strbuf.str_buf mut iface = strbuf.create();
-    defer strbuf.free(&iface);
+    defer del(iface.data);
     string[6] lines = {
         "fort-summaries 1", "library geom", "fn geom.a.f", "empty (*_1).0", "fn geom.b.gh",
         "keep _1",
     };
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     string sums = lines_text(lines[..], &text);
     write_files("sums.flib", lines_text(TWO_MODULES[..], &iface), sums);
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
     i32 mut error = 0;
-    assert(artifact.read("sums.flib", &c, &error) == artifact.verdict.v_valid);
-    assert(same(strbuf.view(&c.summaries), sums));
-    assert(summary.entry_count(&c.ownership) == 2);
-    assert(same(summary.symbol(&c.ownership, 0), "geom.a.f"));
-    assert(same(summary.symbol(&c.ownership, 1), "geom.b.gh"));
-    assert(line_is(summary.lines(&c.ownership, 0), 0, summary.kind.k_empty, "(*_1).0"));
-    assert(summary.find(&c.ownership, "geom.b.gh") == 1);
+    assert(artifact.read("sums.flib", c, &error) == artifact.verdict.v_valid);
+    assert(same(strbuf.view(&c->summaries), sums));
+    assert(summary.entry_count(&c->ownership) == 2);
+    assert(same(summary.symbol(&c->ownership, 0), "geom.a.f"));
+    assert(same(summary.symbol(&c->ownership, 1), "geom.b.gh"));
+    assert(line_is(summary.lines(&c->ownership, 0), 0, summary.kind.k_empty, "(*_1).0"));
+    assert(summary.find(&c->ownership, "geom.b.gh") == 1);
     // a second read of the same contents replaces the summaries of the first
     write_artifact("sums2.flib");
-    assert(artifact.read("sums2.flib", &c, &error) == artifact.verdict.v_valid);
-    assert(summary.entry_count(&c.ownership) == 0);
-    // a free leaves the contents empty
-    assert(artifact.read("sums.flib", &c, &error) == artifact.verdict.v_valid);
-    artifact.free(&c);
-    assert(summary.entry_count(&c.ownership) == 0);
-    assert(strbuf.view(&c.summaries).len == 0);
+    assert(artifact.read("sums2.flib", c, &error) == artifact.verdict.v_valid);
+    assert(summary.entry_count(&c->ownership) == 0);
+    // a free leaves the contents empty, and the drop at the end then runs on the empty contents
+    assert(artifact.read("sums.flib", c, &error) == artifact.verdict.v_valid);
+    artifact.free(c);
+    assert(summary.entry_count(&c->ownership) == 0);
+    assert(strbuf.view(&c->summaries).len == 0);
 }
 
 fn a_missing_summary_file_is_corrupt() void {
@@ -808,7 +808,7 @@ fn a_summary_file_that_differs_from_the_interface_hash_is_corrupt() void {
     assert(is_corrupt("less.flib"));
     // the bytes of the summary file at the end of the interface file, which the counts refuse
     strbuf.str_buf mut both = strbuf.create();
-    defer strbuf.free(&both);
+    defer del(both.data);
     strbuf.append(&both, INTERFACE_TEXT);
     strbuf.append(&both, SUMMARY_TEXT);
     write_artifact("moved.flib");
@@ -818,16 +818,16 @@ fn a_summary_file_that_differs_from_the_interface_hash_is_corrupt() void {
     // an interface line that holds the hash of interface.ft alone, as a build before the summaries
     write_artifact("old.flib");
     strbuf.str_buf mut old = strbuf.create();
-    defer strbuf.free(&old);
+    defer del(old.data);
     artifact.append_hash(&old, cast(INTERFACE_TEXT, u8@));
     strbuf.str_buf mut now = strbuf.create();
-    defer strbuf.free(&now);
+    defer del(now.data);
     artifact.append_interface_hash(&now, INTERFACE_TEXT, SUMMARY_TEXT);
     strbuf.str_buf mut manifest = strbuf.create();
-    defer strbuf.free(&manifest);
+    defer del(manifest.data);
     assert(io.read_file("old.flib/manifest", &manifest));
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     write_file("old.flib/manifest", replaced(strbuf.view(&manifest), strbuf.view(&now),
                                              strbuf.view(&old), &b));
     assert(is_corrupt("old.flib"));
@@ -950,14 +950,14 @@ fn an_entry_that_is_no_regular_file_is_corrupt() void {
 
 fn a_manifest_that_cannot_be_read_is_unreadable() void {
     strbuf.str_buf mut dir = strbuf.create();
-    defer strbuf.free(&dir);
+    defer del(dir.data);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string root = make_temp(&dir);
     string flib = under(root, "geom.flib", &b);
     write_artifact(flib);
     strbuf.str_buf mut m = strbuf.create();
-    defer strbuf.free(&m);
+    defer del(m.data);
     char mut@ own c_manifest = str.to_cstr(under(flib, "manifest", &m));
     defer del(c_manifest);
     assert(libc.chmod(c_manifest.ptr, 0) == 0);
@@ -968,7 +968,7 @@ fn a_manifest_that_cannot_be_read_is_unreadable() void {
     assert(error == libc.EACCES);
     // an archive and a summaries/ that the process cannot read
     strbuf.str_buf mut a = strbuf.create();
-    defer strbuf.free(&a);
+    defer del(a.data);
     char mut@ own c_archive = str.to_cstr(under(flib, "lib.a", &a));
     defer del(c_archive);
     assert(libc.chmod(c_archive.ptr, 0) == 0);
@@ -977,7 +977,7 @@ fn a_manifest_that_cannot_be_read_is_unreadable() void {
     assert(got == artifact.verdict.v_unreadable);
     assert(error == libc.EACCES);
     strbuf.str_buf mut s = strbuf.create();
-    defer strbuf.free(&s);
+    defer del(s.data);
     char mut@ own c_summaries = str.to_cstr(under(flib, "summaries", &s));
     defer del(c_summaries);
     assert(libc.chmod(c_summaries.ptr, 0) == 0);
@@ -987,7 +987,7 @@ fn a_manifest_that_cannot_be_read_is_unreadable() void {
     assert(error == libc.EACCES);
     // a summary file that the process cannot read
     strbuf.str_buf mut o = strbuf.create();
-    defer strbuf.free(&o);
+    defer del(o.data);
     char mut@ own c_ownership = str.to_cstr(under(flib, "summaries/ownership", &o));
     defer del(c_ownership);
     assert(libc.chmod(c_ownership.ptr, 0) == 0);
@@ -1028,17 +1028,17 @@ fn a_summary_file_of_many_functions_reads_its_declarations_once() void {
     // 3000 lines against 3000 declarations: the reader reads the declarations into a set once,
     // where a scan of the interface for each line took the product of the two counts
     strbuf.str_buf mut iface = strbuf.create();
-    defer strbuf.free(&iface);
+    defer del(iface.data);
     strbuf.str_buf mut sums = strbuf.create();
-    defer strbuf.free(&sums);
+    defer del(sums.data);
     many_functions(3000, false, &iface, &sums);
     write_files("many.flib", strbuf.view(&iface), strbuf.view(&sums));
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
     i32 mut error = 0;
-    assert(artifact.read("many.flib", &c, &error) == artifact.verdict.v_valid);
-    assert(summary.entry_count(&c.ownership) == 3000);
-    assert(summary.find(&c.ownership, "geom.a.f3999") == 2999);
+    assert(artifact.read("many.flib", c, &error) == artifact.verdict.v_valid);
+    assert(summary.entry_count(&c->ownership) == 3000);
+    assert(summary.find(&c->ownership, "geom.a.f3999") == 2999);
     // one line more, of a function that the interface lacks, is corrupt
     many_functions(3000, true, &iface, &sums);
     write_files("many.flib", strbuf.view(&iface), strbuf.view(&sums));
@@ -1055,14 +1055,14 @@ fn a_summary_file_of_many_functions_reads_its_declarations_once() void {
 
 fn a_summary_file_with_each_kind_reads_through_the_artifact() void {
     strbuf.str_buf mut iface = strbuf.create();
-    defer strbuf.free(&iface);
+    defer del(iface.data);
     string[11] lines = {
         "fort-summaries 1", "library geom", "fn geom.a.f", "empty (*_1).0", "empty (*_1)[3]",
         "kept (*_2).1", "result _1", "result (*_1).0", "keep _2", "fn geom.a.fa",
         "kept (*_1)",
     };
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     string sums = lines_text(lines[..], &text);
     // `result _1` comes after `result (*_1).0` in byte order, so the text is refused as written
     write_files("kinds.flib", lines_text(TWO_MODULES[..], &iface), sums);
@@ -1073,15 +1073,17 @@ fn a_summary_file_with_each_kind_reads_through_the_artifact() void {
         "kept (*_1)",
     };
     strbuf.str_buf mut good = strbuf.create();
-    defer strbuf.free(&good);
+    defer del(good.data);
     string ordered = lines_text(sorted[..], &good);
     write_files("kinds.flib", lines_text(TWO_MODULES[..], &iface), ordered);
-    artifact.contents mut c = artifact.contents{};
-    defer artifact.free(&c);
+    strbuf.str_buf mut want = strbuf.create();
+    defer del(want.data);
+    artifact.contents mut* own c = artifact.make();
+    defer artifact.drop_made(move(c));
     i32 mut error = 0;
-    assert(artifact.read("kinds.flib", &c, &error) == artifact.verdict.v_valid);
-    assert(summary.entry_count(&c.ownership) == 2);
-    summary.line@ first = summary.lines(&c.ownership, 0);
+    assert(artifact.read("kinds.flib", c, &error) == artifact.verdict.v_valid);
+    assert(summary.entry_count(&c->ownership) == 2);
+    summary.line@ first = summary.lines(&c->ownership, 0);
     assert(first.len == 6);
     assert(line_is(first, 0, summary.kind.k_empty, "(*_1).0"));
     assert(line_is(first, 1, summary.kind.k_empty, "(*_1)[3]"));
@@ -1089,17 +1091,15 @@ fn a_summary_file_with_each_kind_reads_through_the_artifact() void {
     assert(line_is(first, 3, summary.kind.k_result, "(*_1).0"));
     assert(line_is(first, 4, summary.kind.k_result, "_1"));
     assert(line_is(first, 5, summary.kind.k_keep, "_2"));
-    summary.line@ second = summary.lines(&c.ownership, 1);
+    summary.line@ second = summary.lines(&c->ownership, 1);
     assert(second.len == 1 && line_is(second, 0, summary.kind.k_kept, "(*_1)"));
     // the summaries are the ones of the bytes that the read checked
     write_file("kinds.flib/summaries/ownership", SUMMARY_TEXT);
-    assert(summary.entry_count(&c.ownership) == 2);
-    assert(same(strbuf.view(&c.summaries), ordered));
+    assert(summary.entry_count(&c->ownership) == 2);
+    assert(same(strbuf.view(&c->summaries), ordered));
     // the manifest of a used library names the hash that its dependents hold
-    strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
     artifact.append_interface_hash(&want, lines_text(TWO_MODULES[..], &iface), ordered);
-    assert(same(c.fields.interface, strbuf.view(&want)));
+    assert(same(c->fields.interface, strbuf.view(&want)));
 }
 
 // ---- the fields that a build compares ------------------------------------------------
@@ -1221,7 +1221,7 @@ fn a_hash_has_exactly_64_lowercase_hex_digits() void {
     // one digit fewer and one more
     assert(!artifact.is_hash(HASH_A[..63]));
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, HASH_A);
     strbuf.push(&b, 'a');
     assert(!artifact.is_hash(strbuf.view(&b)));

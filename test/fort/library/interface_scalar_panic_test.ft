@@ -14,17 +14,20 @@ import std.strbuf;
 import fort.types;
 
 fn main() i32 {
-    types.table mut tt = types.table{};
-    defer types.type_table_free(&tt);
-    types.node* i32_type = types.type_prim(&tt, prim.prim_kind.prim_i32);
-    modules.module mut m = modules.module{};
-    m.path = "geom.a";
-    interface.section mut sec = interface.section{};
-    sec.m = &m;
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    interface.write_scalar(&sec, i32_type, consts.cv_from_i64(7), &out);
+    defer del(out.data);
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
+    types.node* i32_type = types.type_prim(tt, prim.prim_kind.prim_i32);
+    // A module set holds the module of the section: a module owns the modules made before it
+    // through a chain, and the drop of the set ends that chain.
+    modules.module_set mut* own set = modules.make();
+    defer modules.drop_made(move(set));
+    interface.section mut* own sec = new(interface.section);
+    defer interface.section_drop_made(move(sec));
+    sec->m = modules.admit(set, "geom.a", "", "", "", false);
+    interface.write_scalar(sec, i32_type, consts.cv_from_i64(7), &out);
     println(strbuf.view(&out));
-    interface.write_scalar(&sec, i32_type, consts.cv_none(), &out);
+    interface.write_scalar(sec, i32_type, consts.cv_none(), &out);
     return 0;
 }

@@ -25,7 +25,7 @@ import std.strbuf;
 // module line or the end. Empty when the text has no such section.
 fn section_of(string text, string path) string {
     strbuf.str_buf mut head = strbuf.create();
-    defer strbuf.free(&head);
+    defer del(head.data);
     strbuf.append(&head, modules.INTERFACE_SECTION);
     strbuf.append(&head, path);
     strbuf.push(&head, '\n');
@@ -51,7 +51,7 @@ fn section_changed(driver.analysis* an, modules.module* m, string text) bool {
         return false;
     }
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     interface.write_section(&an->ck, m, &b);
     if (strbuf.view(&b) == section_of(text, m->path)) {
         return false;
@@ -90,43 +90,43 @@ fn main(string@ args) i32 {
         return 2;
     }
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     if (!io.read_file(args[1], &text)) {
         eprintln("checker: cannot read '", args[1], "'");
         return 2;
     }
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
     // the parse reads its arguments from index 1, so the interface file stands as its program
-    if (driver.parse(&opts, args[1..]) != driver.PARSE_OK) {
+    if (driver.parse(opts, args[1..]) != driver.PARSE_OK) {
         return 2;
     }
-    session.session mut s = session.create();
-    defer session.free(&s);
-    driver.configure(&s, &opts);
-    diag.set_text(session.diags(&s), true);
-    session.show_sources(&s);
-    driver.analysis mut an = driver.analysis_create(&s);
-    defer driver.analysis_free(&an);
-    add_roots(&an.set, &opts);
-    if (!modules.use_library(&s, &an.set, "std", args[1], strbuf.view(&text))) {
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    driver.configure(s, opts);
+    diag.set_text(session.diags(s), true);
+    session.show_sources(s);
+    driver.analysis mut* own an = driver.analysis_make(s);
+    defer driver.analysis_drop_made(move(an));
+    add_roots(&an->set, opts);
+    if (!modules.use_library(s, &an->set, "std", args[1], strbuf.view(&text))) {
         eprintln("checker: '", args[1], "' is no interface file of the library std");
         return 2;
     }
-    bool loaded = modules.load(&s, &an.set, opts.entry);
-    an.ck.require_main = !opts.check;
-    bool checked = check_stmt.check_program(&an.ck, &an.set);
-    if (!loaded || !checked || session.error_count(&s) > 0) {
+    bool loaded = modules.load(s, &an->set, opts->entry);
+    an->ck.require_main = !opts->check;
+    bool checked = check_stmt.check_program(&an->ck, &an->set);
+    if (!loaded || !checked || session.error_count(s) > 0) {
         return 1;
     }
     // a store, an exit or a use that the emptiness pass does not prove is an error (D17.11,
     // D17.20, D17.21); the pass also gives the ownership summaries, which this check does not read
-    summary.graph mut calls = summary.graph{};
-    defer summary.free(&calls);
-    if (driver.overwrite_entry(&s, &an, &opts, &calls) != driver.EXIT_OK) {
+    summary.graph mut* own calls = summary.make();
+    defer summary.drop_made(move(calls));
+    if (driver.overwrite_entry(s, an, opts, calls) != driver.EXIT_OK) {
         return 1;
     }
-    if (count_changed(&an, strbuf.view(&text)) > 0) {
+    if (count_changed(an, strbuf.view(&text)) > 0) {
         return 1;
     }
     return 0;

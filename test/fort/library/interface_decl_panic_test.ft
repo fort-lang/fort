@@ -7,21 +7,26 @@
 /// The driver writes an interface file only after a check with no error, so each declaration
 /// has a symbol that did not fail. A declaration with no symbol is a violated precondition.
 import fort.ast;
+import fort.diag;
 import fort.library.interface;
 import fort.modules;
 import std.strbuf;
 
 fn main() i32 {
-    modules.module mut m = modules.module{};
-    m.path = "geom.a";
-    interface.section mut sec = interface.section{};
-    sec.m = &m;
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    ast.node mut decl = ast.node{};
-    decl.kind = ast.ast_kind.k_var_decl;
-    decl.name = "A";
+    defer del(out.data);
+    // A module set holds the module of the section, and an arena holds the declaration: a module
+    // and a node each own the ones made before them through a chain, and each drop ends its chain.
+    modules.module_set mut* own set = modules.make();
+    defer modules.drop_made(move(set));
+    interface.section mut* own sec = new(interface.section);
+    defer interface.section_drop_made(move(sec));
+    sec->m = modules.admit(set, "geom.a", "", "", "", false);
+    ast.arena mut* own ar = ast.arena_make();
+    defer ast.arena_drop_made(move(ar));
+    ast.node mut* decl = ast.ast_new(ar, ast.ast_kind.k_var_decl, diag.loc{});
+    decl->name = "A";
     println("writing");
-    interface.write_decl(&sec, &decl, &out);
+    interface.write_decl(sec, decl, &out);
     return 0;
 }
