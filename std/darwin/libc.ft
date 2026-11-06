@@ -80,9 +80,12 @@ extern fn realpath(char* path, char mut* resolved) char*;
 
 // <dirent.h>: a directory stream is an allocation of C that closedir(3) frees, so the stream
 // that opendir(3) and fdopendir(3) give says `own`, and closedir takes it with `move`. `dirent`
-// is the arm64 Darwin layout of `struct dirent`, with the 64-bit inode. Only `kind` and `name`
-// are read. readdir(3) gives a `dirent*` with no `mut`, a view of storage of C that the next
-// readdir of the stream can change, and null at the end of the stream and on an error (D17.13).
+// is the arm64 Darwin layout of `struct dirent`, with the 64-bit inode, and `dirent_head` holds
+// its fields before `name`. A record of readdir(3) holds `reclen` bytes, and the name ends in it,
+// so a short record does not hold the whole `name` array: readdir gives a `dirent_head*` with no
+// `mut`, a view of storage of C that the next readdir of the stream can change, and null at the
+// end of the stream and on an error (D9.8, D17.13). `os.list_dir` checks `reclen` against the
+// size of a `dirent`, copies `reclen` bytes into a local `dirent`, and reads the name there.
 struct dirent {
     u64 ino;
     u64 seekoff;
@@ -91,8 +94,15 @@ struct dirent {
     u8 kind;
     char[1024] name;
 }
+struct dirent_head {
+    u64 ino;
+    u64 seekoff;
+    u16 reclen;
+    u16 namlen;
+    u8 kind;
+}
 extern fn opendir(char* path) void mut* own;
-extern fn readdir(void mut* dir) dirent*;
+extern fn readdir(void mut* dir) dirent_head*;
 extern fn closedir(void mut* own dir) i32;
 
 // The `kind` values of a directory entry. A file system that does not record the kind gives
@@ -113,6 +123,15 @@ i32 EEXIST = 17;
 
 // The mode bit access(2) is asked about: readable.
 i32 R_OK = 4;
+
+// The errno value of a result that does not fit: strtod(3) and strtof(3) out of range, and
+// getcwd(2) with a buffer too small for the path. It is 34 on both targets.
+i32 ERANGE = 34;
+
+// The command of fcntl(2) that sets the descriptor flags, and the flag that closes the
+// descriptor at an exec. The values are the same on both targets.
+i32 F_SETFD = 2;
+i32 FD_CLOEXEC = 1;
 
 // <string.h>, <stdlib.h>: the error text of an errno value, the C float parsers, a
 // temporary directory (mkdtemp replaces the six X of its argument in place), and
@@ -146,6 +165,9 @@ extern fn fork() i32;
 extern fn execvp(char* file, void* argv) i32;
 extern fn waitpid(i32 pid, i32 mut* status, i32 options) i32;
 extern fn _exit(i32 status) noreturn;
+// raise(3) sends the signal `sig` to the calling thread. It returns 0, or not 0 for a
+// signal number that the system does not have.
+extern fn raise(i32 sig) i32;
 // getpid(2): the id of this process, which names the temporary files of a library artifact.
 extern fn getpid() i32;
 // <fcntl.h>: the flags of open(2) that the artifact writer adds, Darwin arm64 values: create a

@@ -1,0 +1,79 @@
+//! run
+//! stdout:
+//| O_CREAT: true, mode 600
+//| O_APPEND: abcdef
+//| O_TRUNC: xy
+//| O_RDWR: true
+//| O_DIRECTORY of a directory: true
+//| O_DIRECTORY of a file: -1 true
+//| O_NOFOLLOW of a link: -1 true
+//| without O_NOFOLLOW: true
+//| O_WRONLY of a directory: -1 true
+//| a NUL ends the path: true
+import std.io;
+import std.libc;
+import std.os;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+// io.open gives the flags to open(2) as they are (stdlib.md 2.4). A new file gets the mode bits
+// less the umask, and 0o600 is no less after a usual umask. O_APPEND writes at the end, O_TRUNC
+// empties the file, and O_RDWR opens it to read and write. O_DIRECTORY opens only a directory:
+// a file gives ENOTDIR. O_NOFOLLOW refuses a symbolic link with ELOOP, and an open without it
+// follows the link. A directory does not open to write: EISDIR. A NUL in the path ends it.
+
+// EISDIR, the same value on both targets.
+i32 EISDIR = 21;
+
+// The text of the file `path`.
+fn text_of(string path, strbuf.str_buf mut* b) string {
+    strbuf.clear(b);
+    io.read_file(path, b);
+    return strbuf.view(b);
+}
+
+fn main() i32 {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    i32 fd = io.open("t-flags.txt", libc.O_WRONLY | libc.O_CREAT | libc.O_EXCL, 0o600);
+    io.write(fd, cast("abc", u8@));
+    io.close(fd);
+    u32 mut mode = 0;
+    bool stat_ok = os.path_mode("t-flags.txt", &mode);
+    println("O_CREAT: ", stat_ok, ", mode ", (mode >> 6) & 7, (mode >> 3) & 7, mode & 7);
+    i32 append = io.open("t-flags.txt", libc.O_WRONLY | libc.O_APPEND, 0);
+    io.write(append, cast("def", u8@));
+    io.close(append);
+    println("O_APPEND: ", text_of("t-flags.txt", &b));
+    i32 trunc = io.open("t-flags.txt", libc.O_WRONLY | libc.O_TRUNC, 0);
+    io.write(trunc, cast("xy", u8@));
+    io.close(trunc);
+    println("O_TRUNC: ", text_of("t-flags.txt", &b));
+    i32 both = io.open("t-flags.txt", libc.O_RDWR, 0);
+    u8[2] mut got = {};
+    bool rdwr = io.read(both, got[..]) == 2 && io.write(both, cast("z", u8@)) == 1;
+    io.close(both);
+    println("O_RDWR: ", rdwr && text_of("t-flags.txt", &b) == "xyz");
+    i32 dir = io.open(".", libc.O_RDONLY | libc.O_DIRECTORY, 0);
+    println("O_DIRECTORY of a directory: ", dir >= 0);
+    io.close(dir);
+    println("O_DIRECTORY of a file: ", io.open("t-flags.txt", libc.O_RDONLY | libc.O_DIRECTORY, 0),
+            " ", sys.errno() == libc.ENOTDIR);
+    char mut@ own c_target = str.to_cstr("t-flags.txt");
+    defer del(c_target);
+    char mut@ own c_link = str.to_cstr("t-flags.link");
+    defer del(c_link);
+    libc.symlink(c_target.ptr, c_link.ptr);
+    println("O_NOFOLLOW of a link: ", io.open("t-flags.link", libc.O_RDONLY | libc.O_NOFOLLOW, 0),
+            " ", sys.errno() == libc.ELOOP);
+    i32 followed = io.open("t-flags.link", libc.O_RDONLY, 0);
+    println("without O_NOFOLLOW: ", followed >= 0);
+    io.close(followed);
+    println("O_WRONLY of a directory: ", io.open(".", libc.O_WRONLY, 0), " ",
+            sys.errno() == EISDIR);
+    i32 cut = io.open("t-flags.txt\x00.ignored", libc.O_RDONLY, 0);
+    println("a NUL ends the path: ", cut >= 0);
+    io.close(cut);
+    return 0;
+}

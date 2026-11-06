@@ -1,0 +1,36 @@
+//! run
+//! stdout:
+//| true true
+//| false
+//| true true
+//| false true
+//| a full directory: false
+//| no descriptor: false true
+import std.io;
+import std.libc;
+import std.os;
+import std.sys;
+
+// os.remove_at removes an entry of the directory that a descriptor names (stdlib.md 2.14): an
+// entry that is no directory, or with `directory` an empty directory. A directory without
+// `directory` fails, and so does a directory that holds an entry. A missing entry gives ENOENT,
+// and a descriptor that is not open EBADF.
+
+// EBADF, the same value on both targets.
+i32 EBADF = 9;
+fn main() i32 {
+    os.make_dir("t-at", 0o700);
+    os.make_dir("t-at/sub", 0o700);
+    io.write_file("t-at/a.txt", cast("a", u8@));
+    i32 fd = io.open("t-at", libc.O_RDONLY | libc.O_DIRECTORY, 0);
+    println(os.remove_at(fd, "a.txt", false), " ", !os.can_access("t-at/a.txt", libc.R_OK));
+    println(os.remove_at(fd, "sub", false));
+    println(os.remove_at(fd, "sub", true), " ", !os.can_access("t-at/sub", libc.R_OK));
+    println(os.remove_at(fd, "a.txt", false), " ", sys.errno() == libc.ENOENT);
+    os.make_dir("t-at/full", 0o700);
+    io.write_file("t-at/full/b.txt", cast("b", u8@));
+    println("a full directory: ", os.remove_at(fd, "full", true));
+    io.close(fd);
+    println("no descriptor: ", os.remove_at(fd, "full", true), " ", sys.errno() == EBADF);
+    return 0;
+}

@@ -8,8 +8,8 @@
 /// error: it is a miss, or an entry that the build does not store. The compiler never removes an
 /// entry. This module uses no function-pointer table.
 import fort.library.artifact;
+import std.io;
 import std.libc;
-import std.str;
 import std.strbuf;
 import std.sys;
 
@@ -61,17 +61,15 @@ fn layout_flags() i32 {
 
 // Whether `path` opens as a directory. `follow` accepts a symbolic link to a directory.
 fn is_directory(string path, bool follow) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
     i32 mut flags = layout_flags();
     if (follow) {
         flags = libc.O_RDONLY | libc.O_DIRECTORY;
     }
-    i32 fd = libc.open(c_path.ptr, flags, 0);
+    i32 fd = io.open(path, flags, 0);
     if (fd < 0) {
         return false;
     }
-    libc.close(fd);
+    io.close(fd);
     return true;
 }
 
@@ -89,9 +87,7 @@ fn find(string dir, string key, bool library, artifact.contents mut* c) outcome 
     strbuf.str_buf mut entry_buf = strbuf.create();
     defer del(entry_buf.data);
     string entry = artifact.join(&entry_buf, layout, key);
-    char mut@ own c_entry = str.to_cstr(entry);
-    defer del(c_entry);
-    i32 fd = libc.open(c_entry.ptr, layout_flags(), 0);
+    i32 fd = io.open(entry, layout_flags(), 0);
     if (fd < 0) {
         i32 failure = sys.errno();
         if (failure == libc.ENOENT) {
@@ -108,7 +104,7 @@ fn find(string dir, string key, bool library, artifact.contents mut* c) outcome 
         }
         return outcome.o_unreadable;
     }
-    libc.close(fd);
+    io.close(fd);
     i32 mut error = 0;
     artifact.verdict mut found = artifact.verdict.v_valid;
     if (library) {

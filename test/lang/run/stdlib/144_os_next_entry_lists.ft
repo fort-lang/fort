@@ -1,0 +1,79 @@
+//! run
+//! stdout:
+//| empty list: false 0
+//| [a.ft] 8 at 6
+//| [sub] 4 at 11
+//| end: false at 11
+//| [] 0 at 2
+//| [x] 0 at 5
+//| end: false at 5
+//| from the middle: [b] 10 at 9
+//| past the end: end: false at 20
+//| [a name with spaces and .dots] 8
+//| [é] 8 at 4
+//| no final NUL: end: false at 0
+//| no final NUL after an entry: [a] 8 at 3
+//| end: false at 3
+//| a kind byte alone: end: false at 0
+import std.os;
+
+// os.next_entry reads a list in the form that os.list_dir gives (stdlib.md 2.14): a byte of the
+// kind, the name, and a NUL, for each entry. The test writes such lists by hand: an empty list,
+// an entry with an empty name, a kind of 0 (DT_UNKNOWN), a start in the middle of a list, a
+// position past its end, and names with spaces and with bytes above 0x7F. `*at` moves past the
+// NUL of the entry that it read, and stays where it is at the end. A list whose last entry has
+// no NUL, which list_dir does not give, ends before that entry, and the read stays inside the
+// list.
+
+// Reads the entry at `*at` of `list` and prints it with the next position.
+fn read_one(string list, u64 mut* at) void {
+    os.dir_entry mut entry = {};
+    if (os.next_entry(list, at, &entry)) {
+        println("[", entry.name, "] ", entry.kind, " at ", *at);
+    } else {
+        println("end: false at ", *at);
+    }
+}
+
+fn main() i32 {
+    u64 mut at = 0;
+    os.dir_entry mut entry = {};
+    println("empty list: ", os.next_entry("", &at, &entry), " ", at);
+
+    string two = "\x08a.ft\x00\x04sub\x00";
+    at = 0;
+    read_one(two, &at);
+    read_one(two, &at);
+    read_one(two, &at);
+
+    string odd = "\x00\x00\x00x\x00";
+    at = 0;
+    read_one(odd, &at);
+    read_one(odd, &at);
+    read_one(odd, &at);
+
+    string three = "\x08a.ft\x00\x0ab\x00\x04c\x00";
+    at = 6;
+    print("from the middle: ");
+    read_one(three, &at);
+    at = 20;
+    print("past the end: ");
+    read_one(three, &at);
+
+    at = 0;
+    os.next_entry("\x08a name with spaces and .dots\x00", &at, &entry);
+    println("[", entry.name, "] ", entry.kind);
+    at = 0;
+    read_one("\x08é\x00", &at);
+    at = 0;
+    print("no final NUL: ");
+    read_one("\x08abc", &at);
+    at = 0;
+    print("no final NUL after an entry: ");
+    read_one("\x08a\x00\x08bc", &at);
+    read_one("\x08a\x00\x08bc", &at);
+    at = 0;
+    print("a kind byte alone: ");
+    read_one("\x08", &at);
+    return 0;
+}

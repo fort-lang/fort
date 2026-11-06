@@ -1,0 +1,58 @@
+//! run
+//! stdout:
+//| false true
+//| false true
+//| true 3 abc
+//| false true 7 7
+import std.io;
+import std.libc;
+import std.sys;
+
+// io.is_terminal answers false for a file, with ENOTTY, and for a descriptor that is not open,
+// with EBADF (stdlib.md 2.4). io.pipe gives the two ends of a pipe. With the soft limit of
+// descriptors at 3, the process has no free descriptor, so pipe(2) fails with EMFILE and leaves
+// both ends as they were.
+
+// The errno values of the test, the same on both targets.
+i32 EBADF = 9;
+i32 EMFILE = 24;
+i32 ENOTTY = 25;
+
+// getrlimit(2) and setrlimit(2), which std.libc does not declare, and RLIMIT_NOFILE.
+struct rlimit {
+    u64 cur;
+    u64 max;
+}
+extern fn getrlimit(i32 resource, rlimit mut* limit) i32;
+extern fn setrlimit(i32 resource, rlimit* limit) i32;
+$if ($cfg(target_os) == "linux") {
+    i32 RLIMIT_NOFILE = 7;
+} else {
+    i32 RLIMIT_NOFILE = 8;
+}
+
+fn main() i32 {
+    io.write_file("t-file.txt", cast("x", u8@));
+    i32 fd = io.open("t-file.txt", libc.O_RDONLY, 0);
+    println(io.is_terminal(fd), " ", sys.errno() == ENOTTY);
+    io.close(fd);
+    println(io.is_terminal(-1), " ", sys.errno() == EBADF);
+    i32 mut read_end = 7;
+    i32 mut write_end = 7;
+    bool made = io.pipe(&read_end, &write_end);
+    i64 written = io.write(write_end, cast("abc", u8@));
+    u8[8] mut buf = {};
+    i64 got = io.read(read_end, buf[..]);
+    println(made && written == 3, " ", got, " ", cast(buf[..3], string));
+    io.close(read_end);
+    io.close(write_end);
+    rlimit mut limit = {};
+    getrlimit(RLIMIT_NOFILE, &limit);
+    limit.cur = 3;
+    setrlimit(RLIMIT_NOFILE, &limit);
+    read_end = 7;
+    write_end = 7;
+    println(io.pipe(&read_end, &write_end), " ", sys.errno() == EMFILE, " ", read_end, " ",
+            write_end);
+    return 0;
+}

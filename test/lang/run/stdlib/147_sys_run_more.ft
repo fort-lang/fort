@@ -1,0 +1,86 @@
+//! run
+//! stdout:
+//| a b|c'd"e|
+//| done 0 0
+//| 1 two
+//| done 0 0
+//| child
+//| parent
+//| done 0 0
+//| exit 1: done 1 0
+//| exit 42: done 42 0
+//| exit 255: done 255 0
+//| kill -KILL: done 0 9
+//| /bin/sh: done 7 0
+//| a directory: not started true 77
+//| a file that is no program: not started true 77
+//| an empty name: not started true 77
+import std.io;
+import std.libc;
+import std.sys;
+
+// More cases of sys.run (stdlib.md 2.1). Each string of argv reaches the program as it is, with
+// no shell between: spaces and quotes stay. Each pair of `env` reaches the child, and a value of
+// the child replaces the value of the parent there alone. A pair that setenv(3) refuses leaves
+// the environment of the child as it was, and the command runs. The wait status holds each exit
+// status from 0 to 255 and the signal that ended the child. A directory and a file that is no
+// program give EACCES and an empty name ENOENT, and *status keeps its value. The child writes to
+// the descriptors of the parent, so the parent flushes its buffered output before each run.
+
+fn show(string what, sys.run_result r, i32 status) void {
+    if (r == sys.run_result.rr_done) {
+        println(what, "done ", (status >> 8) & 255, " ", status & 127);
+    } else if (r == sys.run_result.rr_not_started) {
+        println(what, "not started");
+    } else {
+        println(what, "not waited");
+    }
+}
+
+// Runs `sh -c <script>` with the pairs `env`, after a flush of standard output.
+fn shell(string script, string@ env, i32 mut* status) sys.run_result {
+    io.flush(io.STDOUT);
+    string[3] argv = {"sh", "-c", script};
+    return sys.run(argv[..], env, status);
+}
+
+fn main() i32 {
+    i32 mut status = 0;
+    io.flush(io.STDOUT);
+    string[6] quoted = {"sh", "-c", "printf '%s|%s|\\n' \"$1\" \"$2\"", "prog", "a b", "c'd\"e"};
+    show("", sys.run(quoted[..], quoted[..0], &status), status);
+
+    string[4] two = {"FORT_T_A", "1", "FORT_T_B", "two"};
+    show("", shell("printf '%s %s\\n' \"$FORT_T_A\" \"$FORT_T_B\"", two[..], &status), status);
+
+    sys.set_env("FORT_T_C", "parent");
+    string[2] child = {"FORT_T_C", "child"};
+    shell("echo \"$FORT_T_C\"", child[..], &status);
+    shell("echo \"$FORT_T_C\"", child[..0], &status);
+    string[2] bad = {"BAD=NAME", "x"};
+    show("", shell("exit 0", bad[..], &status), status);
+
+    show("exit 1: ", shell("exit 1", child[..0], &status), status);
+    show("exit 42: ", shell("exit 42", child[..0], &status), status);
+    show("exit 255: ", shell("exit 255", child[..0], &status), status);
+    show("kill -KILL: ", shell("kill -KILL $$", child[..0], &status), status);
+    string[3] absolute = {"/bin/sh", "-c", "exit 7"};
+    show("/bin/sh: ", sys.run(absolute[..], child[..0], &status), status);
+
+    status = 77;
+    string[1] dir = {"/"};
+    sys.run_result mut r = sys.run(dir[..], dir[..0], &status);
+    println("a directory: ", r == sys.run_result.rr_not_started ? "not started" : "other", " ",
+            sys.errno() == libc.EACCES, " ", status);
+    io.write_file("t-plain", cast("not a program\n", u8@));
+    string[1] plain = {"./t-plain"};
+    r = sys.run(plain[..], plain[..0], &status);
+    println("a file that is no program: ",
+            r == sys.run_result.rr_not_started ? "not started" : "other", " ",
+            sys.errno() == libc.EACCES, " ", status);
+    string[1] empty = {""};
+    r = sys.run(empty[..], empty[..0], &status);
+    println("an empty name: ", r == sys.run_result.rr_not_started ? "not started" : "other", " ",
+            sys.errno() == libc.ENOENT, " ", status);
+    return 0;
+}

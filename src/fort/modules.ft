@@ -16,10 +16,6 @@ import std.strbuf;
 import std.strmap;
 import std.vec;
 
-// The buffer size getcwd is given. A working directory above this size makes
-// getcwd fail, and a relative path then goes to realpath as it is.
-u64 CWD_CAP = 4096;
-
 // The extension of a fort source file; a file with any other extension is
 // never a module.
 string MODULE_SUFFIX = ".ft";
@@ -407,9 +403,7 @@ fn candidate_at(module_set* set, strbuf.str_buf mut* out, ast.node* path, u64 n,
 
 // Whether `path` names a readable file.
 fn file_exists(string path) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    return libc.access(c_path.ptr, libc.R_OK) == 0;
+    return os.can_access(path, libc.R_OK);
 }
 
 // Finds the first root with a file for the first `n` path segments.
@@ -446,10 +440,10 @@ fn find_file(module_set mut* set, ast.node* path, u64 n, string mut* out) bool {
 // the way up: 93% of a `-S` round of test/fort's closure probe went there.
 fn working_dir(module_set mut* set) string {
     if (set->cwd.len == 0) {
-        char mut@ own buf = new(char, CWD_CAP);
-        defer del(buf);
-        if (libc.getcwd(&buf[0], CWD_CAP) != null) {
-            set->cwd = containers.pool_intern(&set->pool, str.from_cbuf(cast(buf[..], u8@)));
+        strbuf.str_buf mut b = strbuf.create();
+        defer del(b.data);
+        if (os.current_dir(&b)) {
+            set->cwd = containers.pool_intern(&set->pool, strbuf.view(&b));
         }
     }
     return set->cwd;

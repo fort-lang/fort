@@ -744,6 +744,14 @@ set_tests_properties(long_imports_selftest PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# Hold the text that std/linux/os.ft and std/darwin/os.ft share after their marker line equal.
+add_test(NAME std_os_shared
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/std_os_shared_test.py"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(std_os_shared PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # Hold the runs of tools/fort_lint.py over a list of files of `std/`: one module alone, a module
 # of a target directory alone, and the modules of both targets in one run (notes/style.md 3).
 add_test(NAME fort_lint_std

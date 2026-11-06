@@ -1,0 +1,34 @@
+//! run
+//! stdout:
+//| first value: true [aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]
+//| after 100 set_env calls: [aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]
+//| the variable now: true [bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb]
+import std.strbuf;
+import std.sys;
+
+// sys.env appends a copy of the value (stdlib.md 2.1). setenv(3) of the Darwin C library frees
+// the storage of a value that it set before when it sets a new value, so a view of the old value
+// would read freed storage. The copy stays whole after 100 calls of set_env, each with a value of
+// another length, which the allocator can put where the old value was.
+fn main() i32 {
+    sys.set_env("FORT_T_COPY", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    strbuf.str_buf mut first = strbuf.create();
+    defer del(first.data);
+    bool found = sys.env("FORT_T_COPY", &first);
+    println("first value: ", found, " [", strbuf.view(&first), "]");
+    strbuf.str_buf mut value = strbuf.create();
+    defer del(value.data);
+    for (u64 mut i = 0; i < 100; i++) {
+        strbuf.clear(&value);
+        for (u64 mut k = 0; k <= i % 50; k++) {
+            strbuf.push(&value, 'b');
+        }
+        sys.set_env("FORT_T_COPY", strbuf.view(&value));
+    }
+    println("after 100 set_env calls: [", strbuf.view(&first), "]");
+    strbuf.str_buf mut now = strbuf.create();
+    defer del(now.data);
+    bool still = sys.env("FORT_T_COPY", &now);
+    println("the variable now: ", still, " [", strbuf.view(&now), "]");
+    return 0;
+}

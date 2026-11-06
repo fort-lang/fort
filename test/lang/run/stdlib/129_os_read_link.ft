@@ -1,0 +1,45 @@
+//! run
+//! stdout:
+//| true target/of/the/link
+//| true 300
+//| false true
+//| false true
+import std.libc;
+import std.os;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+// os.read_link appends the target of a symbolic link (stdlib.md 2.14). A target longer than the
+// first buffer of 256 bytes takes a second read with a larger buffer. A path that is no link
+// gives EINVAL, and a missing path ENOENT; both leave the buffer as it was.
+
+// Makes the symbolic link `link` to `target`. The link need not resolve.
+fn link(string target, string link_path) bool {
+    char mut@ own c_target = str.to_cstr(target);
+    defer del(c_target);
+    char mut@ own c_link = str.to_cstr(link_path);
+    defer del(c_link);
+    return libc.symlink(c_target.ptr, c_link.ptr) == 0;
+}
+
+fn main() i32 {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    link("target/of/the/link", "t-link");
+    println(os.read_link("t-link", &b), " ", strbuf.view(&b));
+    strbuf.str_buf mut long_target = strbuf.create();
+    defer del(long_target.data);
+    for (u64 mut i = 0; i < 30; i++) {
+        strbuf.append(&long_target, "directory/");
+    }
+    link(strbuf.view(&long_target), "t-long-link");
+    strbuf.clear(&b);
+    println(os.read_link("t-long-link", &b), " ", strbuf.view(&b).len);
+    strbuf.clear(&b);
+    strbuf.append(&b, "kept");
+    println(os.read_link(".", &b) || strbuf.view(&b) != "kept", " ", sys.errno() == libc.EINVAL);
+    println(os.read_link("t-missing", &b) || strbuf.view(&b) != "kept", " ",
+            sys.errno() == libc.ENOENT);
+    return 0;
+}

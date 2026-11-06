@@ -1,0 +1,61 @@
+//! run
+//! stdout:
+//| pipe: true, two new descriptors: true
+//| wrote 4096 bytes in 1 call
+//| read 4096 bytes, the same bytes: true
+//| a write of nothing: 0
+//| after the write end closes: 0
+//| a second pipe: true, two descriptors: true
+//| is_terminal of a pipe: false true
+import std.io;
+import std.sys;
+
+// io.pipe gives two new descriptors, and the bytes that io.write writes to the write end come
+// out of the read end in their order (stdlib.md 2.4). A pipe holds 4096 bytes on both targets, so
+// one write of 4096 bytes does not wait. A write of no bytes makes no call. After the write end
+// closes, a read gives 0, the end of the file. A pipe is no terminal: is_terminal gives false
+// with ENOTTY.
+
+// ENOTTY, the same value on both targets.
+i32 ENOTTY = 25;
+
+fn main() i32 {
+    i32 mut r = -1;
+    i32 mut w = -1;
+    bool made = io.pipe(&r, &w);
+    println("pipe: ", made, ", two new descriptors: ", r > 2 && w > 2 && r != w);
+    u8[4096] mut out = {};
+    for (u64 mut i = 0; i < out.len; i++) {
+        out[i] = cast(i * 7 % 251, u8);
+    }
+    i64 written = io.write(w, out[..]);
+    println("wrote ", written, " bytes in 1 call");
+    u8[4096] mut back = {};
+    u64 mut got = 0;
+    while (got < back.len) {
+        i64 n = io.read(r, back[got..]);
+        if (n <= 0) {
+            break;
+        }
+        got += cast(n, u64);
+    }
+    bool mut same = true;
+    for (u64 mut i = 0; i < back.len; i++) {
+        if (back[i] != out[i]) {
+            same = false;
+        }
+    }
+    println("read ", got, " bytes, the same bytes: ", same);
+    println("a write of nothing: ", io.write(w, out[..0]));
+    io.close(w);
+    println("after the write end closes: ", io.read(r, back[..]));
+    i32 mut r2 = -1;
+    i32 mut w2 = -1;
+    bool second = io.pipe(&r2, &w2);
+    println("a second pipe: ", second, ", two descriptors: ", r2 != w2 && r2 > 2 && w2 > 2);
+    println("is_terminal of a pipe: ", io.is_terminal(r2), " ", sys.errno() == ENOTTY);
+    io.close(r);
+    io.close(r2);
+    io.close(w2);
+    return 0;
+}

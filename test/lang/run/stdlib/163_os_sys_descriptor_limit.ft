@@ -1,0 +1,81 @@
+//! run
+//! stdout:
+//| list_dir_fd: false true, the buffer keeps what it held: true
+//| list_dir: false true, the buffer keeps what it held: true
+//| io.open: -1 true
+//| io.pipe: false true
+//| sys.run: not started true, status kept: true
+//| the descriptor of the directory still lists after the limit goes up: true 1
+import std.io;
+import std.libc;
+import std.os;
+import std.strbuf;
+import std.sys;
+
+// With the soft limit of descriptors at 3, a process with descriptors 0, 1 and 2 open gets no
+// new descriptor: each call that needs one fails with EMFILE (stdlib.md 2.4, 2.14, 2.1).
+// os.list_dir_fd fails at dup(2), os.list_dir at opendir(3), io.open at open(2), io.pipe at
+// pipe(2) and sys.run at pipe(2), before fork(2), so sys.run gives rr_not_started and keeps
+// *status. Each failure leaves the buffer of the caller as it was. The descriptor of a directory
+// that the process opened before stays usable after the limit goes up again.
+
+// EMFILE, the same value on both targets.
+i32 EMFILE = 24;
+
+// getrlimit(2) and setrlimit(2), which std.libc does not declare, and RLIMIT_NOFILE.
+struct rlimit {
+    u64 cur;
+    u64 max;
+}
+extern fn getrlimit(i32 resource, rlimit mut* limit) i32;
+extern fn setrlimit(i32 resource, rlimit* limit) i32;
+$if ($cfg(target_os) == "linux") {
+    i32 RLIMIT_NOFILE = 7;
+} else {
+    i32 RLIMIT_NOFILE = 8;
+}
+
+fn main() i32 {
+    os.make_dir("t-limit", 0o700);
+    io.write_file("t-limit/a", cast("a", u8@));
+    i32 dir = io.open("t-limit", libc.O_RDONLY | libc.O_DIRECTORY, 0);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    strbuf.append(&b, "kept");
+    rlimit mut limit = {};
+    getrlimit(RLIMIT_NOFILE, &limit);
+    u64 saved = limit.cur;
+    limit.cur = 3;
+    setrlimit(RLIMIT_NOFILE, &limit);
+
+    bool through_fd = os.list_dir_fd(dir, &b);
+    println("list_dir_fd: ", through_fd, " ", sys.errno() == EMFILE,
+            ", the buffer keeps what it held: ", strbuf.view(&b) == "kept");
+    bool by_path = os.list_dir("t-limit", &b);
+    println("list_dir: ", by_path, " ", sys.errno() == EMFILE,
+            ", the buffer keeps what it held: ", strbuf.view(&b) == "kept");
+    println("io.open: ", io.open("t-limit/a", libc.O_RDONLY, 0), " ", sys.errno() == EMFILE);
+    i32 mut r = 7;
+    i32 mut w = 7;
+    println("io.pipe: ", io.pipe(&r, &w), " ", sys.errno() == EMFILE);
+    i32 mut status = 77;
+    string[3] argv = {"sh", "-c", "exit 0"};
+    sys.run_result ran = sys.run(argv[..], argv[..0], &status);
+    println("sys.run: ", ran == sys.run_result.rr_not_started ? "not started" : "other", " ",
+            sys.errno() == EMFILE, ", status kept: ", status == 77);
+
+    limit.cur = saved;
+    setrlimit(RLIMIT_NOFILE, &limit);
+    strbuf.clear(&b);
+    bool listed = os.list_dir_fd(dir, &b);
+    u64 mut at = 0;
+    u64 mut n = 0;
+    os.dir_entry mut entry = {};
+    while (os.next_entry(strbuf.view(&b), &at, &entry)) {
+        n += 1;
+    }
+    println("the descriptor of the directory still lists after the limit goes up: ", listed, " ",
+            n);
+    io.close(dir);
+    return 0;
+}

@@ -7,7 +7,9 @@
 /// entries of a directory. This module uses no function-pointer table.
 import fort.containers;
 import fort.lexer;
+import std.io;
 import std.libc;
+import std.os;
 import std.str;
 import std.strbuf;
 import std.sys;
@@ -18,9 +20,6 @@ string MODULE_SUFFIX = ".ft";
 // The separators of a module path and of a file path.
 char PATH_SEPARATOR = '.';
 char DIRECTORY_SEPARATOR = '/';
-
-// The buffer that readlink(2) writes when the walk asks whether an entry is a symbolic link.
-u64 LINK_PROBE_CAP = 1;
 
 /// The modules of one library: `paths[i]` is the module path and `files[i]` is the file that the
 /// compiler opens for it, `<root>/a/b.ft`. Both vectors are in byte order of the module path.
@@ -114,23 +113,21 @@ fn join(strbuf.str_buf mut* out, string dir, string name) string {
 
 // Whether `path` is a symbolic link. readlink(2) succeeds only on a link.
 fn is_link(string path) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    char[LINK_PROBE_CAP] mut buf = {};
-    return libc.readlink(c_path.ptr, &buf[0], LINK_PROBE_CAP) >= 0;
+    strbuf.str_buf mut target = strbuf.create();
+    defer del(target.data);
+    return os.read_link(path, &target);
 }
 
-// Whether `path` is a directory: it opens as a directory stream, or it fails to open with an
-// error other than ENOTDIR, which only a file that is no directory gives. So a directory that
-// cannot be read is a directory, and the walk then reports it.
+// Whether `path` is a directory: it opens with the flags of opendir(3), O_DIRECTORY and
+// O_NONBLOCK, or it fails to open with an error other than ENOTDIR, which only a file that is no
+// directory gives. So a directory that cannot be read is a directory, and the walk then reports
+// it.
 fn is_directory(string path) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    void mut* own d = libc.opendir(c_path.ptr);
-    if (d == null) {
+    i32 fd = io.open(path, libc.O_RDONLY | libc.O_DIRECTORY | os.O_NONBLOCK, 0);
+    if (fd < 0) {
         return sys.errno() != libc.ENOTDIR;
     }
-    libc.closedir(move(d));
+    io.close(fd);
     return true;
 }
 
@@ -161,47 +158,38 @@ fn add(tree mut* t, string prefix, string base, string file) void {
     containers.str_push(&t->files, containers.pool_intern(&t->pool, file));
 }
 
-// The next entry of the directory stream `stream`, or null at the end or after an error. errno is
-// 0 before the call, so it is 0 after it at the end and the error number after an error.
-fn next_entry(void mut* stream) libc.dirent* {
-    *libc.errno_slot() = 0;
-    return libc.readdir(stream);
-}
-
-// Reads each entry of the directory stream `stream` of `dir`, and adds the name of each module file
-// to `files` and the name of each subdirectory that can hold modules to `dirs`, interned in
-// `scratch`. `b` is the scratch buffer of the paths. The caller keeps the four, so they are no
-// local owners here.
-fn list_entries(void mut* stream, string dir, strbuf.str_buf mut* b, containers.pool mut* scratch,
+// Reads each entry of `listed`, the entries of `dir` that os.list_dir gave, and adds the name of
+// each module file to `files` and the name of each subdirectory that can hold modules to `dirs`,
+// interned in `scratch`. `b` is the scratch buffer of the paths. The caller keeps the four, so
+// they are no local owners here.
+fn list_entries(string listed, string dir, strbuf.str_buf mut* b, containers.pool mut* scratch,
                 containers.str_vec mut* dirs, containers.str_vec mut* files) void {
-    libc.dirent* mut e = next_entry(stream);
-    while (e != null) {
-        string name = str.from_cstr(&e->name[0]);
-        if (name != "." && name != "..") {
-            u8 kind = kind_of(join(b, dir, name), e->kind);
-            if (kind == libc.DT_DIR && is_segment(name)) {
-                containers.str_push(dirs, containers.pool_intern(scratch, name));
-            } else if (kind == libc.DT_REG && name.len > MODULE_SUFFIX.len
-                       && str.ends_with(name, MODULE_SUFFIX)
-                       && is_segment(name[0..name.len - MODULE_SUFFIX.len])) {
-                containers.str_push(files, containers.pool_intern(scratch, name));
-            }
+    u64 mut at = 0;
+    os.dir_entry mut entry = {};
+    while (os.next_entry(listed, &at, &entry)) {
+        string name = entry.name;
+        u8 kind = kind_of(join(b, dir, name), entry.kind);
+        if (kind == libc.DT_DIR && is_segment(name)) {
+            containers.str_push(dirs, containers.pool_intern(scratch, name));
+        } else if (kind == libc.DT_REG && name.len > MODULE_SUFFIX.len
+                   && str.ends_with(name, MODULE_SUFFIX)
+                   && is_segment(name[0..name.len - MODULE_SUFFIX.len])) {
+            containers.str_push(files, containers.pool_intern(scratch, name));
         }
-        e = next_entry(stream);
     }
 }
 
 // Lists the modules below the directory `dir`, whose module-path prefix is `prefix`. Returns false
 // with the errno value in `*error` when a directory of the walk cannot be read.
 fn walk_dir(tree mut* t, string dir, string prefix, i32 mut* error) bool {
-    char mut@ own c_dir = str.to_cstr(dir);
-    defer del(c_dir);
-    void mut* own stream = libc.opendir(c_dir.ptr);
-    if (stream == null) {
+    // os.list_dir copies the name out of each entry, because the next readdir(3) can reuse its
+    // storage.
+    strbuf.str_buf mut listed = strbuf.create();
+    defer del(listed.data);
+    if (!os.list_dir(dir, &listed)) {
         *error = sys.errno();
         return false;
     }
-    // The names are copied out of each entry, because the next readdir(3) can reuse its storage.
     containers.str_vec mut dirs = containers.str_create();
     defer del(dirs.items);
     containers.str_vec mut files = containers.str_create();
@@ -216,14 +204,7 @@ fn walk_dir(tree mut* t, string dir, string prefix, i32 mut* error) bool {
             containers.pool_free(&scratch);
         }
     }
-    list_entries(stream, dir, &b, &scratch, &dirs, &files);
-    // readdir(3) gives null at the end and on an error, and only an error sets errno
-    i32 failure = sys.errno();
-    libc.closedir(move(stream));
-    if (failure != 0) {
-        *error = failure;
-        return false;
-    }
+    list_entries(strbuf.view(&listed), dir, &b, &scratch, &dirs, &files);
     u64 mut i = 0;
     while (i < files.len) {
         string name = containers.str_at(&files, i);

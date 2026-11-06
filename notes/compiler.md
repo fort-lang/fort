@@ -432,8 +432,9 @@ came here.
   through no link that it did not make. The cache directory itself may be a link. Only a build that
   writes the artifact, or that writes an object or an executable with `--use`, uses the cache;
   `--fir-stats` does not, because a hit runs no emitter. The archiver runs with `ZERO_AR_DATE=1` in
-  its environment, which `driver.run_tool` sets in the child after fork(2), so the archive of macOS
-  holds no time stamp (`test/fort/driver_cache_test.ft`, `test/library/cache_test.py`).
+  its environment, which `driver.run_tool` gives to `sys.run` and the child sets after fork(2), so
+  the archive of macOS holds no time stamp (`test/fort/driver_cache_test.ft`,
+  `test/library/cache_test.py`).
 - **`--use` reads each artifact once and keeps the bytes that it checked** (D9.11, toolchain.md 2.1
   and 2.2). `driver.read_libraries` runs before the entry file or the root is opened.
   `artifact.read` reads `manifest`, `interface.ft`, `summaries/ownership` and `lib.a` once each. It
@@ -1410,6 +1411,19 @@ came here.
   Mac `std.libc` declares seven socket calls with a 4-byte `socklen_t`.
   Mac `std.net` uses `libc.errno_slot()` for its two errno writes.
   Linux `std/linux/net.ft` and `std/linux/libc.ft` keep their Linux layout and calls.
+
+- **`src/fort` calls C only through functions of `std` that take spans and strings** (D9.8,
+  `stdlib.md` 2.1). It declares no extern, calls no extern, and names no boundary function:
+  `os.error_text` appends a copy of the text of an errno value, `os.list_dir` and
+  `os.next_entry` read a directory, `sys.run` runs `--cc` and the archiver, and `str.parse_f64`,
+  `str.format_f64` and `mem.can_allocate` serve the interpreter of `--fir-run`. A function of
+  `std` that a module outside the trusted set calls copies what C gives into storage of the
+  caller: a view of storage of C can end at the next call of C (`strerror(3)`, `setenv(3)`). The
+  exception is `sys.args`, whose views name the `argv` storage that C gives to `main` and that
+  no call of C frees while the process runs. A
+  new C call of the compiler goes into such a function of `std`, with a run test in
+  `test/lang/run/stdlib`.
+  `git grep -nE 'libc\.[a-z_0-9]+\(|str\.from_cstr\(|^\s*extern fn' -- src/fort` finds nothing.
 
 - **A system call added to a print path must give errno back.** `sys.errno()` hands a program the
   errno of its own last library call (`stdlib.md` 2.4), and the print family runs between the two:

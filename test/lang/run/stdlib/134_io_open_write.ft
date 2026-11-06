@@ -1,0 +1,35 @@
+//! run
+//! stdout:
+//| true
+//| 5 0
+//| true hello
+//| -1 true
+//| -1 true
+//| -1 true
+import std.io;
+import std.libc;
+import std.strbuf;
+import std.sys;
+
+// io.open opens a path with the flags of open(2) and a mode for a file that it makes, and
+// io.write writes once (stdlib.md 2.4). An empty buffer writes nothing and makes no call. A
+// missing file without O_CREAT and a file that O_EXCL finds give -1 and the errno of open(2); a
+// write to a descriptor that is not open gives -1 and EBADF.
+
+// EBADF, the same value on both targets.
+i32 EBADF = 9;
+
+fn main() i32 {
+    i32 fd = io.open("t-open.txt", libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o600);
+    println(fd >= 0);
+    println(io.write(fd, cast("hello", u8@)), " ", io.write(fd, cast("", u8@)));
+    io.close(fd);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    println(io.read_file("t-open.txt", &b), " ", strbuf.view(&b));
+    println(io.open("t-missing.txt", libc.O_RDONLY, 0), " ", sys.errno() == libc.ENOENT);
+    println(io.open("t-open.txt", libc.O_WRONLY | libc.O_CREAT | libc.O_EXCL, 0o600), " ",
+            sys.errno() == libc.EEXIST);
+    println(io.write(-1, cast("x", u8@)), " ", sys.errno() == EBADF);
+    return 0;
+}

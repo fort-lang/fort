@@ -1,0 +1,84 @@
+//! run
+//! stdout:
+//| first list: true 3
+//| second list: true 3
+//| after a rename of the directory: true 3
+//| the descriptor stays open: true
+//| a duplicate is no new open: true
+//| after the descriptor closes: false true
+//| a pipe end: false true, the buffer keeps what it held: true
+//| a file: false true, its position stays: c
+import std.io;
+import std.libc;
+import std.os;
+import std.strbuf;
+import std.sys;
+
+// More cases of os.list_dir_fd (stdlib.md 2.14). It reads through a duplicate of the descriptor
+// from the first entry, so a second list of one descriptor gives each entry again. The descriptor
+// names the directory and not its path, so a list after a rename of the directory gives the same
+// entries. The descriptor stays open after each list, and the duplicate closes: the next
+// descriptor that the process opens is the one after `dir_fd`. A descriptor that closed gives
+// EBADF. A pipe end and a regular file give ENOTDIR, and list_dir_fd finds the type before it
+// moves the position, so a read of the file after the call goes on where it stopped.
+
+// EBADF, the same value on both targets.
+i32 EBADF = 9;
+
+// The count of the entries of `listed`.
+fn count(string listed) u64 {
+    u64 mut n = 0;
+    u64 mut at = 0;
+    os.dir_entry mut entry = {};
+    while (os.next_entry(listed, &at, &entry)) {
+        n += 1;
+    }
+    return n;
+}
+
+fn main() i32 {
+    os.make_dir("t-fd", 0o700);
+    io.write_file("t-fd/a", cast("a", u8@));
+    io.write_file("t-fd/b", cast("b", u8@));
+    os.make_dir("t-fd/c", 0o700);
+    i32 fd = io.open("t-fd", libc.O_RDONLY | libc.O_DIRECTORY, 0);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    bool first = os.list_dir_fd(fd, &b);
+    println("first list: ", first, " ", count(strbuf.view(&b)));
+    strbuf.clear(&b);
+    bool second = os.list_dir_fd(fd, &b);
+    println("second list: ", second, " ", count(strbuf.view(&b)));
+    os.rename("t-fd", "t-fd-moved");
+    strbuf.clear(&b);
+    bool moved = os.list_dir_fd(fd, &b);
+    println("after a rename of the directory: ", moved, " ", count(strbuf.view(&b)));
+    i32 next = io.open("t-fd-moved/a", libc.O_RDONLY, 0);
+    println("the descriptor stays open: ", io.close(fd));
+    println("a duplicate is no new open: ", next == fd + 1);
+    io.close(next);
+    strbuf.clear(&b);
+    println("after the descriptor closes: ", os.list_dir_fd(fd, &b), " ", sys.errno() == EBADF);
+    i32 mut r = -1;
+    i32 mut w = -1;
+    io.pipe(&r, &w);
+    strbuf.clear(&b);
+    strbuf.append(&b, "kept");
+    bool piped = os.list_dir_fd(r, &b);
+    println("a pipe end: ", piped, " ", sys.errno() == libc.ENOTDIR,
+            ", the buffer keeps what it held: ", strbuf.view(&b) == "kept");
+    io.close(r);
+    io.close(w);
+    io.write_file("t-fd-file", cast("abcdef", u8@));
+    i32 file = io.open("t-fd-file", libc.O_RDONLY, 0);
+    u8[2] mut head = {};
+    io.read(file, head[..]);
+    bool listed = os.list_dir_fd(file, &b);
+    bool not_dir = sys.errno() == libc.ENOTDIR;
+    u8[1] mut next_byte = {};
+    io.read(file, next_byte[..]);
+    io.close(file);
+    println("a file: ", listed, " ", not_dir, ", its position stays: ",
+            cast(next_byte[..], string));
+    return 0;
+}

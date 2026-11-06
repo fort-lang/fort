@@ -104,3 +104,261 @@ fn path_mode(string path, u32 mut* mode) bool {
     *mode = cast((st[STAT_MODE_WORD] >> STAT_MODE_SHIFT) & MODE_BITS, u32);
     return true;
 }
+
+// ---- the file system and the error text, the same on both targets ----
+
+// The first size and the largest size of the buffers that current_dir and read_link read a path
+// into. A path of the file system is shorter than the first size most of the time.
+u64 PATH_FIRST_CAP = 256;
+u64 PATH_LAST_CAP = 65536;
+
+// The type bits of `st_mode` and the type of a directory, the POSIX values of both targets.
+u32 S_IFMT = 0o170000;
+u32 S_IFDIR = 0o040000;
+
+/// Appends the text of the errno value `code`, from strerror(3), to `out`: "No such file or
+/// directory" for ENOENT. An unknown value gives a text that names it. The C library can change
+/// or free the storage of the text at the next call of strerror(3), so the function copies the
+/// text into `out` before it returns, and no later call changes the copy. errno stays as it was:
+/// the Darwin strerror(3) sets EINVAL for an unknown value, and the function puts the old value
+/// back.
+fn error_text(i32 code, strbuf.str_buf mut* out) void {
+    i32 saved = *libc.errno_slot();
+    strbuf.append(out, str.from_cstr(libc.strerror(code)));
+    *libc.errno_slot() = saved;
+}
+
+/// Reports whether the process can reach the file `path` for `mode`, an access(2) mode such as
+/// libc.R_OK. Returns false and sets errno when it cannot or when access(2) fails.
+fn can_access(string path, i32 mode) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    return libc.access(c_path.ptr, mode) == 0;
+}
+
+/// Makes the directory `path` with the permission bits `mode`, less the umask. Returns false and
+/// sets errno when mkdir(2) fails: EEXIST when an entry stands at `path`.
+fn make_dir(string path, u32 mode) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    return libc.mkdir(c_path.ptr, mode) == 0;
+}
+
+/// Removes the entry `path`, which is no directory; a symbolic link goes, not its target. Returns
+/// false and sets errno when unlink(2) fails: ENOENT when no entry stands at `path`.
+fn remove_file(string path) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    return libc.unlink(c_path.ptr) == 0;
+}
+
+/// Removes the empty directory `path`. Returns false and sets errno when rmdir(2) fails.
+fn remove_dir(string path) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    return libc.rmdir(c_path.ptr) == 0;
+}
+
+/// Removes the entry `name` of the directory that `dir_fd` names: an empty directory with
+/// `directory`, and else an entry that is no directory. Returns false and sets errno when
+/// unlinkat(2) fails.
+fn remove_at(i32 dir_fd, string name, bool directory) bool {
+    char mut@ own c_name = str.to_cstr(name);
+    defer del(c_name);
+    i32 mut flags = 0;
+    if (directory) {
+        flags = libc.AT_REMOVEDIR;
+    }
+    return libc.unlinkat(dir_fd, c_name.ptr, flags) == 0;
+}
+
+/// Gives the file at `old_path` the name `new_path` with rename(2), in one atomic step that
+/// replaces a file at `new_path`. Both paths must be on one file system. Returns false and sets
+/// errno when rename(2) fails.
+fn rename(string old_path, string new_path) bool {
+    char mut@ own c_old = str.to_cstr(old_path);
+    defer del(c_old);
+    char mut@ own c_new = str.to_cstr(new_path);
+    defer del(c_new);
+    return libc.rename(c_old.ptr, c_new.ptr) == 0;
+}
+
+/// Appends the target of the symbolic link `path` to `out` and returns true. Returns false, leaves
+/// `out` unchanged, and sets errno when readlink(2) fails: EINVAL when `path` is no symbolic link.
+/// A target longer than 65535 bytes gives ERANGE.
+fn read_link(string path, strbuf.str_buf mut* out) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    u64 mut cap = PATH_FIRST_CAP;
+    while (cap <= PATH_LAST_CAP) {
+        char mut@ own buf = new(char, cap);
+        defer del(buf);
+        i64 len = libc.readlink(c_path.ptr, buf.ptr, cap);
+        if (len < 0) {
+            return false;
+        }
+        if (cast(len, u64) < cap) {
+            strbuf.append(out, cast(buf[0..cast(len, u64)], string));
+            return true;
+        }
+        cap = cap * 2;
+    }
+    *libc.errno_slot() = libc.ERANGE;
+    return false;
+}
+
+/// Appends the absolute path of the working directory to `out` and returns true. Returns false,
+/// leaves `out` unchanged, and sets errno when getcwd(3) fails, for example with ENOENT when the
+/// directory was removed. A path longer than 65535 bytes gives ERANGE.
+fn current_dir(strbuf.str_buf mut* out) bool {
+    u64 mut cap = PATH_FIRST_CAP;
+    while (cap <= PATH_LAST_CAP) {
+        char mut@ own buf = new(char, cap);
+        defer del(buf);
+        if (libc.getcwd(&buf[0], cap) != null) {
+            strbuf.append(out, str.from_cbuf(cast(buf[..], u8@)));
+            return true;
+        }
+        if (*libc.errno_slot() != libc.ERANGE) {
+            return false;
+        }
+        cap = cap * 2;
+    }
+    return false;
+}
+
+/// Makes a new directory with mkdtemp(3) from `template`, whose last six bytes are `XXXXXX`, which
+/// mkdtemp replaces to give a name that no entry has. Appends the path of the directory to `out`
+/// and returns true. Returns false, leaves `out` unchanged, and sets errno when mkdtemp fails:
+/// ENOENT when the directory of `template` does not exist. glibc gives EINVAL for a template that
+/// does not end in `XXXXXX`, and the Darwin C library takes it.
+fn make_temp_dir(string template, strbuf.str_buf mut* out) bool {
+    char mut@ own c_template = str.to_cstr(template);
+    defer del(c_template);
+    if (libc.mkdtemp(&c_template[0]) == null) {
+        return false;
+    }
+    strbuf.append(out, str.from_cbuf(cast(c_template[..], u8@)));
+    return true;
+}
+
+/// Appends an entry of the directory `path` to `out` for each entry but `.` and `..`, in the order
+/// of readdir(3): one byte of its kind, a `libc.DT_` value, then its name, then a NUL. next_entry
+/// reads the entries back. Returns false, leaves `out` unchanged, and sets errno when the
+/// directory does not open or when readdir fails.
+fn list_dir(string path, strbuf.str_buf mut* out) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    void mut* own stream = libc.opendir(c_path.ptr);
+    if (stream == null) {
+        return false;
+    }
+    bool listed = append_entries(stream, out);
+    i32 failure = *libc.errno_slot();
+    libc.closedir(move(stream));
+    *libc.errno_slot() = failure;
+    return listed;
+}
+
+/// list_dir for the directory that the open descriptor `dir_fd` names. It reads through a
+/// duplicate of `dir_fd` and closes the duplicate, so `dir_fd` stays open. The duplicate shares
+/// the position of `dir_fd`, so the read starts with a move to the first entry, and each call
+/// gives each entry. A descriptor of another type of file gives ENOTDIR before the move, so its
+/// position does not change.
+fn list_dir_fd(i32 dir_fd, strbuf.str_buf mut* out) bool {
+    u32 mut mode = 0;
+    if (!file_mode(dir_fd, &mode)) {
+        return false;
+    }
+    if ((mode & S_IFMT) != S_IFDIR) {
+        *libc.errno_slot() = libc.ENOTDIR;
+        return false;
+    }
+    i32 copy = libc.dup(dir_fd);
+    if (copy < 0) {
+        return false;
+    }
+    if (libc.lseek(copy, 0, libc.SEEK_SET) < 0) {
+        i32 failure = *libc.errno_slot();
+        libc.close(copy);
+        *libc.errno_slot() = failure;
+        return false;
+    }
+    // closedir(3) closes `copy` as well
+    void mut* own stream = libc.fdopendir(copy);
+    if (stream == null) {
+        i32 failure = *libc.errno_slot();
+        libc.close(copy);
+        *libc.errno_slot() = failure;
+        return false;
+    }
+    bool listed = append_entries(stream, out);
+    i32 failure = *libc.errno_slot();
+    libc.closedir(move(stream));
+    *libc.errno_slot() = failure;
+    return listed;
+}
+
+// Appends each entry of the directory stream `stream` but `.` and `..` to `out`, as list_dir
+// gives them. Returns false with errno set and `out` unchanged when readdir(3) fails or gives a
+// record whose size does not fit a `dirent`. errno is 0 before each readdir, so it is 0 after it
+// at the end of the stream and the error number after an error. A record holds `reclen` bytes,
+// the NUL of the name included, so the copy of `reclen` bytes into a zero `dirent` holds the
+// whole name and no byte past the record (D9.8).
+fn append_entries(void mut* stream, strbuf.str_buf mut* out) bool {
+    u64 start = out->len;
+    while (true) {
+        *libc.errno_slot() = 0;
+        libc.dirent_head* head = libc.readdir(stream);
+        if (head == null) {
+            if (*libc.errno_slot() != 0) {
+                out->len = start;
+                return false;
+            }
+            return true;
+        }
+        u64 size = cast(head->reclen, u64);
+        if (size < sizeof(libc.dirent_head) || size > sizeof(libc.dirent)) {
+            out->len = start;
+            *libc.errno_slot() = libc.EINVAL;
+            return false;
+        }
+        libc.dirent mut entry = {};
+        libc.memcpy(cast(&entry, u8 mut*), cast(head, u8*), size);
+        string name = str.from_cbuf(cast(entry.name[..], u8@));
+        if (name != "." && name != "..") {
+            strbuf.push(out, cast(entry.kind, char));
+            strbuf.append(out, name);
+            strbuf.push(out, '\0');
+        }
+    }
+}
+
+/// One entry of a directory that next_entry reads: its name, and its kind, a `libc.DT_` value.
+/// A file system that does not record the kind gives `libc.DT_UNKNOWN`.
+struct dir_entry {
+    string name;
+    u8 kind;
+}
+
+/// Reads the entry at `*at` of `list`, the text that list_dir or list_dir_fd gave, into `*entry`,
+/// moves `*at` to the next entry, and returns true. Returns false when `*at` is at the end of
+/// `list`, and when no NUL ends the entry at `*at`; `*at` and `*entry` then stay as they were.
+/// Start with `*at` at 0. The name is a view of `list`.
+fn next_entry(string list, u64 mut* at, dir_entry mut* entry) bool {
+    if (*at >= list.len) {
+        return false;
+    }
+    u64 start = *at + 1;
+    u64 mut end = start;
+    while (end < list.len && list[end] != '\0') {
+        end += 1;
+    }
+    if (end >= list.len) {
+        return false;
+    }
+    entry->kind = cast(list[*at], u8);
+    entry->name = list[start..end];
+    *at = end + 1;
+    return true;
+}

@@ -1,0 +1,87 @@
+//! run
+//! stdout:
+//| hello from the script
+//| found in PATH: done 0 0
+//| from sh
+//| a script with no #! line: done 0 0
+//| a #! line to a missing program: not started true
+//| 99
+//| 100 arguments: done 0 0
+//| 10000
+//| an argument of 10000 bytes: done 0 0
+import std.io;
+import std.libc;
+import std.os;
+import std.strbuf;
+import std.str;
+import std.sys;
+
+// sys.run looks for a bare program name in PATH, as execvp(3) does (stdlib.md 2.1). A file that
+// the system cannot exec but may run, a script with no `#!` line, goes to /bin/sh, as execvp
+// does on both targets. A script whose `#!` line names a missing program does not start, with
+// ENOENT. Each of 100 arguments, and an argument of 10000 bytes, reach the program whole. The
+// child writes to the standard output of the run before the line of the parent about it.
+
+// Writes the program `path` with the text `text`, with the mode 0o755.
+fn program(string path, string text) void {
+    io.write_file(path, cast(text, u8@));
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    libc.chmod(c_path.ptr, 0o755);
+}
+
+fn show(string what, sys.run_result r, i32 status) void {
+    io.flush(io.STDOUT);
+    if (r == sys.run_result.rr_done) {
+        println(what, "done ", (status >> 8) & 255, " ", status & 127);
+    } else if (r == sys.run_result.rr_not_started) {
+        println(what, "not started ", sys.errno() == libc.ENOENT);
+    } else {
+        println(what, "not waited");
+    }
+    io.flush(io.STDOUT);
+}
+
+fn main() i32 {
+    i32 mut status = 0;
+    os.make_dir("t-bin", 0o700);
+    program("t-bin/fort-t-hello", "#!/bin/sh\necho hello from the script\n");
+    program("t-bin/fort-t-plain", "echo from sh\n");
+    program("t-bin/fort-t-broken", "#!/no/such/interpreter\n");
+    strbuf.str_buf mut path = strbuf.create();
+    defer del(path.data);
+    os.current_dir(&path);
+    strbuf.append(&path, "/t-bin:/bin:/usr/bin");
+    sys.set_env("PATH", strbuf.view(&path));
+
+    string[1] hello = {"fort-t-hello"};
+    sys.run_result found = sys.run(hello[..], hello[..0], &status);
+    show("found in PATH: ", found, status);
+    string[1] plain = {"fort-t-plain"};
+    sys.run_result fallback = sys.run(plain[..], plain[..0], &status);
+    show("a script with no #! line: ", fallback, status);
+    string[1] broken = {"fort-t-broken"};
+    show("a #! line to a missing program: ", sys.run(broken[..], broken[..0], &status), status);
+
+    string[103] mut many = {};
+    many[0] = "sh";
+    many[1] = "-c";
+    many[2] = "echo $#";
+    for (u64 mut i = 3; i < many.len; i++) {
+        many[i] = "x";
+    }
+    // `sh -c` takes the first argument after the script as $0, so 100 arguments give $# = 99
+    sys.run_result counted = sys.run(many[..], many[..0], &status);
+    show("100 arguments: ", counted, status);
+
+    strbuf.str_buf mut long_arg = strbuf.create();
+    defer del(long_arg.data);
+    for (u64 mut i = 0; i < 10000; i++) {
+        strbuf.push(&long_arg, 'y');
+    }
+    string[4] long_argv = {"sh", "-c", "printf '%s' \"$1\" | wc -c | tr -d ' '", "prog"};
+    string[5] with_long = {long_argv[0], long_argv[1], long_argv[2], long_argv[3],
+                           strbuf.view(&long_arg)};
+    show("an argument of 10000 bytes: ", sys.run(with_long[..], with_long[..0], &status), status);
+    return 0;
+}

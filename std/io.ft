@@ -31,6 +31,16 @@ fn open_write(string path) i32 {
     return libc.open(c_path.ptr, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o644);
 }
 
+/// Opens path with the open(2) flags `flags`, such as `libc.O_RDONLY | libc.O_DIRECTORY`.
+/// `mode` gives the permission bits of a file that O_CREAT makes, less the umask; other flags
+/// ignore it. A path containing \0 names its prefix.
+/// A failure returns -1 and sets sys.errno().
+fn open(string path, i32 flags, i32 mode) i32 {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    return libc.open(c_path.ptr, flags, mode);
+}
+
 /// Flushes the runtime buffer for fd, then closes fd.
 /// Returns false when close(2) fails. The descriptor is invalid after either result.
 fn close(i32 fd) bool {
@@ -52,6 +62,21 @@ fn read(i32 fd, u8 mut@ buf) i64 {
     }
     while (true) {
         i64 n = libc.read(fd, buf.ptr, buf.len);
+        if (n >= 0 || sys.errno() != libc.EINTR) {
+            return n;
+        }
+    }
+}
+
+/// Writes once from buf. Returns the count of bytes written, at most buf.len, or 0 for an empty
+/// buffer, which makes no system call. Retries EINTR. Other failures return -1 and set
+/// sys.errno().
+fn write(i32 fd, u8@ buf) i64 {
+    if (buf.len == 0) {
+        return 0;
+    }
+    while (true) {
+        i64 n = libc.write(fd, buf.ptr, buf.len);
         if (n >= 0 || sys.errno() != libc.EINTR) {
             return n;
         }
@@ -147,4 +172,23 @@ fn write_file(string path, u8@ data) bool {
     }
     bool written = write_all(fd, data);
     return close(fd) && written;
+}
+
+/// Reports whether fd names a terminal. Returns false and sets sys.errno() when fd names no
+/// terminal or no open descriptor.
+fn is_terminal(i32 fd) bool {
+    return libc.isatty(fd) == 1;
+}
+
+/// Makes a pipe. Writes the descriptor of its read end to *read_end and the descriptor of its
+/// write end to *write_end, and returns true. Returns false, leaves both unchanged, and sets
+/// sys.errno() when pipe(2) fails.
+fn pipe(i32 mut* read_end, i32 mut* write_end) bool {
+    i32[2] mut fds = {};
+    if (libc.pipe(&fds[0]) != 0) {
+        return false;
+    }
+    *read_end = fds[0];
+    *write_end = fds[1];
+    return true;
 }

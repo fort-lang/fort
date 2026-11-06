@@ -1,0 +1,80 @@
+//! run
+//! stdout:
+//| make_dir mode 700: true
+//| remove_dir of a full directory: false, Directory not empty
+//| rename onto a file: true, new
+//| rename of a directory: true true
+//| remove_file of a link: true, the target stays: true
+//| remove_at of a link: true, the target stays: true
+//| can_access with mode 0: true false
+//| make_dir of a path that a file holds: false true
+//| remove_file of a directory: false
+//| rename into a missing directory: false true
+import std.io;
+import std.libc;
+import std.os;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+// More cases of the file functions of std.os (stdlib.md 2.14). make_dir gives the mode bits less
+// the umask, and 0o700 is no less after a usual umask. A full directory does not go, and the text
+// of its errno is the same on both targets, where the value is not. rename replaces a file at the
+// new name in one step, and renames a directory too. remove_file and remove_at remove a symbolic
+// link and not its target. can_access with the mode 0 asks whether an entry is there. A file at a
+// path gives EEXIST to make_dir, a directory refuses remove_file, and a rename into a missing
+// directory gives ENOENT.
+
+// The text of the file `path`.
+fn text_of(string path, strbuf.str_buf mut* b) string {
+    strbuf.clear(b);
+    io.read_file(path, b);
+    return strbuf.view(b);
+}
+
+// Makes the symbolic link `link_path` to `target`.
+fn link(string target, string link_path) void {
+    char mut@ own c_target = str.to_cstr(target);
+    defer del(c_target);
+    char mut@ own c_link = str.to_cstr(link_path);
+    defer del(c_link);
+    libc.symlink(c_target.ptr, c_link.ptr);
+}
+
+fn main() i32 {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    os.make_dir("t-more", 0o700);
+    u32 mut mode = 0;
+    os.path_mode("t-more", &mode);
+    println("make_dir mode 700: ", (mode & 0o777) == 0o700);
+    io.write_file("t-more/old.txt", cast("old", u8@));
+    bool removed = os.remove_dir("t-more");
+    strbuf.clear(&b);
+    os.error_text(sys.errno(), &b);
+    println("remove_dir of a full directory: ", removed, ", ", strbuf.view(&b));
+    io.write_file("t-more/new.txt", cast("new", u8@));
+    bool renamed = os.rename("t-more/new.txt", "t-more/old.txt");
+    println("rename onto a file: ", renamed, ", ", text_of("t-more/old.txt", &b));
+    os.make_dir("t-more/sub", 0o700);
+    bool dir_renamed = os.rename("t-more/sub", "t-more/sub2");
+    println("rename of a directory: ", dir_renamed, " ", os.can_access("t-more/sub2", 0));
+    link("old.txt", "t-more/link");
+    bool link_removed = os.remove_file("t-more/link");
+    println("remove_file of a link: ", link_removed, ", the target stays: ",
+            os.can_access("t-more/old.txt", libc.R_OK));
+    link("old.txt", "t-more/link2");
+    i32 fd = io.open("t-more", libc.O_RDONLY | libc.O_DIRECTORY, 0);
+    bool at_removed = os.remove_at(fd, "link2", false);
+    io.close(fd);
+    println("remove_at of a link: ", at_removed, ", the target stays: ",
+            os.can_access("t-more/old.txt", libc.R_OK));
+    println("can_access with mode 0: ", os.can_access("t-more/old.txt", 0), " ",
+            os.can_access("t-more/none.txt", 0));
+    println("make_dir of a path that a file holds: ", os.make_dir("t-more/old.txt", 0o700), " ",
+            sys.errno() == libc.EEXIST);
+    println("remove_file of a directory: ", os.remove_file("t-more/sub2"));
+    println("rename into a missing directory: ", os.rename("t-more/old.txt", "t-none/old.txt"),
+            " ", sys.errno() == libc.ENOENT);
+    return 0;
+}

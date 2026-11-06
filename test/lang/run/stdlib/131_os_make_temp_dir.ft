@@ -1,0 +1,32 @@
+//! run
+//! stdout:
+//| true true true
+//| true
+//| false true true
+import std.libc;
+import std.os;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+// os.make_temp_dir makes a new directory from a template that ends in six X, and appends its
+// path (stdlib.md 2.14). Two calls give two directories. A template below a missing directory
+// gives ENOENT and leaves the buffer as it was. glibc refuses a template with no six X at its
+// end, and the Darwin C library does not, so the test does not use one.
+fn main() i32 {
+    strbuf.str_buf mut first = strbuf.create();
+    defer del(first.data);
+    strbuf.str_buf mut second = strbuf.create();
+    defer del(second.data);
+    bool made = os.make_temp_dir("t-temp-XXXXXX", &first)
+                && os.make_temp_dir("t-temp-XXXXXX", &second);
+    string a = strbuf.view(&first);
+    bool named = str.starts_with(a, "t-temp-") && a.len == 13;
+    println(made, " ", named, " ", a != strbuf.view(&second));
+    println(os.remove_dir(a) && os.remove_dir(strbuf.view(&second)));
+    strbuf.clear(&first);
+    strbuf.append(&first, "kept");
+    println(os.make_temp_dir("t-missing/t-XXXXXX", &first), " ", strbuf.view(&first) == "kept",
+            " ", sys.errno() == libc.ENOENT);
+    return 0;
+}
