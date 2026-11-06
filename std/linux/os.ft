@@ -9,8 +9,10 @@ import std.strbuf;
 // --target is absent (D14.1).
 string TARGET = "x86_64-linux-gnu";
 
-// The symbolic link that names the running binary, and the buffer sizes it is read with.
+// The symbolic link that names the running binary.
 string PROC_SELF_EXE = "/proc/self/exe";
+
+// The buffer sizes the path is read with.
 u64 EXE_PATH_FIRST_CAP = 256;
 u64 EXE_PATH_MAX_CAP = 65536;
 
@@ -61,12 +63,14 @@ extern fn fstat(i32 fd, u64 mut* buf) i32;
 // `buf`. std.os declares it for the reason of fstat.
 extern fn stat(char* path, u64 mut* buf) i32;
 
-// `struct stat` (Linux x86-64) is STAT_WORDS 8-byte words with the alignment of C. `st_mode` is
-// a u32 at byte 24, the low half of word 3; MODE_BITS takes its type bits and its permission bits.
+// `struct stat` is STAT_WORDS 8-byte words with the alignment of C on both targets. MODE_BITS
+// takes the type bits and the permission bits of its `st_mode`.
 u64 STAT_WORDS = 18;
+u64 MODE_BITS = 0xFFFF;
+
+// `st_mode` (Linux x86-64) is a u32 at byte 24, the low half of word 3.
 u64 STAT_MODE_WORD = 3;
 u64 STAT_MODE_SHIFT = 0;
-u64 MODE_BITS = 0xFFFF;
 
 /// Opens `path` to read and returns the descriptor, or -1 with the reason in sys.errno(). The
 /// open does not wait for the writer of a FIFO.
@@ -102,6 +106,30 @@ fn path_mode(string path, u32 mut* mode) bool {
     return true;
 }
 
+/// Makes a FIFO at `path` with mkfifo(3) and the permission bits `mode`, less the umask. Returns
+/// false and sets errno when mkfifo fails: EEXIST when an entry stands at `path`. A `mode` with a
+/// bit outside PERMISSION_BITS, or with a bit of SET_ID_BITS, makes nothing and gives EINVAL on
+/// both targets: the two C libraries read a type bit in different ways, and the Darwin kernel
+/// refuses S_ISGID with EPERM in a directory whose group is no group of the process. A success
+/// keeps errno.
+fn make_fifo(string path, u32 mode) bool {
+    if ((mode & ~PERMISSION_BITS) != 0 || (mode & SET_ID_BITS) != 0) {
+        *libc.errno_slot() = libc.EINVAL;
+        return false;
+    }
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    return libc.mkfifo(c_path.ptr, mode) == 0;
+}
+
+/// Sets the file mode creation mask of the process to the bits of `mask` in UMASK_BITS with
+/// umask(2), and returns the bits in UMASK_BITS of the mask that was there before. umask does not
+/// fail and does not change errno. The other bits do not count, on both targets: Linux keeps only
+/// these bits, and Darwin keeps the bits 0o7777, also of a mask that the parent process set.
+fn set_umask(u32 mask) u32 {
+    return libc.umask(mask & UMASK_BITS) & UMASK_BITS;
+}
+
 // ---- the file system and the error text, the same on both targets ----
 
 // The first size and the largest size of the buffers that current_dir and read_link read a path
@@ -112,6 +140,12 @@ u64 PATH_LAST_CAP = 65536;
 // The type bits of `st_mode` and the type of a directory, the POSIX values of both targets.
 u32 S_IFMT = 0o170000;
 u32 S_IFDIR = 0o040000;
+
+// The permission bits of a mode, its S_ISUID and S_ISGID bits, which make_fifo and set_mode
+// refuse, and the bits of a file mode creation mask that set_umask keeps.
+u32 PERMISSION_BITS = 0o7777;
+u32 SET_ID_BITS = 0o6000;
+u32 UMASK_BITS = 0o777;
 
 /// Appends the text of the errno value `code`, from strerror(3), to `out`: "No such file or
 /// directory" for ENOENT. An unknown value gives a text that names it. The C library can change
@@ -139,6 +173,33 @@ fn make_dir(string path, u32 mode) bool {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
     return libc.mkdir(c_path.ptr, mode) == 0;
+}
+
+/// Gives the file `path`, after each symbolic link, the permission bits `mode` with chmod(2). The
+/// bits of `mode` outside PERMISSION_BITS do not count. Returns false and sets errno when chmod
+/// fails: ENOENT when no entry stands at `path`. A `mode` with a bit of SET_ID_BITS changes
+/// nothing and gives EINVAL on both targets: the Darwin chmod(2) clears S_ISGID for a file whose
+/// group is no group of the process and leaves EPERM in errno after a success. Without these
+/// bits, a success keeps errno.
+fn set_mode(string path, u32 mode) bool {
+    if ((mode & SET_ID_BITS) != 0) {
+        *libc.errno_slot() = libc.EINVAL;
+        return false;
+    }
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    return libc.chmod(c_path.ptr, mode) == 0;
+}
+
+/// Makes a symbolic link at `link_path` whose target is the text `target`, with symlink(2). No
+/// file need stand at `target`. Returns false and sets errno when symlink fails: EEXIST when an
+/// entry stands at `link_path`, and ENOENT when its directory does not exist.
+fn make_symlink(string target, string link_path) bool {
+    char mut@ own c_target = str.to_cstr(target);
+    defer del(c_target);
+    char mut@ own c_link = str.to_cstr(link_path);
+    defer del(c_link);
+    return libc.symlink(c_target.ptr, c_link.ptr) == 0;
 }
 
 /// Removes the entry `path`, which is no directory; a symbolic link goes, not its target. Returns
@@ -259,9 +320,10 @@ fn list_dir(string path, strbuf.str_buf mut* out) bool {
 
 /// list_dir for the directory that the open descriptor `dir_fd` names. It reads through a
 /// duplicate of `dir_fd` and closes the duplicate, so `dir_fd` stays open. The duplicate shares
-/// the position of `dir_fd`, so the read starts with a move to the first entry, and each call
-/// gives each entry. A descriptor of another type of file gives ENOTDIR before the move, so its
-/// position does not change.
+/// the position of `dir_fd`, so the function first moves `dir_fd` to the first entry, and each
+/// call gives each entry. A descriptor of another type of file gives ENOTDIR before the move, so
+/// its position does not change. A descriptor whose position does not move gives the errno of
+/// lseek(2) before the dup(2).
 fn list_dir_fd(i32 dir_fd, strbuf.str_buf mut* out) bool {
     u32 mut mode = 0;
     if (!file_mode(dir_fd, &mode)) {
@@ -271,14 +333,11 @@ fn list_dir_fd(i32 dir_fd, strbuf.str_buf mut* out) bool {
         *libc.errno_slot() = libc.ENOTDIR;
         return false;
     }
-    i32 copy = libc.dup(dir_fd);
-    if (copy < 0) {
+    if (libc.lseek(dir_fd, 0, libc.SEEK_SET) < 0) {
         return false;
     }
-    if (libc.lseek(copy, 0, libc.SEEK_SET) < 0) {
-        i32 failure = *libc.errno_slot();
-        libc.close(copy);
-        *libc.errno_slot() = failure;
+    i32 copy = libc.dup(dir_fd);
+    if (copy < 0) {
         return false;
     }
     // closedir(3) closes `copy` as well

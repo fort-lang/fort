@@ -83,6 +83,15 @@ fn set_env(string name, string value) bool {
     return libc.setenv(&key[0], &text[0], 1) == 0;
 }
 
+/// Removes the variable `name` from the process environment with unsetenv(3). A name that is not
+/// there is no failure. Returns false and sets sys.errno() when unsetenv fails: EINVAL for an
+/// empty name or a name that contains '='. A NUL in name limits it to its prefix.
+fn unset_env(string name) bool {
+    char mut@ own key = str.to_cstr(name);
+    defer del(key);
+    return libc.unsetenv(&key[0]) == 0;
+}
+
 /// What run did with a command.
 enum run_result {
     rr_done,        // the command ran and run waited for it: *status holds its wait status
@@ -147,8 +156,8 @@ fn run(string@ argv, string@ env, i32 mut* status) run_result {
         set_errno(libc.EINVAL);
         return run_result.rr_not_started;
     }
-    // made before fork(2), so the child only calls close(2), setenv(3), execvp(3), write(2) and
-    // _exit(2)
+    // made before fork(2), so the child only calls close(2), setenv(3), execvp(3), the errno
+    // accessor of the C library through errno(), write(2) and _exit(2)
     c_strings mut args = c_strings_of(argv);
     defer {
         del(args.bytes);

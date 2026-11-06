@@ -1,0 +1,95 @@
+//! run
+//! stdout:
+//| a pseudo terminal opens: true
+//| the buffer asked once after the reset: y, then a and x at the flush
+//| the regular file got nothing: true
+import std.io;
+import std.libc;
+import std.str;
+import std.strbuf;
+
+// After a reset, the runtime asks isatty once, at the first output, and at no other time (D11.5).
+// io.dup2 points stdout, a pipe here, at a regular file and resets its buffer; the next print
+// asks and finds no terminal. A dup2(2) of C then points stdout at a pseudo terminal with no
+// reset, so println keeps its line in the buffer: a line that io.write writes after it reaches
+// the terminal first, and the two printed lines follow at the flush. A runtime that asked at
+// each output would flush at the newline of println and turn that order.
+
+// posix_openpt(3), grantpt(3), unlockpt(3) and ptsname(3), which std.libc does not declare, and
+// O_NOCTTY of open(2) on each target.
+extern fn posix_openpt(i32 flags) i32;
+extern fn grantpt(i32 fd) i32;
+extern fn unlockpt(i32 fd) i32;
+extern fn ptsname(i32 fd) char*;
+$if ($cfg(target_os) == "linux") {
+    i32 O_NOCTTY = 0o400;
+} else {
+    i32 O_NOCTTY = 0x20000;
+}
+
+// Opens the subordinate side of the pseudo terminal whose main side is `main_fd`.
+fn open_terminal(i32 main_fd) i32 {
+    if (grantpt(main_fd) != 0 || unlockpt(main_fd) != 0) {
+        return -1;
+    }
+    char* name = ptsname(main_fd);
+    if (name == null) {
+        return -1;
+    }
+    return io.open(str.from_cstr(name), libc.O_RDWR | O_NOCTTY, 0);
+}
+
+// Reads from `main_fd` into `out` until it holds `lines` newlines. The terminal gives a CR
+// before each newline, and the function drops it.
+fn read_lines(i32 main_fd, u64 lines, strbuf.str_buf mut* out) void {
+    u64 mut seen = 0;
+    u8[64] mut room = {};
+    while (seen < lines) {
+        i64 n = io.read(main_fd, room[..]);
+        if (n <= 0) {
+            return;
+        }
+        u64 mut i = 0;
+        while (i < cast(n, u64)) {
+            u8 c = room[i];
+            if (c == cast('\n', u8)) {
+                seen += 1;
+            }
+            if (c != cast('\r', u8)) {
+                strbuf.push(out, cast(c, char));
+            }
+            i += 1;
+        }
+    }
+}
+
+fn main() i32 {
+    i32 main_fd = posix_openpt(libc.O_RDWR | O_NOCTTY);
+    i32 terminal = open_terminal(main_fd);
+    println("a pseudo terminal opens: ", main_fd >= 0 && terminal >= 0);
+    io.flush(io.STDOUT);
+
+    i32 saved = io.dup(io.STDOUT);
+    i32 file = io.open_write("t-once.txt");
+    io.dup2(file, io.STDOUT);
+    io.close(file);
+    print("a\n");
+    libc.dup2(terminal, io.STDOUT);
+    println("x");
+    io.write(io.STDOUT, cast("y\n", u8@));
+    io.flush(io.STDOUT);
+    io.dup2(saved, io.STDOUT);
+    io.close(saved);
+    strbuf.str_buf mut got = strbuf.create();
+    defer del(got.data);
+    read_lines(main_fd, 3, &got);
+    println("the buffer asked once after the reset: ",
+            strbuf.view(&got) == "y\na\nx\n" ? "y, then a and x at the flush" : "other order");
+    strbuf.str_buf mut held = strbuf.create();
+    defer del(held.data);
+    io.read_file("t-once.txt", &held);
+    println("the regular file got nothing: ", strbuf.view(&held) == "");
+    io.close(terminal);
+    io.close(main_fd);
+    return 0;
+}

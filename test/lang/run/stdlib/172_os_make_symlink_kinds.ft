@@ -1,0 +1,90 @@
+//! run
+//! stdout:
+//| a link to a directory: true, path_mode follows it: true
+//| list_dir through the link: true 2
+//| remove_dir of the link: false ENOTDIR: true, the directory stays: true
+//| a chain of two links reads the file: data
+//| set_mode through the chain: true 600
+//| a loop of two links: can_access false ELOOP: true
+//| io.open of the loop: -1 ELOOP: true
+//| a link with an absolute target: true
+//| the child of a run sees the link: done 0
+import std.io;
+import std.libc;
+import std.os;
+import std.strbuf;
+import std.sys;
+
+// More cases of os.make_symlink (stdlib.md 2.14). A link to a directory names the directory for
+// path_mode and list_dir, and remove_dir refuses the link with ENOTDIR. A chain of links reaches
+// the file at its end, also for set_mode. Two links that name each other give ELOOP to each call
+// that follows them. A target can be an absolute path, and another process sees the link too.
+
+u32 S_IFMT = 0o170000;
+u32 S_IFDIR = 0o040000;
+
+// The count of the entries of `listed`.
+fn count(string listed) u64 {
+    u64 mut n = 0;
+    u64 mut at = 0;
+    os.dir_entry mut entry = {};
+    while (os.next_entry(listed, &at, &entry)) {
+        n += 1;
+    }
+    return n;
+}
+
+fn main() i32 {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    os.make_dir("t-kinds", 0o700);
+    os.make_dir("t-kinds/dir", 0o700);
+    io.write_file("t-kinds/dir/one", cast("1", u8@));
+    io.write_file("t-kinds/dir/two", cast("2", u8@));
+    bool made = os.make_symlink("dir", "t-kinds/to-dir");
+    u32 mut mode = 0;
+    bool typed = os.path_mode("t-kinds/to-dir", &mode) && (mode & S_IFMT) == S_IFDIR;
+    println("a link to a directory: ", made, ", path_mode follows it: ", typed);
+    bool listed = os.list_dir("t-kinds/to-dir", &b);
+    println("list_dir through the link: ", listed, " ", count(strbuf.view(&b)));
+    sys.set_errno(0);
+    bool gone = os.remove_dir("t-kinds/to-dir");
+    bool not_dir = sys.errno() == libc.ENOTDIR;
+    println("remove_dir of the link: ", gone, " ENOTDIR: ", not_dir, ", the directory stays: ",
+            os.can_access("t-kinds/dir/one", 0));
+
+    io.write_file("t-kinds/file", cast("data", u8@));
+    os.make_symlink("file", "t-kinds/first");
+    os.make_symlink("first", "t-kinds/second");
+    strbuf.clear(&b);
+    io.read_file("t-kinds/second", &b);
+    println("a chain of two links reads the file: ", strbuf.view(&b));
+    bool set = os.set_mode("t-kinds/second", 0o600);
+    os.path_mode("t-kinds/file", &mode);
+    println("set_mode through the chain: ", set, " ",
+            (mode & os.PERMISSION_BITS) == 0o600 ? "600" : "other");
+
+    os.make_symlink("loop-b", "t-kinds/loop-a");
+    os.make_symlink("loop-a", "t-kinds/loop-b");
+    sys.set_errno(0);
+    bool reached = os.can_access("t-kinds/loop-a", 0);
+    println("a loop of two links: can_access ", reached, " ELOOP: ", sys.errno() == libc.ELOOP);
+    i32 fd = io.open("t-kinds/loop-a", libc.O_RDONLY, 0);
+    println("io.open of the loop: ", fd, " ELOOP: ", sys.errno() == libc.ELOOP);
+
+    strbuf.clear(&b);
+    os.current_dir(&b);
+    strbuf.append(&b, "/t-kinds/file");
+    bool absolute = os.make_symlink(strbuf.view(&b), "t-kinds/absolute");
+    strbuf.str_buf mut target = strbuf.create();
+    defer del(target.data);
+    os.read_link("t-kinds/absolute", &target);
+    println("a link with an absolute target: ", absolute && strbuf.view(&target) ==
+            strbuf.view(&b));
+    i32 mut status = 77;
+    string[3] argv = {"sh", "-c", "test -L t-kinds/absolute && test -f t-kinds/absolute"};
+    sys.run_result ran = sys.run(argv[..], argv[..0], &status);
+    println("the child of a run sees the link: ",
+            ran == sys.run_result.rr_done ? "done " : "other ", (status >> 8) & 255);
+    return 0;
+}

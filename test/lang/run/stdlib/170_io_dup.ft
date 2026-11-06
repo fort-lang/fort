@@ -1,0 +1,102 @@
+//! run
+//! stdout:
+//| before the capture
+//| dup gives the lowest free descriptor: true
+//| the two descriptors share the position: true
+//| the capture file holds: inside the capture
+//| dup2 onto itself: true
+//| dup of a closed descriptor: -1 EBADF: true
+//| dup of -1: -1 EBADF: true
+//| dup2 of a closed descriptor: -1 EBADF: true
+//| dup2 onto -1: -1 EBADF: true
+//| dup at the limit of descriptors: -1 EMFILE: true
+//| bytes printed to old_fd before dup2 come first: AB
+import std.io;
+import std.libc;
+import std.strbuf;
+import std.sys;
+
+// io.dup and io.dup2 (stdlib.md 2.4). dup gives the lowest free descriptor, and the two
+// descriptors share the position of the file. dup2 flushes the runtime buffer of the descriptor
+// that it replaces first, so the line that the program printed before the capture goes to the
+// standard output and not to the capture file. A descriptor that is not open gives EBADF, and
+// with the soft limit of descriptors at the count of open ones, dup gives EMFILE. dup2 flushes
+// the buffer of the old descriptor too, so a byte printed to it before the call comes before a
+// byte printed to the new descriptor after the call.
+
+// EBADF and EMFILE, the same values on both targets.
+i32 EBADF = 9;
+i32 EMFILE = 24;
+
+// getrlimit(2) and setrlimit(2), which std.libc does not declare, and RLIMIT_NOFILE.
+struct rlimit {
+    u64 cur;
+    u64 max;
+}
+extern fn getrlimit(i32 resource, rlimit mut* limit) i32;
+extern fn setrlimit(i32 resource, rlimit* limit) i32;
+$if ($cfg(target_os) == "linux") {
+    i32 RLIMIT_NOFILE = 7;
+} else {
+    i32 RLIMIT_NOFILE = 8;
+}
+
+fn main() i32 {
+    println("before the capture");
+    io.write_file("t-dup.txt", cast("abcd", u8@));
+    i32 fd = io.open_read("t-dup.txt");
+    i32 copy = io.dup(fd);
+    println("dup gives the lowest free descriptor: ", copy == fd + 1);
+    u8[2] mut two = {};
+    io.read(fd, two[..]);
+    u8[2] mut next = {};
+    io.read(copy, next[..]);
+    println("the two descriptors share the position: ", next[0] == cast('c', u8));
+    io.close(copy);
+
+    i32 saved = io.dup(io.STDOUT);
+    i32 file = io.open_write("t-capture.txt");
+    io.dup2(file, io.STDOUT);
+    io.close(file);
+    println("inside the capture");
+    io.dup2(saved, io.STDOUT);
+    io.close(saved);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    io.read_file("t-capture.txt", &b);
+    print("the capture file holds: ", strbuf.view(&b));
+    println("dup2 onto itself: ", io.dup2(fd, fd) == fd);
+
+    io.close(fd);
+    println("dup of a closed descriptor: ", io.dup(fd), " EBADF: ", sys.errno() == EBADF);
+    println("dup of -1: ", io.dup(-1), " EBADF: ", sys.errno() == EBADF);
+    println("dup2 of a closed descriptor: ", io.dup2(fd, 50), " EBADF: ", sys.errno() == EBADF);
+    i32 open = io.open_read("t-dup.txt");
+    println("dup2 onto -1: ", io.dup2(open, -1), " EBADF: ", sys.errno() == EBADF);
+    io.close(open);
+
+    io.flush(io.STDOUT);
+    rlimit mut limit = {};
+    getrlimit(RLIMIT_NOFILE, &limit);
+    u64 first = limit.cur;
+    limit.cur = 3;
+    setrlimit(RLIMIT_NOFILE, &limit);
+    i32 over = io.dup(io.STDOUT);
+    i32 failure = sys.errno();
+    limit.cur = first;
+    setrlimit(RLIMIT_NOFILE, &limit);
+    println("dup at the limit of descriptors: ", over, " EMFILE: ", failure == EMFILE);
+
+    i32 order = io.open_write("t-order.txt");
+    fprint(order, "A");
+    i32 kept = io.dup(io.STDOUT);
+    io.dup2(order, io.STDOUT);
+    print("B");
+    io.dup2(kept, io.STDOUT);
+    io.close(kept);
+    io.close(order);
+    strbuf.clear(&b);
+    io.read_file("t-order.txt", &b);
+    println("bytes printed to old_fd before dup2 come first: ", strbuf.view(&b));
+    return 0;
+}

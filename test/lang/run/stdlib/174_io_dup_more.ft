@@ -1,0 +1,70 @@
+//! run
+//! stdout:
+//| dup2 onto an open descriptor: true, it reads the other file: second
+//| the file that the descriptor named before stays open through its duplicate: first
+//| a duplicate shares O_APPEND: true, the file holds: abcd
+//| dup2 of a closed descriptor onto itself: -1 EBADF: true
+//| dup2 keeps the descriptor number: true
+//| the duplicate stays open after the first closes: 5
+//| io.close of each: true true
+import std.io;
+import std.libc;
+import std.strbuf;
+import std.sys;
+
+// More cases of io.dup and io.dup2 (stdlib.md 2.4). dup2 onto an open descriptor closes its file
+// and makes it name the file of the other descriptor; a duplicate of the old file keeps that file
+// open. A duplicate shares the status flags, so a write through a duplicate of an O_APPEND
+// descriptor appends. dup2 of a closed descriptor onto itself gives EBADF. A duplicate stays open
+// after the first descriptor closes.
+
+// EBADF, the same value on both targets.
+i32 EBADF = 9;
+
+// The text that one read of `fd` gives into `room`, or "?" when the read fails.
+fn read_text(i32 fd, u8 mut@ room) string {
+    i64 n = io.read(fd, room);
+    if (n < 0) {
+        return "?";
+    }
+    return cast(room[0..cast(n, u64)], string);
+}
+
+fn main() i32 {
+    io.write_file("t-first", cast("first", u8@));
+    io.write_file("t-second", cast("second", u8@));
+    u8[16] mut room = {};
+    i32 a = io.open_read("t-first");
+    i32 keep = io.dup(a);
+    i32 b = io.open_read("t-second");
+    bool moved = io.dup2(b, a) == a;
+    println("dup2 onto an open descriptor: ", moved, ", it reads the other file: ",
+            read_text(a, room[..]));
+    println("the file that the descriptor named before stays open through its duplicate: ",
+            read_text(keep, room[..]));
+    io.close(keep);
+    io.close(b);
+
+    io.write_file("t-append", cast("ab", u8@));
+    i32 w = io.open("t-append", libc.O_WRONLY | libc.O_APPEND, 0);
+    i32 copy = io.dup(w);
+    bool appended = io.write(copy, cast("cd", u8@)) == 2;
+    io.close(copy);
+    io.close(w);
+    strbuf.str_buf mut held = strbuf.create();
+    defer del(held.data);
+    io.read_file("t-append", &held);
+    println("a duplicate shares O_APPEND: ", appended, ", the file holds: ", strbuf.view(&held));
+
+    io.close(a);
+    println("dup2 of a closed descriptor onto itself: ", io.dup2(a, a), " EBADF: ",
+            sys.errno() == EBADF);
+    i32 c = io.open_read("t-first");
+    i32 high = c + 20;
+    println("dup2 keeps the descriptor number: ", io.dup2(c, high) == high);
+    io.close(c);
+    i64 n = io.read(high, room[..]);
+    println("the duplicate stays open after the first closes: ", n);
+    println("io.close of each: ", io.close(high), " ", !io.close(c));
+    return 0;
+}

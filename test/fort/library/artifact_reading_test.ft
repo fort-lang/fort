@@ -14,6 +14,7 @@ import fort.library.artifact;
 import fort.owner.summary;
 import std.io;
 import std.libc;
+import std.os;
 import std.str;
 import std.strbuf;
 import std.sys;
@@ -523,9 +524,7 @@ fn a_hash_that_is_not_64_lowercase_hex_digits_is_refused() void {
 // ---- the directory -------------------------------------------------------------------
 
 fn make_dir(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(libc.mkdir(c_path.ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    assert(os.make_dir(path, 0o700) || sys.errno() == libc.EEXIST);
 }
 
 fn write_file(string path, string text) void {
@@ -533,23 +532,15 @@ fn write_file(string path, string text) void {
 }
 
 fn remove(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    libc.unlink(c_path.ptr);
+    os.remove_file(path);
 }
 
 fn remove_dir(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    libc.rmdir(c_path.ptr);
+    os.remove_dir(path);
 }
 
 fn link(string target, string path) void {
-    char mut@ own c_target = str.to_cstr(target);
-    defer del(c_target);
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(libc.symlink(c_target.ptr, c_path.ptr) == 0);
+    assert(os.make_symlink(target, path));
 }
 
 // `<dir>/<name>` in `out`.
@@ -885,25 +876,16 @@ fn make_temp(strbuf.str_buf mut* out) string {
         strbuf.append(out, "/tmp");
     }
     strbuf.append(out, "/fort-reading-XXXXXX");
-    char mut@ own tmpl = str.to_cstr(strbuf.view(out));
-    defer del(tmpl);
-    assert(libc.mkdtemp(&tmpl[0]) != null);
+    strbuf.str_buf mut made = strbuf.create();
+    defer del(made.data);
+    assert(os.make_temp_dir(strbuf.view(out), &made));
     strbuf.clear(out);
-    strbuf.append(out, str.from_cstr(&tmpl[0]));
+    strbuf.append(out, strbuf.view(&made));
     return strbuf.view(out);
 }
 
-// mkfifo(3), whose mode_t is a u32 on Linux and a u16 on darwin (D9.8).
-$if ($cfg(target_os) == "linux") {
-    extern fn mkfifo(char* path, u32 mode) i32;
-} else {
-    extern fn mkfifo(char* path, u16 mode) i32;
-}
-
 fn make_fifo(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(mkfifo(c_path.ptr, 0o600) == 0);
+    assert(os.make_fifo(path, 0o600));
 }
 
 fn an_entry_that_is_no_regular_file_is_corrupt() void {
@@ -958,41 +940,37 @@ fn a_manifest_that_cannot_be_read_is_unreadable() void {
     write_artifact(flib);
     strbuf.str_buf mut m = strbuf.create();
     defer del(m.data);
-    char mut@ own c_manifest = str.to_cstr(under(flib, "manifest", &m));
-    defer del(c_manifest);
-    assert(libc.chmod(c_manifest.ptr, 0) == 0);
+    string manifest = under(flib, "manifest", &m);
+    assert(os.set_mode(manifest, 0));
     i32 mut error = 0;
     artifact.verdict mut got = verdict_of(flib, &error);
-    assert(libc.chmod(c_manifest.ptr, 0o644) == 0);
+    assert(os.set_mode(manifest, 0o644));
     assert(got == artifact.verdict.v_unreadable);
     assert(error == libc.EACCES);
     // an archive and a summaries/ that the process cannot read
     strbuf.str_buf mut a = strbuf.create();
     defer del(a.data);
-    char mut@ own c_archive = str.to_cstr(under(flib, "lib.a", &a));
-    defer del(c_archive);
-    assert(libc.chmod(c_archive.ptr, 0) == 0);
+    string archive = under(flib, "lib.a", &a);
+    assert(os.set_mode(archive, 0));
     got = verdict_of(flib, &error);
-    assert(libc.chmod(c_archive.ptr, 0o644) == 0);
+    assert(os.set_mode(archive, 0o644));
     assert(got == artifact.verdict.v_unreadable);
     assert(error == libc.EACCES);
     strbuf.str_buf mut s = strbuf.create();
     defer del(s.data);
-    char mut@ own c_summaries = str.to_cstr(under(flib, "summaries", &s));
-    defer del(c_summaries);
-    assert(libc.chmod(c_summaries.ptr, 0) == 0);
+    string summaries = under(flib, "summaries", &s);
+    assert(os.set_mode(summaries, 0));
     got = verdict_of(flib, &error);
-    assert(libc.chmod(c_summaries.ptr, 0o755) == 0);
+    assert(os.set_mode(summaries, 0o755));
     assert(got == artifact.verdict.v_unreadable);
     assert(error == libc.EACCES);
     // a summary file that the process cannot read
     strbuf.str_buf mut o = strbuf.create();
     defer del(o.data);
-    char mut@ own c_ownership = str.to_cstr(under(flib, "summaries/ownership", &o));
-    defer del(c_ownership);
-    assert(libc.chmod(c_ownership.ptr, 0) == 0);
+    string ownership = under(flib, "summaries/ownership", &o);
+    assert(os.set_mode(ownership, 0));
     got = verdict_of(flib, &error);
-    assert(libc.chmod(c_ownership.ptr, 0o644) == 0);
+    assert(os.set_mode(ownership, 0o644));
     assert(got == artifact.verdict.v_unreadable);
     assert(error == libc.EACCES);
     assert(verdict_of(flib, &error) == artifact.verdict.v_valid);

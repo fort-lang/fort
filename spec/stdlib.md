@@ -191,15 +191,17 @@ fn pid() i32
 fn abort() noreturn
 fn raise_signal(i32 sig) bool
 fn set_env(string name, string value) bool
+fn unset_env(string name) bool
 
 enum run_result { rr_done, rr_not_started, rr_not_waited }
 fn run(string@ argv, string@ env, i32 mut* status) run_result
 ```
 
-The compiler calls C only through functions of the library that take spans, strings and plain
-values (D9.8). This section, 2.3, 2.4, 2.5 and 2.14 give them. Each one takes each length from
-a span or a string, and each failure gives a result that the caller tests, with the reason in
-`sys.errno()`. None is a boundary function (D9.8), so each module can call it.
+The compiler and its test suites call C only through functions of the library that take
+spans, strings and plain values (D9.8). This section, 2.3, 2.4, 2.5 and 2.14 give them. Each one
+takes each length from a span or a string, and each failure gives a result that the caller
+tests, with the reason in `sys.errno()`. None is a boundary function (D9.8), so each module can
+call it.
 
 - `exit`: flushes every runtime output buffer (D11.5) and terminates the process with status
   `code & 0xFF` (D11.6). Deferred statements of the calling function do not run. Implemented as
@@ -232,14 +234,19 @@ a span or a string, and each failure gives a result that the caller tests, with 
   and replaces a value that is there. Returns `false` with the errno of `setenv`: `EINVAL` for an
   empty name or a name that contains `=`. A NUL in `name` or `value` limits it to its prefix.
   Ownership: none; `setenv` copies both.
+- `unset_env`: removes the variable `name` from the process environment with `unsetenv(3)`. A
+  name that is not there is no failure. Returns `false` with the errno of `unsetenv`: `EINVAL`
+  for an empty name or a name that contains `=`. A NUL in `name` limits it to its prefix.
+  Ownership: none.
 - `run`: runs the command `argv` in a child process and waits for it. `argv[0]` names the
   program, which `execvp(3)` looks for in `PATH`. `env` holds pairs of a name and a value, which
   the child sets with `setenv(3)` before the exec; a pair that `setenv` refuses leaves the
   environment of the child as it was, and the environment of the caller does not change. The
   child gets the descriptors of the caller. `run` makes each C string before `fork(2)`, so the
-  child calls only `close(2)`, `setenv`, `execvp`, `write(2)` and `_exit(2)`. A pipe whose write
-  end closes at the exec tells the parent whether the exec succeeded: after a failed exec the
-  child writes its errno to the pipe and ends with status 127.
+  child calls only `close(2)`, `setenv`, `execvp`, the errno accessor of the C library through
+  `errno` (`__errno_location` on Linux, `__error` on Darwin), `write(2)` and `_exit(2)`. A pipe
+  whose write end closes at the exec tells the parent whether the exec succeeded: after a failed
+  exec the child writes its errno to the pipe and ends with status 127.
   Returns `rr_done` with the wait status of
   `waitpid(2)` in `*status`: the exit status in its second byte, and a signal that ended the
   child in its low seven bits. Returns `rr_not_started` when `pipe(2)`, `fcntl(2)`, `fork(2)` or
@@ -267,7 +274,8 @@ fn std_dir(strbuf.str_buf mut* out) void {
 
 The target-specific `std.libc` module supplies C extern declarations and fixed fort wrappers.
 It maps C types per D9.8: `int` is `i32`, `size_t` is `u64`, `ssize_t` and `off_t` are `i64`.
-`mode_t` is `u32` on Linux and `u16` on Mac, and crosses as `u32` on both. `char*` is `char*`.
+`mode_t` is `u32` on Linux and `u16` on Mac. The parameters of `mkdir` and `chmod` cross as `u32`
+on both targets, and `umask` and `mkfifo` give each target its own type. `char*` is `char*`.
 A buffer C fixes as bytes is `u8*` or `u8 mut*`. A buffer of no fixed
 type is `void*` or `void mut*` (1.4). C extern names are unmangled (D9.7). `open` is
 variadic in C, so both targets declare `open` with `...` (D9.8). Apple arm64 then places its
@@ -360,9 +368,9 @@ extern fn closedir(void mut* own dir) i32;
 u64 PATH_MAX = 4096;                         // 1024 in std/darwin/libc.ft
 
 // <string.h>, <stdlib.h>, <unistd.h>, <sys/stat.h>, <sys/wait.h>: what the functions of this
-// library that the compiler calls use, and what its tests call. `mode_t` crosses as u32 on both
-// targets: one signature serves both roots. ERANGE, F_SETFD and FD_CLOEXEC have one value on
-// both targets.
+// library that the compiler and its tests call use. The `mode_t` of `mkdir` and `chmod` crosses
+// as u32 on both targets: one signature serves both roots. ERANGE, F_SETFD and FD_CLOEXEC have
+// one value on both targets.
 i32 EEXIST = 17;
 i32 R_OK = 4;
 i32 ERANGE = 34;
@@ -390,16 +398,18 @@ extern fn execvp(char* file, void* argv) i32;
 extern fn waitpid(i32 pid, i32 mut* status, i32 options) i32;
 extern fn _exit(i32 status) noreturn;
 extern fn raise(i32 sig) i32;
+extern fn umask(u32 mask) u32;               // u16 in std/darwin/libc.ft
+extern fn mkfifo(char* path, u32 mode) i32;  // u16 mode in std/darwin/libc.ft
 ```
 
-A C library function is declared here and nowhere else (since 2026-09-25). The compiler calls
-none of them (D9.8): it calls the functions of `std.os`, `std.io`, `std.sys`, `std.str` and
-`std.mem` that take spans and strings (2.1, 2.3, 2.4, 2.5, 2.14), and those functions call
-`realpath`, `access`, `getcwd`, `strerror`, `mkdtemp`, `mkdir`, `unlink`, `unlinkat`, `rmdir`,
-`rename`, `readlink`, `opendir`, `fdopendir`, `readdir`, `closedir`, `dup`, `getpid`, `raise`,
-`setenv`, `fork`, `execvp`, `waitpid`, `pipe`, `fcntl`, `_exit`, `strtod`, `strtof`,
-`snprintf` and `calloc`. The `test/fort` suites call some of these declarations directly, and
-also `chmod`, `symlink`, `dup2` and `unsetenv`.
+A C library function is declared here and nowhere else (since 2026-09-25). The compiler and the
+`test/fort` suites call none of them (D9.8): they call the functions of `std.os`, `std.io`,
+`std.sys`, `std.str` and `std.mem` that take spans and strings (2.1, 2.3, 2.4, 2.5, 2.14), and
+those functions call `realpath`, `access`, `getcwd`, `strerror`, `mkdtemp`, `mkdir`, `chmod`,
+`symlink`, `mkfifo`, `umask`, `unlink`, `unlinkat`, `rmdir`, `rename`, `readlink`, `opendir`,
+`fdopendir`, `readdir`, `closedir`, `dup`, `dup2`, `getpid`, `raise`, `setenv`, `unsetenv`,
+`fork`, `execvp`, `waitpid`, `pipe`, `fcntl`, `_exit`, `strtod`, `strtof`, `snprintf` and
+`calloc`. `test/fort/support/heap.ft` is the one suite module that declares and calls C itself.
 `_NSGetExecutablePath` stays in the Mac `std.os`: it is dyld's, not the C library's.
 
 Semantics are those of the C functions. Each buffer parameter says what C means by it (1.4):
@@ -415,7 +425,8 @@ the `own` is erased at the boundary and states C's convention, so the pair is in
 with `new` and `del` (D10.3) and exists for storage that fort code gives to C.
 `calloc` returns zeroed storage for `n` items of `size` bytes, or null, and is what `std.rt`
 allocates with, since `new` promises zeroed memory (D10.2, `toolchain.md` 5.1); `isatty` answers
-D11.5's question about a descriptor and is asked once per buffer (`toolchain.md` 5.3).
+D11.5's question about a descriptor and is asked once per buffer, and once more at the first
+output after `io.close` or `io.dup2` resets the buffer (`toolchain.md` 5.3).
 `__errno_location` returns `i32 mut*` because C returns `int*`, whose target is mutable: `std.rt`
 writes errno back around that `isatty` (`toolchain.md` 5.3), and a caller that only reads it drops
 the `mut` on the way (D5.4), which is what `sys.errno()` does. Both are
@@ -533,6 +544,8 @@ fn read_file_bytes(string path, u8 mut@ own mut* out) bool
 fn write_file(string path, u8@ data) bool
 fn is_terminal(i32 fd) bool
 fn pipe(i32 mut* read_end, i32 mut* write_end) bool
+fn dup(i32 fd) i32
+fn dup2(i32 old_fd, i32 new_fd) i32
 ```
 
 - `open_read`: opens `path` with `O_RDONLY`. Returns the descriptor, or `-1` with the reason in
@@ -544,9 +557,10 @@ fn pipe(i32 mut* read_end, i32 mut* write_end) bool
 - `open`: opens `path` with the `open(2)` flags `flags`, for example
   `libc.O_RDONLY | libc.O_DIRECTORY`. `mode` gives the permission bits, less the umask, of a file
   that `O_CREAT` makes, and the other flags ignore it. Same result and ownership as `open_read`.
-- `close`: flushes the runtime's buffer for `fd` if one exists (D11.5, via `rt.flush`),
-  then calls `close(2)`. Returns `true` when `close(2)` returned 0. The descriptor is invalid
-  afterwards in either case. Ownership: none in the types; `close` consumes `fd`.
+- `close`: flushes the runtime's buffer for `fd` if one exists and resets it (D11.5, via
+  `rt.reset_buffer`), then calls `close(2)`. A file that a later open gives the same number gets
+  the buffer state of its own type. Returns `true` when `close(2)` returned 0. The descriptor is
+  invalid afterwards in either case. Ownership: none in the types; `close` consumes `fd`.
 - `flush`: flushes the runtime's buffer for `fd` if one exists and does nothing otherwise.
   Ownership: none.
 - `read`: one `read(2)` into `buf`. Returns the number of bytes read (at most `buf.len`), `0` at
@@ -586,6 +600,21 @@ fn pipe(i32 mut* read_end, i32 mut* write_end) bool
   of its write end to `*write_end`, and returns `true`. Returns `false` with the errno of `pipe`,
   for example `EMFILE` when the process has no free descriptor, and changes neither. Ownership:
   none in the types; the caller closes both descriptors.
+- `dup`: gives a new descriptor of the file that `fd` names with `dup(2)`, the lowest descriptor
+  that is free. The two descriptors share the position and the status flags of the file. Returns
+  `-1` with the errno of `dup`: `EBADF` when `fd` is not open, `EMFILE` when no descriptor is
+  free. Ownership: none in the types; the caller closes the new descriptor.
+- `dup2`: makes `new_fd` name the file that `old_fd` names with `dup2(2)` and returns `new_fd`.
+  It first flushes the runtime buffers of `old_fd` and of `new_fd`: the bytes that the print
+  family wrote to `old_fd` before come before the bytes written to `new_fd` after, and the bytes
+  of `new_fd` go to the file that it named before, which `dup2` closes. Then the buffer of
+  `new_fd` asks `isatty` again with `rt.reset_buffer` (3), so it is line-buffered for a terminal
+  and not for another file (D11.5). `dup2` flushes `old_fd` before `new_fd`, so when both name
+  one file, the bytes of `old_fd` come first, whatever order the program wrote them in: `dup2`
+  keeps no order between two buffers of one file, and a caller that needs one calls `io.flush`
+  between the writes. When `new_fd` is `old_fd` and is open, nothing changes.
+  Returns `-1` with the errno of `dup2`: `EBADF` when `old_fd` is not open or `new_fd` is
+  negative. Ownership: none in the types.
 
 ```fort
 import std.io;
@@ -1312,9 +1341,13 @@ fn serve_one(u16 port) bool {
 ### 2.14 `std.os`
 
 The per-target facts of the standard library (D13.2). Each target has its own source, and both
-sources declare the same names, but for one private name each: `PROC_SELF_EXE` on Linux and
-`_NSGetExecutablePath` on Mac. The ctest `std_os_shared` holds the names, the text that both
-sources share, and each item above the shared part whose text is not per target.
+sources declare the same names, but for one name of each source that the other source does not
+declare: `PROC_SELF_EXE` on Linux and `_NSGetExecutablePath` on Mac. Each name is exported, as
+each module-level name is (D9.6). The ctest `std_os_shared` holds five things: the names, the
+text that both sources share, the text of each item above the shared part with the comment lines
+directly above it, but for the items whose text is per target, the imports, and that each line
+above the shared part is a blank line, a comment, an import or a line of an item, so a `$if`
+block there is an error.
 `TARGET` is the target triple of the standard root. A compiler
 built with that root stores it as its built target (D14.1). `exe_path` gives the path of the
 running binary: Linux reads the symbolic link `/proc/self/exe` with `libc.readlink`. Mac calls
@@ -1335,10 +1368,17 @@ fn real_path(string path, strbuf.str_buf mut* out) bool;
 fn open_nonblocking(string path) i32;
 fn file_mode(i32 fd, u32 mut* mode) bool;
 fn path_mode(string path, u32 mut* mode) bool;
+fn make_fifo(string path, u32 mode) bool;
+fn set_umask(u32 mask) u32;
 
+u32 PERMISSION_BITS = 0o7777;
+u32 SET_ID_BITS = 0o6000;
+u32 UMASK_BITS = 0o777;
 fn error_text(i32 code, strbuf.str_buf mut* out) void;
 fn can_access(string path, i32 mode) bool;
 fn make_dir(string path, u32 mode) bool;
+fn set_mode(string path, u32 mode) bool;
+fn make_symlink(string target, string link_path) bool;
 fn remove_file(string path) bool;
 fn remove_dir(string path) bool;
 fn remove_at(i32 dir_fd, string name, bool directory) bool;
@@ -1374,6 +1414,17 @@ Darwin arm64. `path_mode` writes the same bits of the file that `path` names, af
 symbolic link, and returns true; it returns false with errno set when `stat(2)` fails. It opens
 nothing, so a FIFO that has no writer and a file that the process cannot read give their mode.
 `std.os` declares `stat` for the reason of `fstat`, with the same buffer.
+`make_fifo` makes a FIFO at `path` with `mkfifo(3)` and the permission bits `mode`, less the
+umask; an entry at `path` gives `EEXIST`. A `mode` with a bit outside `PERMISSION_BITS`, or with
+a bit of `SET_ID_BITS` (`S_ISUID` and `S_ISGID`), makes nothing and gives `EINVAL` on both
+targets: the two C libraries read a type bit in different ways, and the Darwin kernel refuses
+`S_ISGID` with `EPERM` in a directory whose group is no group of the process. After a success
+errno stays as it was. `set_umask` sets the file mode creation mask of the process to the bits
+of `mask` in `UMASK_BITS` with `umask(2)` and returns the bits in `UMASK_BITS` of the mask that
+was there before; it does not fail and does not change errno. Linux keeps only these bits of a
+mask, and Darwin keeps the bits `0o7777`, also of a mask that the parent process set, so
+`set_umask` drops the others on both targets. The two functions are per target, because
+`mode_t` is a `u32` on Linux and a `u16` on Mac (D9.8).
 
 The functions of the second group are the same on both targets. Each one that takes a path
 copies it into a NUL-terminated buffer with `str.to_cstr`, and frees it before it returns. Each
@@ -1388,11 +1439,18 @@ it returns. errno stays as it was: the Darwin `strerror` sets `EINVAL` for an un
 `error_text` puts the old value back, as glibc keeps it.
 `can_access` asks `access(2)` whether the process can reach `path` for `mode`, such
 as `libc.R_OK`. `make_dir` makes a directory with `mkdir(2)` and the permission bits `mode`,
-less the umask; an entry at `path` gives `EEXIST`. `remove_file` removes an entry that is no
-directory with `unlink(2)`, and a symbolic link goes, not its target. `remove_dir` removes an
-empty directory with `rmdir(2)`. `remove_at` removes the entry `name` of the directory that
-`dir_fd` names with `unlinkat(2)`: an empty directory when `directory` is true, and else an entry
-that is no directory. `rename` gives a file a new name with `rename(2)` (2.2).
+less the umask; an entry at `path` gives `EEXIST`. `set_mode` gives the file `path`, after each
+symbolic link, the permission bits `mode` with `chmod(2)`; the bits of `mode` outside
+`PERMISSION_BITS` do not count. A `mode` with a bit of `SET_ID_BITS` changes nothing and gives
+`EINVAL` on both targets: the Darwin `chmod` clears `S_ISGID` for a file whose group is no group
+of the process and leaves `EPERM` in errno after a success, because it tries again without
+`S_ISGID` after an `EPERM`. Without these bits, a success keeps errno. `make_symlink` makes a
+symbolic link at `link_path` whose target is the text `target` with `symlink(2)`; no file need
+stand at `target`, and an entry at `link_path` gives `EEXIST`. `remove_file` removes an entry that
+is no directory with `unlink(2)`, and a symbolic link goes, not its target. `remove_dir` removes an
+empty directory with `rmdir(2)`. `remove_at` removes the entry `name` of the directory that `dir_fd`
+names with `unlinkat(2)`: an empty directory when `directory` is true, and else an entry that is no
+directory. `rename` gives a file a new name with `rename(2)` (2.2).
 `read_link` appends the target of the symbolic link `path` to `out`; a path that is no link
 gives `EINVAL`. `current_dir` appends the absolute path of the working directory with
 `getcwd(3)`; a working directory that was removed gives `ENOENT`. Both read into a buffer of 256
@@ -1409,8 +1467,9 @@ reads the name there with `str.from_cbuf` (2.2, D9.8); a record whose size does 
 stream. `list_dir_fd` does the same for the directory that the open descriptor `dir_fd` names: it
 reads through a duplicate from `dup(2)` and `fdopendir(3)`, so `dir_fd` stays open, and a
 symbolic link that replaces the directory at its path does not change what it reads. The
-duplicate shares the position of `dir_fd`, so `list_dir_fd` moves it to the first entry with
-`lseek(2)` before the read, and a second call gives each entry again. It reads the type of
+duplicate shares the position of `dir_fd`, so `list_dir_fd` moves `dir_fd` to the first entry
+with `lseek(2)` before the `dup`, and a second call gives each entry again. A descriptor whose
+position does not move gives the errno of `lseek` before the `dup`. It reads the type of
 `dir_fd` with `fstat(2)` first: a descriptor of a file of another type gives `ENOTDIR`, and its
 position does not change.
 `next_entry` reads the entry at `*at` of such a list into `*entry`, moves `*at` to the next
@@ -1470,12 +1529,15 @@ process start. `std.rt` is a library module like any other (D13.1, 2.11) and thi
 what the rest of the library calls of it. The library uses the builtins `new`, `del`, `move`,
 `panic`, `assert` and the print family as any program does (D12); the runtime calls behind them are
 emitted by the compiler and never named in library source. Beyond that, `sys` and `io` import
-`std.rt` and call four of its functions, whose signatures `toolchain.md` 5.1 fixes:
+`std.rt` and call five of its functions. `toolchain.md` 5.1 fixes the signatures of the four
+entry points among them; `reset_buffer` is no entry point, because the compiler emits no call of
+it:
 
 ```fort
 fn args() string@;
 fn flush(i32 fd) void;
 fn flush_all() void;
+fn reset_buffer(i32 fd) void;
 fn exit(i32 status) noreturn;
 ```
 
@@ -1483,7 +1545,10 @@ fn exit(i32 status) noreturn;
   span `main` receives, so `sys.args()` and `main`'s parameter are equal span for span. The
   result is a view (D17.3): the runtime keeps the storage, and the span carries no `own`.
 - `flush`: writes out the runtime's buffer for one descriptor, if it has one, and is a
-  no-op otherwise. `io.close` and `io.flush` call it, as D11.5 specifies.
+  no-op otherwise. `io.flush` and `io.dup2` call it, as D11.5 specifies.
+- `reset_buffer`: writes out the runtime's buffer for one descriptor and makes it ask `isatty`
+  again at the next output, so it fits the file that the descriptor names then (D11.5). `io.close`
+  calls it before `close(2)`, and `io.dup2` calls it for its new descriptor.
 - `flush_all`: writes out every runtime buffer. The library does not call it; it is
   there for programs that write through `libc.write` after printing (2.2), and the `main` the
   compiler emits calls it at exit (D11.6).

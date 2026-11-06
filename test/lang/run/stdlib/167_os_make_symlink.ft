@@ -1,0 +1,57 @@
+//! run
+//! stdout:
+//| make_symlink to a missing target: true, read_link: none
+//| the link names no file: false
+//| make_symlink to a file: true, the text reads through it: data
+//| make_symlink over an entry: false EEXIST: true, the link keeps its target: none
+//| make_symlink into a missing directory: false ENOENT: true
+//| remove_file removes the link: true, the target stays: true
+//| a NUL ends each path: true target
+import std.io;
+import std.libc;
+import std.os;
+import std.strbuf;
+import std.sys;
+
+// os.make_symlink makes a symbolic link with symlink(2) (stdlib.md 2.14). The target is text, and
+// no file need stand there. A link over an entry gives EEXIST and leaves the entry as it was, and
+// a link in a missing directory gives ENOENT. remove_file removes a link and not its target. A
+// NUL ends the target and the path of the link.
+
+// The target of the link `path`, or "?" when it is no link.
+fn target_of(string path, strbuf.str_buf mut* b) string {
+    strbuf.clear(b);
+    if (!os.read_link(path, b)) {
+        strbuf.append(b, "?");
+    }
+    return strbuf.view(b);
+}
+
+fn main() i32 {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    os.make_dir("t-link", 0o700);
+    bool dangling = os.make_symlink("none", "t-link/dangling");
+    println("make_symlink to a missing target: ", dangling, ", read_link: ",
+            target_of("t-link/dangling", &b));
+    println("the link names no file: ", os.can_access("t-link/dangling", 0));
+    io.write_file("t-link/data.txt", cast("data", u8@));
+    bool made = os.make_symlink("data.txt", "t-link/to-data");
+    strbuf.clear(&b);
+    io.read_file("t-link/to-data", &b);
+    println("make_symlink to a file: ", made, ", the text reads through it: ", strbuf.view(&b));
+    sys.set_errno(0);
+    bool again = os.make_symlink("data.txt", "t-link/dangling");
+    bool exists = sys.errno() == libc.EEXIST;
+    println("make_symlink over an entry: ", again, " EEXIST: ", exists,
+            ", the link keeps its target: ", target_of("t-link/dangling", &b));
+    println("make_symlink into a missing directory: ",
+            os.make_symlink("data.txt", "t-none/link"), " ENOENT: ",
+            sys.errno() == libc.ENOENT);
+    bool removed = os.remove_file("t-link/to-data");
+    println("remove_file removes the link: ", removed, ", the target stays: ",
+            os.can_access("t-link/data.txt", 0));
+    bool cut = os.make_symlink("target\0junk", "t-link/cut\0junk");
+    println("a NUL ends each path: ", cut, " ", target_of("t-link/cut", &b));
+    return 0;
+}

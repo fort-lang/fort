@@ -1,0 +1,87 @@
+//! run
+//! stdout:
+//| set_mode 600: true 600
+//| set_mode 444: true 444
+//| set_mode of a directory 500: true 500
+//| set_mode through a link: true, the target gets 640: true, the link stays a link: true
+//| bits outside PERMISSION_BITS do not count: true 644
+//| set_mode of a missing file: false ENOENT: true
+//| set_mode under a file: false ENOTDIR: true
+//| a NUL ends the path: true 600
+//| set_mode with S_ISGID: false EINVAL: true, the mode stays: true
+//| set_mode with S_ISUID: false EINVAL: true, the mode stays: true
+//| errno stays after a success: true
+import std.io;
+import std.libc;
+import std.os;
+import std.strbuf;
+import std.sys;
+
+// os.set_mode gives a file the permission bits of chmod(2) (stdlib.md 2.14). It follows a
+// symbolic link to its target. The bits of the mode outside PERMISSION_BITS do not count, on both
+// targets. A missing file gives ENOENT, a path through a file gives ENOTDIR, and a NUL ends the
+// path. S_ISUID and S_ISGID give EINVAL on both targets and change nothing, and a success
+// keeps errno. The test prints the permission bits in octal.
+
+// The permission bits of `path` in octal, or "none".
+fn bits(string path, strbuf.str_buf mut* b) string {
+    strbuf.clear(b);
+    u32 mut mode = 0;
+    if (!os.path_mode(path, &mode)) {
+        strbuf.append(b, "none");
+        return strbuf.view(b);
+    }
+    u32 p = mode & os.PERMISSION_BITS;
+    strbuf.append_i64(b, cast((p >> 6) & 7, i64));
+    strbuf.append_i64(b, cast((p >> 3) & 7, i64));
+    strbuf.append_i64(b, cast(p & 7, i64));
+    return strbuf.view(b);
+}
+
+fn main() i32 {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    os.make_dir("t-chmod", 0o700);
+    io.write_file("t-chmod/a", cast("a", u8@));
+    bool six = os.set_mode("t-chmod/a", 0o600);
+    println("set_mode 600: ", six, " ", bits("t-chmod/a", &b));
+    bool four = os.set_mode("t-chmod/a", 0o444);
+    println("set_mode 444: ", four, " ", bits("t-chmod/a", &b));
+    os.make_dir("t-chmod/d", 0o700);
+    bool dir = os.set_mode("t-chmod/d", 0o500);
+    println("set_mode of a directory 500: ", dir, " ", bits("t-chmod/d", &b));
+    os.set_mode("t-chmod/d", 0o700);
+    os.make_symlink("a", "t-chmod/link");
+    bool linked = os.set_mode("t-chmod/link", 0o640);
+    strbuf.str_buf mut target = strbuf.create();
+    defer del(target.data);
+    println("set_mode through a link: ", linked, ", the target gets 640: ",
+            bits("t-chmod/a", &b) == "640", ", the link stays a link: ",
+            os.read_link("t-chmod/link", &target));
+    bool high = os.set_mode("t-chmod/a", 0o170644);
+    println("bits outside PERMISSION_BITS do not count: ", high, " ", bits("t-chmod/a", &b));
+    sys.set_errno(0);
+    println("set_mode of a missing file: ", os.set_mode("t-chmod/none", 0o600), " ENOENT: ",
+            sys.errno() == libc.ENOENT);
+    println("set_mode under a file: ", os.set_mode("t-chmod/a/x", 0o600), " ENOTDIR: ",
+            sys.errno() == libc.ENOTDIR);
+    bool cut = os.set_mode("t-chmod/a\0junk", 0o600);
+    println("a NUL ends the path: ", cut, " ", bits("t-chmod/a", &b));
+    u32 mut mode = 0;
+    sys.set_errno(0);
+    bool gid = os.set_mode("t-chmod/a", 0o2644);
+    bool gid_invalid = sys.errno() == libc.EINVAL;
+    os.path_mode("t-chmod/a", &mode);
+    println("set_mode with S_ISGID: ", gid, " EINVAL: ", gid_invalid, ", the mode stays: ",
+            (mode & os.PERMISSION_BITS) == 0o600);
+    sys.set_errno(0);
+    bool uid = os.set_mode("t-chmod/a", 0o4700);
+    bool uid_invalid = sys.errno() == libc.EINVAL;
+    os.path_mode("t-chmod/a", &mode);
+    println("set_mode with S_ISUID: ", uid, " EINVAL: ", uid_invalid, ", the mode stays: ",
+            (mode & os.PERMISSION_BITS) == 0o600);
+    sys.set_errno(77);
+    os.set_mode("t-chmod/a", 0o640);
+    println("errno stays after a success: ", sys.errno() == 77);
+    return 0;
+}

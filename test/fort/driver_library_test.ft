@@ -14,6 +14,7 @@ import fort.driver;
 import library_env;
 import std.io;
 import std.libc;
+import std.os;
 import std.str;
 import std.strbuf;
 import std.sys;
@@ -58,9 +59,7 @@ fn out_is_empty() bool {
 }
 
 fn make_dir(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(libc.mkdir(c_path.ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    assert(os.make_dir(path, 0o700) || sys.errno() == libc.EEXIST);
 }
 
 fn write_file(string path, string text) void {
@@ -422,11 +421,7 @@ fn a_nested_module_takes_the_path_of_its_directories() void {
     write_file("nested/digest/sum.ft", "import std.rt;\ni32 S = rt.B;\n");
     write_file("nested/my-dir/x.ft", "i32 X = 1;\n");
     write_file("nested/notes.txt", "text\n");
-    char mut@ own target = str.to_cstr("rt.ft");
-    defer del(target);
-    char mut@ own path = str.to_cstr("nested/copy.ft");
-    defer del(path);
-    assert(libc.symlink(target.ptr, path.ptr) == 0);
+    assert(os.make_symlink("rt.ft", "nested/copy.ft"));
     string[5] args = {"fort", "--lib", "std", "nested/", "--emit-interface"};
     assert(run(args[..]) == EXIT_OK);
     string own got = capture.text("out.txt");
@@ -453,12 +448,10 @@ fn an_output_option_is_a_usage_error_and_the_std_dir_is_unused() void {
 fn a_root_without_read_permission_is_exit_two() void {
     make_dir("closed");
     write_file("closed/rt.ft", "i32 B = 1;\n");
-    char mut@ own c_path = str.to_cstr("closed");
-    defer del(c_path);
-    assert(libc.chmod(c_path.ptr, 0) == 0);
+    assert(os.set_mode("closed", 0));
     string[5] args = {"fort", "--lib", "std", "closed", "--emit-interface"};
     i32 status = run(args[..]);
-    assert(libc.chmod(c_path.ptr, 0o700) == 0);
+    assert(os.set_mode("closed", 0o700));
     string own got = capture.text("err.txt");
     defer del(got);
     if (status == EXIT_OK) {

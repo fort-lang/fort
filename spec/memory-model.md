@@ -972,10 +972,13 @@ and `fprint(1, ...)` shares the stdout buffer with `print`. An `extern` write to
 bypasses the buffers, so it can overtake buffered output unless the program flushes first.
 Buffers flush when full, on `io.close` and `io.flush`, at exit, and before any runtime error, so
 output printed before a failure is never lost. A buffer whose descriptor is interactive -- one
-`isatty` accepts, asked once when the runtime creates that buffer -- flushes at every newline as
-well, which is C's rule: the same program shows each `println` as it runs on a terminal and holds
-its output until it exits when it is redirected to a file or a pipe. The runtime exports
-`std.rt.flush(i32 fd)` and `std.rt.flush_all()`; `io.close` and `io.flush` call the former.
+`isatty` accepts, asked once when the runtime creates that buffer and once more at the first output
+after a reset of the buffer -- flushes at every newline as well, which is C's rule: the same program
+shows each `println` as it runs on a terminal and holds its output until it exits when it is
+redirected to a file or a pipe. The runtime exports `std.rt.flush(i32 fd)` and `std.rt.flush_all()`;
+`io.flush` calls the former. `io.close` and `io.dup2` call `std.rt.reset_buffer(i32 fd)`, which
+flushes the buffer and makes it ask `isatty` again at its next output, because the descriptor can
+name a file of another type after the call.
 Program start and exit are the `main` the compiler emits: it asks the runtime to build `args`,
 calls the entry module's `main`, flushes, and returns that result masked to eight bits (D11.6).
 The runtime is `std.rt`, fort like the rest of the library (D13.1).

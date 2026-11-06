@@ -57,6 +57,10 @@ struct enum_member {
 // Slot 0 holds stdout. Other slots use round-robin eviction.
 buffer[BUFFER_COUNT] mut buffers = {};
 bool mut buffers_ready = false;
+
+// reset_buffer sets this for slot 0, and buffer_for asks isatty of stdout again at the next
+// output, because the file of stdout can change after the reset, at an open after a close.
+bool mut stdout_unknown = false;
 u64 mut next_eviction = 1;
 
 // Build one failure line before writing it to stderr.
@@ -160,6 +164,10 @@ fn buffer_for(i32 fd) buffer mut* {
     u64 mut free_slot = 0;
     for (u64 mut i = 0; i < BUFFER_COUNT; i++) {
         if (buffers[i].fd == fd) {
+            if (i == 0 && stdout_unknown) {
+                buffers[0].is_line_buffered = is_interactive(fd);
+                stdout_unknown = false;
+            }
             return &buffers[i];
         }
         if (buffers[i].fd < 0 && free_slot == 0) {
@@ -201,6 +209,25 @@ fn flush(i32 fd) void {
     for (u64 mut i = 0; i < BUFFER_COUNT; i++) {
         if (buffers[i].fd == fd) {
             buffer_flush(&buffers[i]);
+            return;
+        }
+    }
+}
+
+// Flush the buffer of fd, and make its state fit the file that fd names at the next output:
+// io.dup2, or io.close and a new open, can give fd a terminal where it named a regular file, or
+// the other way. Slot 0 stays with stdout and asks isatty again at the next output. Another slot
+// is free again, so the next output to fd assigns a slot and asks isatty then.
+fn reset_buffer(i32 fd) void {
+    buffers_init();
+    for (u64 mut i = 0; i < BUFFER_COUNT; i++) {
+        if (buffers[i].fd == fd) {
+            buffer_flush(&buffers[i]);
+            if (i == 0) {
+                stdout_unknown = true;
+            } else {
+                buffers[i].fd = -1;
+            }
             return;
         }
     }

@@ -272,15 +272,18 @@ fn a_temporary_directory_that_cannot_be_made_reports_its_errno() void {
     i32 mut failure = 0;
     set_env("TMPDIR", "nosuchdirectory");
     string dir = driver.make_temp_dir(&p, &parent, &failure);
-    // The parent is a view of the environment's own storage, which unsetenv
-    // frees on macOS. So the parent is read before the variable goes.
-    assert(parent == "nosuchdirectory");
+    // The parent is a copy in the pool `p`, so it stays the same after the
+    // variable goes.
     unset_env("TMPDIR");
+    assert(parent == "nosuchdirectory");
     assert(dir.len == 0);
     // ENOENT. The value is the system's and is read back through the same
     // call the driver reports with.
     assert(failure != 0);
-    assert(str.from_cstr(libc.strerror(failure)) == "No such file or directory");
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    os.error_text(failure, &text);
+    assert(strbuf.view(&text) == "No such file or directory");
 }
 
 // An empty $TMPDIR names no directory, so it counts as unset.
@@ -379,9 +382,7 @@ fn a_build_writes_its_module_outside_the_working_directory() void {
 fn the_child_receives_the_arguments_cc_argv_built() void {
     write_file("unit.ft", "fn main() i32 {\n    return 0;\n}\n");
     write_file("logger.sh", "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > cc.log\n");
-    char mut@ own path = str.to_cstr("./logger.sh");
-    defer del(path);
-    assert(libc.chmod(path.ptr, 493) == 0);
+    assert(os.set_mode("./logger.sh", 493));
     set_env("TMPDIR", ".");
     string[11] mut whole = {"fort", "--cc", "./logger.sh", "--std-dir", "std", "-lm",
                             "-Xcc", "-static", "-o", "out", "unit.ft"};
@@ -440,10 +441,8 @@ fn count_lines(string text) u64 {
 fn a_cc_that_dies_by_a_signal_is_reported_by_its_signal() void {
     write_file("prog.ft", "fn main() i32 {\n    return 0;\n}\n");
     write_file("killer.sh", "#!/bin/sh\nkill -9 $$\n");
-    char mut@ own path = str.to_cstr("./killer.sh");
-    defer del(path);
     // 0o755: the script has to be executable before it can be a --cc.
-    assert(libc.chmod(path.ptr, 493) == 0);
+    assert(os.set_mode("./killer.sh", 493));
     string[4] mut argv = {"fort", "--cc", "./killer.sh", "prog.ft"};
     assert(run_quiet(argv[0..4]) == driver.EXIT_USAGE);
     assert(said("fort: error: cc failed with signal 9\n"));
@@ -461,17 +460,11 @@ fn a_module_that_cannot_be_written_is_a_toolchain_error() void {
 // ---- the sandbox ---------------------------------------------------------------------
 
 fn set_env(string name, string value) void {
-    char mut@ own key = str.to_cstr(name);
-    defer del(key);
-    char mut@ own text = str.to_cstr(value);
-    defer del(text);
-    assert(libc.setenv(key.ptr, text.ptr, 1) == 0);
+    assert(sys.set_env(name, value));
 }
 
 fn unset_env(string name) void {
-    char mut@ own key = str.to_cstr(name);
-    defer del(key);
-    assert(libc.unsetenv(key.ptr) == 0);
+    assert(sys.unset_env(name));
 }
 
 fn write_file(string path, string text) void {
@@ -484,7 +477,7 @@ fn write_file(string path, string text) void {
 // is `std` of this test's own working directory. What the driver needs there
 // is a file that parses, not a runtime: nothing these tests build is ever run.
 fn write_runtime() void {
-    assert(libc.mkdir("std".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    assert(os.make_dir("std", 0o700) || sys.errno() == libc.EEXIST);
     write_file("std/rt.ft", "// The empty runtime of a driver test.\n");
 }
 

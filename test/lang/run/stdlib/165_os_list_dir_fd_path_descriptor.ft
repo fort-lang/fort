@@ -1,15 +1,21 @@
 //! run
 //! stdout:
-//| list_dir_fd of an O_PATH descriptor: false, EBADF: true, the buffer keeps what it held: true
+//| io.open of an O_PATH descriptor: true
+//| list_dir_fd of an O_PATH descriptor at the limit: false, EBADF: true, the buffer keeps what it held: true
+//| list_dir_fd of an O_PATH descriptor: false, EBADF: true
+//| io.open to read: true
 //| a descriptor opened to read still lists: true 1
 //! stdout-macos:
 //| Darwin has no O_PATH
+//| io.open to read: true
 //| a descriptor opened to read still lists: true 1
-// os.list_dir_fd moves its duplicate to the first entry with lseek(2) (stdlib.md 2.14). On Linux
-// an O_PATH descriptor of a directory passes the type check of fstat(2) and the dup(2), and
-// lseek refuses it with EBADF, so list_dir_fd gives false, closes the duplicate and leaves the
-// buffer as it was. Darwin has no O_PATH, so there the test lists through a descriptor opened
-// to read alone.
+// os.list_dir_fd moves the descriptor to the first entry with lseek(2) before it makes its
+// duplicate with dup(2) (stdlib.md 2.14). On Linux an O_PATH descriptor of a directory passes
+// the type check of fstat(2), and lseek refuses it with EBADF, so list_dir_fd gives false and
+// leaves the buffer as it was. With the soft limit of descriptors at the count of open ones,
+// a dup(2) would give EMFILE, so EBADF there shows that the lseek failure ends the call before
+// the dup. Without the limit, the result is the same. Darwin has no O_PATH, so there the test
+// lists through a descriptor opened to read alone.
 import std.io;
 import std.libc;
 import std.os;
@@ -21,6 +27,19 @@ i32 EBADF = 9;
 
 // O_PATH of open(2), Linux x86-64: a descriptor that names a file and reads nothing.
 i32 O_PATH = 0o10000000;
+
+// getrlimit(2) and setrlimit(2), which std.libc does not declare, and RLIMIT_NOFILE.
+struct rlimit {
+    u64 cur;
+    u64 max;
+}
+extern fn getrlimit(i32 resource, rlimit mut* limit) i32;
+extern fn setrlimit(i32 resource, rlimit* limit) i32;
+$if ($cfg(target_os) == "linux") {
+    i32 RLIMIT_NOFILE = 7;
+} else {
+    i32 RLIMIT_NOFILE = 8;
+}
 
 // The count of the entries of `listed`.
 fn count(string listed) u64 {
@@ -40,16 +59,29 @@ fn main() i32 {
     defer del(b.data);
     $if ($cfg(target_os) == "linux") {
         i32 fd = io.open("t-path", O_PATH | libc.O_DIRECTORY, 0);
+        println("io.open of an O_PATH descriptor: ", fd >= 0);
+        io.flush(io.STDOUT);
+        rlimit mut limit = {};
+        getrlimit(RLIMIT_NOFILE, &limit);
+        u64 saved = limit.cur;
+        limit.cur = cast(fd + 1, u64);
+        setrlimit(RLIMIT_NOFILE, &limit);
         strbuf.append(&b, "kept");
+        bool at_limit = os.list_dir_fd(fd, &b);
+        bool bad = sys.errno() == EBADF;
+        limit.cur = saved;
+        setrlimit(RLIMIT_NOFILE, &limit);
+        println("list_dir_fd of an O_PATH descriptor at the limit: ", at_limit, ", EBADF: ", bad,
+                ", the buffer keeps what it held: ", strbuf.view(&b) == "kept");
         bool listed = os.list_dir_fd(fd, &b);
         println("list_dir_fd of an O_PATH descriptor: ", listed, ", EBADF: ",
-                sys.errno() == EBADF, ", the buffer keeps what it held: ",
-                strbuf.view(&b) == "kept");
+                sys.errno() == EBADF);
         io.close(fd);
     } else {
         println("Darwin has no O_PATH");
     }
     i32 dir = io.open("t-path", libc.O_RDONLY | libc.O_DIRECTORY, 0);
+    println("io.open to read: ", dir >= 0);
     strbuf.clear(&b);
     bool read = os.list_dir_fd(dir, &b);
     println("a descriptor opened to read still lists: ", read, " ", count(strbuf.view(&b)));

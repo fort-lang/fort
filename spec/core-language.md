@@ -1497,8 +1497,9 @@ unbuffered; `fprint` and `fprintln` use one buffer per descriptor. An `extern` w
 descriptor bypasses the buffers. Buffers flush when full, at exit and before any runtime error,
 and a buffer whose descriptor is a terminal flushes at every newline as well, so a program run
 interactively shows each `println` as it happens and one redirected to a file or a pipe does not;
-the runtime exports `std.rt.flush(i32 fd)` and `std.rt.flush_all()`, and `io.close` and
-`io.flush` call the former (`memory-model.md` section 7).
+the runtime exports `std.rt.flush(i32 fd)` and `std.rt.flush_all()`, `io.flush` calls the
+former, and `io.close` and `io.dup2` call `std.rt.reset_buffer(i32 fd)`, which flushes the
+buffer and makes it ask `isatty` again at its next output (`memory-model.md` section 7).
 
 ```fort
 println("x = ", 42, ", ok = ", true);       // x = 42, ok = true

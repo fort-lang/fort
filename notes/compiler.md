@@ -1430,8 +1430,9 @@ came here.
   Mac `std.net` uses `libc.errno_slot()` for its two errno writes.
   Linux `std/linux/net.ft` and `std/linux/libc.ft` keep their Linux layout and calls.
 
-- **`src/fort` calls C only through functions of `std` that take spans and strings** (D9.8,
-  `stdlib.md` 2.1). It declares no extern, calls no extern, and names no boundary function:
+- **`src/fort` and the suites of `test/fort` call C only through functions of `std` that take
+  spans and strings** (D9.8, `stdlib.md` 2.1). `src/fort` declares no extern, calls no extern, and
+  names no boundary function:
   `os.error_text` appends a copy of the text of an errno value, `os.list_dir` and
   `os.next_entry` read a directory, `sys.run` runs `--cc` and the archiver, and `str.parse_f64`,
   `str.format_f64` and `mem.can_allocate` serve the interpreter of `--fir-run`. A function of
@@ -1442,6 +1443,11 @@ came here.
   new C call of the compiler goes into such a function of `std`, with a run test in
   `test/lang/run/stdlib`.
   `git grep -nE 'libc\.[a-z_0-9]+\(|str\.from_cstr\(|^\s*extern fn' -- src/fort` finds nothing.
+  A suite of `test/fort` makes its files with `os.set_mode`, `os.make_symlink`, `os.make_fifo`
+  and `os.set_umask`, moves a descriptor with `io.dup` and `io.dup2`, and removes a variable with
+  `sys.unset_env`. `test/fort/support/heap.ft` is the one module there that declares and calls C,
+  for the heap counters of glibc and Darwin. A suite text that a test compiles is a program and
+  not a suite module, so it can declare an extern.
 
 - **A system call added to a print path must give errno back.** `sys.errno()` hands a program the
   errno of its own last library call (`stdlib.md` 2.4), and the print family runs between the two:
