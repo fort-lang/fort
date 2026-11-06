@@ -82,7 +82,7 @@ string[55] TYPES = {
 // struct and the enum that the last cases name.
 fn add_cases(library_env.env mut* e) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, "struct point { i32 x; }\nenum mode { off, on }\n");
     u64 mut k = 0;
     while (k < TYPES.len) {
@@ -113,7 +113,7 @@ fn spelled(library_env.env* e, u64 k, strbuf.str_buf mut* out) string {
 // Whether the interface text holds the line of `case_<k>` with the type `TYPES[k]`.
 fn holds_line(string text, u64 k) bool {
     strbuf.str_buf mut line = strbuf.create();
-    defer strbuf.free(&line);
+    defer del(line.data);
     strbuf.append(&line, "\nfn case_");
     strbuf.append_u64(&line, k);
     strbuf.push(&line, '(');
@@ -123,45 +123,42 @@ fn holds_line(string text, u64 k) bool {
 }
 
 fn each_type_is_written_as_the_checker_spells_it() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    add_cases(&e);
-    assert(library_env.emit(&e, "geom", "lib/geom"));
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    add_cases(e);
+    assert(library_env.emit(e, "geom", "lib/geom"));
     u64 mut k = 0;
     while (k < TYPES.len) {
         // the case list is in the checker's spelling
-        if (spelled(&e, k, &b) != TYPES[k]) {
+        if (spelled(e, k, &b) != TYPES[k]) {
             println("case ", k, " spells as ", strbuf.view(&b));
         }
-        assert(spelled(&e, k, &b) == TYPES[k]);
-        if (!holds_line(library_env.text(&e), k)) {
+        assert(spelled(e, k, &b) == TYPES[k]);
+        if (!holds_line(library_env.text(e), k)) {
             println("case ", k, ": ", TYPES[k]);
         }
-        assert(holds_line(library_env.text(&e), k));
+        assert(holds_line(library_env.text(e), k));
         k += 1;
     }
 }
 
 fn a_client_of_the_interface_reads_each_type_back() void {
-    library_env.env mut lib = library_env.env{};
-    library_env.open(&lib);
-    defer library_env.close(&lib);
-    add_cases(&lib);
-    assert(library_env.emit(&lib, "geom", "lib/geom"));
-    library_env.env mut use = library_env.env{};
-    library_env.open(&use);
-    defer library_env.close(&use);
-    library_env.add(&use, "main.ft", "import geom.t;\n");
-    assert(library_env.check_against(&use, "geom", "geom.flib/interface.ft",
-                                     library_env.text(&lib), "main.ft"));
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    library_env.env mut* own lib = library_env.make();
+    defer library_env.drop_made(move(lib));
+    add_cases(lib);
+    assert(library_env.emit(lib, "geom", "lib/geom"));
+    library_env.env mut* own use = library_env.make();
+    defer library_env.drop_made(move(use));
+    library_env.add(use, "main.ft", "import geom.t;\n");
+    assert(library_env.check_against(use, "geom", "geom.flib/interface.ft",
+                                     library_env.text(lib), "main.ft"));
     u64 mut k = 0;
     while (k < TYPES.len) {
-        assert(spelled(&use, k, &b) == TYPES[k]);
+        assert(spelled(use, k, &b) == TYPES[k]);
         k += 1;
     }
 }
@@ -186,25 +183,23 @@ fn a_struct_and_an_enum_of_another_module_take_its_binding() void {
         "struct holder { _0.point[2] points; _0.mode* mode; }",
         "",
     };
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    library_env.add_lines(&e, "lib/geom/a.ft", a[..]);
-    library_env.add_lines(&e, "lib/geom/b.ft", b[..]);
-    assert(library_env.emit(&e, "geom", "lib/geom"));
     strbuf.str_buf mut lines = strbuf.create();
-    defer strbuf.free(&lines);
-    library_env.join(want[0..6], &lines);
+    defer del(lines.data);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.add_lines(e, "lib/geom/a.ft", a[..]);
+    library_env.add_lines(e, "lib/geom/b.ft", b[..]);
+    assert(library_env.emit(e, "geom", "lib/geom"));
+    library_env.join(want[0..6], &lines);
     library_env.unmark(strbuf.view(&lines), &text);
-    assert(library_env.holds(library_env.text(&e), strbuf.view(&text)));
-    library_env.env mut use = library_env.env{};
-    library_env.open(&use);
-    defer library_env.close(&use);
-    library_env.add(&use, "main.ft", "import geom.b;\n");
-    assert(library_env.check_against(&use, "geom", "geom.flib/interface.ft",
-                                     library_env.text(&e), "main.ft"));
+    assert(library_env.holds(library_env.text(e), strbuf.view(&text)));
+    library_env.env mut* own use = library_env.make();
+    defer library_env.drop_made(move(use));
+    library_env.add(use, "main.ft", "import geom.b;\n");
+    assert(library_env.check_against(use, "geom", "geom.flib/interface.ft",
+                                     library_env.text(e), "main.ft"));
 }
 
 fn main() i32 {

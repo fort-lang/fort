@@ -239,7 +239,7 @@ string[63] WANT = {
 // Writes the five modules under `root`.
 fn add_library(library_env.env mut* e, string root) void {
     strbuf.str_buf mut path = strbuf.create();
-    defer strbuf.free(&path);
+    defer del(path.data);
     put(e, root, "color.ft", COLOR[..], &path);
     put(e, root, "geom/rect.ft", GEOM_RECT[..], &path);
     put(e, root, "geom/vec.ft", GEOM_VEC[..], &path);
@@ -257,12 +257,11 @@ fn put(library_env.env mut* e, string root, string rel, string@ lines,
 }
 
 fn the_library_gives_its_whole_interface() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    add_library(&e, "lib/shapes");
-    assert(library_env.emit(&e, "shapes", "lib/shapes"));
-    assert(library_env.same_lines(library_env.text(&e), WANT[..]));
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    add_library(e, "lib/shapes");
+    assert(library_env.emit(e, "shapes", "lib/shapes"));
+    assert(library_env.same_lines(library_env.text(e), WANT[..]));
 }
 
 // The client programs: each imports the library as a program would and uses each module.
@@ -300,32 +299,29 @@ string[12] ERRING_CLIENT = {
 
 // The error lines of `client` against the sources of the library and against its interface.
 fn check_both(string@ client, strbuf.str_buf mut* sources, strbuf.str_buf mut* iface) void {
-    library_env.env mut by_source = library_env.env{};
-    library_env.open(&by_source);
-    defer library_env.close(&by_source);
-    add_library(&by_source, "lib/shapes");
-    library_env.add_lines(&by_source, "main.ft", client);
-    library_env.check_with_sources(&by_source, "lib", "main.ft");
-    library_env.error_lines(&by_source, sources);
-    library_env.env mut lib = library_env.env{};
-    library_env.open(&lib);
-    defer library_env.close(&lib);
-    add_library(&lib, "lib/shapes");
-    assert(library_env.emit(&lib, "shapes", "lib/shapes"));
-    library_env.env mut use = library_env.env{};
-    library_env.open(&use);
-    defer library_env.close(&use);
-    library_env.add_lines(&use, "main.ft", client);
-    library_env.check_against(&use, "shapes", "shapes.flib/interface.ft", library_env.text(&lib),
+    library_env.env mut* own by_source = library_env.make();
+    defer library_env.drop_made(move(by_source));
+    add_library(by_source, "lib/shapes");
+    library_env.add_lines(by_source, "main.ft", client);
+    library_env.check_with_sources(by_source, "lib", "main.ft");
+    library_env.error_lines(by_source, sources);
+    library_env.env mut* own lib = library_env.make();
+    defer library_env.drop_made(move(lib));
+    add_library(lib, "lib/shapes");
+    assert(library_env.emit(lib, "shapes", "lib/shapes"));
+    library_env.env mut* own use = library_env.make();
+    defer library_env.drop_made(move(use));
+    library_env.add_lines(use, "main.ft", client);
+    library_env.check_against(use, "shapes", "shapes.flib/interface.ft", library_env.text(lib),
                               "main.ft");
-    library_env.error_lines(&use, iface);
+    library_env.error_lines(use, iface);
 }
 
 fn the_clients_check_alike_against_the_interface_and_the_sources() void {
     strbuf.str_buf mut sources = strbuf.create();
-    defer strbuf.free(&sources);
+    defer del(sources.data);
     strbuf.str_buf mut iface = strbuf.create();
-    defer strbuf.free(&iface);
+    defer del(iface.data);
     check_both(CLEAN_CLIENT[..], &sources, &iface);
     if (strbuf.view(&sources) != "" || strbuf.view(&iface) != "") {
         print(strbuf.view(&sources));
@@ -345,20 +341,18 @@ fn the_clients_check_alike_against_the_interface_and_the_sources() void {
 }
 
 fn the_interface_of_the_library_is_a_fixed_point() void {
-    library_env.env mut lib = library_env.env{};
-    library_env.open(&lib);
-    defer library_env.close(&lib);
-    add_library(&lib, "lib/shapes");
-    assert(library_env.emit(&lib, "shapes", "lib/shapes"));
-    library_env.env mut use = library_env.env{};
-    library_env.open(&use);
-    defer library_env.close(&use);
+    library_env.env mut* own lib = library_env.make();
+    defer library_env.drop_made(move(lib));
+    add_library(lib, "lib/shapes");
+    assert(library_env.emit(lib, "shapes", "lib/shapes"));
+    library_env.env mut* own use = library_env.make();
+    defer library_env.drop_made(move(use));
     string[5] every = {"import shapes.color;", "import shapes.geom.rect;",
                        "import shapes.geom.vec;", "import shapes.registry;", "import shapes.text;"};
-    library_env.add_lines(&use, "main.ft", every[..]);
-    assert(library_env.check_against(&use, "shapes", "shapes.flib/interface.ft",
-                                     library_env.text(&lib), "main.ft"));
-    assert(library_env.rewrites_alike(&use, library_env.text(&lib)));
+    library_env.add_lines(use, "main.ft", every[..]);
+    assert(library_env.check_against(use, "shapes", "shapes.flib/interface.ft",
+                                     library_env.text(lib), "main.ft"));
+    assert(library_env.rewrites_alike(use, library_env.text(lib)));
 }
 
 fn main() i32 {

@@ -34,22 +34,21 @@ import fort.types;
 // `lines`, and returns whether its section text, the header excluded, is `want`. A difference
 // prints both texts.
 fn one_module_gives(string rel, string@ lines, string@ want) bool {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    library_env.add_lines(&e, rel, lines);
-    if (!library_env.emit(&e, "geom", "lib/geom")) {
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.add_lines(e, rel, lines);
+    if (!library_env.emit(e, "geom", "lib/geom")) {
         println("the build failed");
         return false;
     }
-    return library_env.same_lines(library_env.sections(&e), want);
+    return library_env.same_lines(library_env.sections(e), want);
 }
 
 // ---- the example of module-system.md 10.3 ----------------------------------------
 
 fn add_example(library_env.env mut* e, string root) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string[6] math = {
         "fn max_f64(f64 a, f64 b) f64 {",
         "    if (a > b) {",
@@ -104,12 +103,11 @@ string[13] EXAMPLE = {
 };
 
 fn the_example_of_the_specification_gives_its_interface() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    add_example(&e, "lib/geom");
-    assert(library_env.emit(&e, "geom", "lib/geom"));
-    assert(library_env.same_lines(library_env.text(&e), EXAMPLE[..]));
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    add_example(e, "lib/geom");
+    assert(library_env.emit(e, "geom", "lib/geom"));
+    assert(library_env.same_lines(library_env.text(e), EXAMPLE[..]));
 }
 
 // ---- functions and externs -----------------------------------------------------
@@ -207,25 +205,23 @@ fn a_struct_of_the_interface_has_the_layout_of_its_source() void {
         "struct box { u8 flag; pair p; u16[3] pad; pair* next; }",
     };
     string[2] client = {"import geom.shape;", "shape.box B = {};"};
-    library_env.env mut lib = library_env.env{};
-    library_env.open(&lib);
-    defer library_env.close(&lib);
-    library_env.add_lines(&lib, "lib/geom/shape.ft", src[..]);
-    assert(library_env.emit(&lib, "geom", "lib/geom"));
+    library_env.env mut* own lib = library_env.make();
+    defer library_env.drop_made(move(lib));
+    library_env.add_lines(lib, "lib/geom/shape.ft", src[..]);
+    assert(library_env.emit(lib, "geom", "lib/geom"));
     u64 mut source_next = 0;
-    u64 source_size = layout_of(&lib, "geom.shape", "box", "next", &source_next);
+    u64 source_size = layout_of(lib, "geom.shape", "box", "next", &source_next);
     u64 mut source_p = 0;
-    layout_of(&lib, "geom.shape", "box", "p", &source_p);
-    library_env.env mut use = library_env.env{};
-    library_env.open(&use);
-    defer library_env.close(&use);
-    library_env.add_lines(&use, "main.ft", client[..]);
-    assert(library_env.check_against(&use, "geom", "geom.flib/interface.ft",
-                                     library_env.text(&lib), "main.ft"));
+    layout_of(lib, "geom.shape", "box", "p", &source_p);
+    library_env.env mut* own use = library_env.make();
+    defer library_env.drop_made(move(use));
+    library_env.add_lines(use, "main.ft", client[..]);
+    assert(library_env.check_against(use, "geom", "geom.flib/interface.ft",
+                                     library_env.text(lib), "main.ft"));
     u64 mut next = 0;
-    u64 size = layout_of(&use, "geom.shape", "box", "next", &next);
+    u64 size = layout_of(use, "geom.shape", "box", "next", &next);
     u64 mut p = 0;
-    layout_of(&use, "geom.shape", "box", "p", &p);
+    layout_of(use, "geom.shape", "box", "p", &p);
     assert(source_size == 40 && size == source_size);
     assert(source_p == 8 && p == source_p);
     assert(source_next == 32 && next == source_next);
@@ -377,12 +373,11 @@ fn add_selected(library_env.env mut* e) void {
 }
 
 fn only_the_selected_branch_and_imports_remain() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    library_env.config(&e, "target_os", "linux");
-    add_selected(&e);
-    assert(library_env.emit(&e, "geom", "lib/geom"));
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.config(e, "target_os", "linux");
+    add_selected(e);
+    assert(library_env.emit(e, "geom", "lib/geom"));
     string[6] linux = {
         "== module geom.math",
         "i32 PI = 3;",
@@ -391,21 +386,20 @@ fn only_the_selected_branch_and_imports_remain() void {
         "i32 KIND = 1;",
         "fn name() string;",
     };
-    assert(library_env.same_lines(library_env.sections(&e), linux[..]));
+    assert(library_env.same_lines(library_env.sections(e), linux[..]));
 
-    library_env.env mut other = library_env.env{};
-    library_env.open(&other);
-    defer library_env.close(&other);
-    library_env.config(&other, "target_os", "macos");
-    add_selected(&other);
-    assert(library_env.emit(&other, "geom", "lib/geom"));
+    library_env.env mut* own other = library_env.make();
+    defer library_env.drop_made(move(other));
+    library_env.config(other, "target_os", "macos");
+    add_selected(other);
+    assert(library_env.emit(other, "geom", "lib/geom"));
     string[4] macos = {
         "== module geom.math",
         "i32 PI = 3;",
         "== module geom.os",
         "i32 KIND = 2;",
     };
-    assert(library_env.same_lines(library_env.sections(&other), macos[..]));
+    assert(library_env.same_lines(library_env.sections(other), macos[..]));
 }
 
 // The module of a chain: `else $if`, a nested `$if`, and an extern and a struct in a branch.
@@ -428,14 +422,13 @@ string[14] CHAIN = {
 
 // The section text of CHAIN under `mode` and `extra`.
 fn chain_gives(string mode, string extra, string@ want) bool {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    library_env.config(&e, "mode", mode);
-    library_env.config(&e, "extra", extra);
-    library_env.add_lines(&e, "lib/geom/chain.ft", CHAIN[..]);
-    assert(library_env.emit(&e, "geom", "lib/geom"));
-    return library_env.same_lines(library_env.sections(&e), want);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.config(e, "mode", mode);
+    library_env.config(e, "extra", extra);
+    library_env.add_lines(e, "lib/geom/chain.ft", CHAIN[..]);
+    assert(library_env.emit(e, "geom", "lib/geom"));
+    return library_env.same_lines(library_env.sections(e), want);
 }
 
 fn a_chain_of_conditions_keeps_one_branch() void {
@@ -459,7 +452,7 @@ fn a_chain_of_conditions_keeps_one_branch() void {
 // Writes the module `<root>/<name>` with `lines`.
 fn put(library_env.env mut* e, string root, string name, string@ lines) void {
     strbuf.str_buf mut path = strbuf.create();
-    defer strbuf.free(&path);
+    defer del(path.data);
     strbuf.append(&path, root);
     strbuf.push(&path, '/');
     strbuf.append(&path, name);
@@ -529,11 +522,10 @@ fn add_qualified(library_env.env mut* e, string root, bool reverse) void {
 }
 
 fn a_name_of_another_module_takes_the_binding_of_its_import() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    add_qualified(&e, "lib/geom", false);
-    assert(library_env.emit(&e, "geom", "lib/geom"));
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    add_qualified(e, "lib/geom", false);
+    assert(library_env.emit(e, "geom", "lib/geom"));
     string[25] want = {
         "== module geom.a",
         "i32 A = 1;",
@@ -561,34 +553,36 @@ fn a_name_of_another_module_takes_the_binding_of_its_import() void {
         "i32 _0x = 1;",
         "i32 __1 = 2;",
     };
-    assert(library_env.same_lines(library_env.sections(&e), want[..]));
+    assert(library_env.same_lines(library_env.sections(e), want[..]));
 }
 
 // ---- imports of the source ---------------------------------------------------------------
 
 fn an_import_that_no_line_uses_keeps_its_line() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    library_env.add(&e, "lib/geom/a.ft", "i32 A = 1;\n");
-    library_env.add(&e, "lib/geom/b.ft", "import geom.a;\nfn f() void {}\n");
-    assert(library_env.emit(&e, "geom", "lib/geom"));
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    strbuf.str_buf mut text = strbuf.create();
+    defer del(text.data);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.add(e, "lib/geom/a.ft", "i32 A = 1;\n");
+    library_env.add(e, "lib/geom/b.ft", "import geom.a;\nfn f() void {}\n");
+    assert(library_env.emit(e, "geom", "lib/geom"));
     // the closure of the section is the closure of its source
     string[3] want = {"== module geom.b", "import geom.a as _0;", "fn f() void;"};
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     library_env.join_continued(want[..], &b);
-    strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
     library_env.unmark(strbuf.view(&b), &text);
-    assert(library_env.holds(library_env.text(&e), strbuf.view(&text)));
+    assert(library_env.holds(library_env.text(e), strbuf.view(&text)));
 }
 
 fn a_module_bound_twice_has_one_line() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    library_env.add(&e, "lib/geom/a.ft", "i32 A = 1;\ni32 B = 2;\nstruct point { i32 x; }\n");
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    strbuf.str_buf mut text = strbuf.create();
+    defer del(text.data);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.add(e, "lib/geom/a.ft", "i32 A = 1;\ni32 B = 2;\nstruct point { i32 x; }\n");
     string[5] c = {
         "import geom.a;",
         "import geom.a as other;",
@@ -596,47 +590,41 @@ fn a_module_bound_twice_has_one_line() void {
         "i32 C = a.A + other.B + A + bee;",
         "point P = {};",
     };
-    library_env.add_lines(&e, "lib/geom/c.ft", c[..]);
-    assert(library_env.emit(&e, "geom", "lib/geom"));
+    library_env.add_lines(e, "lib/geom/c.ft", c[..]);
+    assert(library_env.emit(e, "geom", "lib/geom"));
     string[4] want = {"== module geom.c", "import geom.a as _0;", "i32 C = 6;",
                       "_0.point P = {};"};
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     library_env.join_continued(want[..], &b);
-    strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
     library_env.unmark(strbuf.view(&b), &text);
-    assert(library_env.holds(library_env.text(&e), strbuf.view(&text)));
+    assert(library_env.holds(library_env.text(e), strbuf.view(&text)));
 }
 
 fn a_symbol_import_of_a_nested_module_gives_its_module() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    library_env.add(&e, "lib/geom/shape/circle.ft", "struct circle { f64 r; }\n");
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.add(e, "lib/geom/shape/circle.ft", "struct circle { f64 r; }\n");
     string[4] use = {"import geom.shape.circle.circle;", "fn area(circle c) f64 {",
                      "    return c.r;", "}"};
-    library_env.add_lines(&e, "lib/geom/use.ft", use[..]);
-    assert(library_env.emit(&e, "geom", "lib/geom"));
-    assert(library_env.holds(library_env.text(&e),
+    library_env.add_lines(e, "lib/geom/use.ft", use[..]);
+    assert(library_env.emit(e, "geom", "lib/geom"));
+    assert(library_env.holds(library_env.text(e),
                              "import geom.shape.circle as _0;\nfn area(_0.circle c) f64;\n"));
 }
 
 // ---- order -----------------------------------------------------------------------------
 
 fn sections_and_declarations_stand_in_byte_order() void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
     string[3] z = {"i32 b = 1;", "i32 B = 2;", "i32 _c = 3;"};
-    library_env.add_lines(&e, "lib/geom/z.ft", z[..]);
+    library_env.add_lines(e, "lib/geom/z.ft", z[..]);
     string[1] upper = {"i32 X = 1;"};
-    library_env.add_lines(&e, "lib/geom/Y.ft", upper[..]);
+    library_env.add_lines(e, "lib/geom/Y.ft", upper[..]);
     string[1] nested = {"i32 Y = 1;"};
-    library_env.add_lines(&e, "lib/geom/z/a.ft", nested[..]);
+    library_env.add_lines(e, "lib/geom/z/a.ft", nested[..]);
     string[1] under = {"i32 W = 1;"};
-    library_env.add_lines(&e, "lib/geom/z_a.ft", under[..]);
-    assert(library_env.emit(&e, "geom", "lib/geom"));
+    library_env.add_lines(e, "lib/geom/z_a.ft", under[..]);
+    assert(library_env.emit(e, "geom", "lib/geom"));
     // `.` (0x2E) sorts before `_` (0x5F), and an upper-case letter before a lower-case one
     string[10] want = {
         "== module geom.Y",
@@ -650,58 +638,53 @@ fn sections_and_declarations_stand_in_byte_order() void {
         "== module geom.z_a",
         "i32 W = 1;",
     };
-    assert(library_env.same_lines(library_env.sections(&e), want[..]));
+    assert(library_env.same_lines(library_env.sections(e), want[..]));
 }
 
 // ---- determinism ------------------------------------------------------------------
 
 fn two_runs_write_the_same_bytes_whatever_the_root_and_the_file_order() void {
-    library_env.env mut first = library_env.env{};
-    library_env.open(&first);
-    defer library_env.close(&first);
-    add_qualified(&first, "lib/geom", false);
-    add_example(&first, "lib/geom");
-    assert(library_env.emit(&first, "geom", "lib/geom"));
+    library_env.env mut* own first = library_env.make();
+    defer library_env.drop_made(move(first));
+    add_qualified(first, "lib/geom", false);
+    add_example(first, "lib/geom");
+    assert(library_env.emit(first, "geom", "lib/geom"));
 
-    library_env.env mut second = library_env.env{};
-    library_env.open(&second);
-    defer library_env.close(&second);
+    library_env.env mut* own second = library_env.make();
+    defer library_env.drop_made(move(second));
     // the other order of creation, under another root
-    add_example(&second, "elsewhere/deep/geom");
-    add_qualified(&second, "elsewhere/deep/geom", true);
-    assert(library_env.emit(&second, "geom", "elsewhere/deep/geom"));
-    assert(library_env.text(&first) == library_env.text(&second));
+    add_example(second, "elsewhere/deep/geom");
+    add_qualified(second, "elsewhere/deep/geom", true);
+    assert(library_env.emit(second, "geom", "elsewhere/deep/geom"));
+    assert(library_env.text(first) == library_env.text(second));
 }
 
 // ---- a client of the interface ---------------------------------------------------
 
 // The error lines of a check of `client` against the sources of the library under `lib`.
 fn errors_with_sources(string@ client, strbuf.str_buf mut* out) void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    add_qualified(&e, "lib/geom", false);
-    add_example(&e, "lib/geom");
-    library_env.add_lines(&e, "main.ft", client);
-    library_env.check_with_sources(&e, "lib", "main.ft");
-    library_env.error_lines(&e, out);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    add_qualified(e, "lib/geom", false);
+    add_example(e, "lib/geom");
+    library_env.add_lines(e, "main.ft", client);
+    library_env.check_with_sources(e, "lib", "main.ft");
+    library_env.error_lines(e, out);
 }
 
 // The error lines of a check of `client` against the interface of the same library.
 fn errors_with_interface(string@ client, strbuf.str_buf mut* out) void {
-    library_env.env mut lib = library_env.env{};
-    library_env.open(&lib);
-    defer library_env.close(&lib);
-    add_qualified(&lib, "lib/geom", false);
-    add_example(&lib, "lib/geom");
-    assert(library_env.emit(&lib, "geom", "lib/geom"));
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    library_env.add_lines(&e, "main.ft", client);
-    library_env.check_against(&e, "geom", "geom.flib/interface.ft", library_env.text(&lib),
+    library_env.env mut* own lib = library_env.make();
+    defer library_env.drop_made(move(lib));
+    add_qualified(lib, "lib/geom", false);
+    add_example(lib, "lib/geom");
+    assert(library_env.emit(lib, "geom", "lib/geom"));
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.add_lines(e, "main.ft", client);
+    library_env.check_against(e, "geom", "geom.flib/interface.ft", library_env.text(lib),
                               "main.ft");
-    library_env.error_lines(&e, out);
+    library_env.error_lines(e, out);
 }
 
 fn a_client_checks_alike_against_the_interface_and_the_sources() void {
@@ -726,10 +709,10 @@ fn a_client_checks_alike_against_the_interface_and_the_sources() void {
         "}",
     };
     strbuf.str_buf mut sources = strbuf.create();
-    defer strbuf.free(&sources);
+    defer del(sources.data);
     errors_with_sources(client[..], &sources);
     strbuf.str_buf mut iface = strbuf.create();
-    defer strbuf.free(&iface);
+    defer del(iface.data);
     errors_with_interface(client[..], &iface);
     if (strbuf.view(&sources) != strbuf.view(&iface)) {
         println("sources:");
@@ -753,7 +736,7 @@ fn every_section_of_the_interface_checks() void {
         "import geom.vec;",
     };
     strbuf.str_buf mut iface = strbuf.create();
-    defer strbuf.free(&iface);
+    defer del(iface.data);
     errors_with_interface(client[..], &iface);
     assert(strbuf.view(&iface) == "");
 }

@@ -102,14 +102,13 @@ string[15] MACOS_RELEASE = {
 
 // Whether the library under `target` and `profile` gives the interface `want`.
 fn gives(string target, string profile, string@ want) bool {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    add_library(&e, target, profile);
-    if (!library_env.emit(&e, "os", "lib/os")) {
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    add_library(e, target, profile);
+    if (!library_env.emit(e, "os", "lib/os")) {
         return false;
     }
-    return library_env.same_lines(library_env.text(&e), want);
+    return library_env.same_lines(library_env.text(e), want);
 }
 
 // A client that uses the declarations of both targets, so that one of them is an error on each.
@@ -128,31 +127,28 @@ string[9] CLIENT = {
 // The error lines of CLIENT under `target` and `profile`, against the sources and against the
 // interface, which must be the same text.
 fn client_alike(string target, string profile) bool {
-    library_env.env mut by_source = library_env.env{};
-    library_env.open(&by_source);
-    defer library_env.close(&by_source);
-    add_library(&by_source, target, profile);
-    library_env.add_lines(&by_source, "main.ft", CLIENT[..]);
-    library_env.check_with_sources(&by_source, "lib", "main.ft");
     strbuf.str_buf mut sources = strbuf.create();
-    defer strbuf.free(&sources);
-    library_env.error_lines(&by_source, &sources);
-    library_env.env mut lib = library_env.env{};
-    library_env.open(&lib);
-    defer library_env.close(&lib);
-    add_library(&lib, target, profile);
-    assert(library_env.emit(&lib, "os", "lib/os"));
-    library_env.env mut use = library_env.env{};
-    library_env.open(&use);
-    defer library_env.close(&use);
-    library_env.config(&use, "target_os", target);
-    library_env.config(&use, "profile", profile);
-    library_env.add_lines(&use, "main.ft", CLIENT[..]);
-    library_env.check_against(&use, "os", "os.flib/interface.ft", library_env.text(&lib),
-                              "main.ft");
+    defer del(sources.data);
     strbuf.str_buf mut iface = strbuf.create();
-    defer strbuf.free(&iface);
-    library_env.error_lines(&use, &iface);
+    defer del(iface.data);
+    library_env.env mut* own by_source = library_env.make();
+    defer library_env.drop_made(move(by_source));
+    add_library(by_source, target, profile);
+    library_env.add_lines(by_source, "main.ft", CLIENT[..]);
+    library_env.check_with_sources(by_source, "lib", "main.ft");
+    library_env.error_lines(by_source, &sources);
+    library_env.env mut* own lib = library_env.make();
+    defer library_env.drop_made(move(lib));
+    add_library(lib, target, profile);
+    assert(library_env.emit(lib, "os", "lib/os"));
+    library_env.env mut* own use = library_env.make();
+    defer library_env.drop_made(move(use));
+    library_env.config(use, "target_os", target);
+    library_env.config(use, "profile", profile);
+    library_env.add_lines(use, "main.ft", CLIENT[..]);
+    library_env.check_against(use, "os", "os.flib/interface.ft", library_env.text(lib),
+                              "main.ft");
+    library_env.error_lines(use, &iface);
     if (strbuf.view(&sources) != strbuf.view(&iface) || strbuf.view(&sources) == "") {
         println("sources:");
         print(strbuf.view(&sources));

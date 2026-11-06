@@ -896,6 +896,17 @@ set_tests_properties(aggregate-gen PROPERTIES
     PROCESSORS ${FORT_LANG_JOBS}
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
+# The sites of --aggregate-report and --leak-report in the tests of the library builds
+# (test/fort/library and the programs of test/library), for both targets: the test holds no site
+# in them.
+add_test(NAME aggregate-library
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_library_test.py"
+            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}" -j "${FORT_LANG_JOBS}")
+set_tests_properties(aggregate-library PROPERTIES
+    LABELS "fort;integration"
+    PROCESSORS ${FORT_LANG_JOBS}
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
+
 # Node's built-in runner tests the VS Code extension in editors/vscode.
 # It converts diagnostic documents into editor shapes.
 # It also converts 1-based byte columns to character offsets.
