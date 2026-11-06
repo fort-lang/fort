@@ -441,6 +441,7 @@ read-only; the second is a fixed binding whose target a callee may write. `void 
 `void*` by the one implicit conversion of D5.4, and the reverse needs a `cast`.
 
 ```fort
+import extern;  // a trusted module (D9.8); rows omitted
 i32 mut x = 1;
 void* vp = cast(&x, void*);
 void mut* wp = cast(&x, void mut*);  // the bytes behind wp may be written
@@ -455,7 +456,7 @@ i32* back = cast(vp, i32*);          // error: a cast never gives a type to a vo
 void* forged = cast(4096, void*);    // error: a cast never makes a pointer from an integer
 u64 addr = cast(vp, u64);
 bool isnull = vp == null;
-void mut* own raw = libc.malloc(16); // an own rvalue lands; malloc answers a writable block
+void mut* own raw = libc.malloc(16); // in a trusted module (D9.8): an own rvalue lands
 void* peek = raw;                    // ok: lends, and drops the mut on the way (D5.4)
 u8 mut* own bytes = cast(move(raw), u8 mut* own);   // error: no type for a void*
 del(raw);                            // ok: del accepts void* own
@@ -1232,6 +1233,7 @@ either side, a struct result goes through its hidden pointer (section 11.2). It 
 address that an integer argument holds. Bits that no function name gave jump to any code.
 
 ```fort
+import extern;  // a trusted module (D9.8); rows omitted
 struct holder { u64 count; u64* own data; }
 struct mirror { u64 tally; u64* own payload; }
 struct wrap { u64* own p; }
@@ -1278,6 +1280,7 @@ an `own` type yields an `own` rvalue, which must land (section 8.3), and a cast 
 from an `own` rvalue is refused (D17.8).
 
 ```fort
+import extern;  // a trusted module (D9.8); rows omitted
 i64 w = cast(cast(-1, i8), i64);     // -1: sign-extended because i8 is signed
 u64 z = cast(cast(-1, i8), u64);     // 18446744073709551615: the i8 is sign-extended to u64
 u8 t = cast(300, u8);                // 44: 300 is i32 by default, low byte kept
@@ -1588,13 +1591,15 @@ convention, so a fort caller must `move` into an `own` parameter and must land a
 A `void*` result carries the marks the C function's contract states: `malloc` answers storage the
 caller may write, so it is `void mut* own`, and `free` takes `void* own`, which every caller
 reaches by dropping marks (D3.11, D5.4). Signature identity includes `own` and the level-1
-mutability (D9.8): two modules declaring one C symbol with and without either conflict. A result
-marks a level `mut` only when it says `own`, when a parameter marks that level `mut`, or when no
-parameter is a pointer or a `void*` (D17.13): `extern fn strchr(char* s, i32 c) char mut*` is the
-error `extern 'strchr': the result marks level 1 'mut', and no parameter marks it`, because C
-gives back `s`, which fort code lent read-only.
+mutability (D9.8): two modules declaring one C symbol with and without either conflict. Only a
+trusted module declares or calls an `extern fn` (D9.8). No compile rule reads the `mut` of a
+pointer type that C gives: the declaration row of the extern says why C gives that `mut`
+(D17.13). So `extern fn strchr(char* s, i32 c) char mut*` breaks A7 of `ownership-design.md` 5.1,
+because C gives back `s`, which fort code lent read-only, and `strchr(char* s, i32 c) char*`
+keeps it.
 
 ```fort
+import extern;                                     // a trusted module (D9.8); rows omitted
 extern fn write(i32 fd, u8* buf, u64 n) i64;       // C means bytes here, so fort says bytes
 extern fn sort(i32@ xs) void;        // error: spans cannot cross an extern boundary
 extern fn malloc(u64 n) void mut* own;

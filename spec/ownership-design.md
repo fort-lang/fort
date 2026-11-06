@@ -482,36 +482,78 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
 - **A4**: a frame and an allocation never share storage (D10.1).
 - **A5**: one thread: no data race (D10.7).
 - **A6**: the invariants of the FIR verifier hold (`fir.md` 10), such as rule V13.
-- **A7**: the C code of an extern keeps A1 to A5, and it frees no allocation that fort still owns.
-  D17.13 already trusts the C side of an extern signature, and V1 trusts C no further: an extern
-  call follows 4.6 as each call does. No rule can check C, so the design takes A7 (section 15).
-  A7 also bounds each pointer that C gives to fort code: a result, a value that C stores in fort
-  storage, a pointer that fort code reads from storage of C, an argument of a fort callback, and
-  a pointer that a callback gave to C and C gives back. Each names storage that C gave, or
-  storage that fort code gave to C (an argument, a callback result, or a value that fort code
-  stored where C reads it). The whole pointee of its type, from the byte that it names, lies
-  inside that storage, the address is aligned for the pointee (D3.1), and the pointer marks no
-  `mut` that the pointer of fort code lacked. So `extern fn memchr(void* s, i32 c, u64 n) i64*`
-  breaks A7 for a search of one byte. C reads and writes only the storage that its arguments name,
-  as the contract of the C function says: a C string ends in a NUL inside its storage, and a length
-  fits its buffer. C writes a pointer place of a struct only where the contract of the C function
-  writes it, as `recvmsg` writes the fields of its `struct msghdr`. C writes only a level that the
-  type of its parameter marks `mut`: with
-  `strtod(char* s, void* end)`, C writes `*end`, and the declaration breaks A7. The user ruled this
-  growth with "(A) Close R1-R7" (2026-10-31), and the coordinator ratified the out-parameter and
-  the alignment on 2026-11-01. D17.13 gives its compile-time part for `mut`: a pointer type that
-  C gives, a result, a parameter of a callback or a pointer that a `mut` level of a parameter holds,
-  marks `mut` only where it says `own`, where a parameter of the same type marks the level, or
-  where the extern has no parameter that can carry a pointer (`...` and a function pointer count).
-  D10.7 names an extern declaration or C code that breaks A7 as outside its guarantee. A7 also asks
-  that a function pointer that C gives to fort code names a function of its type. No cast gives a
+- **A7**: only a trusted module meets C (D9.8): a module that the compiler loads from its standard
+  library or builds with `fort --lib std <root>`, or a module whose first item is
+  `import extern;`. Only such a module declares an
+  `extern fn`, calls one, or names a boundary function, a function of a trusted module whose
+  parameter type reaches a pointer to `char`, `u8` or `void`, such as `str.from_cstr` (D9.8).
+  Each declaration has a declaration row in its `//` lines directly above it, and the row says
+  why A7 holds for it. For each call whose arguments keep the contract of the C function, the C
+  code keeps A1 to A5 and the five points below. The row gives each point after its word, and it
+  says why the point holds:
+  - `gives:` each pointer that C gives to fort code names storage that C gave, a new allocation
+    where its type says `own` (A2), or storage that fort code gave to C in the same call: an
+    argument, a callback result, or a value that fort code stored where C reads it. A pointer
+    that C gives is a result, a value that C stores in fort storage, a pointer that fort code
+    reads from storage of C, an argument of a fort callback, or a pointer that a callback gave to
+    C and that C gives back. The whole pointee of its type, from the byte that it names, lies
+    inside that storage, also when the argument is the `.ptr` of an empty span (D3.5). The address
+    is aligned for the pointee (D3.1). A pointer to storage that fort code gave marks no `mut`
+    that the pointer of fort code lacked (D17.13), and no pointer that C gives derives from an
+    argument of an integer type. A function pointer that C gives names a function of its type. So
+    `extern fn memchr(void* s, i32 c, u64 n) i64*` breaks A7 for a search of one byte. A C
+    function that gives back an argument whose storage can be empty, as `memcpy` gives back
+    `dst`, has a `void*` result or no result.
+  - `writes:` C reads and writes only the storage that its arguments name, as the contract of
+    the C function says: a C string ends in a NUL inside its storage, and a length fits its
+    buffer. C writes only a level that the type of its parameter marks `mut`, and it writes a
+    pointer place only with a pointer of the type of the place. C writes a pointer place of a
+    struct only where the contract writes it, as `recvmsg` writes the fields of its
+    `struct msghdr`. So `strtod(char* s, void* end)` breaks A7, because C writes `*end`.
+  - `keeps:` C keeps no pointer to fort storage after the call returns. The row names each
+    function pointer that C keeps for a later call, as `atexit` keeps one.
+  - `calls:` C calls a fort function only through a function pointer that a parameter of the
+    same call gives it, or that the row of an earlier call names as kept. C gives that function
+    only the pointers that the point `gives:` allows.
+  - `frees:` C frees no allocation that fort still owns, but the allocation that a parameter
+    that says `own` gives it (D17.13).
+
+  Each call in a trusted module of an `extern fn`, of a boundary function or of a function
+  pointer that C gave keeps the contract of its callee, and a call row says why (D9.8): one row
+  for each call, or one row with a count for calls that hold for one reason. The row names a
+  source for each pointer and each length that C reads or writes in the call, at any depth (an
+  argument, storage that C reads through an argument, a callback result, or a value that a
+  callback stores), and the NUL of each C string that C reads. A length that C uses with a
+  pointer fits the bound of the source of that pointer, in bytes, and a length that C uses with
+  more than one pointer fits the bound of each. The first source in this order that fits is the
+  source: a parameter source, a byte pointer, a length or a NUL from a parameter, from a place
+  that the function reaches through a parameter, from a function that a parameter gives, or from
+  a `mut` global; then the own bound of a value that no call of C gave, `.len` elements of a span
+  or a string, the rest of the object for the address of an element of a fixed array, a span or
+  a string, one object for another address or a typed pointer to a type other than `char`, `u8`
+  or `void`, kept through each cast; then storage that a call of C in the same function returned
+  or wrote, with the size and the NUL that its declaration row states; then the NUL of a string
+  literal (also through a global that is no `mut` global), of a buffer of `str.to_cstr` or of a
+  fixed array whose last element the function sets to the NUL (another `string` has none). A
+  parameter source stands only in a boundary function, whose callers are trusted. So a length
+  fits each buffer that C uses it with, and a C string ends in a NUL inside its storage, at each
+  call that the rows cover. The list is a checklist for review, and the ticket that writes the
+  rows of `std` corrects it where a true row cannot be written (section 12).
+  The user ruled the points on the pointers that C gives with "(A) Close R1-R7" (2026-10-31), and
+  the coordinator ratified the out-parameter and the alignment on 2026-11-01. No cast gives a
   function pointer another type, as an argument of an `extern fn` too (D3.14), so fort gives C no
-  function pointer of another type. C gives back an argument only through a parameter of pointer
-  type: a pointer that C gives derives from no argument of an integer type. So no cast makes a
-  `.ptr` an integer or a `void*` (D3.5). The user ruled this part with "No .ptr escape" (user,
-  2026-11-01). C keeps no pointer to fort storage after the call returns, so C gives back an
-  argument only in the call that gets it, and the `.ptr` rule of D3.5 reads only the declaration
-  of that call. The user ruled this part with "A7: C keeps none" (user, 2026-11-01).
+  function pointer of another type. A pointer that C gives derives from no argument of an integer
+  type, so no cast makes a `.ptr` an integer or a `void*` (D3.5). The user ruled this part with
+  "No .ptr escape" (user, 2026-11-01), and the point `keeps:` with "A7: C keeps none" (user,
+  2026-11-01). No rule can check C, so the design takes A7 (section 15). The row makes A7 a
+  question that a reviewer answers for one declaration or one callee: the C function, the source
+  of its contract, the five points, and the bounds of each call. A module outside the trusted set
+  declares no `extern fn` and calls none, so A7 asks nothing of it. D10.7 names a row that is
+  wrong, and C code that breaks A7, as outside its guarantee. The user directed this form on
+  2026-11-02: "Rework the design at the correct, i.e. vaguest/weakest link and course correct",
+  and the coordinator ruled the call rule on the same day (section 12). Before, A7 applied to each
+  declaration and each call of each module, and the compile rules of D3.5 and D17.13 each checked
+  a part of it.
 - **A8**: a value designates storage of a local of this run of F only when it derives from an
   address of that local that this run took. It derives through copies, casts, arithmetic, stores and
   loads, in F or in a callee. The user ruled on 2026-10-26: "Yes, add A8 to D10.7" (section 12),
@@ -526,13 +568,34 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   An argument of an `extern fn` follows these rules, with no exemption (D3.14). No span
   expression takes a raw pointer but in `str.from_cstr` and `rt.args_init` (D6.9), and no
   source calls `rt.args_init`. The `.ptr` of a span is legal only as an operand of `==` or `!=` and
-  as an argument of an `extern fn` that can give fort code no pointer, so no fort code loads or
-  stores through it, and no cast takes it (D3.5). A pointer type that C gives marks `mut` only where
-  it says `own`, where a parameter of the same type marks the level, or where the extern has no
-  parameter that can carry a pointer (D17.13). With A7 for C, a pointer that fort code holds is
-  `null`, a value that derives from an address and keeps its whole pointee inside the object of that
-  address, or a dangling pointer. So A8 holds for each program that compiles, in a build without
-  `--no-bounds-check`, and keeps A1 and A7, for a `del` too.
+  as an argument of an `extern fn` in a trusted module, so no fort code loads or stores through
+  it, and no cast takes it (D3.5). Only a trusted module declares or calls an `extern fn`, and the
+  audit rows of each declaration and each call give A7 for it (D9.8). With A7 for C, a pointer
+  that fort code holds is `null`, a value that derives from an address and keeps its whole pointee
+  inside the object of that address, or a dangling pointer. So A8 holds for each program that
+  compiles, in a build without `--no-bounds-check`, and keeps A1 and A7, for a `del` too.
+  **Code outside the trusted set.** A module outside the trusted set declares no `extern fn`, calls
+  none, and names no boundary function (D9.8). So no code in it can misstate C or break the contract
+  of a C function. It reaches C only through functions of trusted modules that are no boundary
+  functions, and a span or a string brings each length, which the checker checks (D10.6). The
+  compiler emits calls of the boundary functions of `std.rt` in such a module too (`toolchain.md`
+  5.1, and 6 items 14 to 22), and each call keeps its contract because the compiler makes its
+  arguments. A file name, a type name, the name of an enum member and the text of an `assert` are
+  constants with a NUL that the compiler emits, for `fail_overflow`, `fail_shift`, `fail_div_zero`,
+  `fail_div_overflow`, `fail_bounds`, `fail_span`, `fail_alloc_count`, `fail_enum`, `alloc`,
+  `assert_fail` and the table of `print_enum`. The compiler emits no call of `fail_begin`,
+  `fail_runtime` or `fail_overwrite`: `std.rt` calls the first two with the file name that it got,
+  and two tests of `test/lang/run`, trusted modules, call the third by name. `panic` takes the
+  `string` of its message and a file name of that kind. `str_eq` takes the `.ptr` and the `.len` of
+  each of two `string` values. `free` takes the pointer of an owner (A3). `print_ptr` prints an
+  address and reads no pointee. `args_init` takes the `argc` and the `argv` that C gives to `main`.
+  Each pointer that the code of the module holds derives through operations of fort code, which the
+  compile rules above check, or comes from a function of a trusted module. So A8 holds for its code
+  with no condition on that code (D10.7). A trusted module keeps five things: rows that hold; for
+  each function that a module outside the set can call, A8 for each argument that the checker
+  accepts; a boundary function or a function pointer that C gave goes as a value only to C (D9.8);
+  each compile rule, as each module does; and in `std`, the two functions of D6.9 that take a span
+  of a raw pointer.
   Rules (b) and (e) of V1 need A8 for such a read. Without A8 the
   read can name a local that is not memory, and it is then no use (5.5 rule (b)) and no borrow
   (lemma (ii)). Refinement R6 needs A8 for each local (section 7). Rules (a) and (c), and kill rule
@@ -1317,6 +1380,43 @@ not say `own` (D3.5). "A7: C keeps none": C kept an argument and gave it back in
 A7 now says that C keeps no pointer to fort storage after the call returns (5.1, D10.7).
 "Bounded scan": `str.from_cstr(a[24..].ptr)` read past `a`, so `str.from_cstr` takes no `.ptr`,
 and `str.from_cbuf` reads a buffer with a bound (D3.5, D6.9).
+
+The user directed on 2026-11-02, after "You are asking me too many questions, a sign of bad design":
+"Rework the design at the correct, i.e. vaguest/weakest link and course correct". The weakest link
+was A7 (5.1). Each module could declare and call an `extern fn`, and no rule can check C, so each
+compile rule on a declaration checked a part of A7. Each review round found one more route by which
+a declaration that misstates C forged a pointer: the `.ptr` that C gives back (D3.5), hidden
+callbacks, the `mut` of a level and the type of a result (D17.13), a decoy parameter, a value that C
+reads from an argument, and an address in an integer. Now only a trusted module meets C: a module
+that the compiler loads from its standard library, or a module whose first item is `import extern;`
+(D9.3, D9.8). Only a trusted module declares an extern. The coordinator ruled on the same day that
+only a trusted module calls an extern or `str.from_cstr`, because a call outside the trusted set
+kept the same unchecked condition one step outside the declaration. On 2026-11-03, after a review
+that read past a local through `rt.print_enum` and through the callback `record` of a test module,
+the coordinator ruled that only a trusted module names a boundary function: a function whose
+parameter type reaches a pointer to `char`, `u8` or `void` at any level. A call row names a
+parameter source only in a boundary function, and a boundary function goes as a value only to C. On
+2026-11-05 the coordinator ruled that reach goes through the parameters and the result of a function
+pointer type, that a row names a source for each pointer and each length that C reads or writes, at
+any depth, in a fixed order, that the address of an element gives the rest of its object, and that
+the directory that the compiler loads a module from, and not its name, makes it trusted. A second
+ruling of 2026-11-05 made each length fit each buffer that C uses it with, kept the bound of a value
+through a cast, put the parameter source first, and trusted the modules of `fort --lib std <root>`.
+The source list is a checklist for review, and the ticket that writes the rows of `std` corrects it
+where a true row cannot be written. Each declaration has a row with the five points of A7, and each
+call has a call row; `tools/fort_lint.py` reports a missing row. The compile rules that checked a
+part of A7 on a declaration go: the walk of D3.5 ("Refuse if any pointer"), which read the
+declaration of an extern for a `.ptr` argument, and the rule of D17.13 on the `mut` of a pointer
+that C gives. The user ruling "Mark C-given pointers" (2026-11-01) needs no mark, because only
+audited code calls `str.from_cstr` (D6.9). The rules that hold for each module stay: D3.14 with no
+exemption for an argument of an `extern fn`, the positions of a `.ptr` (D3.5), the spans of D6.9,
+and the identity and the types of a declaration (D9.8). A8 then holds for a module outside the
+trusted set with no condition on its code (5.1). A count at c04d6836 (by text, with the `$if` blocks
+of each target) found 58 extern declarations in `std` on Linux and 59 on Darwin, 1 in `src`, 4 on
+Linux and 6 on Darwin in `test/fort`, and 235 in 80 files of `test/lang`; 21 boundary functions in
+`std`, with 118 names outside `std`. Outside `std`, `src/fort` and `test/fort` call 39 externs 224
+times in 27 files and `str.from_cstr` 35 times. They go behind about 31 functions of `std` that take
+spans and strings. 131 files of `test/lang` and `test/fort/support/heap.ft` write `import extern;`.
 
 The questions, their options and their counts stay below as the record.
 
