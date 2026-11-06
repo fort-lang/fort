@@ -1,0 +1,208 @@
+{
+  "comment": [
+    "The table of the trusted boundary of D9.8 and D9.3: the trust bit of a module, which the parser",
+    "sets for a first item `import extern;` and the loader sets for a module of a trusted root; the",
+    "three errors of a module that is not trusted (a declaration, a call of an extern and a name of a",
+    "boundary function, a symbol import included); the precedence of the error of D6.9 at",
+    "`rt.args_init`; the walk of the parameter types that finds a boundary function; and the `import",
+    "extern;` of the interface writer. The rows cover src/fort/check.ft, parser.ft, modules.ft and",
+    "library/interface.ft. Each row breaks one part of the rule. The first stage runs",
+    "check_trust_test.ft, which pins each message and position of the checker; the second the corpus",
+    "tests of the rule and the D6.9 test fail/stdlib/007; the third the suites of the parser, the",
+    "loader, the libraries and D6.9. The table runs in the VM with the debug preset. The md5 guard",
+    "reads the product compiler. A row that an earlier run caught stands first, because the first",
+    "round of a run in the VM can read stale (notes/testing.md)."
+  ],
+  "sources": [
+    "src/fort/check.ft",
+    "src/fort/parser.ft",
+    "src/fort/modules.ft",
+    "src/fort/library/interface.ft"
+  ],
+  "binary": "build/Linux/debug/fort",
+  "build": "sleep 2 && touch src/fort/check.ft && ninja -C build/Linux/debug fort",
+  "stages": [
+    {
+      "name": "the trust suite",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 6 check_trust_test"
+    },
+    {
+      "name": "the trust corpus",
+      "command": "python3 test/lang/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std -j 6 fail/ffi/017 fail/ffi/018 fail/stdlib/007 fail/stdlib/009 fail/stdlib/010 fail/modules/029 fail/modules/030 fail/modules/031 fail/modules/032 run/modules/trusted_types"
+    },
+    {
+      "name": "the loader, parser and library suites",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 6 modules_test modules_library_test parser_stmt_test parser_interface_test check_raw_span_test library/interface_test"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D9.8-T1",
+      "file": "src/fort/check.ft",
+      "old": "        if (kind == ast.sym_kind.s_extern_fn && !checking_trusted(ck)) {",
+      "new": "        if (false) {",
+      "what": "an `extern fn` of a module that is not trusted is no error"
+    },
+    {
+      "decision": "D9.8-T2a",
+      "file": "src/fort/check.ft",
+      "old": "            if (!checking_trusted(ck)) {\n                report_untrusted_call(ck, s, n->name_loc);",
+      "new": "            if (false) {\n                report_untrusted_call(ck, s, n->name_loc);",
+      "what": "a call of an extern in a module that is not trusted is no error"
+    },
+    {
+      "decision": "D9.8-T2b-name",
+      "file": "src/fort/check.ft",
+      "old": "        if (!checking_trusted(ck) && is_boundary(ck, s)) {",
+      "new": "        if (false) {",
+      "what": "a call or a value of a boundary function in a module that is not trusted is no error"
+    },
+    {
+      "decision": "D9.8-T2b-import",
+      "file": "src/fort/check.ft",
+      "old": "        } else if (!modules.trusted(m) && is_boundary(ck, s)) {",
+      "new": "        } else if (false) {",
+      "what": "a symbol import of a boundary function is no error"
+    },
+    {
+      "decision": "D6.9-import",
+      "file": "src/fort/check.ft",
+      "old": "            check_error(ck, imported_name_loc(b), ARGS_INIT_ERROR);",
+      "new": "            report_boundary_name(ck, s, imported_name_loc(b));",
+      "what": "a symbol import of `rt.args_init` gets the error of D9.8 and not that of D6.9"
+    },
+    {
+      "decision": "D6.9-precedence",
+      "file": "src/fort/check.ft",
+      "old": "            check_error(ck, n->name_loc, ARGS_INIT_ERROR);",
+      "new": "            report_boundary_name(ck, s, n->name_loc);\n            check_error(ck, n->name_loc, ARGS_INIT_ERROR);",
+      "what": "a name of `rt.args_init` gets the error of D9.8 beside that of D6.9"
+    },
+    {
+      "decision": "D9.8-reach-void",
+      "file": "src/fort/check.ft",
+      "old": "    case types.type_kind.k_voidptr:\n        return true;\n    case types.type_kind.k_ptr:",
+      "new": "    case types.type_kind.k_voidptr:\n        return false;\n    case types.type_kind.k_ptr:",
+      "what": "a `void*` reaches no byte pointer"
+    },
+    {
+      "decision": "D9.8-reach-u8",
+      "file": "src/fort/check.ft",
+      "old": " || t->prim == prim.prim_kind.prim_u8);",
+      "new": ");",
+      "what": "a `u8*` reaches no byte pointer"
+    },
+    {
+      "decision": "D9.8-reach-char",
+      "file": "src/fort/check.ft",
+      "old": "(t->prim == prim.prim_kind.prim_char || ",
+      "new": "(",
+      "what": "a `char*` reaches no byte pointer"
+    },
+    {
+      "decision": "D9.8-reach-pointee",
+      "file": "src/fort/check.ft",
+      "old": "            return true;\n        }\n        reach_push(w, t->elem);\n    case types.type_kind.k_span",
+      "new": "            return true;\n        }\n        reach_push(w, null);\n    case types.type_kind.k_span",
+      "what": "the walk reads no pointee"
+    },
+    {
+      "decision": "D9.8-reach-element",
+      "file": "src/fort/check.ft",
+      "old": "    case types.type_kind.k_span, types.type_kind.k_array:\n        reach_push(w, t->elem);",
+      "new": "    case types.type_kind.k_span, types.type_kind.k_array:\n        reach_push(w, null);",
+      "what": "the walk reads no element of a span or of a fixed array"
+    },
+    {
+      "decision": "D9.8-reach-fn-params",
+      "file": "src/fort/check.ft",
+      "old": "            reach_push(w, t->params[i]);",
+      "new": "            reach_push(w, null);",
+      "what": "the walk reads no parameter of a function pointer type"
+    },
+    {
+      "decision": "D9.8-reach-fn-result",
+      "file": "src/fort/check.ft",
+      "old": "            i += 1;\n        }\n        reach_push(w, t->elem);\n    case types.type_kind.k_struct:",
+      "new": "            i += 1;\n        }\n        reach_push(w, null);\n    case types.type_kind.k_struct:",
+      "what": "the walk reads no result of a function pointer type"
+    },
+    {
+      "decision": "D9.8-reach-fields",
+      "file": "src/fort/check.ft",
+      "old": "        reach_push(w, types.field_at(s, i).ty);",
+      "new": "        reach_push(w, null);",
+      "what": "the walk reads no field of a struct"
+    },
+    {
+      "decision": "D9.8-reach-marks",
+      "file": "src/fort/check.ft",
+      "old": "    if (!found) {\n        u64 mut i = 0;\n        while (i < w->entered_len) {",
+      "new": "    if (true) {\n        u64 mut i = 0;\n        while (i < w->entered_len) {",
+      "what": "a walk that found a byte pointer keeps its structs as reaching none"
+    },
+    {
+      "decision": "D9.8-reach-error",
+      "file": "src/fort/check.ft",
+      "old": "    if (types.type_layout_state(s) == types.layout_state.l_error) {\n        return;\n    }",
+      "new": "    if (false) {\n        return;\n    }",
+      "what": "the walk reads the fields of a struct in error"
+    },
+    {
+      "decision": "D9.3-trust-form",
+      "file": "src/fort/parser.ft",
+      "old": "        mod->flags |= ast.FLAG_TRUSTED;\n        return;",
+      "new": "        return;",
+      "what": "`import extern;` makes no module trusted"
+    },
+    {
+      "decision": "D9.3-trust-place",
+      "file": "src/fort/parser.ft",
+      "old": "fn parse_import(parser mut* p) ast.node mut* {\n    if (at_trust_decl(p)) {\n        return parse_misplaced_trust(p);\n    }",
+      "new": "fn parse_import(parser mut* p) ast.node mut* {",
+      "what": "a misplaced `import extern;` gets the error of a path and not its own"
+    },
+    {
+      "decision": "D9.8-std-root",
+      "file": "src/fort/modules.ft",
+      "old": "    if (from_trusted_root(set, path)) {",
+      "new": "    if (false) {",
+      "what": "a module of the standard library directory is not trusted"
+    },
+    {
+      "decision": "D9.8-lib-std",
+      "file": "src/fort/modules.ft",
+      "old": "        return set->library == STD_SEGMENT;",
+      "new": "        return false;",
+      "what": "a module of `fort --lib std <root>` is not trusted"
+    },
+    {
+      "decision": "D9.8-std-dot",
+      "file": "src/fort/modules.ft",
+      "old": "\n        || path[STD_SEGMENT.len] != PATH_SEPARATOR) {",
+      "new": ") {",
+      "what": "a module whose path starts with the letters `std` is trusted"
+    },
+    {
+      "decision": "D9.8-used-std",
+      "file": "src/fort/modules.ft",
+      "old": "    if (lib->name == STD_SEGMENT) {\n        // a section of the library `std` is trusted",
+      "new": "    if (false) {\n        // a section of the library `std` is trusted",
+      "what": "a section of the used library `std` is not trusted"
+    },
+    {
+      "decision": "D9.11-writer-trust",
+      "file": "src/fort/library/interface.ft",
+      "old": "    if (writes_trust(m)) {",
+      "new": "    if (false) {",
+      "what": "the interface file writes no `import extern;`"
+    },
+    {
+      "decision": "D9.11-writer-std",
+      "file": "src/fort/library/interface.ft",
+      "old": "    return modules.trusted(m) && !str.starts_with(m->path, STD_PREFIX);",
+      "new": "    return modules.trusted(m);",
+      "what": "a section of `std` starts with `import extern;`"
+    }
+  ]
+}

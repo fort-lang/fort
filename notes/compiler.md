@@ -343,6 +343,39 @@ came here.
   (`check_ptr_walk_limit_test.ft`). An argument of the variable tail is read after its check, with
   a walk of its own and its own limit, and `report_tail_ptrs` then reports each `.ptr` argument of
   the call; a struct field named `ptr` is no `.ptr` (`is_pseudo_ptr`).
+- **Only a trusted module meets C, and the trust is one bit of the module node** (D9.8).
+  `ast.FLAG_TRUSTED` on the `k_module` node is the bit. The parser sets it for a first item
+  `import extern;` (`parse_trust_decl`), which makes no node, and reports each other
+  `import extern;` as `'import extern;' stands only as the first item of a module`, then reads it
+  to its `;`, so no recovery skips the item after it. The loader sets it for a module whose path
+  starts with `std.` (`from_trusted_root`), because only the standard library directory and the
+  root of `fort --lib std <root>` give such a path, and for each section of the used library
+  `std` (`load_section`). The path of an entry module is the base name of its file and holds no
+  `.`, so an entry file `std.ft` is trusted by its own form alone. An entry file that the closure
+  of `std.rt` read before it from the standard library directory (rt, libc, mem, str and strbuf)
+  stays the module of that read, with its path and its trust (`entry_already_read`); each other
+  file of that directory named on the command line is the entry module of its base name and is
+  not trusted, so `fort --check <std>/io.ft` reports the errors of D9.8. `modules.trusted` reads
+  the bit, and the checker reads it for the module that it checks (`checking_trusted`) and for
+  the owner of a symbol (`declared_trusted`). Three checks
+  hold the rule: `resolve_declaration` reports an `extern fn` of a module that is not trusted,
+  `value_of_sym` reports an extern callee and a name of a boundary function there, and
+  `check_symbol_imports` reports a symbol import of a boundary function there, and a symbol
+  import of `std.rt.args_init` in each module. A name of `std.rt.args_init` takes the error of
+  D6.9 alone, because `value_of_sym` returns before it asks `is_boundary`. None of the three
+  poisons a type, so each name is one error and the arguments of the call are checked as before.
+  `is_boundary` walks the parameter types with an explicit stack (`reach_walk`): the pointee of a
+  pointer, the element of a span or a fixed array, each field of a struct, and the parameters and
+  the result of a function type. A struct keeps the number of the last walk that entered it in
+  `types.layout.reach`, so a walk enters it once; after a walk that found no pointer to `char`,
+  `u8` or `void`, each struct that it entered keeps `check.REACH_NONE` for the life of the type
+  table, and a later walk enters it no more. A walk that found one keeps no such mark. A struct
+  in error adds nothing; each other struct has a layout, because the module of a boundary function
+  is checked before each module that names it, so the walk lays out nothing itself. The
+  interface writer starts the section of a trusted module of a library other than `std` with
+  `import extern;` (`interface.writes_trust`). `params_reach_byte_pointer` takes the function type
+  as a parameter: with the walk in `is_boundary`, a read of `s->ty->params` after a call that
+  takes `&w` was the error `use after move or del: 'w.todo' can be vacated here` (D17.21).
 
 ## 5. Modules, the driver and the diagnostics
 

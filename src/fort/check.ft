@@ -181,6 +181,8 @@ struct checker {
     ast.node* ptr_ok;
     // The count of the walks of the types of `extern fn` calls (give_id), which number each walk.
     u64 give_walks;
+    // The count of the walks of reach_walk (reach_id), which number each walk (D9.8).
+    u64 reach_walks;
     // Whether the checker needs an operand address instead of its value.
     // `node N = node{&N};` is a legal self-reference. An address of a module
     // declaration is available from all modules, including its own module.
@@ -2528,14 +2530,21 @@ fn value_of_sym(checker mut* ck, ast.node* n, ast.sym mut* s, expr mut* out) voi
             check_msg_end(ck, n->name_loc);
             out->ty = types.type_error(&ck->types);
         } else {
+            if (!checking_trusted(ck)) {
+                report_untrusted_call(ck, s, n->name_loc);
+            }
             out->init_const = true;
         }
     case ast.sym_kind.s_fn:
         if (is_args_init(s)) {
-            // only the `main` that the compiler emits calls it (D6.9)
+            // only the `main` that the compiler emits calls it (D6.9), and the error of D9.8
+            // gives way to it
             check_error(ck, n->name_loc, ARGS_INIT_ERROR);
             out->ty = types.type_error(&ck->types);
             return;
+        }
+        if (!checking_trusted(ck) && is_boundary(ck, s)) {
+            report_boundary_name(ck, s, n->name_loc);
         }
         // `&f` is an error; a function name initializes
         out->init_const = true;
@@ -2833,6 +2842,274 @@ fn c_tail_gives(checker mut* ck, types.node* t) bool {
     bool gives = give_run(&w);
     del(w.todo);
     return gives;
+}
+
+// ---- the trusted boundary (D9.8) -------------------------------------------------------
+
+// The texts of the three errors of D9.8, around the name that each quotes.
+string UNTRUSTED_EXTERN_HEAD = "extern ";
+string UNTRUSTED_EXTERN_TAIL = " needs a trusted module: add 'import extern;'";
+string UNTRUSTED_CALL_HEAD = "a call of extern ";
+string UNTRUSTED_CALL_TAIL =
+    " needs a trusted module: call a function of std that takes a span or a string";
+string BOUNDARY_TAIL = " is a boundary function: only a trusted module names it";
+
+// The mark of layout.reach for a struct that reaches no pointer to `char`, `u8` or `void`: a walk
+// that found no such pointer entered it, so the answer holds for the life of the type table. No
+// walk takes this number: reach_id counts from 1.
+u64 REACH_NONE = 18446744073709551615;
+
+// Whether the module that the checker checks is trusted (D9.8). With no module, nothing is
+// trusted.
+fn checking_trusted(checker* ck) bool {
+    return ck->module != null && modules.trusted(ck->module);
+}
+
+// Whether `s` is a declaration of a trusted module: its owner is the symbol of a module, whose
+// node the loader or the parser marked (D9.8).
+fn declared_trusted(ast.sym* s) bool {
+    ast.sym* m = s->owner;
+    return m != null && m->kind == ast.sym_kind.s_module && m->node != null
+        && (m->node->flags & ast.FLAG_TRUSTED) != 0;
+}
+
+// A type that the walk of is_boundary reads, or a struct that it entered.
+struct reach_item {
+    types.node* ty;
+}
+
+// One walk of is_boundary, with an explicit stack, so that a long chain of types needs no deep
+// recursion. `todo` holds the types that the walk has still to read and `entered` each struct that
+// it entered. Each struct that it entered keeps `id` (layout.reach), so the walk enters a struct
+// once.
+struct reach_walk {
+    reach_item mut@ own todo;
+    u64 todo_len;
+    reach_item mut@ own entered;
+    u64 entered_len;
+    u64 id;
+}
+
+// A number for a new walk of reach_walk, above 0, which no struct keeps yet.
+fn reach_id(checker mut* ck) u64 {
+    ck->reach_walks += 1;
+    return ck->reach_walks;
+}
+
+// Adds `t` to the types that the walk has still to read. A `void` result has no type to read.
+fn reach_push(reach_walk mut* w, types.node* t) void {
+    if (t == null) {
+        return;
+    }
+    if (w->todo_len == w->todo.len) {
+        reach_item mut@ own more = new(reach_item, grown_size(w->todo.len));
+        u64 mut i = 0;
+        while (i < w->todo_len) {
+            more[i] = w->todo[i];
+            i += 1;
+        }
+        del(w->todo);
+        w->todo = move(more);
+    }
+    w->todo[w->todo_len] = reach_item{.ty = t};
+    w->todo_len += 1;
+}
+
+// Keeps that the walk entered the struct `s`, which reach_run marks REACH_NONE after a walk that
+// found no pointer.
+fn reach_keep_entered(reach_walk mut* w, types.node* s) void {
+    if (w->entered_len == w->entered.len) {
+        reach_item mut@ own more = new(reach_item, grown_size(w->entered.len));
+        u64 mut i = 0;
+        while (i < w->entered_len) {
+            more[i] = w->entered[i];
+            i += 1;
+        }
+        del(w->entered);
+        w->entered = move(more);
+    }
+    w->entered[w->entered_len] = reach_item{.ty = s};
+    w->entered_len += 1;
+    types.keep_reach(s, w->id);
+}
+
+// Whether `t` is `char` or `u8`, the bytes of a C string or of a C buffer (D9.8).
+fn is_byte_type(types.node* t) bool {
+    return t->kind == types.type_kind.k_prim
+        && (t->prim == prim.prim_kind.prim_char || t->prim == prim.prim_kind.prim_u8);
+}
+
+// Enters the struct `s` for the walk and adds the type of each of its fields. A struct that this
+// walk entered before, or that a walk found reaching no pointer, adds nothing. A struct in error
+// has reported, and adds nothing. Each other struct has a layout: the module of a boundary
+// function, and each module that it imports, are checked before each module that names the
+// function (the dependency order of check_program), and the check of a module lays out each of its
+// structs, so types.fields_of panics on a struct with no layout as a broken precondition.
+fn reach_enter(reach_walk mut* w, types.node* s) void {
+    if (types.type_layout_state(s) == types.layout_state.l_error) {
+        return;
+    }
+    u64 mark = types.reach_of(s);
+    if (mark == REACH_NONE || mark == w->id) {
+        return;
+    }
+    reach_keep_entered(w, s);
+    u64 mut i = 0;
+    while (i < types.field_count(s)) {
+        reach_push(w, types.field_at(s, i).ty);
+        i += 1;
+    }
+}
+
+// Reads one type of the walk: true when it is a pointer to `char`, `u8` or `void` with any marks,
+// and otherwise adds the types that it leads to (D9.8): the pointee of another pointer, the
+// element of a span or of a fixed array, each field of a struct, and the parameters and the result
+// of a function pointer type. A `string` and a span of `u8` bring their length and lead to no such
+// pointer. A primitive, an enum and `void` lead to nothing.
+fn reach_step(reach_walk mut* w, types.node* t) bool {
+    switch (t->kind) {
+    case types.type_kind.k_voidptr:
+        return true;
+    case types.type_kind.k_ptr:
+        if (is_byte_type(t->elem)) {
+            return true;
+        }
+        reach_push(w, t->elem);
+    case types.type_kind.k_span, types.type_kind.k_array:
+        reach_push(w, t->elem);
+    case types.type_kind.k_fn:
+        u64 mut i = 0;
+        while (i < t->params.len) {
+            reach_push(w, t->params[i]);
+            i += 1;
+        }
+        reach_push(w, t->elem);
+    case types.type_kind.k_struct:
+        reach_enter(w, t);
+    default:
+        // a primitive, an enum, `void`, a `string` and an error type
+    }
+    return false;
+}
+
+// Reads the types of the walk until one is a pointer to `char`, `u8` or `void` or no type is left,
+// and returns whether one was. After a walk that found none, each struct that it entered keeps
+// REACH_NONE, because the walk read every type that the struct reaches. The caller dels the two
+// spans of the walk after it, in the function that owns the walk (D17.20).
+fn reach_run(reach_walk mut* w) bool {
+    bool mut found = false;
+    while (!found && w->todo_len > 0) {
+        w->todo_len -= 1;
+        found = reach_step(w, w->todo[w->todo_len].ty);
+    }
+    if (!found) {
+        u64 mut i = 0;
+        while (i < w->entered_len) {
+            types.keep_reach(w->entered[i].ty, REACH_NONE);
+            i += 1;
+        }
+    }
+    return found;
+}
+
+// Whether a parameter of the function type `fty` reaches a pointer to `char`, `u8` or `void`,
+// with any marks, as the type of the parameter, a pointee, an element of a span or of a fixed
+// array, a field of a struct, or a parameter or the result of a function pointer type, at any
+// depth (D9.8). Reach reads the types alone. The type is a parameter, so that no read of it after
+// a call that takes `&w` is a read through a pointer that the call can change (D17.21).
+fn params_reach_byte_pointer(checker mut* ck, types.node* fty) bool {
+    reach_walk mut w = reach_walk{.id = reach_id(ck)};
+    u64 mut i = 0;
+    while (i < fty->params.len) {
+        reach_push(&w, fty->params[i]);
+        i += 1;
+    }
+    bool found = reach_run(&w);
+    del(w.todo);
+    del(w.entered);
+    return found;
+}
+
+/// Whether `s` is a boundary function (D9.8): a fort function of a trusted module with a
+/// parameter whose type reaches a pointer to `char`, `u8` or `void` (params_reach_byte_pointer).
+fn is_boundary(checker mut* ck, ast.sym* s) bool {
+    if (s->kind != ast.sym_kind.s_fn || !declared_trusted(s) || check_poisoned(s->ty)
+        || s->ty->kind != types.type_kind.k_fn) {
+        return false;
+    }
+    return params_reach_byte_pointer(ck, s->ty);
+}
+
+// Reports the declaration `decl` of an `extern fn` in a module that is not trusted (D9.8).
+fn report_untrusted_extern(checker mut* ck, ast.node* decl) void {
+    check_msg_begin(ck);
+    msg_str(ck, UNTRUSTED_EXTERN_HEAD);
+    msg_quote(ck, decl->name);
+    msg_str(ck, UNTRUSTED_EXTERN_TAIL);
+    check_msg_end(ck, decl->name_loc);
+}
+
+// Reports at `at` a call of the `extern fn` `s` in a module that is not trusted (D9.8).
+fn report_untrusted_call(checker mut* ck, ast.sym* s, diag.loc at) void {
+    check_msg_begin(ck);
+    msg_str(ck, UNTRUSTED_CALL_HEAD);
+    msg_quote(ck, s->name);
+    msg_str(ck, UNTRUSTED_CALL_TAIL);
+    check_msg_end(ck, at);
+}
+
+// Reports at `at` a name of the boundary function `s` in a module that is not trusted (D9.8). The
+// name is the path of its module and its own name.
+fn report_boundary_name(checker mut* ck, ast.sym* s, diag.loc at) void {
+    check_msg_begin(ck);
+    strbuf.push(&ck->msg, '\'');
+    msg_str(ck, s->owner->name);
+    strbuf.push(&ck->msg, '.');
+    msg_str(ck, s->name);
+    strbuf.push(&ck->msg, '\'');
+    msg_str(ck, BOUNDARY_TAIL);
+    check_msg_end(ck, at);
+}
+
+// The position of the name that the symbol import of the binding `b` imports: the item of a brace
+// list, or the last segment of the path.
+fn imported_name_loc(scope.binding* b) diag.loc {
+    ast.node* n = b->node;
+    if (n == null) {
+        return b->loc;
+    }
+    if (n->kind == ast.ast_kind.k_import_item) {
+        return n->name_loc;
+    }
+    if (n->a != null && ast.ast_len(n->a) > 0) {
+        return ast.ast_child(n->a, ast.ast_len(n->a) - 1)->loc;
+    }
+    return b->loc;
+}
+
+// Reports each symbol import of the module `m` that names `std.rt.args_init` (D6.9), in each
+// module, and in a module that is not trusted each one that names a boundary function (D9.8). The
+// name of `std.rt.args_init` gets the error of D6.9 alone.
+fn check_symbol_imports(checker mut* ck, modules.module* m) void {
+    u64 mut k = 0;
+    while (k < scope.count(&m->names)) {
+        scope.binding* b = scope.at(&m->names, k);
+        k += 1;
+        if (b->kind != scope.bind_kind.b_symbol) {
+            continue;
+        }
+        ast.sym mut* s = sym_of_binding(ck, b);
+        if (s == null || s->kind != ast.sym_kind.s_fn) {
+            continue;
+        }
+        resolve_sym(ck, s);
+        bool start = is_args_init(s);
+        if (start) {
+            check_error(ck, imported_name_loc(b), ARGS_INIT_ERROR);
+        } else if (!modules.trusted(m) && is_boundary(ck, s)) {
+            report_boundary_name(ck, s, imported_name_loc(b));
+        }
+    }
 }
 
 // Whether an argument of the call `n` is a `.ptr` or a `->ptr` node (ptr_node). A call with none
@@ -6000,6 +6277,9 @@ fn resolve_declaration(checker mut* ck, ast.node* decl) void {
     }
     ast.sym_kind mut kind = ast.sym_kind.s_const;
     if (decl_sym_kind(current, &kind)) {
+        if (kind == ast.sym_kind.s_extern_fn && !checking_trusted(ck)) {
+            report_untrusted_extern(ck, current);
+        }
         resolve_sym(ck, current->sym);
     }
 }
@@ -6054,6 +6334,7 @@ fn check_module_decls(checker mut* ck, modules.module* m) void {
     strmap.free(&ck->bad_imports);
     collect_failed_imports(ck, m);
     collect_module(ck, m);
+    check_symbol_imports(ck, m);
     resolve_declarations(ck, m->ast);
 }
 

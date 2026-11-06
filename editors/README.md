@@ -230,6 +230,27 @@ for d in $dirs; do echo "$dirs" | grep -q "^$d/" && echo "$d"; done | wc -l
 
 Only a project model would fix the repeating layout, and the extension has none.
 
+A file of `std/` that you open is checked as the entry module of its base name, which no root
+gives, so it is not trusted (D9.8): its externs, its calls of C and its names of boundary functions
+are painted as errors. The compiler reads its own copy of the standard library beside the binary,
+so even the files that the runtime reads first are no modules of that root when the extension
+checks the workspace file. Counted in the VM with the debug build, each file checked alone as the
+extension checks it: rt 20, `linux/libc.ft` 61, mem 5, str 5, io 11, `linux/net.ft` 9,
+`linux/os.ft` 31, sys 25, and 0 for strbuf, math, sort, strmap, vec and `digest/sha256.ft`:
+
+```sh
+tools/vm run 'for f in $(find std -maxdepth 1 -name "*.ft") \
+        $(find std/digest std/linux -name "*.ft"); do
+    echo "$f $(build/Linux/debug/fort --check "$f" 2>&1 |
+        grep -c "needs a trusted module\|is a boundary function")"
+done'
+```
+
+A check of the file as `std.<name>` needs a standard root that holds the edited file at the path of
+its target, as `tools/fort_lint.py` builds one of links (`std_documents`), and an entry that
+imports it; the extension builds neither, so read these errors as the cost of a check of the file
+alone. The build and the lint check `std` as the compiler loads it.
+
 A diagnostic reported inside the standard library is dropped rather than shown, since its path is
 the guest's. Its notes go with it wherever they point. An error in the standard library that names
 a line of your own file therefore paints nothing at all. The checker puts that error in your own

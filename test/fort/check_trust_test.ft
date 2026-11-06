@@ -1,0 +1,582 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| reach ok
+//| no reach ok
+//| marks ok
+//| externs ok
+//| imports ok
+//| roots ok
+//| places ok
+//| ok
+/// Checks the three rules of D9.8 in src/fort/check.ft: only a trusted module declares an `extern
+/// fn`, calls one, or names a boundary function, a function of a trusted module with a parameter
+/// whose type reaches a pointer to `char`, `u8` or `void`. A module of the standard library
+/// directory is trusted, and another module is trusted when its first item is `import extern;`.
+import check_env;
+import modules_env;
+import std.strbuf;
+
+// The module std.edge of the sandbox: a boundary function for each way that a parameter type
+// reaches a byte pointer, and a function for each type that reaches none.
+string[37] EDGE = {
+    "struct holder { u8* data; u64 len; }",
+    "struct chain { void* item; chain* next; }",
+    "struct ring { ring* next; i64 v; }",
+    "struct plain { i64 x; i32* y; }",
+    "struct wrap { plain p; }",
+    "struct both { plain p; holder h; }",
+    "enum shade { dark, light }",
+    "fn by_char(char* p) void {}",
+    "fn by_byte(u8 mut* p) void {}",
+    "fn by_void(void* p) void {}",
+    "fn by_pointee(u8** p) void {}",
+    "fn by_element(char*@ names) void {}",
+    "fn by_array(void*[2] slots) void {}",
+    "fn by_field(holder* h) void {}",
+    "fn by_value_field(both b) void {}",
+    "fn by_chain(chain* c) void {}",
+    "fn by_callback(fn (u8*) void cb) void {}",
+    "fn by_result(fn () char* cb) void {}",
+    "fn by_two_levels(fn () fn (char*) void cb) void {}",
+    "fn by_string(string s) void {}",
+    "fn by_bytes(u8@ b) void {}",
+    "fn by_typed(fn (i64*) i32 cb) void {}",
+    "fn by_plain(plain* p) void {}",
+    "fn by_wrap(wrap w) void {}",
+    "fn by_ring(ring* r) void {}",
+    "fn by_i8(i8* p) void {}",
+    "fn by_shade(shade s) void {}",
+    "fn gives_char() char* {",
+    "    return null;",
+    "}",
+    "fn twice(i64 v) i64 {",
+    "    return v + v;",
+    "}",
+    "struct hooks { fn (u8*) void on; }",
+    "fn by_hooks(hooks* h) void {}",
+    "fn by_holders(holder[2] hs) void {}",
+    "fn by_nested(holder*@ hs) void {}",
+};
+
+// The module std.c of the sandbox: one extern, which std.c declares as a trusted module.
+string C_MODULE = "extern fn labs(i64 v) i64;\n";
+
+// The end of the error of a name of a boundary function (D9.8).
+string BOUNDARY = " is a boundary function: only a trusted module names it";
+
+// Fills the sandbox standard library directory `std` with its runtime, std.edge and std.c.
+fn sandbox(check_env.env mut* e) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    u64 mut i = 0;
+    while (i < EDGE.len) {
+        strbuf.append(&b, EDGE[i]);
+        strbuf.push(&b, '\n');
+        i += 1;
+    }
+    check_env.add(e, "std/edge.ft", strbuf.view(&b));
+    check_env.add(e, "std/c.ft", C_MODULE);
+    modules_env_std(e);
+}
+
+// Names the sandbox directory `std` the standard library directory, with an empty runtime.
+fn modules_env_std(check_env.env mut* e) void {
+    modules_env.std_dir(&e->m, "std");
+}
+
+// The lines `lines`, joined with a newline after each, in `out`.
+fn joined(string@ lines, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(out, lines[i]);
+        strbuf.push(out, '\n');
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+// Holds that report `i` of `e` is `<at>: '<name>'` and BOUNDARY.
+fn boundary_at(check_env.env mut* e, u64 i, string at, string name) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    strbuf.append(&b, at);
+    strbuf.append(&b, ": '");
+    strbuf.append(&b, name);
+    strbuf.push(&b, '\'');
+    strbuf.append(&b, BOUNDARY);
+    same(e, i, strbuf.view(&b));
+}
+
+// Holds that report `i` of `e` is `want`.
+fn same(check_env.env mut* e, u64 i, string want) void {
+    string got = check_env.report_text(e, i);
+    if (got != want) {
+        eprintln("check_trust_test: report ", i, ": expected <", want, ">, got <", got, ">");
+        panic("check_trust_test: a report differs");
+    }
+}
+
+// Holds that the check of `e` reported exactly `n` diagnostics.
+fn reported(check_env.env mut* e, u64 n) void {
+    if (check_env.reports(e) != n) {
+        eprintln("check_trust_test: expected ", n, " reports, got ", check_env.reports(e),
+                 ", the first <", check_env.report_text(e, 0), ">");
+        panic("check_trust_test: the count of the reports differs");
+    }
+}
+
+// ---- reach ---------------------------------------------------------------------------------
+
+// The body of a main that names each boundary function of std.edge, one on each line from line 3.
+string[18] NAMES_EACH_REACH = {
+    "fn main() i32 {",
+    "    edge.by_char(null);",
+    "    edge.by_byte(null);",
+    "    edge.by_void(null);",
+    "    edge.by_pointee(null);",
+    "    char*[2] names = {};",
+    "    edge.by_element(names[..]);",
+    "    void*[2] slots = {};",
+    "    edge.by_array(slots);",
+    "    edge.by_field(null);",
+    "    edge.both pair = {};",
+    "    edge.by_value_field(pair);",
+    "    edge.by_chain(null);",
+    "    edge.by_callback(null);",
+    "    edge.by_result(null);",
+    "    edge.by_two_levels(null);",
+    "    fn (char*) void value = edge.by_char;",
+    "    return 0;",
+};
+
+// Checks `import std.edge;`, an optional `import extern;` before it, and NAMES_EACH_REACH.
+fn check_each_reach(check_env.env mut* e, bool trusted) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    strbuf.str_buf mut text = strbuf.create();
+    defer del(text.data);
+    if (trusted) {
+        strbuf.append(&text, "import extern;\n");
+    }
+    strbuf.append(&text, "import std.edge;\n");
+    strbuf.append(&text, joined(NAMES_EACH_REACH[..], &b));
+    strbuf.append(&text, "}\n");
+    return check_env.check_src(e, strbuf.view(&text));
+}
+
+// A parameter type reaches a byte pointer as the type itself (`char*`, `u8 mut*`, `void*`), as a
+// pointee, as an element of a span or of a fixed array, as a field of a struct behind a pointer
+// or of a struct by value, through a recursive struct, and as a parameter or the result of a
+// function pointer type, at two levels too. Each name is one error at the name, a call and a
+// function value alike. The walk of `by_field` finds the pointer of `holder`, so a mutant that
+// kept the structs of that walk as reaching none would drop the report of `by_value_field`.
+fn each_reach_makes_a_boundary_function(check_env.env mut* e) void {
+    sandbox(e);
+    assert(!check_each_reach(e, false));
+    reported(e, 13);
+    boundary_at(e, 0, "3:10", "std.edge.by_char");
+    boundary_at(e, 1, "4:10", "std.edge.by_byte");
+    boundary_at(e, 2, "5:10", "std.edge.by_void");
+    boundary_at(e, 3, "6:10", "std.edge.by_pointee");
+    boundary_at(e, 4, "8:10", "std.edge.by_element");
+    boundary_at(e, 5, "10:10", "std.edge.by_array");
+    boundary_at(e, 6, "11:10", "std.edge.by_field");
+    boundary_at(e, 7, "13:10", "std.edge.by_value_field");
+    boundary_at(e, 8, "14:10", "std.edge.by_chain");
+    boundary_at(e, 9, "15:10", "std.edge.by_callback");
+    boundary_at(e, 10, "16:10", "std.edge.by_result");
+    boundary_at(e, 11, "17:10", "std.edge.by_two_levels");
+    boundary_at(e, 12, "18:34", "std.edge.by_char");
+    // a trusted module names each of them
+    check_env.reopen(e);
+    sandbox(e);
+    assert(check_each_reach(e, true));
+    reported(e, 0);
+}
+
+// A `string` and a span of `u8` bring their length, and a pointer to another type, a struct with
+// no byte pointer, a recursive struct with none, an enum and a function pointer type over other
+// types reach none. A result of `char*` is no parameter. Each of these is no boundary function.
+fn types_that_reach_nothing_are_named_freely(check_env.env mut* e) void {
+    sandbox(e);
+    string[16] lines = {
+        "import std.edge;",
+        "fn main() i32 {",
+        "    edge.by_string(\"text\");",
+        "    u8[2] raw = {};",
+        "    edge.by_bytes(raw[..]);",
+        "    edge.by_typed(null);",
+        "    edge.by_plain(null);",
+        "    edge.wrap w = {};",
+        "    edge.by_wrap(w);",
+        "    edge.by_ring(null);",
+        "    edge.by_i8(null);",
+        "    edge.by_shade(edge.shade.dark);",
+        "    char* given = edge.gives_char();",
+        "    fn (i64) i64 doubled = edge.twice;",
+        "    return cast(doubled(1), i32) - 2;",
+        "}",
+    };
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    assert(check_env.check_src(e, joined(lines[..], &b)));
+    reported(e, 0);
+}
+
+// A walk that found no byte pointer keeps each struct that it entered as reaching none, and a
+// walk that found one keeps none of them so: `by_plain` after `by_wrap` still reaches none, and
+// `by_value_field` after `by_plain` still reaches the pointer of `holder` past the `plain` that
+// a walk kept.
+fn the_marks_of_a_walk_hold_for_later_walks(check_env.env mut* e) void {
+    sandbox(e);
+    string[9] lines = {
+        "import std.edge;",
+        "fn main() i32 {",
+        "    edge.wrap w = {};",
+        "    edge.by_wrap(w);",
+        "    edge.by_plain(null);",
+        "    edge.both pair = {};",
+        "    edge.by_value_field(pair);",
+        "    return 0;",
+        "}",
+    };
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    assert(!check_env.check_src(e, joined(lines[..], &b)));
+    reported(e, 1);
+    boundary_at(e, 0, "7:10", "std.edge.by_value_field");
+}
+
+// A function of a module that is not trusted is no boundary function, whatever its parameters.
+// The same module with `import extern;` makes it one.
+fn only_a_function_of_a_trusted_module_is_a_boundary_function(check_env.env mut* e) void {
+    string caller = "import helper;\nfn main() i32 {\n    helper.take(null);\n    return 0;\n}\n";
+    modules_env_std(e);
+    check_env.add(e, "helper.ft", "fn take(char* p) void {}\n");
+    assert(check_env.check_src(e, caller));
+    reported(e, 0);
+    check_env.reopen(e);
+    modules_env_std(e);
+    check_env.add(e, "helper.ft", "import extern;\nfn take(char* p) void {}\n");
+    assert(!check_env.check_src(e, caller));
+    reported(e, 1);
+    boundary_at(e, 0, "3:12", "helper.take");
+}
+
+// ---- externs -------------------------------------------------------------------------------
+
+// The error of the declaration of `puts` in a module that is not trusted.
+string PUTS_DECLARED = "1:11: extern 'puts' needs a trusted module: add 'import extern;'";
+
+// The end of the error of a call of an extern in a module that is not trusted.
+string CALL_TAIL =
+    " needs a trusted module: call a function of std that takes a span or a string";
+
+// The report `<at>: a call of extern '<name>'` and CALL_TAIL, in `out`.
+fn call_error(string at, string name, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    strbuf.append(out, at);
+    strbuf.append(out, ": a call of extern '");
+    strbuf.append(out, name);
+    strbuf.push(out, '\'');
+    strbuf.append(out, CALL_TAIL);
+    return strbuf.view(out);
+}
+
+// An `extern fn` of a module that is not trusted is one error at its name, and each call of it
+// one more at the callee. `import extern;` makes both legal.
+fn an_extern_needs_a_trusted_module(check_env.env mut* e) void {
+    modules_env_std(e);
+    string text = "extern fn puts(char* s) i32;\nfn main() i32 {\n    return puts(null);\n}\n";
+    assert(!check_env.check_src(e, text));
+    reported(e, 2);
+    same(e, 0, PUTS_DECLARED);
+    strbuf.str_buf mut want = strbuf.create();
+    defer del(want.data);
+    same(e, 1, call_error("3:12", "puts", &want));
+    check_env.reopen(e);
+    modules_env_std(e);
+    string[5] trusted = {
+        "import extern;",
+        "extern fn puts(char* s) i32;",
+        "fn main() i32 {",
+        "    return puts(null);",
+        "}",
+    };
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    assert(check_env.check_src(e, joined(trusted[..], &b)));
+    reported(e, 0);
+}
+
+// A call of an extern of a trusted module is an error in a module that is not trusted. An extern
+// name as a value is the one error that it is not a value.
+fn a_call_of_an_extern_of_std_needs_a_trusted_module(check_env.env mut* e) void {
+    sandbox(e);
+    string call = "import std.c;\nfn main() i32 {\n    i64 v = c.labs(1);\n    return 0;\n}\n";
+    assert(!check_env.check_src(e, call));
+    reported(e, 1);
+    strbuf.str_buf mut want = strbuf.create();
+    defer del(want.data);
+    same(e, 0, call_error("3:15", "labs", &want));
+    check_env.reopen(e);
+    sandbox(e);
+    string value = "import std.c;\nfn (i64) i64 f = c.labs;\nfn main() i32 {\n    return 0;\n}\n";
+    assert(!check_env.check_src(e, value));
+    assert(check_env.said(e, "'labs' is an extern function, which is not a value"));
+    assert(!check_env.said(e, CALL_TAIL));
+}
+
+// ---- symbol imports ----------------------------------------------------------------------
+
+// A symbol import of a boundary function is a name of it: one error at the imported name, in the
+// path form and in a brace list, whether a use follows or not.
+fn a_symbol_import_of_a_boundary_function_is_a_name(check_env.env mut* e) void {
+    sandbox(e);
+    string[5] lines = {
+        "import std.edge.by_char;",
+        "import std.edge.{by_string, by_byte as b};",
+        "fn main() i32 {",
+        "    return 0;",
+        "}",
+    };
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    assert(!check_env.check_src(e, joined(lines[..], &b)));
+    reported(e, 2);
+    boundary_at(e, 0, "1:17", "std.edge.by_char");
+    boundary_at(e, 1, "2:29", "std.edge.by_byte");
+}
+
+// `std.rt.args_init` belongs to the start of the program (D6.9): a symbol import of it is the
+// error of D6.9 alone, in a module that is not trusted and in a trusted one.
+fn a_symbol_import_of_args_init_is_the_error_of_d6_9_alone(check_env.env mut* e) void {
+    string args = "fn args_init(i32 argc, char* mut* argv) void {\n}\n";
+    string want = "'std.rt.args_init' belongs to the start of the program";
+    modules_env_std(e);
+    check_env.add(e, "std/rt.ft", args);
+    string plain = "import std.rt.args_init;\nfn main() i32 {\n    return 0;\n}\n";
+    assert(!check_env.check_src(e, plain));
+    reported(e, 1);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    strbuf.append(&b, "1:15: ");
+    strbuf.append(&b, want);
+    same(e, 0, strbuf.view(&b));
+    check_env.reopen(e);
+    modules_env_std(e);
+    check_env.add(e, "std/rt.ft", args);
+    string trusted =
+        "import extern;\nimport std.rt.args_init;\nfn main() i32 {\n    return 0;\n}\n";
+    assert(!check_env.check_src(e, trusted));
+    reported(e, 1);
+    strbuf.clear(&b);
+    strbuf.append(&b, "2:15: ");
+    strbuf.append(&b, want);
+    same(e, 0, strbuf.view(&b));
+}
+
+// ---- the roots -------------------------------------------------------------------------------
+
+// The name does not make a module trusted (D9.8): an entry file `std.ft` is the module `std`,
+// which is trusted only by its `import extern;`, and std/c.ft of the sandbox, which the closure of
+// the runtime does not read, is the entry module `c` when the command line names it. A file that
+// that closure reads keeps its trust as the entry (modules_test
+// the_runtime_as_the_entry_stays_trusted).
+fn a_module_is_trusted_by_its_root_and_not_by_its_name(check_env.env mut* e) void {
+    modules_env_std(e);
+    string untrusted = "extern fn puts(char* s) i32;\nfn main() i32 {\n    return 0;\n}\n";
+    check_env.add(e, "std.ft", untrusted);
+    assert(!check_env.check_entry(e, "std.ft"));
+    reported(e, 1);
+    same(e, 0, PUTS_DECLARED);
+    check_env.reopen(e);
+    modules_env_std(e);
+    string trusted =
+        "import extern;\nextern fn puts(char* s) i32;\nfn main() i32 {\n    return 0;\n}\n";
+    check_env.add(e, "std.ft", trusted);
+    assert(check_env.check_entry(e, "std.ft"));
+    reported(e, 0);
+    check_env.reopen(e);
+    sandbox(e);
+    e->want_main = false;
+    assert(!check_env.check_entry(e, "std/c.ft"));
+    reported(e, 1);
+    same(e, 0, "1:11: extern 'labs' needs a trusted module: add 'import extern;'");
+}
+
+// A name of a boundary function is an error wherever a module that is not trusted writes it: in
+// the initializer of a module-level constant, in a `defer`, and in a nested call. Each one is one
+// error at its name.
+fn each_place_of_a_name_is_one_error(check_env.env mut* e) void {
+    sandbox(e);
+    string[11] lines = {
+        "import std.edge;",
+        "fn (char*) void FIRST = edge.by_char;",
+        "fn take(fn (char*) void f) void {}",
+        "fn main() i32 {",
+        "    defer edge.by_void(null);",
+        "    take(edge.by_char);",
+        "    if (true) {",
+        "        edge.by_byte(null);",
+        "    }",
+        "    return 0;",
+        "}",
+    };
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    assert(!check_env.check_src(e, joined(lines[..], &b)));
+    reported(e, 4);
+    boundary_at(e, 0, "2:30", "std.edge.by_char");
+    boundary_at(e, 1, "5:16", "std.edge.by_void");
+    boundary_at(e, 2, "6:15", "std.edge.by_char");
+    boundary_at(e, 3, "8:14", "std.edge.by_byte");
+}
+
+// The rule reads the module that holds the name: the trusted module `helper` calls its extern,
+// and the module `main`, which is not trusted, calls the function of `helper` that wraps it and
+// not the extern itself.
+fn the_module_that_holds_the_name_decides(check_env.env mut* e) void {
+    sandbox(e);
+    string helper =
+        "import extern;\nextern fn ping() i32;\nfn pong() i32 {\n    return ping();\n}\n";
+    check_env.add(e, "helper.ft", helper);
+    string[6] lines = {
+        "import helper;",
+        "fn main() i32 {",
+        "    i32 a = helper.pong();",
+        "    i32 b = helper.ping();",
+        "    return a + b;",
+        "}",
+    };
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    assert(!check_env.check_src(e, joined(lines[..], &b)));
+    reported(e, 1);
+    strbuf.str_buf mut want = strbuf.create();
+    defer del(want.data);
+    same(e, 0, call_error("4:20", "ping", &want));
+}
+
+// The declaration in a `$if` branch that the configuration selects is an error, and one in the
+// branch that it drops is not checked at all.
+fn only_a_selected_declaration_is_an_error(check_env.env mut* e) void {
+    modules_env_std(e);
+    string[8] lines = {
+        "$if (true) {",
+        "    extern fn kept(i32 v) i32;",
+        "} else {",
+        "    extern fn dropped(i32 v) i32;",
+        "}",
+        "fn main() i32 {",
+        "    return 0;",
+        "}",
+    };
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    assert(!check_env.check_src(e, joined(lines[..], &b)));
+    reported(e, 1);
+    same(e, 0, "2:15: extern 'kept' needs a trusted module: add 'import extern;'");
+}
+
+// The steps of reach combine: a field of a function pointer type whose parameter is a `u8*`, a
+// field of the element of a fixed array of structs, and a field of the pointee of the element of
+// a span.
+fn the_steps_of_reach_combine(check_env.env mut* e) void {
+    sandbox(e);
+    string[9] lines = {
+        "import std.edge;",
+        "fn main() i32 {",
+        "    edge.by_hooks(null);",
+        "    edge.holder[2] hs = {};",
+        "    edge.by_holders(hs);",
+        "    edge.holder*[1] ps = {};",
+        "    edge.by_nested(ps[..]);",
+        "    return 0;",
+        "}",
+    };
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    assert(!check_env.check_src(e, joined(lines[..], &b)));
+    reported(e, 3);
+    boundary_at(e, 0, "3:10", "std.edge.by_hooks");
+    boundary_at(e, 1, "5:10", "std.edge.by_holders");
+    boundary_at(e, 2, "7:10", "std.edge.by_nested");
+}
+
+// A function whose parameter type is in error fails, so it is no boundary function: the walk does
+// not start.
+fn a_failed_parameter_type_is_no_boundary_function(check_env.env mut* e) void {
+    modules_env_std(e);
+    string helper =
+        "import extern;\nstruct bad {\n    bad inner;\n    u8* data;\n}\nfn take(bad* p) void {}\n";
+    check_env.add(e, "helper.ft", helper);
+    string main = "import helper;\nfn main() i32 {\n    helper.take(null);\n    return 0;\n}\n";
+    assert(!check_env.check_src(e, main));
+    assert(check_env.said(e, "struct bad has infinite size"));
+    assert(!check_env.said(e, BOUNDARY));
+}
+
+// A struct in error has reported, and the walk reads none of its fields: `s1` lays out, because
+// its field is a pointer, and the walk reaches `s2`, which is in error, through that field. Without
+// the test of the error state, types.fields_of panics on `s2`.
+fn a_struct_in_error_reaches_nothing(check_env.env mut* e) void {
+    modules_env_std(e);
+    string[10] helper = {
+        "import extern;",
+        "struct s1 {",
+        "    s2* p;",
+        "}",
+        "struct s2 {",
+        "    s2 self;",
+        "    u8* data;",
+        "}",
+        "fn take(s1* p) void {}",
+        "fn keep(char* c, s1* p) void {}",
+    };
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    check_env.add(e, "helper.ft", joined(helper[..], &b));
+    string[6] lines = {
+        "import helper;",
+        "fn main() i32 {",
+        "    helper.take(null);",
+        "    helper.keep(null, null);",
+        "    return 0;",
+        "}",
+    };
+    assert(!check_env.check_src(e, joined(lines[..], &b)));
+    assert(check_env.said(e, "struct s2 has infinite size"));
+    // `take` reaches only `s2`; the walk of `keep` reads `s1` and `s2` before its `char*`
+    assert(!check_env.said(e, "'helper.take' is a boundary function"));
+    assert(check_env.said(e, "'helper.keep' is a boundary function"));
+}
+
+fn main() i32 {
+    check_env.run(each_reach_makes_a_boundary_function);
+    println("reach ok");
+    check_env.run(types_that_reach_nothing_are_named_freely);
+    check_env.run(only_a_function_of_a_trusted_module_is_a_boundary_function);
+    println("no reach ok");
+    check_env.run(the_marks_of_a_walk_hold_for_later_walks);
+    println("marks ok");
+    check_env.run(an_extern_needs_a_trusted_module);
+    check_env.run(a_call_of_an_extern_of_std_needs_a_trusted_module);
+    println("externs ok");
+    check_env.run(a_symbol_import_of_a_boundary_function_is_a_name);
+    check_env.run(a_symbol_import_of_args_init_is_the_error_of_d6_9_alone);
+    println("imports ok");
+    check_env.run(a_module_is_trusted_by_its_root_and_not_by_its_name);
+    println("roots ok");
+    check_env.run(the_steps_of_reach_combine);
+    check_env.run(each_place_of_a_name_is_one_error);
+    check_env.run(the_module_that_holds_the_name_decides);
+    check_env.run(only_a_selected_declaration_is_an_error);
+    check_env.run(a_failed_parameter_type_is_no_boundary_function);
+    check_env.run(a_struct_in_error_reaches_nothing);
+    println("places ok");
+    println("ok");
+    return 0;
+}
