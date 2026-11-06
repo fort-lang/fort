@@ -2,8 +2,9 @@
 ///
 /// The file declares every module-level declaration of every module of the library, with no
 /// function body. It holds one section for each module, in byte order of the module path. A
-/// section holds one import for each module that its source module selects with an import or
-/// that one of its types or values names, in byte order of the path, and then each selected
+/// section of a trusted module of a library that is not `std` starts with `import extern;` (D9.8).
+/// Then a section holds one import for each module that its source module selects with an import
+/// or that one of its types or values names, in byte order of the path, and then each selected
 /// declaration in byte order of its name. A name of another module is qualified with the binding
 /// of its import. A constant has its folded value and a `mut` global the zero value of its type.
 /// The bytes are a function of the checked trees alone, so two runs write the same file. The
@@ -38,6 +39,11 @@ u64 HEX_MASK = 15;
 
 // The bytes of a binding prefix and of a digit after it.
 char PREFIX_BYTE = '_';
+
+// The first line of the section of a trusted module of a library that is not `std` (D9.8, D9.11),
+// and the start of the path of each module of `std`.
+string TRUST_LINE = "import extern;\n";
+string STD_PREFIX = "std.";
 
 // The selected declarations of one module.
 struct decl_list {
@@ -768,7 +774,14 @@ fn write_decl(section mut* sec, ast.node* decl, strbuf.str_buf mut* out) void {
 
 // ---- sections and the file -----------------------------------------------------------
 
-// Writes the section of the module `m`: its `//! module` line, its imports and its declarations.
+// Whether the section of the module `m` starts with `import extern;`: `m` is trusted and is no
+// module of `std`, which is trusted by its library (D9.8, D9.11).
+fn writes_trust(modules.module* m) bool {
+    return modules.trusted(m) && !str.starts_with(m->path, STD_PREFIX);
+}
+
+// Writes the section of the module `m`: its `//! module` line, its `import extern;` when
+// writes_trust holds, its imports and its declarations.
 fn write_section(check.checker* ck, modules.module* m, strbuf.str_buf mut* out) void {
     // The buffer comes before the list and the section: the drop of each is a call, and a `del`
     // of the buffer after it would end a local that the call can change.
@@ -792,6 +805,9 @@ fn write_section(check.checker* ck, modules.module* m, strbuf.str_buf mut* out) 
     strbuf.append(out, modules.INTERFACE_SECTION);
     strbuf.append(out, m->path);
     strbuf.push(out, '\n');
+    if (writes_trust(m)) {
+        strbuf.append(out, TRUST_LINE);
+    }
     u64 mut i = 0;
     while (i < sec->imports.len) {
         strbuf.append(out, "import ");

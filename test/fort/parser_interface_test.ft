@@ -294,6 +294,43 @@ fn a_section_of_only_imports_holds_no_declaration(parse_env.env mut* e) void {
     assert(ast.ast_child(mod, 2)->b->name == "_2");
 }
 
+// The section of a trusted module of a library that is not `std` starts with `import extern;`
+// (grammar.md section 2, D9.11): it marks the section trusted and adds no node.
+fn a_section_starts_with_its_trust_form(parse_env.env mut* e) void {
+    string[3] lines = {"import extern;", "import geom.a as _0;", "extern fn puts(char* s) i32;"};
+    string own text = section(lines[..]);
+    defer del(text);
+    ast.node* mod = parse_env.parse_interface(e, text);
+    assert(parse_env.errors(e) == 0);
+    assert((mod->flags & ast.FLAG_TRUSTED) != 0);
+    assert(ast.ast_len(mod) == 2);
+    assert(ast.ast_child(mod, 0)->kind == ast.ast_kind.k_import);
+    // a section with no such form is not trusted
+    ast.node* plain = parse_env.parse_interface(e, "extern fn puts(char* s) i32;\n");
+    assert(parse_env.errors(e) == 0);
+    assert((plain->flags & ast.FLAG_TRUSTED) == 0);
+}
+
+// The form stands only first in a section too: after an import and after a declaration, it is one
+// error at its `import`, and the item after it stays.
+fn the_trust_form_stands_only_first_in_a_section() void {
+    string want = "2:1: error: 'import extern;' stands only as the first item of a module";
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
+    ast.node* mod =
+        parse_env.parse_interface(e, "import geom.a as _0;\nimport extern;\ni32 A = 1;\n");
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0) == want);
+    assert((mod->flags & ast.FLAG_TRUSTED) == 0);
+    assert(ast.ast_len(mod) == 2);
+    parse_env.env mut* own f = parse_env.make();
+    defer parse_env.drop_made(move(f));
+    ast.node* late = parse_env.parse_interface(f, "i32 A = 1;\nimport extern;\ni32 B = 2;\n");
+    assert(parse_env.errors(f) == 1);
+    assert(parse_env.diag_at(f, 0) == want);
+    assert(ast.ast_len(late) == 2);
+}
+
 fn main() i32 {
     parse_env.run(a_bodiless_function_in_a_source_file_is_one_error_at_its_semicolon);
     an_extern_in_a_source_file_still_has_no_body();
@@ -315,6 +352,8 @@ fn main() i32 {
     a_struct_and_an_enum_of_a_section_keep_the_source_rules();
     a_section_reads_each_value_form_of_the_writer();
     parse_env.run(a_section_of_only_imports_holds_no_declaration);
+    parse_env.run(a_section_starts_with_its_trust_form);
+    the_trust_form_stands_only_first_in_a_section();
     println("interface ok");
     println("ok");
     return 0;

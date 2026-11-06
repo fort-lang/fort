@@ -2629,7 +2629,46 @@ fn check_path_separator(parser mut* p) bool {
     return false;
 }
 
+// The error of an `import extern;` that is not the first item of its module (D9.3).
+string TRUST_PLACE_ERROR = "'import extern;' stands only as the first item of a module";
+
+// Whether the cursor is at `import extern`, the start of a trust_decl (grammar.md section 2).
+fn at_trust_decl(parser* p) bool {
+    return at(p, lexer.tok_kind.kw_import) && peek_kind(p, 1) == lexer.tok_kind.kw_extern;
+}
+
+// trust_decl = "import" "extern" ";": the first item of a module or of a section of an
+// interface file (grammar.md section 2, D9.3). It imports no module and binds no name, so it
+// makes no node: it marks `mod` trusted (D9.8).
+fn parse_trust_decl(parser mut* p, ast.node mut* mod) void {
+    u64 start = p->pos;
+    bump(p);
+    bump(p);
+    if (expect(p, lexer.tok_kind.semi, "';'")) {
+        mod->flags |= ast.FLAG_TRUSTED;
+        return;
+    }
+    recover(p, mod, start, true, RECOVER_DECL);
+}
+
+// Reports an `import extern;` at the cursor that is not the first item of its module: after an
+// import, a second one, in a `$if` or after a declaration (D9.3). It reads the form to its `;`,
+// so no recovery skips the item after it, and it makes no node.
+fn parse_misplaced_trust(parser mut* p) ast.node mut* {
+    error_here(p, TRUST_PLACE_ERROR);
+    bump(p);
+    bump(p);
+    if (at(p, lexer.tok_kind.semi)) {
+        bump(p);
+    }
+    p->failed = false;
+    return null;
+}
+
 fn parse_import(parser mut* p) ast.node mut* {
+    if (at_trust_decl(p)) {
+        return parse_misplaced_trust(p);
+    }
     diag.loc at_loc = here(p);
     ast.node mut* n = node_at(p, ast.ast_kind.k_import, at_loc);
     bump(p);
@@ -2693,6 +2732,9 @@ fn parse_top_decl(parser mut* p) ast.node mut* {
     if (at(p, lexer.tok_kind.kw_enum)) {
         return parse_enum_decl(p);
     }
+    if (at_trust_decl(p)) {
+        return parse_misplaced_trust(p);
+    }
     if (at(p, lexer.tok_kind.kw_import)) {
         error_here(p, "an import comes before every declaration");
         return null;
@@ -2744,7 +2786,8 @@ fn parse_module_compile_if_into(parser mut* p, ast.node mut* mod,
     return imports;
 }
 
-/// Parses one file into a `k_module` node. Imports precede declarations in source order.
+/// Parses one file into a `k_module` node. A first item `import extern;` marks the node trusted
+/// (D9.8). Imports precede declarations in source order.
 /// The token vector must end in EOF. Syntax errors use the budget that the lexer started.
 /// The function returns a partial tree with `k_error` nodes when syntax errors occur.
 fn parse_module(session.session mut* sess, string file, lexer.tok_vec* toks,
@@ -2759,6 +2802,9 @@ fn parse_module(session.session mut* sess, string file, lexer.tok_vec* toks,
                           diag.loc_make(file, 0, 0), strbuf.create(), 0, 0, false};
 
     ast.node mut* mod = ast.ast_new(ar, ast.ast_kind.k_module, diag.loc_make(file, 1, 1));
+    if (at_trust_decl(p)) {
+        parse_trust_decl(p, mod);
+    }
     // Both loops are recovery points, so one error removes one subtree.
     while (true) {
         if (at(p, lexer.tok_kind.kw_import)) {
@@ -2784,6 +2830,9 @@ fn parse_module(session.session mut* sess, string file, lexer.tok_vec* toks,
 // interface_import = "import" import_path "as" identifier ";": the one import form of an
 // interface file. The binding is the `b` of the import, as an `as` alias is in a source file.
 fn parse_interface_import(parser mut* p) ast.node mut* {
+    if (at_trust_decl(p)) {
+        return parse_misplaced_trust(p);
+    }
     diag.loc at_loc = here(p);
     ast.node mut* n = node_at(p, ast.ast_kind.k_import, at_loc);
     bump(p);
@@ -2819,10 +2868,11 @@ fn parse_interface_import(parser mut* p) ast.node mut* {
 }
 
 /// Parses one section of an interface file into a `k_module` node (grammar.md section 2,
-/// module-system.md 10.3). The section is an `interface_module`: its imports, and then its
-/// declarations, each function without a body. A function body and a `$if` are syntax errors,
-/// and a `$cfg` is an error. The token vector holds the tokens of the section and ends in EOF.
-/// The positions of the tokens are their positions in the whole file.
+/// module-system.md 10.3). The section is an `interface_module`: an `import extern;`, which
+/// marks the node trusted (D9.8), its imports, and then its declarations, each function without a
+/// body. A function body and a `$if` are syntax errors, and a `$cfg` is an error. The token
+/// vector holds the tokens of the section and ends in EOF. The positions of the tokens are their
+/// positions in the whole file.
 fn parse_interface(session.session mut* sess, string file, lexer.tok_vec* toks,
                    ast.arena mut* ar) ast.node mut* {
     u64 ntoks = lexer.tokvec_count(toks);
@@ -2838,6 +2888,9 @@ fn parse_interface(session.session mut* sess, string file, lexer.tok_vec* toks,
         start = here(p);
     }
     ast.node mut* mod = ast.ast_new(ar, ast.ast_kind.k_module, start);
+    if (at_trust_decl(p)) {
+        parse_trust_decl(p, mod);
+    }
     while (at(p, lexer.tok_kind.kw_import)) {
         u64 begin = p->pos;
         ast.node mut* imp = parse_interface_import(p);
