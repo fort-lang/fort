@@ -6,6 +6,7 @@
 //| sections ok
 //| malformed ok
 //| checker ok
+//| trust ok
 //| ok
 /// Checks the resolution of a library build in src/fort/modules.ft (D9.11, module-system.md
 /// 10.2): the modules of a `--lib` walk, a path in no library, the runtime of `--lib std`, and the
@@ -755,6 +756,126 @@ fn an_import_of_an_import_binding_has_no_declaration_in_the_interface() void {
     assert(!library_env.said(use, "cannot import"));
 }
 
+// ---- the trusted modules (D9.8) ---------------------------------------------------------
+
+// The error of the declaration of `puts` at `at` in a module that is not trusted.
+fn puts_untrusted(string at, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    strbuf.append(out, at);
+    strbuf.append(out, ": error: extern 'puts' needs a trusted module: add 'import extern;'");
+    return strbuf.view(out);
+}
+
+// Each module of `<root>` in `fort --lib std <root>` is trusted with no `import extern;`.
+fn the_modules_of_the_library_std_are_trusted(library_env.env mut* e) void {
+    library_env.add(e, "root/rt.ft", "i32 B = 1;\n");
+    string io = "extern fn puts(char* s) i32;\nfn put() i32 {\n    return puts(null);\n}\n";
+    library_env.add(e, "root/io.ft", io);
+    assert(library_env.emit(e, "std", "root"));
+    assert(modules.trusted(modules.find(&e->m.set, "std.io")));
+    assert(modules.trusted(modules.find(&e->m.set, "std.rt")));
+    // a section of `std` is trusted by its library, so the writer gives it no `import extern;`
+    string text = library_env.text(e);
+    assert(library_env.holds(text, "module std.io\nfn put() i32;\nextern fn puts(char* s) i32;\n"));
+    assert(str.find(text, "import extern;") < 0);
+}
+
+// A module of another library is trusted only by its `import extern;`, and its section in the
+// interface file starts with the same line, so that a client reads its externs as trusted.
+fn a_module_of_another_library_is_trusted_by_its_form() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    strbuf.str_buf mut want = strbuf.create();
+    defer del(want.data);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.add(e, "lib/geom/a.ft", "extern fn puts(char* s) i32;\n");
+    assert(!library_env.build(e, "geom", "lib/geom"));
+    assert(library_env.reports(e) == 1);
+    assert(said_at(e, 0, &b) == puts_untrusted("1:11", &want));
+    library_env.env mut* own f = library_env.make();
+    defer library_env.drop_made(move(f));
+    library_env.add(f, "lib/geom/a.ft", "import extern;\nextern fn puts(char* s) i32;\n");
+    library_env.add(f, "lib/geom/b.ft", "i32 B = 1;\n");
+    assert(library_env.emit(f, "geom", "lib/geom"));
+    assert(modules.trusted(modules.find(&f->m.set, "geom.a")));
+    assert(!modules.trusted(modules.find(&f->m.set, "geom.b")));
+    string text = library_env.text(f);
+    string first = "module geom.a\nimport extern;\nextern fn puts(char* s) i32;\n";
+    assert(library_env.holds(text, first));
+    assert(library_env.holds(text, "module geom.b\ni32 B = 1;\n"));
+}
+
+// A section of the used library `std` is trusted with no `import extern;`.
+fn a_section_of_the_used_std_is_trusted(library_env.env mut* e) void {
+    string[5] std_text = {
+        "== fort interface 1",
+        "== library std",
+        "== module std.rt",
+        "extern fn puts(char* s) i32;",
+        "fn exit(i32 status) noreturn;",
+    };
+    string own text = library_env.interface_text(std_text[..]);
+    defer del(text);
+    library_env.add(e, "main.ft", "i32 A = 1;\n");
+    assert(library_env.check_against(e, "std", "std.flib/interface.ft", text, "main.ft"));
+    assert(modules.trusted(modules.find(&e->m.set, "std.rt")));
+}
+
+// A section of another used library is trusted only when it starts with `import extern;`: with
+// no such line its extern is the error of a module that is not trusted, at its line of the file.
+fn a_section_of_another_used_library_is_trusted_by_its_form() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    strbuf.str_buf mut want = strbuf.create();
+    defer del(want.data);
+    string[4] plain = {"== fort interface 1", "== library lib", "== module lib.c",
+                       "extern fn puts(char* s) i32;"};
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    assert(!check_lines(e, "lib", plain[..], "import lib.c;\ni32 A = 1;\n"));
+    assert(library_env.reports(e) == 1);
+    assert(said_at(e, 0, &b) == puts_untrusted("4:11", &want));
+    assert(file_of_ends(e, 0, "lib.flib/interface.ft"));
+    string[5] trusted = {"== fort interface 1", "== library lib", "== module lib.c",
+                         "import extern;", "extern fn puts(char* s) i32;"};
+    library_env.env mut* own f = library_env.make();
+    defer library_env.drop_made(move(f));
+    assert(check_lines(f, "lib", trusted[..], "import lib.c;\ni32 A = 1;\n"));
+    assert(modules.trusted(modules.find(&f->m.set, "lib.c")));
+}
+
+// A bodiless function of a trusted section with a `char*` parameter is a boundary function, and
+// the extern of the section is an extern: a client that is not trusted names neither of them, and
+// a trusted client names both (D9.8).
+fn a_client_names_no_boundary_function_of_a_trusted_section() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    string[7] text = {"== fort interface 1", "== library lib", "== module lib.c", "import extern;",
+                      "fn length(string s) u64;", "extern fn puts(char* s) i32;",
+                      "fn take(char* p) void;"};
+    string client = "import lib.c;\nfn f() i32 {\n    c.take(null);\n    return c.puts(null);\n}\n";
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    assert(!check_lines(e, "lib", text[..], client));
+    assert(library_env.reports(e) == 2);
+    string named = "3:7: error: 'lib.c.take' is a boundary function";
+    assert(str.starts_with(said_at(e, 0, &b), named));
+    string call = said_at(e, 1, &b);
+    assert(str.starts_with(call, "4:14: error: a call of extern 'puts' needs a trusted module"));
+    // a function whose parameter brings its length is no boundary function
+    library_env.env mut* own f = library_env.make();
+    defer library_env.drop_made(move(f));
+    string free = "import lib.c;\nfn g() u64 {\n    return c.length(\"ab\");\n}\n";
+    assert(check_lines(f, "lib", text[..], free));
+    library_env.env mut* own g = library_env.make();
+    defer library_env.drop_made(move(g));
+    strbuf.clear(&b);
+    strbuf.append(&b, "import extern; ");
+    strbuf.append(&b, client);
+    assert(check_lines(g, "lib", text[..], strbuf.view(&b)));
+}
+
 fn main() i32 {
     library_env.run(a_library_path_resolves_among_the_listed_modules);
     a_path_in_no_library_is_an_error_at_its_import();
@@ -796,6 +917,12 @@ fn main() i32 {
     a_main_of_a_library_module_is_an_ordinary_function();
     an_import_of_an_import_binding_has_no_declaration_in_the_interface();
     println("checker ok");
+    library_env.run(the_modules_of_the_library_std_are_trusted);
+    a_module_of_another_library_is_trusted_by_its_form();
+    library_env.run(a_section_of_the_used_std_is_trusted);
+    a_section_of_another_used_library_is_trusted_by_its_form();
+    a_client_names_no_boundary_function_of_a_trusted_section();
+    println("trust ok");
     println("ok");
     return 0;
 }
