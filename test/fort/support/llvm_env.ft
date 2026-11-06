@@ -40,9 +40,9 @@ fn open(env mut* e) void {
 // sandbox of lower_env. No part of it reads the session or the checker that the emitter points to.
 fn drop(env mut e) void {
     gen.drop(move(e.g));
-    del(e.text.data);
-    del(e.want.data);
-    del(e.text2.data);
+    strbuf.drop(move(e.text));
+    strbuf.drop(move(e.want));
+    strbuf.drop(move(e.text2));
     lower_env.drop(move(e.low));
 }
 
@@ -69,33 +69,45 @@ fn reset(env mut* e, pass_env.mode m) void {
     e->g.ck = &e->low.c.ck;
 }
 
-/// Checks `lines` with the runtime of lower_env and lowers the function `name`. The verifier, the
-/// build-mode pass of mode `m` and the verifier again run on the result. The caller frees it.
-fn lower(env mut* e, string@ lines, string name, pass_env.mode m) fir.func {
+/// Checks `lines` with the runtime of lower_env and lowers the function `name` into an
+/// allocation of its own, which the caller ends through fir.func_drop_made. The lowering fills the
+/// fresh `new`, so no store follows a make. The verifier, the build-mode pass of mode `m` and the
+/// verifier again run on the result.
+fn lower_made(env mut* e, string@ lines, string name, pass_env.mode m) fir.func mut* own {
     lower_env.check_lines(&e->low, lines, true);
     reset(e, m);
-    fir.func mut f = fir.func{};
+    fir.func mut* own f = new(fir.func);
     fir_lower.report mut why = fir_lower.report{};
-    if (!fir_lower.lower_function(&e->low.c.ck, lower_env.decl(&e->low, name), &f, &why)) {
+    if (!fir_lower.lower_function(&e->low.c.ck, lower_env.decl(&e->low, name), f, &why)) {
         panic("llvm_env.lower: the lowering refuses the function");
     }
-    pass_env.build(&e->low, &f, m);
+    pass_env.build(&e->low, f, m);
     return f;
 }
 
-/// lower, for `lines` that lower_env.check_str_lines checks as the module std.str: a function
+/// lower_made, for `lines` that lower_env.check_str_lines checks as the module std.str: a function
 /// `from_cstr` there takes `p[lo..hi]` of a raw pointer (D6.9).
-fn lower_str(env mut* e, string@ lines, string name, pass_env.mode m) fir.func {
+fn lower_str_made(env mut* e, string@ lines, string name, pass_env.mode m) fir.func mut* own {
     lower_env.check_str_lines(&e->low, lines);
     reset(e, m);
-    fir.func mut f = fir.func{};
+    fir.func mut* own f = new(fir.func);
     fir_lower.report mut why = fir_lower.report{};
-    if (!fir_lower.lower_function(&e->low.c.ck, lower_env.decl(&e->low, name), &f, &why)) {
+    if (!fir_lower.lower_function(&e->low.c.ck, lower_env.decl(&e->low, name), f, &why)) {
         panic("llvm_env.lower_str: the lowering refuses the function");
     }
-    pass_env.build(&e->low, &f, m);
+    pass_env.build(&e->low, f, m);
     return f;
 }
+
+/// The function of lower_made as a value, for a caller that holds it in a value of its own. The
+/// caller frees it.
+fn lower(env mut* e, string@ lines, string name, pass_env.mode m) fir.func {
+    fir.func mut* own p = lower_made(e, lines, name, m);
+    fir.func f = move(*p);
+    del(p);
+    return f;
+}
+
 
 /// Parses `text`, the lines of a FIR module, against `prelude`, as pass_env.parse does. The
 /// verifier runs on no function of it. The caller frees the module.
@@ -121,7 +133,13 @@ fn begin(gen.emitter mut* g) void {
 fn translate(env mut* e, fir.func* f) string {
     begin(&e->g);
     fir_llvm.translator mut t = fir_llvm.open(&e->g, f);
-    defer fir_llvm.close(&t);
+    // the four tables of the translator, as fir_llvm.translate_function ends its translator
+    defer {
+        del(t.locals);
+        del(t.notes);
+        del(t.cont_of);
+        del(t.fail_label);
+    }
     fir_llvm.write_locals(&t);
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
@@ -144,7 +162,13 @@ fn translate(env mut* e, fir.func* f) string {
 fn statement_text(env mut* e, fir.func* f, u32 b, u32 i) string {
     begin(&e->g);
     fir_llvm.translator mut t = fir_llvm.open(&e->g, f);
-    defer fir_llvm.close(&t);
+    // the four tables of the translator, as fir_llvm.translate_function ends its translator
+    defer {
+        del(t.locals);
+        del(t.notes);
+        del(t.cont_of);
+        del(t.fail_label);
+    }
     fir_llvm.write_locals(&t);
     strbuf.clear(&e->g.body);
     fir_llvm.translate_statement(&t, fir.block_statement(f, b, i));
@@ -166,9 +190,9 @@ fn whole(env mut* e, fir.func* f) string {
 
 /// Lowers the function `name` of `lines` in mode `m` and gives its whole definition.
 fn lowered_whole(env mut* e, string@ lines, string name, pass_env.mode m) string {
-    fir.func mut f = lower(e, lines, name, m);
-    defer fir.func_free(&f);
-    return whole(e, &f);
+    fir.func mut* own f = lower_made(e, lines, name, m);
+    defer fir.func_drop_made(move(f));
+    return whole(e, f);
 }
 
 /// Holds the block structure of the definitions in `text`: each block ends in exactly one
@@ -200,16 +224,16 @@ fn module_tail(env mut* e) string {
 
 /// Lowers the function `name` of `lines` in mode `m` and translates it.
 fn lowered(env mut* e, string@ lines, string name, pass_env.mode m) string {
-    fir.func mut f = lower(e, lines, name, m);
-    defer fir.func_free(&f);
-    return translate(e, &f);
+    fir.func mut* own f = lower_made(e, lines, name, m);
+    defer fir.func_drop_made(move(f));
+    return translate(e, f);
 }
 
 /// lowered, for `lines` that lower_env.check_str_lines checks as the module std.str.
 fn lowered_str(env mut* e, string@ lines, string name, pass_env.mode m) string {
-    fir.func mut f = lower_str(e, lines, name, m);
-    defer fir.func_free(&f);
-    return translate(e, &f);
+    fir.func mut* own f = lower_str_made(e, lines, name, m);
+    defer fir.func_drop_made(move(f));
+    return translate(e, f);
 }
 
 // Joins `lines` into e->want, each ended by a newline. A line that ends with `\` continues on the

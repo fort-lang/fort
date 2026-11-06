@@ -54,18 +54,29 @@ fn join(strbuf.str_buf mut* b, string@ lines) void {
 }
 
 /// Checks `prelude` with the runtime of lower_env as the module `main`, and parses `text`, the
-/// lines of a FIR module, against it. The text must parse with no diagnostic.
-fn parse(lower_env.env mut* e, string@ prelude, string@ text) fir.module {
+/// lines of a FIR module, against it into a module in an allocation of its own, which the caller
+/// ends through fir.module_drop_made. The parse fills the fresh `new`, so no store follows a make.
+/// The text must parse with no diagnostic.
+fn parse_made(lower_env.env mut* e, string@ prelude, string@ text) fir.module mut* own {
     lower_env.check_lines(e, prelude, true);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     join(&b, text);
     fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e->c, "main"), &e->c.ck};
-    fir.module mut m = fir_parse.parse_module(&e->c.m.s, "t.fir", strbuf.view(&b), pre);
+    fir.module mut* own m = new(fir.module);
+    fir_parse.parse_into(&e->c.m.s, "t.fir", strbuf.view(&b), pre, m);
     if (check_env.errors(&e->c) != 0) {
         eprintln(check_env.report_text(&e->c, 0));
         panic("pass_env.parse: the text does not parse");
     }
+    return m;
+}
+
+/// The module of parse_made as a value, for a caller that holds it in a value of its own.
+fn parse(lower_env.env mut* e, string@ prelude, string@ text) fir.module {
+    fir.module mut* own p = parse_made(e, prelude, text);
+    fir.module m = move(*p);
+    del(p);
     return m;
 }
 
@@ -85,9 +96,9 @@ fn verified(lower_env.env mut* e, fir.func* f, string what) void {
 /// pass with that proof, so the pass removes the overwrite checks that the proof proves
 /// (spec/fir.md 11).
 fn build_proved(fir.func mut* f, bool release, bool no_bounds) void {
-    prover.proof mut p = prover.prove(f);
-    defer prover.free(&p);
-    fir_passes.build_mode(f, release, no_bounds, &p);
+    prover.proof mut* own p = prover.prove_made(f);
+    defer prover.drop_made(move(p));
+    fir_passes.build_mode(f, release, no_bounds, p);
 }
 
 /// Runs the pass in mode `m` on `f` between two runs of the verifier, as build_proved does, and
@@ -120,11 +131,11 @@ fn build_each(lower_env.env mut* e, fir.module mut* fm, mode m) void {
 /// Parses `text` against `prelude`, runs the pass in mode `m` on each function between two runs
 /// of the verifier, and gives the printed module.
 fn run(lower_env.env mut* e, string@ prelude, string@ text, mode m) string {
-    fir.module mut fm = parse(e, prelude, text);
-    defer fir.module_free(&fm);
-    build_each(e, &fm, m);
+    fir.module mut* own fm = parse_made(e, prelude, text);
+    defer fir.module_drop_made(move(fm));
+    build_each(e, fm, m);
     strbuf.clear(&e->text);
-    fir_print.print_module(&fm, &e->text);
+    fir_print.print_module(fm, &e->text);
     return strbuf.view(&e->text);
 }
 
@@ -132,29 +143,29 @@ fn run(lower_env.env mut* e, string@ prelude, string@ text, mode m) string {
 /// mode `m` between two runs of the verifier, and gives the printed function.
 fn lowered(lower_env.env mut* e, string@ source, string name, mode m) string {
     lower_env.check_lines(e, source, true);
-    fir.func mut f = fir.func{};
+    fir.func mut* own f = fir.func_make();
     fir_lower.report mut why = fir_lower.report{};
-    if (!fir_lower.lower_function(&e->c.ck, lower_env.decl(e, name), &f, &why)) {
+    if (!fir_lower.lower_function(&e->c.ck, lower_env.decl(e, name), f, &why)) {
         panic("pass_env.lowered: the lowering refuses the function");
     }
-    defer fir.func_free(&f);
-    build(e, &f, m);
+    defer fir.func_drop_made(move(f));
+    build(e, f, m);
     strbuf.clear(&e->text);
-    fir_print.print_function(&f, &e->text);
+    fir_print.print_function(f, &e->text);
     return strbuf.view(&e->text);
 }
 
 /// Parses `text` against `prelude`, runs the pass in mode `m` as `run` does, and returns whether
 /// the printed module after the pass is the text before it.
 fn unchanged(lower_env.env mut* e, string@ prelude, string@ text, mode m) bool {
-    fir.module mut fm = parse(e, prelude, text);
-    defer fir.module_free(&fm);
     strbuf.str_buf mut before = strbuf.create();
-    defer strbuf.free(&before);
-    fir_print.print_module(&fm, &before);
-    build_each(e, &fm, m);
+    defer del(before.data);
+    fir.module mut* own fm = parse_made(e, prelude, text);
+    defer fir.module_drop_made(move(fm));
+    fir_print.print_module(fm, &before);
+    build_each(e, fm, m);
     strbuf.clear(&e->text);
-    fir_print.print_module(&fm, &e->text);
+    fir_print.print_module(fm, &e->text);
     return strbuf.view(&before) == strbuf.view(&e->text);
 }
 
@@ -162,7 +173,7 @@ fn unchanged(lower_env.env mut* e, string@ prelude, string@ text, mode m) bool {
 /// returns whether the printed function after the pass is the text that the lowering wrote.
 fn keeps_lowering(lower_env.env mut* e, string@ source, string name, mode m) bool {
     strbuf.str_buf mut before = strbuf.create();
-    defer strbuf.free(&before);
+    defer del(before.data);
     strbuf.append(&before, lower_env.lower(e, source, name));
     return strbuf.view(&before) == lowered(e, source, name, m);
 }

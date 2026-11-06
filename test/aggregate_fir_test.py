@@ -10,11 +10,10 @@ module or in src belongs to the test of that tree.
 
 Some suites hold drops of their own (the `drop` and `drop_made` of an environment, a run of the
 tokenizer or a fixture). A drop that misses a release leaves an owner of its value unproved at its
-exit, and that exit is a site. So this test also holds each release of those drops. The suites
-end the environments of support/fir_env.ft, lower_env.ft and llvm_env.ft through their `drop` and
-`drop_made`, which reach the `drop` of support/check_env.ft and modules_env.ft, and no heap probe
-holds those ends. So the test holds `drop` and `drop_made` of those five modules too. The other
-functions of the support modules are outside it.
+exit, and that exit is a site. So this test also holds each release of those drops. The drops of
+the support environments that the suites end (support/fir_env.ft, lower_env.ft, llvm_env.ft and
+the check_env.ft and modules_env.ft that they reach) have one owner, test/aggregate_misc_test.py,
+which holds test/fort/support.
 
 A control program gives one site of each report in a file of the scope. The test holds the
 control too, so it cannot pass when it reads no site.
@@ -41,12 +40,6 @@ EXPECTED = {"aggregate": {}, "leak": {}}
 # A suite of the scope, and a file of the scope, relative to test/fort.
 SUITE = re.compile(r"^fir_[^/]*_test\.ft$")
 SCOPE = re.compile(r"^fir_[^/]*\.ft$")
-
-# The support modules whose drops the suites call, and the functions of them in the scope.
-SUPPORT = ("support/fir_env.ft", "support/lower_env.ft", "support/llvm_env.ft",
-           "support/check_env.ft", "support/modules_env.ft")
-DROPS = ("drop", "drop_made")
-FN = re.compile(r"^fn (\w+)\(")
 
 # The count of the suites of the scope at 0e8e954f. It is a floor, so a parallel change that adds
 # a suite does not turn this test red, and a pattern that finds no suite does.
@@ -104,24 +97,6 @@ def std_root(target, out):
     return out
 
 
-def function_at(path, line):
-    """The name of the function of `path` that holds `line`, or None before the first one."""
-    with open(path) as handle:
-        lines = handle.read().split("\n")
-    for k in range(min(line, len(lines)) - 1, -1, -1):
-        m = FN.match(lines[k])
-        if m:
-            return m.group(1)
-    return None
-
-
-def in_scope(cwd, name, line):
-    """Whether the site at `line` of `name`, relative to `cwd`, is in the scope."""
-    if SCOPE.match(name):
-        return True
-    return name in SUPPORT and function_at(os.path.join(cwd, name), line) in DROPS
-
-
 def report(job):
     """The sites of one report of one file in the scope: a set of (file, line, column, place)."""
     kind, triple, std, cwd, flags, entry = job
@@ -136,7 +111,7 @@ def report(job):
         m = SITE.match(line)
         if m:
             name = os.path.relpath(os.path.normpath(os.path.join(cwd, m.group(1))), cwd)
-            if in_scope(cwd, name, int(m.group(2))):
+            if SCOPE.match(name):
                 found.add((name, int(m.group(2)), int(m.group(3)), m.group(4)))
     return found
 

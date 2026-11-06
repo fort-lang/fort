@@ -66,7 +66,7 @@ fn close(env mut* e) void {
 // points to.
 fn drop(env mut e) void {
     check.drop(move(e.ck));
-    del(e.buf.data);
+    strbuf.drop(move(e.buf));
     modules_env.drop(move(e.m));
 }
 
@@ -144,7 +144,7 @@ fn check_src(env mut* e, string text) bool {
 // wrote.
 fn check_decls(env mut* e, string decls) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, decls);
     strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
     return check_src(e, strbuf.view(&b));
@@ -156,7 +156,7 @@ fn check_decls(env mut* e, string decls) bool {
 // line n of `body` is on line n + 1 of the module.
 fn check_body(env mut* e, string body) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, "fn main() i32 {\n");
     strbuf.append(&b, body);
     strbuf.append(&b, "\n    return 0;\n}\n");
@@ -189,7 +189,7 @@ fn check_broken(env mut* e, string text) bool {
 // module checked clean.
 fn check_init_of(env mut* e, string type_text, string expr_text) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, type_text);
     strbuf.append(&b, " probe = ");
     strbuf.append(&b, expr_text);
@@ -520,7 +520,7 @@ fn probe_stmt(env mut* e, string fn_name, u64 i) check.expr {
 // parentless block scope holds the function parameters for name
 // resolution. This half of the checker resolves the signature and leaves
 // the scope to the statement checker. So a probe of a statement expression
-// builds it here. close_params closes it.
+// builds it here. params_drop_made ends it.
 fn open_params(env mut* e, scope.scope mut* params, string fn_name) void {
     ast.node mut* f = node_in_main(e, ast.ast_kind.k_fn_decl, fn_name);
     if (f == null) {
@@ -538,13 +538,8 @@ fn open_params(env mut* e, scope.scope mut* params, string fn_name) void {
     e->ck.scope = params;
 }
 
-fn close_params(env mut* e, scope.scope mut* params) void {
-    e->ck.scope = null;
-    scope.free(params);
-}
-
-// Ends a parameter scope of scope.make that the caller moves in, as close_params ends one: the
-// checker forgets the scope, and scope.drop_made ends it.
+// Ends a parameter scope of scope.make that the caller moves in: the checker forgets the scope,
+// and scope.drop_made ends it.
 fn params_drop_made(env mut* e, scope.scope mut* own params) void {
     e->ck.scope = null;
     scope.drop_made(move(params));

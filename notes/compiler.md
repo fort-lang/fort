@@ -1129,22 +1129,21 @@ came here.
   `scope.drop`). A drop moves each field whose type has a value drop into that drop
   (`strbuf.drop(move(g.out))`, `fir_flow.bits_drop(move(c.origins))`), dels each other owner of its
   value, and drains each chain in a loop, in the order of the free that it replaces, so each release
-  of a type stands once, in the drop of the type. No function of src/fort, src/lsp or std, a drop or
-  another, dels the storage below a field or an element of a span whose type has a value drop,
-  through a parameter or a local: a local whose type holds such a field and that the function
-  lends to calls lives in an allocation and ends through the drop_made of its type
+  of a type stands once, in the drop of the type. No function of src/fort, src/lsp, std or
+  test/fort/support, a drop or another, dels the storage below a field or an element of a span whose
+  type has a value drop, through a parameter or a local: a local whose type holds such a field and
+  that the function lends to calls lives in an allocation and ends through the drop_made of its type
   (`gen.gen_args_make` in `gen.gen_main`, `prover.probes_drop_made`). ctest `drop-fields`
-  (`test/drop_fields_test.py`) holds that count at 0 by a scan of the text, with a control tree.
-  The scan reads each function at the top of a file and each function in each branch of a module
-  `$if`, with its parameters, its locals and each `del`; it reads the code of a line without its
-  comment and with each literal empty. It follows a `del` through fields, `->` and elements of
-  spans. Its docstring names what the scan cannot see, and it does not read test/fort/support.
-  The parameter of a drop is a local whose address no call takes, so no call kills its facts; a
-  drop that takes the address of a field makes its parameter a memory local, and its end a site.
-  The free by pointer moves its value into the drop (`gen.gen_free`, `fir_parse.parser_free`), or
-  keeps the fields that its callers read after it (`diag.free` keeps the text mode for
-  `diag.reset`, `lsp.json.free` the limit), or frees each field through the free of its type,
-  which reaches the drop of that type (`session.free`).
+  (`test/drop_fields_test.py`) holds that count at 0 by a scan of the text, with a control tree. The
+  scan reads each function at the top of a file and each function in each branch of a module `$if`,
+  with its parameters, its locals and each `del`; it reads the code of a line without its comment
+  and with each literal empty. It follows a `del` through fields, `->` and elements of spans. Its
+  docstring names what the scan cannot see. The parameter of a drop is a local whose address no call
+  takes, so no call kills its facts; a drop that takes the address of a field makes its parameter a
+  memory local, and its end a site. The free by pointer moves its value into the drop
+  (`gen.gen_free`, `fir_parse.parser_free`), or keeps the fields that its callers read after it
+  (`diag.free` keeps the text mode for `diag.reset`, `lsp.json.free` the limit), or frees each field
+  through the free of its type, which reaches the drop of that type (`session.free`).
   Allocation: a local that the function lends to calls lives in an allocation of `make`, whose
   `own` pointer no call changes, and `drop_made` moves the value out, dels the allocation and
   drops the value (`scope.make` and `scope.drop_made` in `check_stmt.check_block`,

@@ -56,7 +56,7 @@ fn rendered(strbuf.str_buf mut* b, runtime_sig.rt_entry rt) string {
 
 fn want(runtime_sig.rt_entry rt, string text) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string got = rendered(&b, rt);
     if (got != text) {
         eprintln("runtime_sig_test: expected <", text, ">, got <", got, ">");
@@ -248,17 +248,16 @@ fn a_form_carries_its_extension_attribute_in_a_parameter_list() void {
 // std/rt.ft through. An aggregate result is the leading `ptr` of a `void` function. Every other
 // type takes its value form.
 fn a_fort_signature_maps_to_the_row_the_call_site_needs() void {
-    types_env.env mut te = types_env.env{};
-    types_env.init(&te);
-    defer types_env.free(&te);
-    types.node* i64t = types.type_prim(&te.tt, prim.prim_kind.prim_i64);
-    types.node* boolt = types.type_prim(&te.tt, prim.prim_kind.prim_bool);
-    types.node* chart = types.type_prim(&te.tt, prim.prim_kind.prim_char);
-    types.node* charp = types.type_ptr(&te.tt, chart, false, false);
+    types_env.env mut* own te = types_env.make();
+    defer types_env.drop_made(move(te));
+    types.node* i64t = types.type_prim(&te->tt, prim.prim_kind.prim_i64);
+    types.node* boolt = types.type_prim(&te->tt, prim.prim_kind.prim_bool);
+    types.node* chart = types.type_prim(&te->tt, prim.prim_kind.prim_char);
+    types.node* charp = types.type_ptr(&te->tt, chart, false, false);
     // `fn str_eq(char* a, u64 a_len, char* b, u64 b_len) bool`, whose row is
     // the one a wrong result form would make wrong code of.
     types.node*[4] mut params = {charp, i64t, charp, i64t};
-    types.node* sig = types.type_fn(&te.tt, boolt, params[..], false);
+    types.node* sig = types.type_fn(&te->tt, boolt, params[..], false);
     runtime_sig.rt_sig got = runtime_sig.rt_signature_of_type("std.rt.str_eq", sig);
     runtime_sig.rt_sig row = runtime_sig.rt_sig_of(runtime_sig.rt_entry.rt_str_eq);
     assert(got.name == row.name);
@@ -268,29 +267,29 @@ fn a_fort_signature_maps_to_the_row_the_call_site_needs() void {
     assert(got.p3 == row.p3 && got.p4 == row.p4 && got.p5 == row.p5);
     // `fn args() string@`: an aggregate result is a `void` function with one
     // leading `ptr` and no parameter of its own.
-    types.node* strspan = types.type_string(&te.tt, false);
+    types.node* strspan = types.type_string(&te->tt, false);
     types.node*[1] mut spare = {};
-    types.node* args_sig = types.type_fn(&te.tt, strspan, spare[0..0], false);
+    types.node* args_sig = types.type_fn(&te->tt, strspan, spare[0..0], false);
     runtime_sig.rt_sig args_got = runtime_sig.rt_signature_of_type("std.rt.args", args_sig);
     runtime_sig.rt_sig args_row = runtime_sig.rt_sig_of(runtime_sig.rt_entry.rt_args);
     assert(args_got.result == args_row.result);
     assert(args_got.p0 == args_row.p0 && args_got.p1 == args_row.p1);
     // A `noreturn` signature carries the mark the row does.
-    types.node* voidt = types.type_void(&te.tt);
-    types.node*[1] mut one = {types.type_prim(&te.tt, prim.prim_kind.prim_i32)};
-    types.node* exit_sig = types.type_fn(&te.tt, voidt, one[..], true);
+    types.node* voidt = types.type_void(&te->tt);
+    types.node*[1] mut one = {types.type_prim(&te->tt, prim.prim_kind.prim_i32)};
+    types.node* exit_sig = types.type_fn(&te->tt, voidt, one[..], true);
     runtime_sig.rt_sig exit_got = runtime_sig.rt_signature_of_type("std.rt.exit", exit_sig);
     assert(exit_got.is_noreturn);
     assert(exit_got.p0 == runtime_sig.ir_form.ir_i32);
     // `fn print_str(i32 fd, string s) void` and `fn panic(string msg, char* file, u32 line, u32
     // col) noreturn`: a `string` parameter is one `ptr`, the address of the caller-made copy.
-    types.node*[2] mut text = {types.type_prim(&te.tt, prim.prim_kind.prim_i32), strspan};
-    types.node* str_sig = types.type_fn(&te.tt, voidt, text[..], false);
+    types.node*[2] mut text = {types.type_prim(&te->tt, prim.prim_kind.prim_i32), strspan};
+    types.node* str_sig = types.type_fn(&te->tt, voidt, text[..], false);
     same_row(runtime_sig.rt_signature_of_type("std.rt.print_str", str_sig),
              runtime_sig.rt_entry.rt_print_str);
-    types.node* u32t = types.type_prim(&te.tt, prim.prim_kind.prim_u32);
+    types.node* u32t = types.type_prim(&te->tt, prim.prim_kind.prim_u32);
     types.node*[4] mut message = {strspan, charp, u32t, u32t};
-    types.node* panic_sig = types.type_fn(&te.tt, voidt, message[..], true);
+    types.node* panic_sig = types.type_fn(&te->tt, voidt, message[..], true);
     same_row(runtime_sig.rt_signature_of_type("std.rt.panic", panic_sig),
              runtime_sig.rt_entry.rt_panic);
 }

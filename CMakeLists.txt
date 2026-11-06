@@ -399,9 +399,9 @@ set_tests_properties(aggregate-sites PROPERTIES
     LABELS "fort;integration"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
-# No function of src/fort, src/lsp or std dels the storage below a field whose type has a value
-# drop: such a field ends through the drop of its type, so each release stands once. A text scan
-# with a control tree; it needs no compiler.
+# No function of src/fort, src/lsp, std or test/fort/support dels the storage below a field or an
+# element of a span whose type has a value drop: such a field ends through the drop of its type, so
+# each release stands once. A text scan with a control tree; it needs no compiler.
 add_test(NAME drop-fields
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/drop_fields_test.py" --root "${CMAKE_SOURCE_DIR}")
 set_tests_properties(drop-fields PROPERTIES
@@ -925,6 +925,19 @@ add_test(NAME aggregate-owner
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_owner_test.py"
             --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}" -j "${FORT_LANG_JOBS}")
 set_tests_properties(aggregate-owner PROPERTIES
+    LABELS "fort;integration"
+    PROCESSORS ${FORT_LANG_JOBS}
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
+
+# Hold test/fort/support (but the four modules of aggregate-parser) and the suites
+# test/fort/driver_*, containers_*, scope_*, ast_*, consts_*, comptime_*, flt_*, runtime_*, fir/,
+# std/ and support_test at no site of --aggregate-report and --leak-report, for the Linux and the
+# Darwin target, with a control program at one site of each report. It is the one owner of the
+# drops of those support modules.
+add_test(NAME aggregate-misc
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_misc_test.py"
+            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}" -j "${FORT_LANG_JOBS}")
+set_tests_properties(aggregate-misc PROPERTIES
     LABELS "fort;integration"
     PROCESSORS ${FORT_LANG_JOBS}
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")

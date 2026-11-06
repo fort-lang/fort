@@ -13,17 +13,17 @@ import std.strbuf;
 // A thousand pushes keep every element at its index, across the growths the
 // doubling implies.
 fn a_thousand_pushes_keep_their_order() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
     containers.str_vec mut v = containers.str_create();
-    defer containers.str_free(&v);
+    defer del(v.items);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
     u64 mut i = 0;
     while (i < 1000) {
         strbuf.clear(&b);
         strbuf.append_u64(&b, i);
-        containers.str_push(&v, containers.pool_intern(&p, strbuf.view(&b)));
+        containers.str_push(&v, containers.pool_intern(p, strbuf.view(&b)));
         i += 1;
     }
     assert(v.len == 1000);
@@ -43,7 +43,7 @@ fn a_thousand_pushes_keep_their_order() void {
 // grows it afterwards.
 fn a_reserve_up_front_grows_nothing_later() void {
     containers.str_vec mut v = containers.str_create();
-    defer containers.str_free(&v);
+    defer del(v.items);
     containers.str_reserve(&v, 500);
     assert(v.items.len == 500);
     u64 mut i = 0;
@@ -63,7 +63,7 @@ fn a_reserve_up_front_grows_nothing_later() void {
 // zero, so the room asked for is room for new elements.
 fn a_reserve_counts_from_the_length() void {
     containers.str_vec mut v = containers.str_create();
-    defer containers.str_free(&v);
+    defer del(v.items);
     u64 mut i = 0;
     while (i < 20) {
         containers.str_push(&v, "x");
@@ -81,7 +81,7 @@ fn a_reserve_counts_from_the_length() void {
 // holds nothing of the first one afterwards.
 fn a_refilled_vector_holds_nothing_of_the_last_round() void {
     containers.str_vec mut v = containers.str_create();
-    defer containers.str_free(&v);
+    defer del(v.items);
     u64 mut round = 0;
     while (round < 100) {
         u64 mut i = 0;
@@ -104,9 +104,9 @@ fn a_refilled_vector_holds_nothing_of_the_last_round() void {
 // freeing one does not touch the elements of the other.
 fn two_vectors_share_nothing() void {
     containers.str_vec mut a = containers.str_create();
-    defer containers.str_free(&a);
+    defer del(a.items);
     containers.str_vec mut b = containers.str_create();
-    defer containers.str_free(&b);
+    defer del(b.items);
     containers.str_push(&a, "in a");
     containers.str_push(&b, "in b");
     containers.str_push(&b, "in b too");
@@ -116,6 +116,7 @@ fn two_vectors_share_nothing() void {
     assert(a.len == 1);
     assert(containers.str_at(&a, 0) == "in a");
     assert(b.len == 0);
+    assert(b.items.len == 0);
 }
 
 fn main() i32 {

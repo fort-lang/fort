@@ -1,0 +1,71 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| reopen ok
+//| close ok
+//| ok
+/// Checks the environments of test/fort/support: a reopened environment starts again, and each
+/// free by pointer of an environment moves its value into the drop of the environment.
+//
+// Each drop of a support environment takes its value by `move` and holds each release of it once.
+// test/aggregate_misc_test.py holds those releases: a drop that misses one leaves an owner of its
+// parameter unproved at its exit, which is a site of that test. A free by pointer (`close`, or
+// `free` for types_env) is one line, `drop(move(*e))`, and its deletion gives no site, because
+// the pass reads no callee. So each test below holds that line: the move leaves the zero value,
+// and a close that moves nothing leaves the fields as open filled them.
+import fort.check;
+import check_env;
+import lower_env;
+import types_env;
+
+// ---- reopen ---------------------------------------------------------------------------------
+
+// lower_env.check_lines checks each source in a fresh sandbox (check_env.reopen), so the second of
+// two checks in one environment starts from a fresh checker: it holds the symbols of its source
+// alone. A reopen that kept the symbols of the first check would add the second set to them, so
+// this test holds the line of check_env.close too.
+fn a_second_check_starts_from_a_fresh_checker() void {
+    string[3] source = {"fn f(i32 a) i32 {", "    return a;", "}"};
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, source[..], true);
+    u64 first = check.check_sym_count(&e->c.ck);
+    assert(first > 0);
+    lower_env.check_lines(e, source[..], true);
+    assert(check.check_sym_count(&e->c.ck) == first);
+}
+
+// ---- close ----------------------------------------------------------------------------------
+
+// The source that each test below checks, so that the checker and the session hold names.
+string SOURCE = "fn main() i32 {\n    return 0;\n}\n";
+
+fn check_close_leaves_the_zero_value() void {
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_env.check_src(e, SOURCE));
+    assert(e->m.dir.len > 0 && e->want_main);
+    check_env.close(e);
+    assert(e->m.dir.len == 0 && !e->want_main);
+}
+
+// types_env.free leaves no bound name, which init fills again.
+fn types_free_leaves_the_zero_value() void {
+    types_env.env mut* own e = types_env.make();
+    defer types_env.drop_made(move(e));
+    assert(e->nnamed > 0 && types_env.type_of(e, "i32") != null);
+    types_env.free(e);
+    assert(e->nnamed == 0 && e->node == null);
+    types_env.init(e);
+    assert(types_env.type_of(e, "i32") != null);
+}
+
+fn main() i32 {
+    a_second_check_starts_from_a_fresh_checker();
+    println("reopen ok");
+    check_close_leaves_the_zero_value();
+    types_free_leaves_the_zero_value();
+    println("close ok");
+    println("ok");
+    return 0;
+}

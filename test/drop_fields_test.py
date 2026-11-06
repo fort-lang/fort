@@ -7,22 +7,23 @@ notes/compiler.md 6). A function that dels the storage below such a field or ele
 strbuf.drop, so a defect of the drop shows on one path only. Such a field ends through the drop of
 its type, `strbuf.drop(move(v.text))`.
 
-This test reads the .ft files of src/fort, src/lsp and std. It reads each declaration at the top
-of a file and each declaration in each branch of a module `$if`, so it reads the code of both
-targets. Of each function it reads the parameters, the locals and each `del`. It lists each `del`
-whose operand passes through a field or an element of a span, strictly below its root, whose type
-has a value drop. It holds the count of the list at 0. The scan reads the code of a line:
-it removes each `//` comment and the text of each string and char literal first, so a brace in a
-literal does not move the end of a body. A control tree gives one line for each form that the
-scan follows, and no line for a `del` of the storage of a local of such a type itself (the Del
-form of notes/compiler.md 6).
+This test reads the .ft files of src/fort, src/lsp, std and test/fort/support, where a module takes
+its bare name (`import check_env;`). It reads each declaration at the top of a file and each
+declaration in each branch of a module `$if`, so it reads the code of both targets. Of each
+function it reads the parameters, the locals and each `del`. It lists each `del` whose operand
+passes through a field or an element of a span, strictly below its root, whose type has a value
+drop. It holds the count of the list at 0. The scan reads the code of a line: it removes each `//`
+comment and the text of each string and char literal first, so a brace in a literal does not move
+the end of a body. A control tree gives one line for each form that the scan follows, one for each
+of two modules of test/fort/support, and no line for a `del` of the storage of a local of such a
+type itself (the Del form of notes/compiler.md 6).
 
 A type has a value drop when a function whose name holds `drop` takes it by value:
 `fn <name>(<type> mut <param>) void`. A drop_made takes a pointer, so it gives no value drop.
 
 What the scan cannot see, so it lists no line for it:
-- a type that no `struct` of src/fort, src/lsp or std declares (test/fort/support is outside
-  this test), or a type name that it cannot resolve through the imports of the file;
+- a type that no `struct` of TREES declares, or a type name that it cannot resolve through the
+  imports of the file;
 - a field that does not stand on a line of its own, and of two branches of a `$if` that declare
   one struct, the type that the first branch gives to a field that both declare;
 - a module that both std/linux and std/darwin hold: a type name resolves to the std/darwin file;
@@ -31,6 +32,11 @@ What the scan cannot see, so it lists no line for it:
 - a `del` whose operand is no path of a parameter or a local: a call, a cast, a dereference, a
   global, or an element of a span that a call gives;
 - a `del` over two lines, and a `del` with an index that holds a `]`.
+
+What the scan can list in excess: a step `.len` or `.ptr` of a span reads the field of that name
+of the element struct, because `.f` does not test the suffixes. So a `del` whose operand takes
+`.len` or `.ptr` of a span gives an extra line when the element struct has a field of that name
+whose type has a value drop.
 """
 
 import argparse
@@ -40,7 +46,7 @@ import sys
 import tempfile
 import unittest
 
-TREES = ("src/fort", "src/lsp", "std")
+TREES = ("src/fort", "src/lsp", "std", "test/fort/support")
 
 # A declared type: a name, then `mut`, `own`, `*`, `@` and `[N]` in any order. N is any text
 # without a `]`, as `2 * 2`.
@@ -62,8 +68,11 @@ OPTIONS = None
 
 def module_name(rel):
     """The module path of a file: src/fort/owner/prover.ft is fort.owner.prover, src/lsp/json.ft
-    lsp.json, std/strbuf.ft std.strbuf, and std/linux/libc.ft std.libc."""
+    lsp.json, std/strbuf.ft std.strbuf, std/linux/libc.ft std.libc, and
+    test/fort/support/check_env.ft check_env, as the suites import it with `-I support`."""
     parts = rel[:-len(".ft")].split("/")
+    if parts[:3] == ["test", "fort", "support"]:
+        return ".".join(parts[3:])
     if parts[0] == "src":
         return ".".join(parts[1:])
     if parts[0] == "std" and len(parts) == 3 and parts[1] in ("linux", "darwin"):
@@ -584,9 +593,35 @@ fn by_platform(plat.plat_rec mut r) void {
 }
 """
 
+# A module of test/fort/support takes its bare name, `import sink;`: a `del` below the str_buf
+# field of the environment of sink gives a line through the drop of sink and through a pointer of
+# another support module.
+CONTROL_SINK = """import std.strbuf;
+
+struct env {
+    strbuf.str_buf text;
+}
+
+fn drop(env mut e) void {
+    del(e.text.data);
+}
+"""
+
+CONTROL_OUTER = """import sink;
+
+struct env {
+    sink.env inner;
+}
+
+fn clear(env mut* p) void {
+    del(p->inner.text.data);
+}
+"""
+
 CONTROL = {"std/strbuf.ft": CONTROL_STD, "std/linux/plat.ft": CONTROL_PLAT,
            "src/fort/holder.ft": CONTROL_HOLDER, "src/fort/alias.ft": CONTROL_ALIAS,
-           "src/fort/platform.ft": CONTROL_PLATFORM, "src/lsp/item.ft": CONTROL_ITEM}
+           "src/fort/platform.ft": CONTROL_PLATFORM, "src/lsp/item.ft": CONTROL_ITEM,
+           "test/fort/support/sink.ft": CONTROL_SINK, "test/fort/support/outer.ft": CONTROL_OUTER}
 CONTROL_LINES = [
     ("src/fort/alias.ft", 14, "by_alias"), ("src/fort/alias.ft", 18, "by_rename"),
     ("src/fort/holder.ft", 25, "holder_drop"), ("src/fort/holder.ft", 29, "clear"),
@@ -601,7 +636,8 @@ CONTROL_LINES = [
     ("src/fort/holder.ft", 130, "two_line_struct"), ("src/fort/holder.ft", 134, "gives_fn"),
     ("src/fort/holder.ft", 138, "spaced"), ("src/fort/holder.ft", 142, "sized_items"),
     ("src/fort/platform.ft", 4, "by_platform"), ("src/lsp/item.ft", 13, "by_item"),
-    ("src/lsp/item.ft", 21, "other_module")]
+    ("src/lsp/item.ft", 21, "other_module"), ("test/fort/support/outer.ft", 8, "clear"),
+    ("test/fort/support/sink.ft", 8, "drop")]
 
 
 def main():

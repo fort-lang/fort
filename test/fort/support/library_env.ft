@@ -33,21 +33,13 @@ fn open(env mut* e) void {
     check.check_init(&e->ck, &e->m.s);
 }
 
-// Releases the checker, the list and the text, and then the sandbox: every annotation points
-// into the checker and every tree into the set.
-fn close(env mut* e) void {
-    check.check_free(&e->ck);
-    tree.free(&e->t);
-    strbuf.free(&e->text);
-    modules_env.close(&e->m);
-}
-
-// Releases an environment that the caller moves in, in the order of close. No part of it reads
-// the session that the checker points to.
+// Releases an environment that the caller moves in: the checker, the list and the text, and then
+// the sandbox. Every annotation points into the checker and every tree into the set. No part of it
+// reads the session that the checker points to.
 fn drop(env mut e) void {
     check.drop(move(e.ck));
     tree.drop(move(e.t));
-    del(e.text.data);
+    strbuf.drop(move(e.text));
     modules_env.drop(move(e.m));
 }
 
@@ -197,7 +189,7 @@ fn file_is(env* e, string rel, string text) bool {
     string own path = modules_env.in_sandbox(&e->m, rel);
     defer del(path);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     return io.read_file(path, &b) && str.equal(strbuf.view(&b), text);
 }
 
@@ -205,7 +197,7 @@ fn file_is(env* e, string rel, string text) bool {
 // literals, so a test lists the lines of a module.
 fn add_lines(env mut* e, string rel, string@ lines) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     join(lines, &b);
     add(e, rel, strbuf.view(&b));
 }
@@ -223,10 +215,10 @@ fn join(string@ lines, strbuf.str_buf mut* out) void {
 // The interface text of `lines`, as join and unmark write it.
 fn interface_text(string@ lines) string own {
     strbuf.str_buf mut joined = strbuf.create();
-    defer strbuf.free(&joined);
+    defer del(joined.data);
     join(lines, &joined);
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
+    defer del(out.data);
     unmark(strbuf.view(&joined), &out);
     return strbuf.take(&out);
 }
@@ -256,7 +248,7 @@ fn unmark(string want, strbuf.str_buf mut* out) void {
 // Whether `got` is `want` with its markers written out. A difference prints both texts.
 fn same_text(string got, string want) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     unmark(want, &b);
     if (got == strbuf.view(&b)) {
         return true;
@@ -293,7 +285,7 @@ fn join_continued(string@ lines, strbuf.str_buf mut* out) void {
 // their continued lines joined.
 fn same_lines(string got, string@ want) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     join_continued(want, &b);
     return same_text(got, strbuf.view(&b));
 }
@@ -314,7 +306,7 @@ fn holds(string text, string part) bool {
 // up to the next module line or the end. Empty when the text has no such section.
 fn section_of(string text, string path) string {
     strbuf.str_buf mut head = strbuf.create();
-    defer strbuf.free(&head);
+    defer del(head.data);
     strbuf.append(&head, modules.INTERFACE_SECTION);
     strbuf.append(&head, path);
     strbuf.push(&head, '\n');
@@ -338,7 +330,7 @@ fn section_of(string text, string path) string {
 // writer. A difference prints both texts.
 fn rewrites_alike(env mut* e, string text) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     return sections_alike(e, text, &b);
 }
 
@@ -418,28 +410,28 @@ fn spelling(string source, lexer.token t) string {
 
 // Whether the line `line` is spelled as its tokens and the spacing rules spell it.
 fn spaced_line(string line, strbuf.str_buf mut* out) bool {
-    session.session mut s = session.create();
-    defer session.free(&s);
-    lexer.tok_vec mut toks = lexer.tokvec_create();
-    defer lexer.tokvec_free(&toks);
-    if (!lexer.lex_file(&s, "line.ft", line, &toks)) {
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    lexer.tok_vec mut* own toks = lexer.tokvec_make();
+    defer lexer.tokvec_drop_made(move(toks));
+    if (!lexer.lex_file(s, "line.ft", line, toks)) {
         return false;
     }
     strbuf.clear(out);
     // the kinds of the open braces: true for an initializer brace
     bool[64] mut init = {};
     u64 mut depth = 0;
-    u64 count = lexer.tokvec_count(&toks) - 1;
+    u64 count = lexer.tokvec_count(toks) - 1;
     u64 mut i = 0;
     while (i < count) {
-        lexer.token cur = lexer.tokvec_at(&toks, i);
+        lexer.token cur = lexer.tokvec_at(toks, i);
         bool inside = depth > 0 && init[depth - 1];
-        if (i > 0 && spaced_between(lexer.tokvec_at(&toks, i - 1), cur, inside)) {
+        if (i > 0 && spaced_between(lexer.tokvec_at(toks, i - 1), cur, inside)) {
             strbuf.push(out, ' ');
         }
         strbuf.append(out, spelling(line, cur));
         if (cur.kind == lexer.tok_kind.lbrace) {
-            bool body = i >= 2 && is_kind(lexer.tokvec_at(&toks, i - 2), lexer.tok_kind.kw_struct,
+            bool body = i >= 2 && is_kind(lexer.tokvec_at(toks, i - 2), lexer.tok_kind.kw_struct,
                                           lexer.tok_kind.kw_enum);
             init[depth] = !body;
             depth += 1;
@@ -455,7 +447,7 @@ fn spaced_line(string line, strbuf.str_buf mut* out) bool {
 // line that is not prints the line and its spacing.
 fn spaced(string text, bool report) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     bool mut ok = true;
     u64 mut start = 0;
     while (start < text.len) {
@@ -527,7 +519,7 @@ fn import_parts(string line, string prefix, u64 k, string mut* path) bool {
     }
     *path = line["import ".len..cast(as_at, u64)];
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     strbuf.append(&want, prefix);
     strbuf.append_u64(&want, k);
     strbuf.push(&want, ';');
@@ -596,7 +588,7 @@ fn in_library(string path, string name) bool {
 // a path of the library, and each section ordered.
 fn well_formed(string text, string name, bool report) bool {
     containers.str_vec mut lines = containers.str_create();
-    defer containers.str_free(&lines);
+    defer del(lines.items);
     u64 mut start = 0;
     while (start < text.len) {
         u64 mut end = start;
@@ -607,7 +599,7 @@ fn well_formed(string text, string name, bool report) bool {
         start = end + 1;
     }
     strbuf.str_buf mut library = strbuf.create();
-    defer strbuf.free(&library);
+    defer del(library.data);
     strbuf.append(&library, modules.INTERFACE_LIBRARY);
     strbuf.append(&library, name);
     if (lines.len < 2 || containers.str_at(&lines, 0) != modules.INTERFACE_FORMAT

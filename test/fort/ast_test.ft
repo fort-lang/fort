@@ -20,13 +20,23 @@ struct env {
     strbuf.str_buf buf;
 }
 
-fn open() env {
-    return env{ast.arena{}, strbuf.create()};
+// Ends an environment that the caller moves in: the arena, then the buffer.
+fn drop(env mut e) void {
+    ast.arena_drop(move(e.arena));
+    strbuf.drop(move(e.buf));
 }
 
-fn close(env mut* e) void {
-    ast.ast_arena_free(&e->arena);
-    strbuf.free(&e->buf);
+// An empty arena and an empty buffer in an allocation of their own: each test lends the
+// environment to calls.
+fn make() env mut* own {
+    return new(env);
+}
+
+// Ends an environment of make that the caller moves in.
+fn drop_made(env mut* own p) void {
+    env kept = move(*p);
+    del(p);
+    drop(move(kept));
 }
 
 fn at(u32 line, u32 col) diag.loc {
@@ -78,17 +88,17 @@ fn suffix(env mut* e, types.suffix_kind k, u32 flags, ast.node mut* len) ast.nod
 // ---- the arena -----------------------------------------------------------------
 
 fn arena_starts_empty() void {
-    env mut e = open();
-    defer close(&e);
-    assert(ast.ast_arena_count(&e.arena) == 0);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    assert(ast.ast_arena_count(&e->arena) == 0);
 }
 
 // Makes a `env`, runs `body` on it, and releases it. `body` reads the value through a pointer, so
 // the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
 fn run(fn (env mut*) void body) void {
-    env mut e = open();
-    defer close(&e);
-    body(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    body(e);
 }
 
 fn arena_hands_out_zeroed_nodes(env mut* e) void {
@@ -158,7 +168,8 @@ fn a_fresh_arena_is_empty(env mut* e) void {
 // keeps a block moves the view by the bytes of that block. The early round is
 // held against the last two and the smaller distance taken.
 //
-// ast_arena_free makes three releases. At d2f5b2b6 a deletion of
+// ast.arena_drop makes three releases, and each round reaches them through
+// drop_made. At d2f5b2b6, when ast_arena_free held them, a deletion of
 // `del(n->list.items)` moved the live view by 804384 bytes, and a deletion of
 // `del(ar->nodes)` by 1607200 bytes, under glibc 2.39 and 2.43.
 // The third, `del(n)` on the node itself, is held by the language rather than
@@ -184,14 +195,14 @@ fn the_nodes_and_their_lists_are_released_with_the_arena() void {
     u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < LEAK_ROUNDS) {
-        env mut e = open();
-        ast.node mut* parent = node(&e, ast.ast_kind.k_block);
+        env mut* own e = make();
+        ast.node mut* parent = node(e, ast.ast_kind.k_block);
         u64 mut i = 0;
         while (i < LEAK_CHILDREN) {
-            ast.ast_push(parent, int_lit(&e, i));
+            ast.ast_push(parent, int_lit(e, i));
             i += 1;
         }
-        close(&e);
+        drop_made(move(e));
         u64 mut slot = 3;
         if (round == LEAK_EARLY) {
             slot = 0;
@@ -241,18 +252,18 @@ fn children_are_pushed_and_read_back(env mut* e) void {
 }
 
 fn marks_are_read_from_the_flags() void {
-    env mut e = open();
-    defer close(&e);
-    ast.node mut* plain = node(&e, ast.ast_kind.k_type);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    ast.node mut* plain = node(e, ast.ast_kind.k_type);
     assert(!ast.ast_is_own(plain) && !ast.ast_is_mut(plain));
-    ast.node mut* owned = node(&e, ast.ast_kind.k_type);
+    ast.node mut* owned = node(e, ast.ast_kind.k_type);
     owned->flags = ast.FLAG_OWN;
     assert(ast.ast_is_own(owned) && !ast.ast_is_mut(owned));
-    ast.node mut* both = node(&e, ast.ast_kind.k_type);
+    ast.node mut* both = node(e, ast.ast_kind.k_type);
     both->flags = ast.FLAG_OWN | ast.FLAG_MUT;
     assert(ast.ast_is_own(both) && ast.ast_is_mut(both));
     // The other bits are not marks of a type position.
-    ast.node mut* external = node(&e, ast.ast_kind.k_fn_decl);
+    ast.node mut* external = node(e, ast.ast_kind.k_fn_decl);
     external->flags = ast.FLAG_EXTERN;
     assert(!ast.ast_is_own(external) && !ast.ast_is_mut(external));
 }
@@ -286,140 +297,140 @@ fn every_kind_has_a_name() void {
 // ---- the dump ------------------------------------------------------------------
 
 fn dump_of_null_is_nil() void {
-    env mut e = open();
-    defer close(&e);
-    assert(dump(&e, null) == "nil");
+    env mut* own e = make();
+    defer drop_made(move(e));
+    assert(dump(e, null) == "nil");
 }
 
 fn dump_of_an_error_node_has_no_children() void {
-    env mut e = open();
-    defer close(&e);
-    ast.node mut* err = node(&e, ast.ast_kind.k_error);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    ast.node mut* err = node(e, ast.ast_kind.k_error);
     // A skipped region never has children, and the dump prints none even if a
     // pass put one there.
-    ast.ast_push(err, int_lit(&e, 1));
-    assert(dump(&e, err) == "(error)");
+    ast.ast_push(err, int_lit(e, 1));
+    assert(dump(e, err) == "(error)");
 }
 
 fn dump_of_literals() void {
-    env mut e = open();
-    defer close(&e);
-    assert(dump(&e, int_lit(&e, 42)) == "(int 42)");
-    ast.node mut* ch = node(&e, ast.ast_kind.k_char);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    assert(dump(e, int_lit(e, 42)) == "(int 42)");
+    ast.node mut* ch = node(e, ast.ast_kind.k_char);
     ch->ival = 97;
-    assert(dump(&e, ch) == "(char 97)");
-    ast.node mut* yes = node(&e, ast.ast_kind.k_bool);
+    assert(dump(e, ch) == "(char 97)");
+    ast.node mut* yes = node(e, ast.ast_kind.k_bool);
     yes->ival = 1;
-    assert(dump(&e, yes) == "(bool true)");
-    ast.node mut* no = node(&e, ast.ast_kind.k_bool);
-    assert(dump(&e, no) == "(bool false)");
-    assert(dump(&e, node(&e, ast.ast_kind.k_null)) == "(null)");
-    assert(dump(&e, ident(&e, "x")) == "(ident x)");
-    ast.node mut* f = node(&e, ast.ast_kind.k_float);
+    assert(dump(e, yes) == "(bool true)");
+    ast.node mut* no = node(e, ast.ast_kind.k_bool);
+    assert(dump(e, no) == "(bool false)");
+    assert(dump(e, node(e, ast.ast_kind.k_null)) == "(null)");
+    assert(dump(e, ident(e, "x")) == "(ident x)");
+    ast.node mut* f = node(e, ast.ast_kind.k_float);
     f->name = "1.5";
-    assert(dump(&e, f) == "(float \"1.5\")");
+    assert(dump(e, f) == "(float \"1.5\")");
 }
 
 fn dump_escapes_string_bytes() void {
-    env mut e = open();
-    defer close(&e);
-    ast.node mut* s = node(&e, ast.ast_kind.k_string);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    ast.node mut* s = node(e, ast.ast_kind.k_string);
     s->name = "a\nb";
-    assert(dump(&e, s) == "(str \"a\\x0Ab\")");
+    assert(dump(e, s) == "(str \"a\\x0Ab\")");
     s->name = "q\"q";
-    assert(dump(&e, s) == "(str \"q\\\"q\")");
+    assert(dump(e, s) == "(str \"q\\\"q\")");
     s->name = "back\\slash";
-    assert(dump(&e, s) == "(str \"back\\\\slash\")");
+    assert(dump(e, s) == "(str \"back\\\\slash\")");
     s->name = "";
-    assert(dump(&e, s) == "(str \"\")");
+    assert(dump(e, s) == "(str \"\")");
 }
 
 fn dump_of_operators_uses_the_token_spelling() void {
-    env mut e = open();
-    defer close(&e);
-    ast.node mut* sum = node(&e, ast.ast_kind.k_binary);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    ast.node mut* sum = node(e, ast.ast_kind.k_binary);
     sum->op = cast(lexer.tok_kind.plus, i32);
-    sum->a = int_lit(&e, 1);
-    sum->b = int_lit(&e, 2);
-    assert(dump(&e, sum) == "(binary + (int 1) (int 2))");
-    ast.node mut* neg = node(&e, ast.ast_kind.k_unary);
+    sum->a = int_lit(e, 1);
+    sum->b = int_lit(e, 2);
+    assert(dump(e, sum) == "(binary + (int 1) (int 2))");
+    ast.node mut* neg = node(e, ast.ast_kind.k_unary);
     neg->op = cast(lexer.tok_kind.minus, i32);
-    neg->a = ident(&e, "x");
-    assert(dump(&e, neg) == "(unary - (ident x))");
-    ast.node mut* set = node(&e, ast.ast_kind.k_assign);
+    neg->a = ident(e, "x");
+    assert(dump(e, neg) == "(unary - (ident x))");
+    ast.node mut* set = node(e, ast.ast_kind.k_assign);
     set->op = cast(lexer.tok_kind.shl_assign, i32);
-    set->a = ident(&e, "x");
-    set->b = int_lit(&e, 1);
-    assert(dump(&e, set) == "(assign <<= (ident x) (int 1))");
-    ast.node mut* step = node(&e, ast.ast_kind.k_incdec);
+    set->a = ident(e, "x");
+    set->b = int_lit(e, 1);
+    assert(dump(e, set) == "(assign <<= (ident x) (int 1))");
+    ast.node mut* step = node(e, ast.ast_kind.k_incdec);
     step->op = cast(lexer.tok_kind.plus_plus, i32);
-    step->a = ident(&e, "x");
-    assert(dump(&e, step) == "(incdec ++ (ident x))");
+    step->a = ident(e, "x");
+    assert(dump(e, step) == "(incdec ++ (ident x))");
 }
 
 fn dump_of_a_type_with_marks_and_suffixes() void {
-    env mut e = open();
-    defer close(&e);
-    ast.node mut* t = prim_type(&e, prim.prim_kind.prim_u8, ast.FLAG_MUT);
-    ast.ast_push(t, suffix(&e, types.suffix_kind.s_span, ast.FLAG_OWN, null));
-    ast.ast_push(t, suffix(&e, types.suffix_kind.s_ptr, 0, null));
-    assert(dump(&e, t) == "(type (prim u8) mut (span own) (ptr))");
-    ast.node mut* arr = prim_type(&e, prim.prim_kind.prim_i32, 0);
-    ast.ast_push(arr, suffix(&e, types.suffix_kind.s_array, ast.FLAG_MUT, int_lit(&e, 4)));
-    assert(dump(&e, arr) == "(type (prim i32) (array (int 4) mut))");
+    env mut* own e = make();
+    defer drop_made(move(e));
+    ast.node mut* t = prim_type(e, prim.prim_kind.prim_u8, ast.FLAG_MUT);
+    ast.ast_push(t, suffix(e, types.suffix_kind.s_span, ast.FLAG_OWN, null));
+    ast.ast_push(t, suffix(e, types.suffix_kind.s_ptr, 0, null));
+    assert(dump(e, t) == "(type (prim u8) mut (span own) (ptr))");
+    ast.node mut* arr = prim_type(e, prim.prim_kind.prim_i32, 0);
+    ast.ast_push(arr, suffix(e, types.suffix_kind.s_array, ast.FLAG_MUT, int_lit(e, 4)));
+    assert(dump(e, arr) == "(type (prim i32) (array (int 4) mut))");
 }
 
 fn dump_of_named_string_void_and_function_types() void {
-    env mut e = open();
-    defer close(&e);
-    ast.node mut* named = node(&e, ast.ast_kind.k_type_name);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    ast.node mut* named = node(e, ast.ast_kind.k_type_name);
     named->name = "node";
-    assert(dump(&e, named) == "(name node)");
+    assert(dump(e, named) == "(name node)");
     // A qualified name prints both identifiers.
-    named->a = ident(&e, "writer");
-    assert(dump(&e, named) == "(name node writer)");
-    assert(dump(&e, node(&e, ast.ast_kind.k_type_string)) == "(string)");
-    assert(dump(&e, node(&e, ast.ast_kind.k_type_void)) == "(void)");
-    assert(dump(&e, node(&e, ast.ast_kind.k_type_noreturn)) == "(noreturn)");
-    ast.node mut* fn_type = node(&e, ast.ast_kind.k_type_fn);
-    fn_type->a = prim_type(&e, prim.prim_kind.prim_i32, 0);
-    ast.ast_push(fn_type, prim_type(&e, prim.prim_kind.prim_bool, 0));
-    assert(dump(&e, fn_type) == "(fn-type (type (prim i32)) (type (prim bool)))");
+    named->a = ident(e, "writer");
+    assert(dump(e, named) == "(name node writer)");
+    assert(dump(e, node(e, ast.ast_kind.k_type_string)) == "(string)");
+    assert(dump(e, node(e, ast.ast_kind.k_type_void)) == "(void)");
+    assert(dump(e, node(e, ast.ast_kind.k_type_noreturn)) == "(noreturn)");
+    ast.node mut* fn_type = node(e, ast.ast_kind.k_type_fn);
+    fn_type->a = prim_type(e, prim.prim_kind.prim_i32, 0);
+    ast.ast_push(fn_type, prim_type(e, prim.prim_kind.prim_bool, 0));
+    assert(dump(e, fn_type) == "(fn-type (type (prim i32)) (type (prim bool)))");
 }
 
 fn dump_keeps_the_position_of_absent_children() void {
-    env mut e = open();
-    defer close(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
     // An absent fixed child prints as `nil`, so the position of every child
     // is visible in the text.
-    ast.node mut* branch = node(&e, ast.ast_kind.k_if);
-    branch->a = ident(&e, "c");
-    branch->b = node(&e, ast.ast_kind.k_block);
-    assert(dump(&e, branch) == "(if (ident c) (block) nil)");
-    ast.node mut* loop = node(&e, ast.ast_kind.k_for);
-    loop->d = node(&e, ast.ast_kind.k_block);
-    assert(dump(&e, loop) == "(for nil nil nil (block))");
-    ast.node mut* ret = node(&e, ast.ast_kind.k_return);
-    assert(dump(&e, ret) == "(return nil)");
+    ast.node mut* branch = node(e, ast.ast_kind.k_if);
+    branch->a = ident(e, "c");
+    branch->b = node(e, ast.ast_kind.k_block);
+    assert(dump(e, branch) == "(if (ident c) (block) nil)");
+    ast.node mut* loop = node(e, ast.ast_kind.k_for);
+    loop->d = node(e, ast.ast_kind.k_block);
+    assert(dump(e, loop) == "(for nil nil nil (block))");
+    ast.node mut* ret = node(e, ast.ast_kind.k_return);
+    assert(dump(e, ret) == "(return nil)");
 }
 
 fn dump_of_a_declaration_and_of_a_module() void {
-    env mut e = open();
-    defer close(&e);
-    ast.node mut* var = node(&e, ast.ast_kind.k_var_decl);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    ast.node mut* var = node(e, ast.ast_kind.k_var_decl);
     var->name = "n";
-    var->a = prim_type(&e, prim.prim_kind.prim_i32, ast.FLAG_MUT);
-    var->b = int_lit(&e, 1);
-    assert(dump(&e, var) == "(var n (type (prim i32) mut) (int 1))");
-    ast.node mut* mod = node(&e, ast.ast_kind.k_module);
+    var->a = prim_type(e, prim.prim_kind.prim_i32, ast.FLAG_MUT);
+    var->b = int_lit(e, 1);
+    assert(dump(e, var) == "(var n (type (prim i32) mut) (int 1))");
+    ast.node mut* mod = node(e, ast.ast_kind.k_module);
     ast.ast_push(mod, var);
-    assert(dump(&e, mod) == "(module (var n (type (prim i32) mut) (int 1)))");
+    assert(dump(e, mod) == "(module (var n (type (prim i32) mut) (int 1)))");
     // An `extern fn` is named by its flag rather than by its kind.
-    ast.node mut* fn_decl = node(&e, ast.ast_kind.k_fn_decl);
+    ast.node mut* fn_decl = node(e, ast.ast_kind.k_fn_decl);
     fn_decl->name = "abort";
     fn_decl->flags = ast.FLAG_EXTERN;
-    fn_decl->a = node(&e, ast.ast_kind.k_type_void);
-    assert(dump(&e, fn_decl) == "(extern-fn (void) abort (params) nil)");
+    fn_decl->a = node(e, ast.ast_kind.k_type_void);
+    assert(dump(e, fn_decl) == "(extern-fn (void) abort (params) nil)");
 }
 
 fn dump_of_a_compile_time_condition_keeps_both_branches(env mut* e) void {
@@ -432,21 +443,21 @@ fn dump_of_a_compile_time_condition_keeps_both_branches(env mut* e) void {
 }
 
 fn dump_of_a_case_clause_and_a_designator() void {
-    env mut e = open();
-    defer close(&e);
-    ast.node mut* clause = node(&e, ast.ast_kind.k_case);
-    ast.ast_push(clause, int_lit(&e, 1));
-    clause->a = node(&e, ast.ast_kind.k_block);
-    assert(dump(&e, clause) == "(case (labels (int 1)) (block))");
+    env mut* own e = make();
+    defer drop_made(move(e));
+    ast.node mut* clause = node(e, ast.ast_kind.k_case);
+    ast.ast_push(clause, int_lit(e, 1));
+    clause->a = node(e, ast.ast_kind.k_block);
+    assert(dump(e, clause) == "(case (labels (int 1)) (block))");
     // The default clause carries the word rather than a label list.
-    ast.node mut* other = node(&e, ast.ast_kind.k_case);
+    ast.node mut* other = node(e, ast.ast_kind.k_case);
     other->flags = ast.FLAG_DEFAULT;
-    other->a = node(&e, ast.ast_kind.k_block);
-    assert(dump(&e, other) == "(case default (block))");
-    ast.node mut* field = node(&e, ast.ast_kind.k_designator);
+    other->a = node(e, ast.ast_kind.k_block);
+    assert(dump(e, other) == "(case default (block))");
+    ast.node mut* field = node(e, ast.ast_kind.k_designator);
     field->name = "x";
-    field->a = int_lit(&e, 2);
-    assert(dump(&e, field) == "(designator x (int 2))");
+    field->a = int_lit(e, 2);
+    assert(dump(e, field) == "(designator x (int 2))");
 }
 
 fn main() i32 {

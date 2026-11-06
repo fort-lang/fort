@@ -241,14 +241,9 @@ fn open(env mut* e) void {
     e->text = strbuf.create();
 }
 
-fn close(env mut* e) void {
-    strbuf.free(&e->text);
-    check_env.close(&e->c);
-}
-
-// Releases an environment that the caller moves in, in the order of close.
+// Releases an environment that the caller moves in: the text, then the checker and the sandbox.
 fn drop(env mut e) void {
-    del(e.text.data);
+    strbuf.drop(move(e.text));
     check_env.drop(move(e.c));
 }
 
@@ -287,7 +282,7 @@ fn check(env mut* e, string@ lines) void {
 fn check_with(env mut* e, string@ lines, string@ runtime) void {
     check_env.reopen(&e->c);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     join(&b, runtime);
     check_env.add(&e->c, "std/rt.ft", strbuf.view(&b));
     strbuf.clear(&b);
@@ -303,14 +298,17 @@ fn check_with(env mut* e, string@ lines, string@ runtime) void {
     }
 }
 
-/// Parses `text`, the lines of a FIR module, against the checked source. The verifier does not
-/// see it, so a function of it can break a rule.
-fn parse_unverified(env mut* e, string@ text) fir.module {
+/// Parses `text`, the lines of a FIR module, against the checked source, into a module in an
+/// allocation of its own, which the caller ends through fir.module_drop_made. The parse fills the
+/// fresh `new`, so no store follows a make. The verifier does not see the module, so a function of
+/// it can break a rule.
+fn parse_unverified_made(env mut* e, string@ text) fir.module mut* own {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     join(&b, text);
     fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e->c, "main"), &e->c.ck};
-    fir.module m = fir_parse.parse_module(&e->c.m.s, "t.fir", strbuf.view(&b), pre);
+    fir.module mut* own m = new(fir.module);
+    fir_parse.parse_into(&e->c.m.s, "t.fir", strbuf.view(&b), pre, m);
     if (check_env.errors(&e->c) != 0) {
         eprintln(check_env.report_text(&e->c, 0));
         panic("run_env.parse: the text does not parse");
@@ -318,17 +316,17 @@ fn parse_unverified(env mut* e, string@ text) fir.module {
     return m;
 }
 
-/// Parses `text` as parse_unverified does, and holds that each of its functions keeps every rule
-/// of the verifier.
-fn parse(env mut* e, string@ text) fir.module {
-    fir.module mut m = parse_unverified(e, text);
+/// Parses `text` as parse_unverified_made does, and holds that each of its functions keeps every
+/// rule of the verifier.
+fn parse_made(env mut* e, string@ text) fir.module mut* own {
+    fir.module mut* own m = parse_unverified_made(e, text);
     fir_verify.runtime rt = fir_verify.runtime_of(&e->c.ck);
     u64 mut i = 0;
-    while (i < m.funcs.len) {
+    while (i < m->funcs.len) {
         fir_verify.violation mut v = fir_verify.violation{};
-        if (fir_verify.find_violation(&m.funcs.items[i], &rt, &v)) {
+        if (fir_verify.find_violation(&m->funcs.items[i], &rt, &v)) {
             strbuf.clear(&e->text);
-            fir_verify.violation_text(&m.funcs.items[i], &v, &e->text);
+            fir_verify.violation_text(&m->funcs.items[i], &v, &e->text);
             eprintln(strbuf.view(&e->text));
             panic("run_env.parse: the verifier refuses the text");
         }
@@ -347,7 +345,7 @@ fn named(ast.sym* s, string name, strbuf.str_buf mut* b) bool {
 /// The function of `m` or of the module `main` named `name`, a bare name or a dotted one.
 fn function(env* e, fir.module* m, string name) ast.sym* {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     u64 mut i = 0;
     while (i < m->funcs.len) {
         if (named(m->funcs.items[i].sym, name, &b)) {
@@ -365,49 +363,47 @@ fn function(env* e, fir.module* m, string name) ast.sym* {
 /// Runs the function `name` of `m` or of the checked source with `args`, the bits of each
 /// argument, and gives the report.
 fn run_in(env mut* e, fir.module* m, string name, u64@ args) string {
-    interpreter.machine mut it = interpreter.machine{};
-    interpreter.init(&it, &e->c.ck, m, true);
-    defer interpreter.free(&it);
+    interpreter.machine mut* own it = interpreter.make(&e->c.ck, m, true);
+    defer interpreter.drop_made(move(it));
     if (e->stack_limit != 0) {
-        it.stack_limit = e->stack_limit;
+        it->stack_limit = e->stack_limit;
     }
-    it.sh.reporting = e->events;
-    interpreter.run_function(&it, function(e, m, name), args);
+    it->sh.reporting = e->events;
+    interpreter.run_function(it, function(e, m, name), args);
     strbuf.clear(&e->text);
-    interpreter.write_report(&it, &e->text);
+    interpreter.write_report(it, &e->text);
     return strbuf.view(&e->text);
 }
 
 /// Checks `source`, runs its function `name` with `args`, and gives the report.
 fn run(env mut* e, string@ source, string name, u64@ args) string {
     check(e, source);
-    fir.module mut none = fir.module_new();
-    defer fir.module_free(&none);
-    return run_in(e, &none, name, args);
+    fir.module mut* own none = fir.module_make();
+    defer fir.module_drop_made(move(none));
+    return run_in(e, none, name, args);
 }
 
 /// Checks `prelude`, parses `text` against it, runs the function `name` with `args`, and gives
 /// the report.
 fn run_text(env mut* e, string@ prelude, string@ text, string name, u64@ args) string {
     check(e, prelude);
-    fir.module mut m = parse(e, text);
-    defer fir.module_free(&m);
-    return run_in(e, &m, name, args);
+    fir.module mut* own m = parse_made(e, text);
+    defer fir.module_drop_made(move(m));
+    return run_in(e, m, name, args);
 }
 
 /// Checks `source` and runs it as a program whose `main` is the function `main`, with the
 /// arguments `argv`, and gives the report.
 fn run_program(env mut* e, string@ source, string@ argv) string {
     check(e, source);
-    fir.module mut none = fir.module_new();
-    defer fir.module_free(&none);
-    interpreter.machine mut it = interpreter.machine{};
-    interpreter.init(&it, &e->c.ck, &none, true);
-    defer interpreter.free(&it);
-    it.sh.reporting = e->events;
-    interpreter.run_program(&it, function(e, &none, "main"), argv);
+    fir.module mut* own none = fir.module_make();
+    defer fir.module_drop_made(move(none));
+    interpreter.machine mut* own it = interpreter.make(&e->c.ck, none, true);
+    defer interpreter.drop_made(move(it));
+    it->sh.reporting = e->events;
+    interpreter.run_program(it, function(e, none, "main"), argv);
     strbuf.clear(&e->text);
-    interpreter.write_report(&it, &e->text);
+    interpreter.write_report(it, &e->text);
     return strbuf.view(&e->text);
 }
 

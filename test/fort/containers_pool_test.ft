@@ -16,9 +16,9 @@ import std.strbuf;
 // Makes a `containers.pool`, runs `body` on it, and releases it. `body` reads the value through a
 // pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
 fn run(fn (containers.pool mut*) void body) void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    body(&p);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    body(p);
 }
 
 // A block is 4096 bytes: 4095 fits, one more byte still fits, and the byte
@@ -99,20 +99,20 @@ fn a_big_request_between_small_ones(containers.pool mut* p) void {
 // Requests of every size from 1 to 64 fit one block, and the byte count is
 // their sum.
 fn many_sizes_share_one_block() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
     u64 mut n = 1;
     u64 mut total = 0;
     while (n <= 64) {
-        u8 mut@ got = containers.pool_bytes(&p, n);
+        u8 mut@ got = containers.pool_bytes(p, n);
         assert(got.len == n);
         total += n;
         n += 1;
     }
     // 1 + 2 +... + 64 is 2080, well inside a block.
     assert(total == 2080);
-    assert(containers.pool_used(&p) == 2080);
-    assert(containers.pool_block_count(&p) == 1);
+    assert(containers.pool_used(p) == 2080);
+    assert(containers.pool_block_count(p) == 1);
 }
 
 // `count` bytes 'x' as one owned string. A test keeps this string and no buffer, because the use
@@ -120,7 +120,7 @@ fn many_sizes_share_one_block() void {
 // buffer of the test is lent to.
 fn xs(u64 count) string own {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     u64 mut i = 0;
     while (i < count) {
         strbuf.push(&b, 'x');
@@ -144,20 +144,20 @@ fn a_long_string_is_interned_whole(containers.pool mut* p) void {
 // Interning across a block boundary keeps every earlier copy readable: the
 // blocks are a list and nothing is ever moved or reallocated.
 fn interning_across_a_boundary_keeps_the_copies() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    string first = containers.pool_intern(&p, "first of all");
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    string first = containers.pool_intern(p, "first of all");
     // The filler takes the block to within four bytes of full, so the next
     // string cannot fit behind it.
-    u8 mut@ filler = containers.pool_bytes(&p, 4080);
+    u8 mut@ filler = containers.pool_bytes(p, 4080);
     assert(filler.len == 4080);
-    assert(containers.pool_block_count(&p) == 1);
-    string second = containers.pool_intern(&p, "second of all");
-    assert(containers.pool_block_count(&p) == 2);
+    assert(containers.pool_block_count(p) == 1);
+    string second = containers.pool_intern(p, "second of all");
+    assert(containers.pool_block_count(p) == 2);
     assert(first == "first of all");
     assert(second == "second of all");
-    string third = containers.pool_intern(&p, "third of all");
-    assert(containers.pool_block_count(&p) == 2);
+    string third = containers.pool_intern(p, "third of all");
+    assert(containers.pool_block_count(p) == 2);
     assert(first == "first of all");
     assert(second == "second of all");
     assert(third == "third of all");
@@ -170,7 +170,7 @@ fn interning_across_a_boundary_keeps_the_copies() void {
 // blocks as it takes.
 fn views_never_overlap_across_blocks(containers.pool mut* p) void {
     containers.str_vec mut kept = containers.str_create();
-    defer containers.str_free(&kept);
+    defer del(kept.items);
     u64 mut i = 0;
     while (i < 300) {
         u8 mut@ got = containers.pool_bytes(p, 100);
@@ -207,25 +207,25 @@ fn views_hold_their_index(containers.str_vec* kept) void {
 // The same for interned strings: a thousand distinct names come back as they
 // went in, whichever block they landed in.
 fn a_thousand_names_come_back_unchanged() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
     containers.str_vec mut names = containers.str_create();
-    defer containers.str_free(&names);
+    defer del(names.items);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    strbuf.str_buf mut expected = strbuf.create();
+    defer del(expected.data);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
     u64 mut i = 0;
     while (i < 1000) {
         strbuf.clear(&b);
         strbuf.append(&b, "symbol_");
         strbuf.append_u64(&b, i);
         strbuf.append(&b, "_end");
-        containers.str_push(&names, containers.pool_intern(&p, strbuf.view(&b)));
+        containers.str_push(&names, containers.pool_intern(p, strbuf.view(&b)));
         i += 1;
     }
     assert(names.len == 1000);
-    assert(containers.pool_block_count(&p) > 1);
-    strbuf.str_buf mut expected = strbuf.create();
-    defer strbuf.free(&expected);
+    assert(containers.pool_block_count(p) > 1);
     i = 0;
     while (i < 1000) {
         strbuf.clear(&expected);

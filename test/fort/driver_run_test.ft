@@ -62,7 +62,7 @@ fn said(string out, string err) void {
 // stderr.
 fn said_usage(string head, string tail) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, "fort: error: ");
     strbuf.append(&b, head);
     strbuf.append(&b, tail);
@@ -90,7 +90,7 @@ fn write_file(string path, string text) void {
 // Writes the lines of `lines`, each with a newline, as the file `path`.
 fn write_lines(string path, string@ lines) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     run_env.join(&b, lines);
     write_file(path, strbuf.view(&b));
 }
@@ -105,7 +105,7 @@ fn write_std() void {
     assert(os.make_dir("sstd", 0o700) || sys.errno() == libc.EEXIST);
     write_lines("sstd/rt.ft", run_env.RUNTIME[..]);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     run_env.join(&b, run_env.LIBC[..LIBC_KEPT]);
     strbuf.append(&b, "extern fn oracle_keep(void* p) noreturn;\n");
     write_file("sstd/libc.ft", strbuf.view(&b));
@@ -130,30 +130,30 @@ fn run_program(string path, string@ lines, string@ args) i32 {
 // --fir-run sets its flag, and every argument after `--` goes to the program, an option too.
 fn fir_run_takes_the_arguments_after_the_separator() void {
     string[8] mut argv = {"fort", "--fir-run", "main.ft", "--", "-o", "--check", "x", "--"};
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    assert(driver.parse(&opts, argv[..]) == driver.PARSE_OK);
-    assert(opts.fir_run && opts.have_run_args && !opts.check && !opts.have_output);
-    assert(opts.entry == "main.ft");
-    assert(opts.run_args.len == 4);
-    assert(containers.str_at(&opts.run_args, 0) == "-o");
-    assert(containers.str_at(&opts.run_args, 1) == "--check");
-    assert(containers.str_at(&opts.run_args, 2) == "x");
-    assert(containers.str_at(&opts.run_args, 3) == "--");
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    assert(driver.parse(opts, argv[..]) == driver.PARSE_OK);
+    assert(opts->fir_run && opts->have_run_args && !opts->check && !opts->have_output);
+    assert(opts->entry == "main.ft");
+    assert(opts->run_args.len == 4);
+    assert(containers.str_at(&opts->run_args, 0) == "-o");
+    assert(containers.str_at(&opts->run_args, 1) == "--check");
+    assert(containers.str_at(&opts->run_args, 2) == "x");
+    assert(containers.str_at(&opts->run_args, 3) == "--");
 }
 
 // With no `--` the program has no argument of its own, and with `--` at the end it has none
 // either. The flag may follow the entry file.
 fn fir_run_without_arguments() void {
     string[4] mut argv = {"fort", "main.ft", "--fir-run", "--"};
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    assert(driver.parse(&opts, argv[..3]) == driver.PARSE_OK);
-    assert(opts.fir_run && !opts.have_run_args && opts.run_args.len == 0);
-    driver.options mut dashed = driver.options_create();
-    defer driver.options_free(&dashed);
-    assert(driver.parse(&dashed, argv[..]) == driver.PARSE_OK);
-    assert(dashed.fir_run && dashed.have_run_args && dashed.run_args.len == 0);
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    assert(driver.parse(opts, argv[..3]) == driver.PARSE_OK);
+    assert(opts->fir_run && !opts->have_run_args && opts->run_args.len == 0);
+    driver.options mut* own dashed = driver.options_make();
+    defer driver.options_drop_made(move(dashed));
+    assert(driver.parse(dashed, argv[..]) == driver.PARSE_OK);
+    assert(dashed->fir_run && dashed->have_run_args && dashed->run_args.len == 0);
 }
 
 fn options() void {
@@ -380,7 +380,7 @@ string[5] POINT = {
 // Writes `t.fir`: the pass directive of each line of `passes`, the prelude, then `text`.
 fn write_fir_test(string@ passes, string@ text) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     u64 mut i = 0;
     while (i < passes.len) {
         strbuf.append(&b, "\x2F/! pass: ");
