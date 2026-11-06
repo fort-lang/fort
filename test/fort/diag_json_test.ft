@@ -47,76 +47,76 @@ fn holds(string text, string needle) bool {
 // ---- the shape of the array ----------------------------------------------------
 
 fn no_diagnostic_is_an_empty_array() void {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    assert(written_json(&s, &out) == "[]");
+    defer del(out.data);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    assert(written_json(s, &out) == "[]");
 }
 
 fn an_error_is_one_object_with_an_empty_notes_array() void {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    diag.error(&s, one_byte(USE_LINE, USE_COL), "expected ';'");
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
+    strbuf.str_buf mut out = strbuf.create();
+    defer del(out.data);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    diag.error(s, one_byte(USE_LINE, USE_COL), "expected ';'");
     strbuf.append(&want, "[{\"file\":\"main.ft\",\"line\":7,\"col\":5,\"end_line\":7,");
     strbuf.append(&want, "\"end_col\":6,\"severity\":\"error\",");
     strbuf.append(&want, "\"message\":\"expected ';'\",\"notes\":[]}]");
-    strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    assert(written_json(&s, &out) == strbuf.view(&want));
+    assert(written_json(s, &out) == strbuf.view(&want));
 }
 
 // The whole range is written, a range that spans lines included, and a
 // positionless error is the empty range at 1:1.
 fn the_document_holds_both_ends_of_the_range() void {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    diag.error(&s, diag.loc_range("util.ft", 12, 23, 14, 2), "infinite size");
-    diag.error(&s, diag.loc_make("main.ft", 1, 1), "no 'main' function");
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
+    strbuf.str_buf mut out = strbuf.create();
+    defer del(out.data);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    diag.error(s, diag.loc_range("util.ft", 12, 23, 14, 2), "infinite size");
+    diag.error(s, diag.loc_make("main.ft", 1, 1), "no 'main' function");
     strbuf.append(&want, "[{\"file\":\"util.ft\",\"line\":12,\"col\":23,\"end_line\":14,");
     strbuf.append(&want, "\"end_col\":2,\"severity\":\"error\",");
     strbuf.append(&want, "\"message\":\"infinite size\",\"notes\":[]},");
     strbuf.append(&want, "{\"file\":\"main.ft\",\"line\":1,\"col\":1,\"end_line\":1,");
     strbuf.append(&want, "\"end_col\":1,\"severity\":\"error\",");
     strbuf.append(&want, "\"message\":\"no 'main' function\",\"notes\":[]}]");
-    strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    assert(written_json(&s, &out) == strbuf.view(&want));
+    assert(written_json(s, &out) == strbuf.view(&want));
 }
 
 // A message and a file name go through the writer's escapes.
 fn the_message_and_the_file_name_are_escaped() void {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    diag.error(&s, diag.loc_range("a\"b.ft", 1, 1, 1, 2), "expected '\"', found a tab\there");
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
+    strbuf.str_buf mut out = strbuf.create();
+    defer del(out.data);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    diag.error(s, diag.loc_range("a\"b.ft", 1, 1, 1, 2), "expected '\"', found a tab\there");
     strbuf.append(&want, "[{\"file\":\"a\\\"b.ft\",\"line\":1,\"col\":1,\"end_line\":1,");
     strbuf.append(&want, "\"end_col\":2,\"severity\":\"error\",");
     strbuf.append(&want, "\"message\":\"expected '\\\"', found a tab\\there\",\"notes\":[]}]");
-    strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    assert(written_json(&s, &out) == strbuf.view(&want));
+    assert(written_json(s, &out) == strbuf.view(&want));
 }
 
 // Every error is one element of the array, whatever their number.
 fn many_errors_are_many_elements() void {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
+    strbuf.str_buf mut out = strbuf.create();
+    defer del(out.data);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
     u32 many = 30;
     u32 mut i = 0;
     while (i < many) {
-        diag.error(&s, one_byte(i + 1, 1), "boom");
-        diag.note(&s, one_byte(i + 1, 3), "note");
+        diag.error(s, one_byte(i + 1, 1), "boom");
+        diag.note(s, one_byte(i + 1, 3), "note");
         i += 1;
     }
-    strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    string text = written_json(&s, &out);
+    string text = written_json(s, &out);
     u64 mut found = 0;
     u64 mut at = 0;
     while (at < text.len) {
@@ -129,25 +129,25 @@ fn many_errors_are_many_elements() void {
         }
     }
     assert(found == 30);
-    assert(diag.record_count(&s) == 60);
+    assert(diag.record_count(s) == 60);
 }
 
 // The document is written through a writer the caller owns, so it can be one
 // member of a larger document.
 fn the_array_can_be_the_value_of_a_member() void {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    diag.error(&s, one_byte(1, 1), "boom");
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
+    defer del(out.data);
+    strbuf.str_buf mut want = strbuf.create();
+    defer del(want.data);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    diag.error(s, one_byte(1, 1), "boom");
     json.writer mut j = json.writer{};
     json.json_init(&j, &out);
     json.json_object_begin(&j);
     json.json_key(&j, "diagnostics");
-    diag.write_json(&s, &j);
+    diag.write_json(s, &j);
     json.json_object_end(&j);
-    strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
     strbuf.append(&want, "{\"diagnostics\":[{\"file\":\"main.ft\",\"line\":1,\"col\":1,");
     strbuf.append(&want, "\"end_line\":1,\"end_col\":2,\"severity\":\"error\",");
     strbuf.append(&want, "\"message\":\"boom\",\"notes\":[]}]}");
@@ -156,14 +156,14 @@ fn the_array_can_be_the_value_of_a_member() void {
 
 // The document of a sink that was reset is empty again, whatever it held.
 fn the_document_is_empty_again_after_a_reset() void {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    diag.error(&s, one_byte(1, 1), "boom");
-    diag.note(&s, one_byte(1, 5), "bang");
-    diag.reset(&s);
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    assert(written_json(&s, &out) == "[]");
+    defer del(out.data);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    diag.error(s, one_byte(1, 1), "boom");
+    diag.note(s, one_byte(1, 5), "bang");
+    diag.reset(s);
+    assert(written_json(s, &out) == "[]");
 }
 
 // ---- the notes of an error -----------------------------------------------------
@@ -171,13 +171,15 @@ fn the_document_is_empty_again_after_a_reset() void {
 // The golden document of the worked example: the two notes that follow the
 // error are nested under it.
 fn the_notes_that_follow_an_error_are_nested_under_it() void {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    diag.error(&s, one_byte(USE_LINE, USE_COL), "cannot assign to immutable 'x'");
-    diag.note(&s, one_byte(DECL_LINE, DECL_COL), "'x' declared here");
-    diag.note(&s, one_byte(DECL_LINE, DECL_COL + 2), "declare it with 'mut'");
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
+    strbuf.str_buf mut out = strbuf.create();
+    defer del(out.data);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    diag.error(s, one_byte(USE_LINE, USE_COL), "cannot assign to immutable 'x'");
+    diag.note(s, one_byte(DECL_LINE, DECL_COL), "'x' declared here");
+    diag.note(s, one_byte(DECL_LINE, DECL_COL + 2), "declare it with 'mut'");
     strbuf.append(&want, "[{\"file\":\"main.ft\",\"line\":7,\"col\":5,\"end_line\":7,");
     strbuf.append(&want, "\"end_col\":6,\"severity\":\"error\",");
     strbuf.append(&want, "\"message\":\"cannot assign to immutable 'x'\",\"notes\":[");
@@ -185,21 +187,21 @@ fn the_notes_that_follow_an_error_are_nested_under_it() void {
     strbuf.append(&want, "\"end_col\":10,\"message\":\"'x' declared here\"},");
     strbuf.append(&want, "{\"file\":\"main.ft\",\"line\":3,\"col\":11,\"end_line\":3,");
     strbuf.append(&want, "\"end_col\":12,\"message\":\"declare it with 'mut'\"}]}]");
-    strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    assert(written_json(&s, &out) == strbuf.view(&want));
+    assert(written_json(s, &out) == strbuf.view(&want));
 }
 
 // A note belongs to the error before it, so the next error starts a diagnostic
 // of its own.
 fn each_error_takes_only_the_notes_that_follow_it() void {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    diag.error(&s, one_byte(1, 1), "first");
-    diag.note(&s, one_byte(2, 1), "about the first");
-    diag.error(&s, one_byte(3, 1), "second");
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
+    strbuf.str_buf mut out = strbuf.create();
+    defer del(out.data);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    diag.error(s, one_byte(1, 1), "first");
+    diag.note(s, one_byte(2, 1), "about the first");
+    diag.error(s, one_byte(3, 1), "second");
     strbuf.append(&want, "[{\"file\":\"main.ft\",\"line\":1,\"col\":1,\"end_line\":1,");
     strbuf.append(&want, "\"end_col\":2,\"severity\":\"error\",\"message\":\"first\",\"notes\":[");
     strbuf.append(&want, "{\"file\":\"main.ft\",\"line\":2,\"col\":1,\"end_line\":2,");
@@ -207,41 +209,41 @@ fn each_error_takes_only_the_notes_that_follow_it() void {
     strbuf.append(&want, "{\"file\":\"main.ft\",\"line\":3,\"col\":1,\"end_line\":3,");
     strbuf.append(&want, "\"end_col\":2,\"severity\":\"error\",\"message\":\"second\",");
     strbuf.append(&want, "\"notes\":[]}]");
-    strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    assert(written_json(&s, &out) == strbuf.view(&want));
+    assert(written_json(s, &out) == strbuf.view(&want));
 }
 
 // A note that follows no error has nothing to hang under, so it stands as a
 // diagnostic of its own rather than being dropped.
 fn a_note_without_an_error_stands_alone() void {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    diag.note(&s, one_byte(1, 1), "lonely");
-    diag.note(&s, one_byte(2, 1), "also lonely");
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
+    strbuf.str_buf mut out = strbuf.create();
+    defer del(out.data);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    diag.note(s, one_byte(1, 1), "lonely");
+    diag.note(s, one_byte(2, 1), "also lonely");
     strbuf.append(&want, "[{\"file\":\"main.ft\",\"line\":1,\"col\":1,\"end_line\":1,");
     strbuf.append(&want, "\"end_col\":2,\"severity\":\"note\",\"message\":\"lonely\",");
     strbuf.append(&want, "\"notes\":[]},");
     strbuf.append(&want, "{\"file\":\"main.ft\",\"line\":2,\"col\":1,\"end_line\":2,");
     strbuf.append(&want, "\"end_col\":2,\"severity\":\"note\",\"message\":\"also lonely\",");
     strbuf.append(&want, "\"notes\":[]}]");
-    strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    assert(written_json(&s, &out) == strbuf.view(&want));
+    assert(written_json(s, &out) == strbuf.view(&want));
 }
 
 // A note that follows no error still stands alone when errors come later, and
 // the error after it takes only the notes that follow it.
 fn an_orphan_note_does_not_capture_the_notes_of_the_error_after_it() void {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    diag.note(&s, one_byte(1, 1), "orphan");
-    diag.error(&s, one_byte(2, 1), "boom");
-    diag.note(&s, one_byte(2, 5), "about the boom");
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
+    strbuf.str_buf mut out = strbuf.create();
+    defer del(out.data);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    diag.note(s, one_byte(1, 1), "orphan");
+    diag.error(s, one_byte(2, 1), "boom");
+    diag.note(s, one_byte(2, 5), "about the boom");
     strbuf.append(&want, "[{\"file\":\"main.ft\",\"line\":1,\"col\":1,\"end_line\":1,");
     strbuf.append(&want, "\"end_col\":2,\"severity\":\"note\",\"message\":\"orphan\",");
     strbuf.append(&want, "\"notes\":[]},");
@@ -249,9 +251,7 @@ fn an_orphan_note_does_not_capture_the_notes_of_the_error_after_it() void {
     strbuf.append(&want, "\"end_col\":2,\"severity\":\"error\",\"message\":\"boom\",\"notes\":[");
     strbuf.append(&want, "{\"file\":\"main.ft\",\"line\":2,\"col\":5,\"end_line\":2,");
     strbuf.append(&want, "\"end_col\":6,\"message\":\"about the boom\"}]}]");
-    strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    assert(written_json(&s, &out) == strbuf.view(&want));
+    assert(written_json(s, &out) == strbuf.view(&want));
 }
 
 // ---- the copies a record keeps -------------------------------------------------
@@ -288,17 +288,22 @@ fn fill(u8 mut@ block) void {
 // bytes instead. The assertion checks that the filler is absent. An empty-name
 // assertion cannot detect this fort failure mode.
 fn the_document_names_the_file_after_its_buffer_is_freed() void {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    strbuf.str_buf mut name = strbuf.create();
-    strbuf.append(&name, "gone.ft");
-    strbuf.str_buf mut msg = strbuf.create();
-    strbuf.append(&msg, "cannot assign to immutable 'x'");
-    diag.error(&s, diag.loc_range(strbuf.view(&name), 2, 3, 2, 4), strbuf.view(&msg));
-    // Both buffers die here, before the document is written, as the module set
-    // that reported a diagnostic dies before the check document.
-    strbuf.free(&name);
-    strbuf.free(&msg);
+    strbuf.str_buf mut out = strbuf.create();
+    defer del(out.data);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    {
+        strbuf.str_buf mut name = strbuf.create();
+        strbuf.append(&name, "gone.ft");
+        strbuf.str_buf mut msg = strbuf.create();
+        strbuf.append(&msg, "cannot assign to immutable 'x'");
+        diag.error(s, diag.loc_range(strbuf.view(&name), 2, 3, 2, 4), strbuf.view(&msg));
+        // Both buffers die here, before the document is written, as the module set
+        // that reported a diagnostic dies before the check document. No call follows
+        // the two `del`s in the block, so the leak rule proves both.
+        del(name.data);
+        del(msg.data);
+    }
     u8 mut@ own small = new(u8, 16);
     defer del(small);
     fill(small);
@@ -308,60 +313,58 @@ fn the_document_names_the_file_after_its_buffer_is_freed() void {
     u8 mut@ own large = new(u8, 64);
     defer del(large);
     fill(large);
-    strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    string text = written_json(&s, &out);
+    string text = written_json(s, &out);
     assert(holds(text, "\"file\":\"gone.ft\""));
     assert(holds(text, "\"message\":\"cannot assign to immutable 'x'\""));
     // No record reads the storage the two buffers gave back.
     assert(!holds(text, "ZZZ"));
-    assert(diag.record_at(&s, 0).loc.file == "gone.ft");
-    assert(diag.record_at(&s, 0).msg == "cannot assign to immutable 'x'");
+    assert(diag.record_at(s, 0).loc.file == "gone.ft");
+    assert(diag.record_at(s, 0).msg == "cannot assign to immutable 'x'");
 }
 
 // A message can quote any bytes of a source file, which is UTF-8 only by
 // convention. So the writer replaces what is not well-formed and the document
 // stays valid UTF-8.
 fn a_message_of_arbitrary_bytes_gives_a_valid_document() void {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
     strbuf.str_buf mut m = strbuf.create();
-    defer strbuf.free(&m);
-    strbuf.append(&m, "unexpected byte in 'caf\xC3\xA9\xFF'");
-    diag.error(&s, one_byte(1, 1), strbuf.view(&m));
+    defer del(m.data);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
+    strbuf.str_buf mut out = strbuf.create();
+    defer del(out.data);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    strbuf.append(&m, "unexpected byte in 'caf\xC3\xA9\xFF'");
+    diag.error(s, one_byte(1, 1), strbuf.view(&m));
     strbuf.append(&want, "\"message\":\"unexpected byte in 'caf\xC3\xA9");
     strbuf.append(&want, "\xEF\xBF\xBD'\"");
-    strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    assert(holds(written_json(&s, &out), strbuf.view(&want)));
+    assert(holds(written_json(s, &out), strbuf.view(&want)));
 }
 
 // What the JSON says and what the text says are the same diagnostics: the
 // structured form is written from the records, not from the lines.
 fn the_document_is_written_with_the_text_off() void {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    diag.set_text(&s, false);
-    diag.error(&s, one_byte(USE_LINE, USE_COL), "expected ';'");
-    diag.note(&s, one_byte(DECL_LINE, DECL_COL), "here");
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    assert(holds(written_json(&s, &out), "\"message\":\"expected ';'\""));
-    assert(holds(written_json(&s, &out), "\"message\":\"here\""));
+    defer del(out.data);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    diag.set_text(s, false);
+    diag.error(s, one_byte(USE_LINE, USE_COL), "expected ';'");
+    diag.note(s, one_byte(DECL_LINE, DECL_COL), "here");
+    assert(holds(written_json(s, &out), "\"message\":\"expected ';'\""));
+    assert(holds(written_json(s, &out), "\"message\":\"here\""));
 }
 
 // A muted diagnostic is not recorded, so the document does not hold it either.
 fn a_muted_diagnostic_is_in_no_document() void {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    diag.mute(&s);
-    diag.error(&s, one_byte(1, 1), "probing");
-    assert(diag.unmute(&s) == 1);
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    assert(written_json(&s, &out) == "[]");
+    defer del(out.data);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    diag.mute(s);
+    diag.error(s, one_byte(1, 1), "probing");
+    assert(diag.unmute(s) == 1);
+    assert(written_json(s, &out) == "[]");
 }
 
 fn main() i32 {

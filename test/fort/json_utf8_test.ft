@@ -38,9 +38,8 @@ u64 ASCII_MAX = 127;
 u64 HIGH_MIN = 128;
 u64 BYTE_MAX = 255;
 
-// The document one string produces.
+// The document one string produces, in an environment of json_env.make, which opens it.
 fn document_of(json_env.env mut* e, string bytes) string {
-    json_env.open(e);
     json.json_str(&e->j, bytes);
     return json_env.written(e);
 }
@@ -51,15 +50,15 @@ fn document_of(json_env.env mut* e, string bytes) string {
 // has the form the golden table gives.
 fn every_control_byte_is_escaped() void {
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     u64 mut byte = 0;
     while (byte <= CONTROL_MAX) {
-        json_env.env mut e = json_env.env{};
-        string got = document_of(&e, json_env.one_byte(&text, byte));
+        json_env.env mut* own e = json_env.make();
+        string got = document_of(e, json_env.one_byte(&text, byte));
         json_env.check(got, json_env.quoted(&want, CONTROL_FORMS[byte]), CONTROL_FORMS[byte]);
-        json_env.close(&e);
+        json_env.drop_made(move(e));
         byte += 1;
     }
 }
@@ -69,13 +68,13 @@ fn every_control_byte_is_escaped() void {
 // retained bytes.
 fn every_ascii_byte_takes_its_form() void {
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     u64 mut byte = 0;
     while (byte <= ASCII_MAX) {
-        json_env.env mut e = json_env.env{};
-        string got = document_of(&e, json_env.one_byte(&text, byte));
+        json_env.env mut* own e = json_env.make();
+        string got = document_of(e, json_env.one_byte(&text, byte));
         if (byte <= CONTROL_MAX) {
             json_env.check(got, json_env.quoted(&want, CONTROL_FORMS[byte]), "a control byte");
         } else if (byte == cast('"', u64)) {
@@ -86,7 +85,7 @@ fn every_ascii_byte_takes_its_form() void {
             json_env.check(got, json_env.quoted(&want, json_env.one_byte(&text, byte)),
                            "a printable byte");
         }
-        json_env.close(&e);
+        json_env.drop_made(move(e));
         byte += 1;
     }
 }
@@ -95,36 +94,36 @@ fn every_ascii_byte_takes_its_form() void {
 // that is not escaped at all is the space.
 fn only_the_quote_and_the_backslash_are_escaped_above_the_controls() void {
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     u64 mut escaped = 0;
     u64 mut byte = CONTROL_MAX + 1;
     while (byte <= ASCII_MAX) {
-        json_env.env mut e = json_env.env{};
-        if (document_of(&e, json_env.one_byte(&text, byte)).len != 3) {
+        json_env.env mut* own e = json_env.make();
+        if (document_of(e, json_env.one_byte(&text, byte)).len != 3) {
             escaped += 1;
         }
-        json_env.close(&e);
+        json_env.drop_made(move(e));
         byte += 1;
     }
     assert(escaped == 2);
-    json_env.env mut e = json_env.env{};
-    defer json_env.close(&e);
-    assert(document_of(&e, json_env.one_byte(&text, CONTROL_MAX + 1)) == "\" \"");
+    json_env.env mut* own e = json_env.make();
+    defer json_env.drop_made(move(e));
+    assert(document_of(e, json_env.one_byte(&text, CONTROL_MAX + 1)) == "\" \"");
 }
 
 // The document is valid UTF-8 whatever the message held, so a byte that starts
 // no sequence becomes U+FFFD.
 fn a_byte_that_starts_no_sequence_becomes_the_replacement_character() void {
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     u64 mut byte = HIGH_MIN;
     while (byte <= BYTE_MAX) {
-        json_env.env mut e = json_env.env{};
-        string got = document_of(&e, json_env.one_byte(&text, byte));
+        json_env.env mut* own e = json_env.make();
+        string got = document_of(e, json_env.one_byte(&text, byte));
         json_env.check(got, json_env.quoted(&want, ONE_REPLACEMENT), "a high byte alone");
-        json_env.close(&e);
+        json_env.drop_made(move(e));
         byte += 1;
     }
 }
@@ -137,12 +136,12 @@ fn a_byte_that_starts_no_sequence_becomes_the_replacement_character() void {
 // well, so the text around a bad byte is untouched.
 fn utf8_case(string bytes, string want, string what) void {
     strbuf.str_buf mut expected = strbuf.create();
-    defer strbuf.free(&expected);
-    json_env.env mut alone = json_env.env{};
-    json_env.check(document_of(&alone, bytes), json_env.quoted(&expected, want), what);
-    json_env.close(&alone);
+    defer del(expected.data);
+    json_env.env mut* own alone = json_env.make();
+    json_env.check(document_of(alone, bytes), json_env.quoted(&expected, want), what);
+    json_env.drop_made(move(alone));
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     strbuf.push(&text, 'a');
     strbuf.append(&text, bytes);
     strbuf.push(&text, 'z');
@@ -150,9 +149,9 @@ fn utf8_case(string bytes, string want, string what) void {
     strbuf.append(&expected, "\"a");
     strbuf.append(&expected, want);
     strbuf.append(&expected, "z\"");
-    json_env.env mut inside = json_env.env{};
-    json_env.check(document_of(&inside, strbuf.view(&text)), strbuf.view(&expected), what);
-    json_env.close(&inside);
+    json_env.env mut* own inside = json_env.make();
+    json_env.check(document_of(inside, strbuf.view(&text)), strbuf.view(&expected), what);
+    json_env.drop_made(move(inside));
 }
 
 // Both edges of every range of every sequence length: the writer replaces
@@ -208,7 +207,7 @@ fn every_ill_formed_sequence_is_replaced() void {
 // ASCII byte that stood in its place is still itself.
 fn a_continuation_byte_out_of_range_ends_the_sequence() void {
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     strbuf.append(&want, ONE_REPLACEMENT);
     strbuf.append(&want, "\x7F");
     utf8_case("\xC2\x7F", strbuf.view(&want), "a second byte one below the range");
@@ -224,13 +223,13 @@ fn a_continuation_byte_out_of_range_ends_the_sequence() void {
 // ASCII, valid UTF-8, and a byte outside any valid sequence.
 fn a_message_of_every_kind_of_byte_is_written_once() void {
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     strbuf.append(&want, "\"a\\\"b\\\\c\\nd\\u0001e\xC3\xA9f");
     strbuf.append(&want, ONE_REPLACEMENT);
     strbuf.append(&want, "g\"");
-    json_env.env mut e = json_env.env{};
-    defer json_env.close(&e);
-    string got = document_of(&e, "a\"b\\c\nd\x01e\xC3\xA9f\xFFg");
+    json_env.env mut* own e = json_env.make();
+    defer json_env.drop_made(move(e));
+    string got = document_of(e, "a\"b\\c\nd\x01e\xC3\xA9f\xFFg");
     json_env.check(got, strbuf.view(&want), "a byte of every kind");
 }
 
@@ -238,7 +237,7 @@ fn a_message_of_every_kind_of_byte_is_written_once() void {
 // UTF-8 stays UTF-8.
 fn a_sequence_of_every_length_goes_through_verbatim() void {
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     strbuf.append(&text, "\xC2\x80\xDF\xBF\xE0\xA0\x80\xED\x9F\xBF");
     strbuf.append(&text, "\xEE\x80\x80\xEF\xBF\xBD\xF0\x90\x80\x80\xF4\x8F\xBF\xBF");
     utf8_case(strbuf.view(&text), strbuf.view(&text), "one sequence of every length");

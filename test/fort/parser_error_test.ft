@@ -15,38 +15,38 @@ import std.strbuf;
 // ---- what is reported ----------------------------------------------------------
 
 fn a_missing_token_is_reported_where_it_is_missing() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    parse_env.parse(&e, "fn f( {\n}\n");
-    assert(parse_env.errors(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "1:7: error: expected a type, found '{'");
-    parse_env.parse(&e, "i32 n = 1\n");
-    assert(parse_env.errors(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "2:1: error: expected ';', found end of file");
-    parse_env.parse(&e, "fn f() void {\n    g(1;\n}\n");
-    assert(parse_env.errors(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "2:8: error: expected ')', found ';'");
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
+    parse_env.parse(e, "fn f( {\n}\n");
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "1:7: error: expected a type, found '{'");
+    parse_env.parse(e, "i32 n = 1\n");
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "2:1: error: expected ';', found end of file");
+    parse_env.parse(e, "fn f() void {\n    g(1;\n}\n");
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "2:8: error: expected ')', found ';'");
 }
 
 fn a_token_that_starts_no_expression_or_type_is_reported() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    parse_env.parse(&e, "i32 n = ;\n");
-    assert(parse_env.diag_at(&e, 0) == "1:9: error: expected an expression, found ';'");
-    parse_env.parse(&e, "fn f() void {\n    g(*);\n}\n");
-    assert(parse_env.diag_at(&e, 0) == "2:8: error: expected an expression, found ')'");
-    parse_env.parse(&e, "fn f() void {\n    ;\n}\n");
-    assert(parse_env.diag_at(&e, 0) == "2:5: error: an empty statement is not allowed");
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
+    parse_env.parse(e, "i32 n = ;\n");
+    assert(parse_env.diag_at(e, 0) == "1:9: error: expected an expression, found ';'");
+    parse_env.parse(e, "fn f() void {\n    g(*);\n}\n");
+    assert(parse_env.diag_at(e, 0) == "2:8: error: expected an expression, found ')'");
+    parse_env.parse(e, "fn f() void {\n    ;\n}\n");
+    assert(parse_env.diag_at(e, 0) == "2:5: error: an empty statement is not allowed");
 }
 
 fn a_missing_identifier_is_reported_as_such() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    parse_env.parse(&e, "fn f(i32 1) void {\n}\n");
-    assert(parse_env.diag_at(&e, 0)
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
+    parse_env.parse(e, "fn f(i32 1) void {\n}\n");
+    assert(parse_env.diag_at(e, 0)
            == "1:10: error: expected an identifier, found integer literal");
-    parse_env.parse(&e, "struct { i32 x; }\n");
-    assert(parse_env.diag_at(&e, 0) == "1:8: error: expected an identifier, found '{'");
+    parse_env.parse(e, "struct { i32 x; }\n");
+    assert(parse_env.diag_at(e, 0) == "1:8: error: expected an identifier, found '{'");
 }
 
 // The separator a source spells wrongly is named where it stands, rather than
@@ -54,151 +54,151 @@ fn a_missing_identifier_is_reported_as_such() void {
 // the important case because it lexes as two colons. The diagnostic must name
 // that separator instead of a later missing semicolon.
 fn the_old_path_separator_names_the_mistake() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    parse_env.parse(&e, "import a::b;\nfn main() i32 { return 0; }\n");
-    assert(parse_env.errors(&e) == 1);
-    assert(parse_env.diag_at(&e, 0)
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
+    parse_env.parse(e, "import a::b;\nfn main() i32 { return 0; }\n");
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0)
            == "1:9: error: a module path is separated by '.', not '::'");
-    parse_env.parse(&e, "import a.b::{c};\nfn main() i32 { return 0; }\n");
-    assert(parse_env.diag_at(&e, 0)
+    parse_env.parse(e, "import a.b::{c};\nfn main() i32 { return 0; }\n");
+    assert(parse_env.diag_at(e, 0)
            == "1:11: error: a module path is separated by '.', not '::'");
     // One colon is not two, and the message says which one it found.
-    parse_env.parse(&e, "import a:b;\nfn main() i32 { return 0; }\n");
-    assert(parse_env.diag_at(&e, 0) == "1:9: error: a module path is separated by '.', not ':'");
+    parse_env.parse(e, "import a:b;\nfn main() i32 { return 0; }\n");
+    assert(parse_env.diag_at(e, 0) == "1:9: error: a module path is separated by '.', not ':'");
     // A colon before the first segment is not a separator at all.
-    parse_env.parse(&e, "import ::a;\nfn main() i32 { return 0; }\n");
-    assert(parse_env.diag_at(&e, 0) == "1:8: error: expected an identifier, found ':'");
+    parse_env.parse(e, "import ::a;\nfn main() i32 { return 0; }\n");
+    assert(parse_env.diag_at(e, 0) == "1:8: error: expected an identifier, found ':'");
 }
 
 // `..` is one token and longest match wins. The separator of a path written with two dots is
 // the range operator and never reaches the parser as two separators. The diagnostic says so
 // rather than reporting the `;` the path's end would then be missing.
 fn a_path_separator_written_twice_names_the_mistake() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    parse_env.parse(&e, "import a..b;\nfn main() i32 { return 0; }\n");
-    assert(parse_env.errors(&e) == 1);
-    assert(parse_env.diag_at(&e, 0)
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
+    parse_env.parse(e, "import a..b;\nfn main() i32 { return 0; }\n");
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0)
            == "1:9: error: a module path is separated by '.', not '..'");
-    parse_env.parse(&e, "import a.b..c;\nfn main() i32 { return 0; }\n");
-    assert(parse_env.diag_at(&e, 0)
+    parse_env.parse(e, "import a.b..c;\nfn main() i32 { return 0; }\n");
+    assert(parse_env.diag_at(e, 0)
            == "1:11: error: a module path is separated by '.', not '..'");
     // A `..` before the first segment is not a separator at all.
-    parse_env.parse(&e, "import ..a;\nfn main() i32 { return 0; }\n");
-    assert(parse_env.diag_at(&e, 0) == "1:8: error: expected an identifier, found '..'");
+    parse_env.parse(e, "import ..a;\nfn main() i32 { return 0; }\n");
+    assert(parse_env.diag_at(e, 0) == "1:8: error: expected an identifier, found '..'");
 }
 
 fn the_marker_placement_rules_are_reported_at_the_marker() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // Every one of these is decidable from the written form, so the parser
     // and not the checker reports it.
-    parse_env.parse(&e, "mut i32 x = 0;\n");
-    string leading_mut = parse_env.diag_at(&e, 0);
-    assert(leading_mut == parse_env.join2(&e, "1:1: error: a mut never precedes the base type:",
+    parse_env.parse(e, "mut i32 x = 0;\n");
+    string leading_mut = parse_env.diag_at(e, 0);
+    assert(leading_mut == parse_env.join2(e, "1:1: error: a mut never precedes the base type:",
                                           " write 'node mut* p' or 'node* mut p'"));
-    parse_env.parse(&e, "i32 mut mut x = 0;\n");
-    assert(parse_env.diag_at(&e, 0) == "1:9: error: a mut appears once in a type position");
-    parse_env.parse(&e, "node* mut own x = 0;\n");
-    assert(parse_env.diag_at(&e, 0)
+    parse_env.parse(e, "i32 mut mut x = 0;\n");
+    assert(parse_env.diag_at(e, 0) == "1:9: error: a mut appears once in a type position");
+    parse_env.parse(e, "node* mut own x = 0;\n");
+    assert(parse_env.diag_at(e, 0)
            == "1:11: error: an own precedes the mut of its position: write 'node* own mut p'");
-    parse_env.parse(&e, "i32 own x = 0;\n");
-    string own_on_value = parse_env.diag_at(&e, 0);
-    assert(own_on_value == parse_env.join2(&e, "1:5: error: an own marks a reference: write it",
+    parse_env.parse(e, "i32 own x = 0;\n");
+    string own_on_value = parse_env.diag_at(e, 0);
+    assert(own_on_value == parse_env.join2(e, "1:5: error: an own marks a reference: write it",
                                            " after a '*' or an '@', or on a string"));
-    parse_env.parse(&e, "i32 mut[4] x = 0;\n");
-    string mut_before_array = parse_env.diag_at(&e, 0);
+    parse_env.parse(e, "i32 mut[4] x = 0;\n");
+    string mut_before_array = parse_env.diag_at(e, 0);
     assert(mut_before_array
-           == parse_env.join2(&e, "1:5: error: the elements share the array's storage: write",
+           == parse_env.join2(e, "1:5: error: the elements share the array's storage: write",
                               " the mut after the length, as 'i32[4] mut'"));
-    parse_env.parse(&e, "i32[4]*[2] x = 0;\n");
-    string array_after_ref = parse_env.diag_at(&e, 0);
+    parse_env.parse(e, "i32[4]*[2] x = 0;\n");
+    string array_after_ref = parse_env.diag_at(e, 0);
     assert(array_after_ref
-           == parse_env.join2(&e, "1:8: error: no array suffix follows a reference suffix:",
+           == parse_env.join2(e, "1:8: error: no array suffix follows a reference suffix:",
                               " group the inner type or use a struct"));
 }
 
 fn the_constructs_the_bootstrap_lacks_are_parsed_here() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // This parser supports forms that the C bootstrap lacks: a second array
     // or span level,
     // `do`-`while`, `?:` and a float literal. So each of these parses here
     // and reports nothing.
-    parse_env.parse(&e, "f64 x = 1.5;\n");
-    assert(parse_env.diag_count(&e) == 0);
-    parse_env.parse(&e, "fn f() void {\n    i32 x = a ? b : c;\n}\n");
-    assert(parse_env.errors(&e) == 0);
-    parse_env.parse(&e, "fn f() void {\n    do {\n        g();\n    } while (c);\n}\n");
-    assert(parse_env.errors(&e) == 0);
-    parse_env.parse(&e, "i32[2][3] x = 0;\n");
-    assert(parse_env.errors(&e) == 0);
-    parse_env.parse(&e, "i32[2]@ x = 0;\n");
-    assert(parse_env.errors(&e) == 0);
-    parse_env.parse(&e, "u8@@ x = 0;\n");
-    assert(parse_env.errors(&e) == 0);
-    parse_env.parse(&e, "node@[4] x = 0;\n");
-    assert(parse_env.errors(&e) == 0);
+    parse_env.parse(e, "f64 x = 1.5;\n");
+    assert(parse_env.diag_count(e) == 0);
+    parse_env.parse(e, "fn f() void {\n    i32 x = a ? b : c;\n}\n");
+    assert(parse_env.errors(e) == 0);
+    parse_env.parse(e, "fn f() void {\n    do {\n        g();\n    } while (c);\n}\n");
+    assert(parse_env.errors(e) == 0);
+    parse_env.parse(e, "i32[2][3] x = 0;\n");
+    assert(parse_env.errors(e) == 0);
+    parse_env.parse(e, "i32[2]@ x = 0;\n");
+    assert(parse_env.errors(e) == 0);
+    parse_env.parse(e, "u8@@ x = 0;\n");
+    assert(parse_env.errors(e) == 0);
+    parse_env.parse(e, "node@[4] x = 0;\n");
+    assert(parse_env.errors(e) == 0);
 }
 
 fn new_refuses_the_markers_it_does_not_take() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // Inside `new` a `mut` parses below the outermost position and not in it,
     // an `own` follows only a `*`. And a span is asked for with a count.
-    parse_env.parse(&e, "i32 x = new(i32 mut);\n");
-    assert(parse_env.diag_at(&e, 0)
+    parse_env.parse(e, "i32 x = new(i32 mut);\n");
+    assert(parse_env.diag_at(e, 0)
            == "1:17: error: new allocates writable storage: remove the outermost 'mut'");
-    parse_env.parse(&e, "i32 x = new(i32 own);\n");
-    assert(parse_env.diag_at(&e, 0)
+    parse_env.parse(e, "i32 x = new(i32 own);\n");
+    assert(parse_env.diag_at(e, 0)
            == "1:17: error: inside new an own follows a '*' of the element type");
-    parse_env.parse(&e, "i32 x = new(i32@);\n");
-    assert(parse_env.diag_at(&e, 0)
+    parse_env.parse(e, "i32 x = new(i32@);\n");
+    assert(parse_env.diag_at(e, 0)
            == "1:16: error: a span suffix does not parse inside new: write new(T, n)");
 }
 
 fn a_brace_list_may_not_mix_its_two_forms() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // Positional and designated initializers do not mix.
-    parse_env.parse(&e, "point p = {.x = 1, 2};\n");
-    assert(parse_env.diag_at(&e, 0)
+    parse_env.parse(e, "point p = {.x = 1, 2};\n");
+    assert(parse_env.diag_at(e, 0)
            == "1:20: error: positional and designated initializers do not mix");
 }
 
 fn an_empty_struct_or_enum_body_is_reported() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    parse_env.parse(&e, "struct s {\n}\n");
-    assert(parse_env.diag_at(&e, 0) == "2:1: error: a struct has at least one field");
-    parse_env.parse(&e, "enum k {\n}\n");
-    assert(parse_env.diag_at(&e, 0) == "2:1: error: an enum has at least one member");
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
+    parse_env.parse(e, "struct s {\n}\n");
+    assert(parse_env.diag_at(e, 0) == "2:1: error: a struct has at least one field");
+    parse_env.parse(e, "enum k {\n}\n");
+    assert(parse_env.diag_at(e, 0) == "2:1: error: an enum has at least one member");
 }
 
 // ---- how often it is reported --------------------------------------------------
 
 fn one_mistake_costs_one_diagnostic() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // The first report starts an unwind: everything between it and the next
     // recovery point is silent. So a construct that fails deep inside itself
     // still reports once.
-    parse_env.parse(&e, "fn f() void {\n    g(h(i(;\n}\n");
-    assert(parse_env.errors(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "2:11: error: expected an expression, found ';'");
+    parse_env.parse(e, "fn f() void {\n    g(h(i(;\n}\n");
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "2:11: error: expected an expression, found ';'");
 }
 
 fn later_errors_are_reported_too() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // A file reports one diagnostic for each construct that failed, not only
     // for the first.
-    parse_env.parse(&e, "i32 a = ;\ni32 b = ;\ni32 c = ;\n");
-    assert(parse_env.errors(&e) == 3);
-    assert(parse_env.diag_at(&e, 0) == "1:9: error: expected an expression, found ';'");
-    assert(parse_env.diag_at(&e, 1) == "2:9: error: expected an expression, found ';'");
-    assert(parse_env.diag_at(&e, 2) == "3:9: error: expected an expression, found ';'");
+    parse_env.parse(e, "i32 a = ;\ni32 b = ;\ni32 c = ;\n");
+    assert(parse_env.errors(e) == 3);
+    assert(parse_env.diag_at(e, 0) == "1:9: error: expected an expression, found ';'");
+    assert(parse_env.diag_at(e, 1) == "2:9: error: expected an expression, found ';'");
+    assert(parse_env.diag_at(e, 2) == "3:9: error: expected an expression, found ';'");
 }
 
 // Twenty-five declarations that each fail at their `;`, as one owned string. The suite builds the
@@ -208,7 +208,7 @@ fn later_errors_are_reported_too() void {
 // pointer after a call that a buffer of the test is lent to.
 fn failed_declarations() string own {
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
     u64 mut i = 0;
     while (i < 25) {
         strbuf.append(&src, "i32 a = ;\n");
@@ -242,104 +242,104 @@ fn a_file_reports_at_most_twenty_diagnostics(parse_env.env mut* e) void {
 }
 
 fn two_errors_at_one_position_are_reported_once() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // An error that starts where the one before it started is dropped, which
     // is what keeps a half-typed construct from reporting twice about one
     // token.
-    parse_env.parse(&e, "fn f() void {\n    x = ;;\n}\n");
-    assert(parse_env.errors(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "2:9: error: expected an expression, found ';'");
+    parse_env.parse(e, "fn f() void {\n    x = ;;\n}\n");
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "2:9: error: expected an expression, found ';'");
 }
 
 // ---- what the tree holds afterwards --------------------------------------------
 
 fn a_skipped_region_is_an_error_node() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // The skipped tokens are kept as an error node, so a later pass sees that
     // the region was skipped. The declarations after it are parsed.
-    assert(parse_env.parse_dump(&e, "i32 a = ;\ni32 b = 1;\n")
+    assert(parse_env.parse_dump(e, "i32 a = ;\ni32 b = 1;\n")
            == "(module (error) (var b (type (prim i32)) (int 1)))");
-    string body = parse_env.parse_dump(&e, "fn f() i32 {\n    x = ;\n    return 0;\n}\n");
+    string body = parse_env.parse_dump(e, "fn f() i32 {\n    x = ;\n    return 0;\n}\n");
     assert(body == "(module (fn (type (prim i32)) f (params) (block (error) (return (int 0)))))");
 }
 
 fn a_broken_field_leaves_the_struct_standing() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // The fields are a recovery point of their own: a broken one is skipped
     // to its `;` and the fields after it are read.
-    assert(parse_env.parse_dump(&e, "struct s {\n    i32 ;\n    i32 y;\n}\n")
+    assert(parse_env.parse_dump(e, "struct s {\n    i32 ;\n    i32 y;\n}\n")
            == "(module (struct s (error) (field-decl (type (prim i32)) y)))");
 }
 
 fn a_broken_clause_leaves_the_switch_standing() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    string src = parse_env.join2(&e, "fn f() void {\n    switch (c) {\n    case :\n",
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
+    string src = parse_env.join2(e, "fn f() void {\n    switch (c) {\n    case :\n",
                                  "    case 2:\n        g();\n    }\n}\n");
-    string dumped = parse_env.parse_dump(&e, src);
-    string expected = parse_env.join3(&e, "(module (fn (type (void)) f (params) (block (switch",
+    string dumped = parse_env.parse_dump(e, src);
+    string expected = parse_env.join3(e, "(module (fn (type (void)) f (params) (block (switch",
                                       " (ident c) (error) (case (labels (int 2))",
                                       " (block (call-stmt (call (ident g)))))))))");
     assert(dumped == expected);
-    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.errors(e) == 1);
 }
 
 fn a_missing_closing_brace_is_reported_once() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // A block ends at its `}` or a top-level declaration. Thus, one missing
     // brace causes one diagnostic, not one per following declaration.
     string src = "fn f() void {\n    g();\nfn h() void {\n    k();\n}\n";
-    string dumped = parse_env.parse_dump(&e, src);
-    string expected = parse_env.join4(&e, "(module (fn (type (void)) f (params)",
+    string dumped = parse_env.parse_dump(e, src);
+    string expected = parse_env.join4(e, "(module (fn (type (void)) f (params)",
                                       " (block (call-stmt (call (ident g)))))",
                                       " (fn (type (void)) h (params)",
                                       " (block (call-stmt (call (ident k))))))");
     assert(dumped == expected);
-    assert(parse_env.errors(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "3:1: error: expected '}', found 'fn'");
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "3:1: error: expected '}', found 'fn'");
 }
 
 fn a_missing_opening_brace_is_reported_once_too() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // A declaration header is complete before its `{`.
     // The parser reads the body as though the brace were there.
-    string dumped = parse_env.parse_dump(&e, "fn f() void\n    g();\n}\n");
+    string dumped = parse_env.parse_dump(e, "fn f() void\n    g();\n}\n");
     assert(dumped == "(module (fn (type (void)) f (params) (block (call-stmt (call (ident g))))))");
-    assert(parse_env.errors(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "2:5: error: expected '{', found identifier 'g'");
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "2:5: error: expected '{', found identifier 'g'");
 }
 
 fn a_lexical_error_leaves_the_parser_the_rest_of_the_file() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // A lexical error costs the lexer its line and the parser recovers from
     // whatever that missing line broke. The budget is shared, so the count
     // here is the lexer's error and no cascade.
-    assert(parse_env.parse_dump(&e, "#\ni32 b = 1;\n")
+    assert(parse_env.parse_dump(e, "#\ni32 b = 1;\n")
            == "(module (var b (type (prim i32)) (int 1)))");
-    assert(parse_env.errors(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "1:1: error: unexpected character '#'");
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "1:1: error: unexpected character '#'");
 }
 
 // ---- the speculative parses -------------------------------------
 
 fn a_speculation_reports_nothing() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // The three grammar choices use a speculative parse that always rewinds,
     // so a program that needs them reports nothing. The array-literal probe fails on `v[0]`,
     // the declaration probe on a call, and the `for` probe on a plain init.
-    parse_env.parse(&e, "fn f() void {\n    g(v[0]);\n    for (n = 0; n < 2; n++) { }\n}\n");
-    assert(parse_env.errors(&e) == 0);
+    parse_env.parse(e, "fn f() void {\n    g(v[0]);\n    for (n = 0; n < 2; n++) { }\n}\n");
+    assert(parse_env.errors(e) == 0);
     // The committed branch reports its own error, once: `i32[` speculates as
     // an array literal, fails, and the declaration branch reports.
-    parse_env.parse(&e, "fn f() void {\n    i32[2] v = i32[2]{1;\n}\n");
-    assert(parse_env.errors(&e) == 1);
+    parse_env.parse(e, "fn f() void {\n    i32[2] v = i32[2]{1;\n}\n");
+    assert(parse_env.errors(e) == 1);
 }
 
 fn main() i32 {

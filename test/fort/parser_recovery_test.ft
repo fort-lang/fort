@@ -14,64 +14,64 @@ import std.strbuf;
 // ---- where a skip stops ---------------------------------------
 
 fn a_skip_stops_before_the_next_statement_keyword() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // A statement keyword starts the next statement. So the skip leaves it
     // where the block reads it and the statements after the broken one are
     // parsed.
     string src = "fn f() void {\n    x = ;\n    return;\n}\n";
-    assert(parse_env.parse_dump(&e, src)
+    assert(parse_env.parse_dump(e, src)
            == "(module (fn (type (void)) f (params) (block (error) (return nil))))");
-    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.errors(e) == 1);
 }
 
 fn a_skip_stops_before_the_next_case_keyword() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // Neither `case` nor `default` appears in a statement or an expression.
     // So a skip inside a switch stops before one rather than swallowing the
     // clause that follows the broken one.
-    string src = parse_env.join2(&e, "fn f() void {\n    switch (c) {\n    case 1:\n",
+    string src = parse_env.join2(e, "fn f() void {\n    switch (c) {\n    case 1:\n",
                                  "        x = ;\n    default:\n        g();\n    }\n}\n");
-    string dumped = parse_env.parse_dump(&e, src);
-    string expected = parse_env.join3(&e, "(module (fn (type (void)) f (params) (block (switch",
+    string dumped = parse_env.parse_dump(e, src);
+    string expected = parse_env.join3(e, "(module (fn (type (void)) f (params) (block (switch",
                                       " (ident c) (case (labels (int 1)) (block (error)))",
                                       " (case default (block (call-stmt (call (ident g)))))))))");
     assert(dumped == expected);
-    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.errors(e) == 1);
 }
 
 fn a_skip_stops_before_a_top_level_declaration() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // A body ends where a top-level declaration starts, so a file whose
     // braces are unbalanced costs one diagnostic and the declarations after
     // it are read.
-    string src = parse_env.join2(&e, "fn f() void {\n    x = ;\n",
+    string src = parse_env.join2(e, "fn f() void {\n    x = ;\n",
                                  "struct s {\n    i32 x;\n}\n");
-    string dumped = parse_env.parse_dump(&e, src);
-    string expected = parse_env.join2(&e, "(module (fn (type (void)) f (params) (block (error)))",
+    string dumped = parse_env.parse_dump(e, src);
+    string expected = parse_env.join2(e, "(module (fn (type (void)) f (params) (block (error)))",
                                       " (struct s (field-decl (type (prim i32)) x)))");
     assert(dumped == expected);
 }
 
 fn a_skip_runs_over_a_semicolon_inside_a_bracket() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // The `;` of a `for` header and the `,` of an argument list stand inside the brackets the
     // failed construct left open. They are not statement boundaries: the whole header goes with
     // the skipped region and the statement after it is read.
     string src = "fn f() void {\n    for (i32 mut i = ; i < 2; i++) { }\n    g();\n}\n";
-    string dumped = parse_env.parse_dump(&e, src);
-    string expected = parse_env.join2(&e, "(module (fn (type (void)) f (params) (block (error)",
+    string dumped = parse_env.parse_dump(e, src);
+    string expected = parse_env.join2(e, "(module (fn (type (void)) f (params) (block (error)",
                                       " (call-stmt (call (ident g))))))");
     assert(dumped == expected);
-    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.errors(e) == 1);
 }
 
 fn a_run_of_semicolons_is_one_boundary() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // The empty statement that follows a skipped region is part of it and not
     // an error of its own, so this file reports once.
     //
@@ -80,50 +80,50 @@ fn a_run_of_semicolons_is_one_boundary() void {
     // prints that range. Thus, this assertion checks both loops together. The
     // direct range tests check each loop.
     string src = "fn f() void {\n    x = ;;;\n    g();\n}\n";
-    string dumped = parse_env.parse_dump(&e, src);
-    string expected = parse_env.join2(&e, "(module (fn (type (void)) f (params) (block (error)",
+    string dumped = parse_env.parse_dump(e, src);
+    string expected = parse_env.join2(e, "(module (fn (type (void)) f (params) (block (error)",
                                       " (call-stmt (call (ident g))))))");
     assert(dumped == expected);
-    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.errors(e) == 1);
 }
 
 fn a_leftover_bracket_is_dropped_rather_than_reported_again() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // Directly after a skip, a `)` or a `]` that closes nothing is the tail
     // of the construct that failed. So reading it as the next construct would
     // cost a second diagnostic for one mistake. The skipped
     // region includes both `)` tokens and the following statement.
     // The skip loses the next call but prevents a second diagnostic.
     string src = "fn f() void {\n    g(h(;))\n    k();\n}\n";
-    assert(parse_env.parse_dump(&e, src)
+    assert(parse_env.parse_dump(e, src)
            == "(module (fn (type (void)) f (params) (block (error))))");
-    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.errors(e) == 1);
 }
 
 // A `}` that a `;`, `,`, `)` or `]` follows closes a literal, not a block (D14.2). Inside a group
 // that the failed construct left open, the skip goes on past it to the end of the group, so the
 // `for` header and its body go with the skipped region and the statement after them is read.
 fn a_literal_inside_an_open_group_goes_with_the_statement() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     string header = "fn f() void {\n    for (i32 mut[2] a = {}; a < 3; a++) { }\n    g();\n}\n";
-    assert(parse_env.parse_dump(&e, header) == kept_g(&e));
-    assert(parse_env.diag_count(&e) == 1);
-    assert(parse_env.diag_at(&e, 0)
-           == parse_env.join2(&e, "2:14: error: the elements share the array's storage:",
+    assert(parse_env.parse_dump(e, header) == kept_g(e));
+    assert(parse_env.diag_count(e) == 1);
+    assert(parse_env.diag_at(e, 0)
+           == parse_env.join2(e, "2:14: error: the elements share the array's storage:",
                               " write the mut after the length, as 'i32[4] mut'"));
     string step = "fn f() void {\n    for (i32 mut[2] b = {1}; ; b = {3}) { h(); }\n    g();\n}\n";
-    assert(parse_env.parse_dump(&e, step) == kept_g(&e));
-    assert(parse_env.diag_count(&e) == 1);
+    assert(parse_env.parse_dump(e, step) == kept_g(e));
+    assert(parse_env.diag_count(e) == 1);
     string call = "fn f() void {\n    k(1 2, point{x: 1}, 3);\n    g();\n}\n";
-    assert(parse_env.parse_dump(&e, call) == kept_g(&e));
-    assert(parse_env.diag_count(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "2:9: error: expected ')', found integer literal");
+    assert(parse_env.parse_dump(e, call) == kept_g(e));
+    assert(parse_env.diag_count(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "2:9: error: expected ')', found integer literal");
     string index = "fn f() void {\n    k(t[1 2, {1}], 3);\n    g();\n}\n";
-    assert(parse_env.parse_dump(&e, index) == kept_g(&e));
-    assert(parse_env.diag_count(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "2:11: error: expected ']', found integer literal");
+    assert(parse_env.parse_dump(e, index) == kept_g(e));
+    assert(parse_env.diag_count(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "2:11: error: expected ']', found integer literal");
 }
 
 // The dump of a function `f` whose first statement failed and whose second is `g();`.
@@ -135,37 +135,37 @@ fn kept_g(parse_env.env mut* e) string {
 // A block that follows an unclosed `(` still ends the skip: no `;`, `,`, `)` or `]` follows its
 // `}`. The statement after it is parsed and reports on its own.
 fn a_block_after_an_unclosed_group_ends_the_skip() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     string src = "fn f() void {\n    while (n < 3 {\n        g();\n    }\n    h(;\n}\n";
-    assert(parse_env.parse_dump(&e, src)
+    assert(parse_env.parse_dump(e, src)
            == "(module (fn (type (void)) f (params) (block (error) (error))))");
-    assert(parse_env.diag_count(&e) == 2);
-    assert(parse_env.diag_at(&e, 0) == "2:18: error: expected ')', found '{'");
-    assert(parse_env.diag_at(&e, 1) == "5:7: error: expected an expression, found ';'");
+    assert(parse_env.diag_count(e) == 2);
+    assert(parse_env.diag_at(e, 0) == "2:18: error: expected ')', found '{'");
+    assert(parse_env.diag_at(e, 1) == "5:7: error: expected an expression, found ';'");
 }
 
 // Outside a group the rule above does not apply: the `}` of a literal still ends the skip, the `)`
 // after it is a leftover, and the statement on the next line is read.
 fn outside_a_group_a_literal_still_ends_the_skip() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     string src = "fn f() void {\n    i32 mut[2] a = {1})\n    g();\n}\n";
-    assert(parse_env.parse_dump(&e, src) == kept_g(&e));
-    assert(parse_env.diag_count(&e) == 1);
+    assert(parse_env.parse_dump(e, src) == kept_g(e));
+    assert(parse_env.diag_count(e) == 1);
 }
 
 // The two remaining kinds of literal: a `{` after `[` and a struct literal whose name follows `=`.
 fn an_index_literal_and_a_struct_literal_go_with_the_statement() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     string index = "fn f() void {\n    g(t[{1}], 3);\n    h();\n}\n";
-    assert(parse_env.parse_dump(&e, index) == kept_h(&e));
-    assert(parse_env.diag_count(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "2:9: error: expected an expression, found '{'");
+    assert(parse_env.parse_dump(e, index) == kept_h(e));
+    assert(parse_env.diag_count(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "2:9: error: expected an expression, found '{'");
     string named = "fn f() void {\n    for (point mut[2] p = point{x: 1}; ;) { }\n    h();\n}\n";
-    assert(parse_env.parse_dump(&e, named) == kept_h(&e));
-    assert(parse_env.diag_count(&e) == 1);
+    assert(parse_env.parse_dump(e, named) == kept_h(e));
+    assert(parse_env.diag_count(e) == 1);
 }
 
 // The dump of a function `f` whose first statement failed and whose second is `h();`.
@@ -178,51 +178,51 @@ fn kept_h(parse_env.env mut* e) string {
 // last token of the condition, not `=`, `,`, `(` or `[`, so it opens no literal. The error on
 // the next line is reported.
 fn a_block_that_a_stray_semicolon_follows_ends_the_skip() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     string src = "fn f() void {\n    if (n < 3 {\n        h();\n    };\n    h(;\n}\n";
-    string dumped = parse_env.parse_dump(&e, src);
+    string dumped = parse_env.parse_dump(e, src);
     assert(dumped.len > 0);
-    assert(parse_env.diag_count(&e) == 2);
-    assert(parse_env.diag_at(&e, 0) == "2:15: error: expected ')', found '{'");
-    assert(parse_env.diag_at(&e, 1) == "5:7: error: expected an expression, found ';'");
+    assert(parse_env.diag_count(e) == 2);
+    assert(parse_env.diag_at(e, 0) == "2:15: error: expected ')', found '{'");
+    assert(parse_env.diag_at(e, 1) == "5:7: error: expected an expression, found ';'");
 }
 
 // A group that the skip opens holds a literal as well: the `(` of the call opens after the
 // failure, and the `,` after `{1, 2}` stays inside it.
 fn a_literal_inside_a_group_the_skip_opened_goes_with_the_statement() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     string src = "fn f() void {\n    i32 mut[2] a = k({1, 2}, 2);\n    g();\n}\n";
-    assert(parse_env.parse_dump(&e, src) == kept_g(&e));
-    assert(parse_env.diag_count(&e) == 1);
+    assert(parse_env.parse_dump(e, src) == kept_g(e));
+    assert(parse_env.diag_count(e) == 1);
 }
 
 // ---- what the tree keeps -------------------------------------------------------
 
 fn every_recovery_point_keeps_an_error_node() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // The four recovery points use one file each. The declarations of a module, the statements
     // of a block, the clauses of a switch and the fields of a struct.
-    assert(parse_env.parse_dump(&e, "i32 a = ;\ni32 b = 1;\n")
+    assert(parse_env.parse_dump(e, "i32 a = ;\ni32 b = 1;\n")
            == "(module (error) (var b (type (prim i32)) (int 1)))");
-    string in_block = parse_env.parse_dump(&e, "fn f() void {\n    x = ;\n    g();\n}\n");
-    assert(in_block == parse_env.join2(&e, "(module (fn (type (void)) f (params)",
+    string in_block = parse_env.parse_dump(e, "fn f() void {\n    x = ;\n    g();\n}\n");
+    assert(in_block == parse_env.join2(e, "(module (fn (type (void)) f (params)",
                                        " (block (error) (call-stmt (call (ident g))))))"));
-    assert(parse_env.parse_dump(&e, "struct s {\n    i32 ;\n    i32 y;\n}\n")
+    assert(parse_env.parse_dump(e, "struct s {\n    i32 ;\n    i32 y;\n}\n")
            == "(module (struct s (error) (field-decl (type (prim i32)) y)))");
-    string switch_src = parse_env.join2(&e, "fn f() void {\n    switch (c) {\n    1:\n",
+    string switch_src = parse_env.join2(e, "fn f() void {\n    switch (c) {\n    1:\n",
                                         "    case 2:\n    }\n}\n");
-    string dumped = parse_env.parse_dump(&e, switch_src);
-    string expected = parse_env.join2(&e, "(module (fn (type (void)) f (params) (block (switch",
+    string dumped = parse_env.parse_dump(e, switch_src);
+    string expected = parse_env.join2(e, "(module (fn (type (void)) f (params) (block (switch",
                                       " (ident c) (error) (case (labels (int 2)) (block))))))");
     assert(dumped == expected);
 }
 
 fn a_construct_that_stands_at_the_boundary_keeps_its_node() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // A block, a switch, a struct body and an enum body are returned whether
     // or not their `}` was found. So the recovery point pushes the node and
     // skips nothing: the tree holds the construct and not an error node over
@@ -230,36 +230,36 @@ fn a_construct_that_stands_at_the_boundary_keeps_its_node() void {
     // keyword is a boundary and a global's type is not. `i32 N = 1;` there
     // would be a local of the unterminated body.
     string src = "fn f() void {\n    g();\nfn h() void {\n}\n";
-    string dumped = parse_env.parse_dump(&e, src);
-    assert(dumped == parse_env.join3(&e, "(module (fn (type (void)) f (params)",
+    string dumped = parse_env.parse_dump(e, src);
+    assert(dumped == parse_env.join3(e, "(module (fn (type (void)) f (params)",
                                      " (block (call-stmt (call (ident g)))))",
                                      " (fn (type (void)) h (params) (block)))"));
-    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.errors(e) == 1);
 }
 
 fn a_file_that_is_nothing_but_errors_still_yields_a_module() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // The result is never null, and its tree covers the
     // complete file. This lets later passes walk broken files.
-    assert(parse_env.parse_dump(&e, ")\n") == "(module (error))");
-    assert(parse_env.parse_dump(&e, "}\n") == "(module (error))");
-    assert(parse_env.parse_dump(&e, "; ; ;\n") == "(module (error))");
-    assert(parse_env.parse_dump(&e, "1 2 3\n") == "(module (error))");
+    assert(parse_env.parse_dump(e, ")\n") == "(module (error))");
+    assert(parse_env.parse_dump(e, "}\n") == "(module (error))");
+    assert(parse_env.parse_dump(e, "; ; ;\n") == "(module (error))");
+    assert(parse_env.parse_dump(e, "1 2 3\n") == "(module (error))");
     // An empty file is an empty module and no error at all.
-    assert(parse_env.parse_dump(&e, "") == "(module)");
-    assert(parse_env.errors(&e) == 0);
+    assert(parse_env.parse_dump(e, "") == "(module)");
+    assert(parse_env.errors(e) == 0);
 }
 
 fn a_recovery_always_consumes_a_token() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // The first token is consumed when the construct consumed none, so the
     // parse of a file made of tokens no construct accepts terminates.
     // Reaching this assertion at all is the test.
-    assert(parse_env.parse_dump(&e, ") ) ) )\n") == "(module (error))");
-    assert(parse_env.parse_dump(&e, "] } ] }\n") == "(module (error))");
-    assert(parse_env.parse_dump(&e, ", , ,\n") == "(module (error))");
+    assert(parse_env.parse_dump(e, ") ) ) )\n") == "(module (error))");
+    assert(parse_env.parse_dump(e, "] } ] }\n") == "(module (error))");
+    assert(parse_env.parse_dump(e, ", , ,\n") == "(module (error))");
 }
 
 // ---- the nesting limit ---------------------------------------------------------
@@ -285,24 +285,24 @@ fn nested(strbuf.str_buf mut* out, u64 depth) string {
 }
 
 fn nesting_deeper_than_the_limit_is_an_error() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // Blocks, brace initializers, bracketed groups, unary operands,
     // conditional branches and types count towards one limit of 256, so the
     // parser's recursion is bounded.
-    parse_env.parse(&e, nested(&src, 200));
-    assert(parse_env.errors(&e) == 0);
-    parse_env.parse(&e, nested(&src, 256));
-    assert(parse_env.errors(&e) == 0);
-    parse_env.parse(&e, nested(&src, 300));
-    assert(parse_env.errors(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "1:266: error: nesting deeper than 256");
+    parse_env.parse(e, nested(&src, 200));
+    assert(parse_env.errors(e) == 0);
+    parse_env.parse(e, nested(&src, 256));
+    assert(parse_env.errors(e) == 0);
+    parse_env.parse(e, nested(&src, 300));
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "1:266: error: nesting deeper than 256");
     // The file is still parsed whole: the declaration after the deep one is
     // read like any other.
-    parse_env.parse(&e, nested(&src, 300));
-    assert(parse_env.errors(&e) == 1);
+    parse_env.parse(e, nested(&src, 300));
+    assert(parse_env.errors(e) == 1);
 }
 
 // One source with `outer` parentheses around the parenthesized `$cfg` form.
@@ -325,17 +325,17 @@ fn nested_cfg(strbuf.str_buf mut* out, u64 outer) string {
 }
 
 fn configuration_parentheses_count_towards_the_limit() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // The configuration form adds one pair to the 255 outer pairs. One more
     // outer pair makes its identifier the first token past the limit.
-    parse_env.parse(&e, nested_cfg(&src, 255));
-    assert(parse_env.errors(&e) == 0);
-    parse_env.parse(&e, nested_cfg(&src, 256));
-    assert(parse_env.errors(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "1:273: error: nesting deeper than 256");
+    parse_env.parse(e, nested_cfg(&src, 255));
+    assert(parse_env.errors(e) == 0);
+    parse_env.parse(e, nested_cfg(&src, 256));
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "1:273: error: nesting deeper than 256");
 }
 
 // One source whose type carries `count` pointer suffixes, which is the limit
@@ -353,32 +353,32 @@ fn suffixed(strbuf.str_buf mut* out, u64 count) string {
 }
 
 fn the_suffixes_of_one_type_have_their_own_arm_of_the_limit() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     // push_suffix counts the suffixes already on the type against the same
     // limit of 256, which is a second report site. The depth `enter` tracks
     // never rises here, since a suffix opens no nested construct. The two
     // hundred and fifty-seventh suffix is the one that reports, at its own
     // token.
-    parse_env.parse(&e, suffixed(&src, 255));
-    assert(parse_env.errors(&e) == 0);
-    parse_env.parse(&e, suffixed(&src, 256));
-    assert(parse_env.errors(&e) == 0);
-    parse_env.parse(&e, suffixed(&src, 257));
-    assert(parse_env.errors(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "1:260: error: nesting deeper than 256");
-    parse_env.parse(&e, suffixed(&src, 300));
-    assert(parse_env.errors(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "1:260: error: nesting deeper than 256");
+    parse_env.parse(e, suffixed(&src, 255));
+    assert(parse_env.errors(e) == 0);
+    parse_env.parse(e, suffixed(&src, 256));
+    assert(parse_env.errors(e) == 0);
+    parse_env.parse(e, suffixed(&src, 257));
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "1:260: error: nesting deeper than 256");
+    parse_env.parse(e, suffixed(&src, 300));
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "1:260: error: nesting deeper than 256");
 }
 
 fn deep_blocks_count_towards_the_same_limit() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     strbuf.append(&src, "fn f() void {\n");
     u64 mut i = 0;
     while (i < 300) {
@@ -391,16 +391,16 @@ fn deep_blocks_count_towards_the_same_limit() void {
         i += 1;
     }
     strbuf.append(&src, "\n}\n");
-    parse_env.parse(&e, strbuf.view(&src));
-    assert(parse_env.errors(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "2:257: error: nesting deeper than 256");
+    parse_env.parse(e, strbuf.view(&src));
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "2:257: error: nesting deeper than 256");
 }
 
 fn grouped_types_count_towards_the_limit() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     u64 mut depth = 256;
     while (depth <= 257) {
         strbuf.clear(&src);
@@ -416,22 +416,22 @@ fn grouped_types_count_towards_the_limit() void {
             i += 1;
         }
         strbuf.append(&src, " x = 0;\n");
-        parse_env.parse(&e, strbuf.view(&src));
+        parse_env.parse(e, strbuf.view(&src));
         if (depth == 256) {
-            assert(parse_env.errors(&e) == 0);
+            assert(parse_env.errors(e) == 0);
         } else {
-            assert(parse_env.errors(&e) == 1);
-            assert(parse_env.diag_at(&e, 0) == "1:258: error: nesting deeper than 256");
+            assert(parse_env.errors(e) == 1);
+            assert(parse_env.diag_at(e, 0) == "1:258: error: nesting deeper than 256");
         }
         depth += 1;
     }
 }
 
 fn groups_do_not_reset_the_suffix_limit() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     u64 mut outer = 128;
     while (outer <= 129) {
         strbuf.clear(&src);
@@ -448,12 +448,12 @@ fn groups_do_not_reset_the_suffix_limit() void {
             i += 1;
         }
         strbuf.append(&src, " p = null;\n");
-        parse_env.parse(&e, strbuf.view(&src));
+        parse_env.parse(e, strbuf.view(&src));
         if (outer == 128) {
-            assert(parse_env.errors(&e) == 0);
+            assert(parse_env.errors(e) == 0);
         } else {
-            assert(parse_env.errors(&e) == 1);
-            assert(parse_env.diag_at(&e, 0) == "1:262: error: nesting deeper than 256");
+            assert(parse_env.errors(e) == 1);
+            assert(parse_env.diag_at(e, 0) == "1:262: error: nesting deeper than 256");
         }
         outer += 1;
     }
@@ -491,7 +491,7 @@ fn too_deep_at(parse_env.env mut* e, string src, string pos) void {
     parse_env.parse(e, src);
     assert(parse_env.errors(e) == 1);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     strbuf.append(&want, pos);
     strbuf.append(&want, ": error: nesting deeper than 256");
     assert(parse_env.diag_at(e, 0) == strbuf.view(&want));
@@ -502,62 +502,62 @@ fn too_deep_at(parse_env.env mut* e, string src, string pos) void {
 // limit and the 256th group is past it. The parser reports the limit and not a
 // failed expression.
 fn a_type_group_is_one_level_of_nesting() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
-    accepts(&e, wrapped(&src, "fn f() void {\n", "(", 255, "i32", ")", " x = 0;\n}\n"));
-    too_deep_at(&e, wrapped(&src, "fn f() void {\n", "(", 256, "i32", ")", " x = 0;\n}\n"),
+    defer del(src.data);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
+    accepts(e, wrapped(&src, "fn f() void {\n", "(", 255, "i32", ")", " x = 0;\n}\n"));
+    too_deep_at(e, wrapped(&src, "fn f() void {\n", "(", 256, "i32", ")", " x = 0;\n}\n"),
                 "2:257");
-    accepts(&e, wrapped(&src, "fn f() void {\n", "(", 255, "i32*", ")", " p = null;\n}\n"));
+    accepts(e, wrapped(&src, "fn f() void {\n", "(", 255, "i32*", ")", " p = null;\n}\n"));
 }
 
 // The type of `sizeof`, `cast`, `new` and an array literal adds no level to its
 // own groups.
 fn an_expression_type_adds_no_level() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
-    accepts(&e, wrapped(&src, "u64 x = sizeof(", "(", 255, "i32", ")", ");\n"));
-    too_deep_at(&e, wrapped(&src, "u64 x = sizeof(", "(", 256, "i32", ")", ");\n"), "1:272");
-    accepts(&e, wrapped(&src, "i32 x = cast(1, ", "(", 255, "i32", ")", ");\n"));
-    too_deep_at(&e, wrapped(&src, "i32 x = cast(1, ", "(", 256, "i32", ")", ");\n"), "1:273");
-    accepts(&e, wrapped(&src, "i32* x = new(", "(", 255, "i32", ")", ");\n"));
-    too_deep_at(&e, wrapped(&src, "i32* x = new(", "(", 256, "i32", ")", ");\n"), "1:270");
-    accepts(&e, wrapped(&src, "i32[1] x = ", "(", 256, "i32", ")", "[1]{1};\n"));
-    too_deep_at(&e, wrapped(&src, "i32[1] x = ", "(", 257, "i32", ")", "[1]{1};\n"), "1:269");
+    defer del(src.data);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
+    accepts(e, wrapped(&src, "u64 x = sizeof(", "(", 255, "i32", ")", ");\n"));
+    too_deep_at(e, wrapped(&src, "u64 x = sizeof(", "(", 256, "i32", ")", ");\n"), "1:272");
+    accepts(e, wrapped(&src, "i32 x = cast(1, ", "(", 255, "i32", ")", ");\n"));
+    too_deep_at(e, wrapped(&src, "i32 x = cast(1, ", "(", 256, "i32", ")", ");\n"), "1:273");
+    accepts(e, wrapped(&src, "i32* x = new(", "(", 255, "i32", ")", ");\n"));
+    too_deep_at(e, wrapped(&src, "i32* x = new(", "(", 256, "i32", ")", ");\n"), "1:270");
+    accepts(e, wrapped(&src, "i32[1] x = ", "(", 256, "i32", ")", "[1]{1};\n"));
+    too_deep_at(e, wrapped(&src, "i32[1] x = ", "(", 257, "i32", ")", "[1]{1};\n"), "1:269");
 }
 
 // A type at the deepest level parses, because the type adds no level: a
 // declaration in the 256th block, `sizeof` and `cast` as the 256th level of an
 // expression, and a global with 256 groups. One more level is an error.
 fn a_type_at_the_deepest_level_parses() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
-    accepts(&e, wrapped(&src, "fn f() void {\n", "{", 255, "i32 x = 0;", "}", "\n}\n"));
-    too_deep_at(&e, wrapped(&src, "fn f() void {\n", "{", 256, "i32 x = 0;", "}", "\n}\n"),
+    defer del(src.data);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
+    accepts(e, wrapped(&src, "fn f() void {\n", "{", 255, "i32 x = 0;", "}", "\n}\n"));
+    too_deep_at(e, wrapped(&src, "fn f() void {\n", "{", 256, "i32 x = 0;", "}", "\n}\n"),
                 "2:257");
-    accepts(&e, wrapped(&src, "u64 x = ", "(", 255, "sizeof(i32)", ")", ";\n"));
-    too_deep_at(&e, wrapped(&src, "u64 x = ", "(", 256, "sizeof(i32)", ")", ";\n"), "1:272");
-    accepts(&e, wrapped(&src, "i32 x = ", "(", 255, "cast(1, i32)", ")", ";\n"));
-    too_deep_at(&e, wrapped(&src, "i32 x = ", "(", 256, "cast(1, i32)", ")", ";\n"), "1:270");
-    accepts(&e, wrapped(&src, "", "(", 256, "i32", ")", " x = 0;\n"));
-    too_deep_at(&e, wrapped(&src, "", "(", 257, "i32", ")", " x = 0;\n"), "1:258");
+    accepts(e, wrapped(&src, "u64 x = ", "(", 255, "sizeof(i32)", ")", ";\n"));
+    too_deep_at(e, wrapped(&src, "u64 x = ", "(", 256, "sizeof(i32)", ")", ";\n"), "1:272");
+    accepts(e, wrapped(&src, "i32 x = ", "(", 255, "cast(1, i32)", ")", ";\n"));
+    too_deep_at(e, wrapped(&src, "i32 x = ", "(", 256, "cast(1, i32)", ")", ";\n"), "1:270");
+    accepts(e, wrapped(&src, "", "(", 256, "i32", ")", " x = 0;\n"));
+    too_deep_at(e, wrapped(&src, "", "(", 257, "i32", ")", " x = 0;\n"), "1:258");
 }
 
 // The suffix count of one written type runs through the return type and the
 // parameter types of a function type in it (D2.11). The 257th suffix reports,
 // at its own token.
 fn the_suffix_count_runs_through_a_function_type() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
     strbuf.str_buf mut inner = strbuf.create();
-    defer strbuf.free(&inner);
+    defer del(inner.data);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     strbuf.clear(&inner);
     repeat(&inner, "*", 200);
     // `(fn () i32` with 200 suffixes, `)`, and more suffixes.
@@ -567,14 +567,14 @@ fn the_suffix_count_runs_through_a_function_type() void {
     strbuf.append(&src, ")");
     repeat(&src, "*", 56);
     strbuf.append(&src, " p = null;\n");
-    accepts(&e, strbuf.view(&src));
+    accepts(e, strbuf.view(&src));
     strbuf.clear(&src);
     strbuf.append(&src, "(fn () i32");
     strbuf.append(&src, strbuf.view(&inner));
     strbuf.append(&src, ")");
     repeat(&src, "*", 256);
     strbuf.append(&src, " p = null;\n");
-    too_deep_at(&e, strbuf.view(&src), "1:268");
+    too_deep_at(e, strbuf.view(&src), "1:268");
     // Two parameters of 200 and 56, then 200 and 57, in a global that starts
     // with `fn (`.
     strbuf.clear(&src);
@@ -583,7 +583,7 @@ fn the_suffix_count_runs_through_a_function_type() void {
     strbuf.append(&src, ", i32");
     repeat(&src, "*", 56);
     strbuf.append(&src, ") void p = null;\n");
-    accepts(&e, strbuf.view(&src));
+    accepts(e, strbuf.view(&src));
     strbuf.clear(&src);
     strbuf.append(&src, "fn (i32");
     strbuf.append(&src, strbuf.view(&inner));
@@ -594,42 +594,42 @@ fn the_suffix_count_runs_through_a_function_type() void {
     strbuf.append(&src, "i32");
     repeat(&src, "*", 256);
     strbuf.append(&src, " q = null;\n");
-    too_deep_at(&e, strbuf.view(&src), "1:269");
+    too_deep_at(e, strbuf.view(&src), "1:269");
 }
 
 // A type in an array length is a written type of its own, so its suffixes do
 // not add to the count of the type around it. The `*` before the array suffix
 // is on the count of the outer type before the length starts.
 fn a_type_in_an_array_length_counts_on_its_own() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
     strbuf.append(&src, "i32*[sizeof(i32");
     repeat(&src, "*", 256);
     strbuf.append(&src, ")]");
     repeat(&src, "*", 254);
     strbuf.append(&src, " p = null;\n");
-    accepts(&e, strbuf.view(&src));
+    accepts(e, strbuf.view(&src));
     strbuf.clear(&src);
     strbuf.append(&src, "i32*[sizeof(i32");
     repeat(&src, "*", 256);
     strbuf.append(&src, ")]");
     repeat(&src, "*", 255);
     strbuf.append(&src, " p = null;\n");
-    too_deep_at(&e, strbuf.view(&src), "1:528");
+    too_deep_at(e, strbuf.view(&src), "1:528");
 }
 
 // A function type is one level of nesting: its parameter list and its return
 // type are inside it, so a chain of function types in return position has a
 // bound.
 fn a_function_type_is_one_level_of_nesting() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
-    accepts(&e, wrapped(&src, "", "fn () ", 256, "i32 p = null;\n", "", ""));
-    too_deep_at(&e, wrapped(&src, "", "fn () ", 257, "i32 p = null;\n", "", ""), "1:1541");
+    defer del(src.data);
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
+    accepts(e, wrapped(&src, "", "fn () ", 256, "i32 p = null;\n", "", ""));
+    too_deep_at(e, wrapped(&src, "", "fn () ", 257, "i32 p = null;\n", "", ""), "1:1541");
 }
 
 fn main() i32 {

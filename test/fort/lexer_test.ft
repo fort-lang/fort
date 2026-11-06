@@ -1,5 +1,5 @@
 //! run
-//! flags: -I ../../src
+//! flags: -I ../../src -I support
 //! stdout:
 //| ok
 /// The lexer of src/fort/lexer.ft: the file, positions and comments,
@@ -7,6 +7,8 @@
 /// token vector. The literal forms are in lexer_literals_test.ft and the error
 /// recovery in lexer_errors_test.ft.
 import fort.diag;
+import heap;
+import lex_env;
 import fort.lexer;
 import fort.session;
 import std.strbuf;
@@ -14,338 +16,246 @@ import std.strbuf;
 //
 // These direct tests hold the fort lexer. The C suite holds the C lexer.
 
-// ---- the fixture --------------------------------------------------------------
-
-// Each test reuses one session and token
-// vector. The session owns the diagnostic sink
-// and literal pool, and its release frees both.
-struct fixture {
-    session.session sess;
-    lexer.tok_vec toks;
-}
-
-fn open_fixture() fixture {
-    return fixture{session.create(), lexer.tokvec_create()};
-}
-
-fn close_fixture(fixture mut* f) void {
-    lexer.tokvec_free(&f->toks);
-    session.free(&f->sess);
-}
-
-// Lexes `src` as t.ft, dropping the tokens and the diagnostics of the lex
-// before it. The pool keeps the strings of both, which no test reads across
-// a call. Returns whether the file was clean.
-fn lex(fixture mut* f, string src) bool {
-    lexer.tokvec_free(&f->toks);
-    diag.reset(session.diags(&f->sess));
-    return lexer.lex_file(&f->sess, "t.ft", src, &f->toks);
-}
-
-// The tokens of the last lex, the end-of-file token included.
-fn count(fixture* f) u64 {
-    return lexer.tokvec_count(&f->toks);
-}
-
-fn tok(fixture* f, u64 i) lexer.token {
-    return lexer.tokvec_at(&f->toks, i);
-}
-
-// The name of the kind of token `i`, which is what an assertion compares.
-// Two kinds are equal when their names are (tok_kind_name is injective, as
-// kind_names_are_distinct asserts).
-fn kind(fixture* f, u64 i) string {
-    return lexer.tok_kind_name(tok(f, i).kind);
-}
-
-fn text(fixture* f, u64 i) string {
-    return tok(f, i).text;
-}
-
-// Whether token `i` starts at line `line`, column `col`.
-fn at(fixture* f, u64 i, u32 line, u32 col) bool {
-    return tok(f, i).line == line && tok(f, i).col == col;
-}
-
-// Whether token `i` covers `len` bytes from offset `off`.
-fn covers(fixture* f, u64 i, u64 off, u64 len) bool {
-    return tok(f, i).off == off && tok(f, i).len == len;
-}
-
-// The errors the last lex reported, notes excluded.
-fn errors(fixture mut* f) u64 {
-    return session.error_count(&f->sess);
-}
-
-// Whether the diagnostic `i` is an error at `line`:`col` of t.ft saying `msg`,
-// which is everything its text line carries.
-fn error_is(fixture mut* f, u64 i, u32 line, u32 col, string msg) bool {
-    diag.record r = diag.record_at(session.diags(&f->sess), i);
-    return r.severity == diag.severity.error && r.loc.file == "t.ft" && r.loc.line == line
-        && r.loc.col == col && r.msg == msg;
-}
-
-// The last lex succeeded with `n` tokens before the end-of-file token and
-// reported nothing.
-fn clean(fixture mut* f, string src, u64 n) bool {
-    bool ok = lex(f, src);
-    return ok && errors(f) == 0 && count(f) == n + 1
-        && tok(f, n).kind == lexer.tok_kind.eof;
-}
-
-// The last lex failed with exactly the one diagnostic given, and still lexed
-// the file whole, so the tokens end in the end-of-file token.
-fn one_error(fixture mut* f, string src, u32 line, u32 col, string msg) bool {
-    bool ok = lex(f, src);
-    if (ok || errors(f) != 1 || count(f) == 0) {
-        return false;
-    }
-    if (tok(f, count(f) - 1).kind != lexer.tok_kind.eof) {
-        return false;
-    }
-    return error_is(f, 0, line, col, msg);
-}
-
 // ---- files, whitespace and positions -------------------------------------------
 
 fn empty_file_is_only_eof() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "", 0));
-    assert(kind(&f, 0) == "end of file");
-    assert(at(&f, 0, 1, 1));
-    assert(covers(&f, 0, 0, 0));
-    assert(text(&f, 0).len == 0);
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "", 0));
+    assert(lex_env.kind(f, 0) == "end of file");
+    assert(lex_env.at(f, 0, 1, 1));
+    assert(lex_env.covers(f, 0, 0, 0));
+    assert(lex_env.text(f, 0).len == 0);
 }
 
 fn whitespace_only_file_is_only_eof() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, " \t\r\n \n", 0));
-    assert(at(&f, 0, 3, 1));
-    assert(covers(&f, 0, 6, 0));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, " \t\r\n \n", 0));
+    assert(lex_env.at(f, 0, 3, 1));
+    assert(lex_env.covers(f, 0, 6, 0));
 }
 
 fn file_without_trailing_newline() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "x", 1));
-    assert(kind(&f, 0) == "identifier");
-    assert(at(&f, 1, 1, 2));
-    assert(covers(&f, 1, 1, 0));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "x", 1));
+    assert(lex_env.kind(f, 0) == "identifier");
+    assert(lex_env.at(f, 1, 1, 2));
+    assert(lex_env.covers(f, 1, 1, 0));
 }
 
 fn eof_sits_after_the_trailing_newline() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "x;\n", 2));
-    assert(at(&f, 2, 2, 1));
-    assert(covers(&f, 2, 3, 0));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "x;\n", 2));
+    assert(lex_env.at(f, 2, 2, 1));
+    assert(lex_env.covers(f, 2, 3, 0));
 }
 
 // The byte-order mark is skipped and takes no column.
 fn bom_is_skipped_and_takes_no_column() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "\xEF\xBB\xBFx", 1));
-    assert(kind(&f, 0) == "identifier");
-    assert(text(&f, 0) == "x");
-    assert(at(&f, 0, 1, 1));
-    assert(covers(&f, 0, 3, 1));
-    assert(clean(&f, "\xEF\xBB\xBF", 0));
-    assert(at(&f, 0, 1, 1));
-    assert(covers(&f, 0, 3, 0));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "\xEF\xBB\xBFx", 1));
+    assert(lex_env.kind(f, 0) == "identifier");
+    assert(lex_env.text(f, 0) == "x");
+    assert(lex_env.at(f, 0, 1, 1));
+    assert(lex_env.covers(f, 0, 3, 1));
+    assert(lex_env.clean(f, "\xEF\xBB\xBF", 0));
+    assert(lex_env.at(f, 0, 1, 1));
+    assert(lex_env.covers(f, 0, 3, 0));
 }
 
 // A lone carriage return is whitespace and numbers no line.
 fn cr_is_whitespace() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "a\r\nb\rc", 3));
-    assert(at(&f, 0, 1, 1));
-    assert(at(&f, 1, 2, 1));
-    assert(at(&f, 2, 2, 3));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "a\r\nb\rc", 3));
+    assert(lex_env.at(f, 0, 1, 1));
+    assert(lex_env.at(f, 1, 2, 1));
+    assert(lex_env.at(f, 2, 2, 3));
 }
 
 // A tab is one column, not a stop.
 fn tab_counts_as_one_column() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "\t\tx\ty", 2));
-    assert(at(&f, 0, 1, 3));
-    assert(at(&f, 1, 1, 5));
-    assert(covers(&f, 0, 2, 1));
-    assert(covers(&f, 1, 4, 1));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "\t\tx\ty", 2));
+    assert(lex_env.at(f, 0, 1, 3));
+    assert(lex_env.at(f, 1, 1, 5));
+    assert(lex_env.covers(f, 0, 2, 1));
+    assert(lex_env.covers(f, 1, 4, 1));
 }
 
 fn positions_advance_across_lines() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "fn main() {\n    return 0;\n}\n", 9));
-    assert(at(&f, 0, 1, 1));
-    assert(at(&f, 1, 1, 4));
-    assert(at(&f, 2, 1, 8));
-    assert(at(&f, 3, 1, 9));
-    assert(at(&f, 4, 1, 11));
-    assert(at(&f, 5, 2, 5));
-    assert(at(&f, 6, 2, 12));
-    assert(at(&f, 7, 2, 13));
-    assert(at(&f, 8, 3, 1));
-    assert(at(&f, 9, 4, 1));
-    assert(covers(&f, 5, 16, 6));
-    assert(covers(&f, 9, 28, 0));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "fn main() {\n    return 0;\n}\n", 9));
+    assert(lex_env.at(f, 0, 1, 1));
+    assert(lex_env.at(f, 1, 1, 4));
+    assert(lex_env.at(f, 2, 1, 8));
+    assert(lex_env.at(f, 3, 1, 9));
+    assert(lex_env.at(f, 4, 1, 11));
+    assert(lex_env.at(f, 5, 2, 5));
+    assert(lex_env.at(f, 6, 2, 12));
+    assert(lex_env.at(f, 7, 2, 13));
+    assert(lex_env.at(f, 8, 3, 1));
+    assert(lex_env.at(f, 9, 4, 1));
+    assert(lex_env.covers(f, 5, 16, 6));
+    assert(lex_env.covers(f, 9, 28, 0));
 }
 
 // ---- comments ------------------------------------------------------------------
 
 fn line_comment_runs_to_the_end_of_the_line() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "a // b c \"d\" /* e\nf", 2));
-    assert(text(&f, 0) == "a");
-    assert(text(&f, 1) == "f");
-    assert(at(&f, 1, 2, 1));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "a // b c \"d\" /* e\nf", 2));
+    assert(lex_env.text(f, 0) == "a");
+    assert(lex_env.text(f, 1) == "f");
+    assert(lex_env.at(f, 1, 2, 1));
 }
 
 fn line_comment_at_the_end_of_the_file() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "a //", 1));
-    assert(clean(&f, "//", 0));
-    assert(clean(&f, "// no newline", 0));
-    assert(at(&f, 0, 1, 14));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "a //", 1));
+    assert(lex_env.clean(f, "//", 0));
+    assert(lex_env.clean(f, "// no newline", 0));
+    assert(lex_env.at(f, 0, 1, 14));
 }
 
 // `/*` is a lexical error rather than a comment.
 fn block_comment_start_is_an_error() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(one_error(&f, "a /* stale */ + 1", 1, 3,
-                     "block comments are not supported, use '//'"));
-    assert(count(&f) == 1);
-    assert(one_error(&f, "/*", 1, 1, "block comments are not supported, use '//'"));
-    assert(one_error(&f, "/**/", 1, 1, "block comments are not supported, use '//'"));
-    assert(one_error(&f, "x/*", 1, 2, "block comments are not supported, use '//'"));
-    assert(one_error(&f, "a/*=b", 1, 2, "block comments are not supported, use '//'"));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.one_error(f, "a /* stale */ + 1", 1, 3,
+                             "block comments are not supported, use '//'"));
+    assert(lex_env.count(f) == 1);
+    assert(lex_env.one_error(f, "/*", 1, 1, "block comments are not supported, use '//'"));
+    assert(lex_env.one_error(f, "/**/", 1, 1, "block comments are not supported, use '//'"));
+    assert(lex_env.one_error(f, "x/*", 1, 2, "block comments are not supported, use '//'"));
+    assert(lex_env.one_error(f, "a/*=b", 1, 2, "block comments are not supported, use '//'"));
 }
 
 fn block_comment_start_is_an_error_wherever_it_stands() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(one_error(&f, "// fine\nx = /* y */ 1;\n", 2, 5,
-                     "block comments are not supported, use '//'"));
-    assert(count(&f) == 1);
-    assert(one_error(&f, "f(/*x*/)", 1, 3,
-                     "block comments are not supported, use '//'"));
-    assert(one_error(&f, "a\n\t/*", 2, 2,
-                     "block comments are not supported, use '//'"));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.one_error(f, "// fine\nx = /* y */ 1;\n", 2, 5,
+                             "block comments are not supported, use '//'"));
+    assert(lex_env.count(f) == 1);
+    assert(lex_env.one_error(f, "f(/*x*/)", 1, 3,
+                             "block comments are not supported, use '//'"));
+    assert(lex_env.one_error(f, "a\n\t/*", 2, 2,
+                             "block comments are not supported, use '//'"));
 }
 
 // `a / *p`, with the operators separated, is a division by a dereference and
 // not a comment.
 fn a_slash_before_a_separated_star_is_a_division() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "a / *p", 4));
-    assert(kind(&f, 0) == "identifier");
-    assert(kind(&f, 1) == "/");
-    assert(kind(&f, 2) == "*");
-    assert(kind(&f, 3) == "identifier");
-    assert(at(&f, 2, 1, 5));
-    assert(clean(&f, "a/ *p", 4));
-    assert(kind(&f, 1) == "/");
-    assert(kind(&f, 2) == "*");
-    assert(clean(&f, "a /\n*p", 4));
-    assert(at(&f, 2, 2, 1));
-    assert(clean(&f, "a / *(p)", 6));
-    assert(kind(&f, 2) == "*");
-    assert(kind(&f, 3) == "(");
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "a / *p", 4));
+    assert(lex_env.kind(f, 0) == "identifier");
+    assert(lex_env.kind(f, 1) == "/");
+    assert(lex_env.kind(f, 2) == "*");
+    assert(lex_env.kind(f, 3) == "identifier");
+    assert(lex_env.at(f, 2, 1, 5));
+    assert(lex_env.clean(f, "a/ *p", 4));
+    assert(lex_env.kind(f, 1) == "/");
+    assert(lex_env.kind(f, 2) == "*");
+    assert(lex_env.clean(f, "a /\n*p", 4));
+    assert(lex_env.at(f, 2, 2, 1));
+    assert(lex_env.clean(f, "a / *(p)", 6));
+    assert(lex_env.kind(f, 2) == "*");
+    assert(lex_env.kind(f, 3) == "(");
 }
 
 fn line_comments_may_hold_non_ascii_bytes() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "// caf\xC3\xA9\nx // na\xC3\xAFve", 1));
-    assert(text(&f, 0) == "x");
-    assert(at(&f, 0, 2, 1));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "// caf\xC3\xA9\nx // na\xC3\xAFve", 1));
+    assert(lex_env.text(f, 0) == "x");
+    assert(lex_env.at(f, 0, 2, 1));
 }
 
 fn comment_markers_inside_a_line_comment_are_text() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "// /* still a line comment */\nx", 1));
-    assert(text(&f, 0) == "x");
-    assert(clean(&f, "x // //\n", 1));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "// /* still a line comment */\nx", 1));
+    assert(lex_env.text(f, 0) == "x");
+    assert(lex_env.clean(f, "x // //\n", 1));
 }
 
 // ---- identifiers, keywords and reserved words ----------------------------------
 
 fn identifier_forms() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "_ a1 _x_ CamelCase __ a_b_c z9", 7));
-    assert(text(&f, 0) == "_");
-    assert(text(&f, 1) == "a1");
-    assert(text(&f, 2) == "_x_");
-    assert(text(&f, 3) == "CamelCase");
-    assert(text(&f, 4) == "__");
-    assert(text(&f, 5) == "a_b_c");
-    assert(text(&f, 6) == "z9");
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "_ a1 _x_ CamelCase __ a_b_c z9", 7));
+    assert(lex_env.text(f, 0) == "_");
+    assert(lex_env.text(f, 1) == "a1");
+    assert(lex_env.text(f, 2) == "_x_");
+    assert(lex_env.text(f, 3) == "CamelCase");
+    assert(lex_env.text(f, 4) == "__");
+    assert(lex_env.text(f, 5) == "a_b_c");
+    assert(lex_env.text(f, 6) == "z9");
     u64 mut i = 0;
     while (i < 7) {
-        assert(kind(&f, i) == "identifier");
+        assert(lex_env.kind(f, i) == "identifier");
         i += 1;
     }
     // A digit may not start an identifier, but `_` may and the digit after it
     // is an ordinary identifier byte.
-    assert(clean(&f, "_1 _0x", 2));
-    assert(kind(&f, 0) == "identifier");
-    assert(kind(&f, 1) == "identifier");
+    assert(lex_env.clean(f, "_1 _0x", 2));
+    assert(lex_env.kind(f, 0) == "identifier");
+    assert(lex_env.kind(f, 1) == "identifier");
 }
 
 // An identifier's text is a view into the source, not a copy: it has the
 // bytes at its own offset and its own length.
 fn identifier_text_is_a_view_into_the_source() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "  hello  ", 1));
-    assert(text(&f, 0) == "hello");
-    assert(text(&f, 0).len == 5);
-    assert(covers(&f, 0, 2, 5));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "  hello  ", 1));
+    assert(lex_env.text(f, 0) == "hello");
+    assert(lex_env.text(f, 0).len == 5);
+    assert(lex_env.covers(f, 0, 2, 5));
 }
 
 fn identifiers_have_no_length_limit() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
     // Ten thousand bytes of `a`, built here because adjacent literals do not
     // concatenate in fort and a line is a hundred columns.
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     u64 mut i = 0;
     while (i < 10000) {
         strbuf.push(&b, 'a');
         i += 1;
     }
-    assert(clean(&f, strbuf.view(&b), 1));
-    assert(kind(&f, 0) == "identifier");
-    assert(text(&f, 0).len == 10000);
-    assert(at(&f, 1, 1, 10001));
+    assert(lex_env.clean(f, strbuf.view(&b), 1));
+    assert(lex_env.kind(f, 0) == "identifier");
+    assert(lex_env.text(f, 0).len == 10000);
+    assert(lex_env.at(f, 1, 1, 10001));
 }
 
 // Every keyword lexes as its own kind, and the kind's name is the word: the
 // table tok_kind_name holds is the table keyword_kind walks.
 fn every_keyword_lexes_as_its_kind() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
     i64 mut k = cast(lexer.tok_kind.kw_as, i64);
     i64 last = cast(lexer.tok_kind.kw_while, i64);
     i64 mut seen = 0;
     while (k <= last) {
         string word = lexer.tok_kind_name(cast(k, lexer.tok_kind));
-        assert(clean(&f, word, 1));
-        assert(kind(&f, 0) == word);
-        assert(text(&f, 0) == word);
-        assert(covers(&f, 0, 0, word.len));
+        assert(lex_env.clean(f, word, 1));
+        assert(lex_env.kind(f, 0) == word);
+        assert(lex_env.text(f, 0) == word);
+        assert(lex_env.covers(f, 0, 0, word.len));
         seen += 1;
         k += 1;
     }
@@ -354,100 +264,100 @@ fn every_keyword_lexes_as_its_kind() void {
 }
 
 fn the_keyword_list_of_d2_4() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
     // The list, in its order, in five lines because adjacent literals do not
     // concatenate and a line is a hundred columns.
-    assert(clean(&f, "as bool break case cast char continue default defer do", 10));
-    assert(kind(&f, 0) == "as");
-    assert(kind(&f, 5) == "char");
-    assert(kind(&f, 9) == "do");
-    assert(clean(&f, "else enum extern f32 f64 false fn for", 8));
-    assert(kind(&f, 0) == "else");
-    assert(kind(&f, 3) == "f32");
-    assert(kind(&f, 7) == "for");
-    assert(clean(&f, "i8 i16 i32 i64 if import mut new noreturn null own", 11));
-    assert(kind(&f, 0) == "i8");
-    assert(kind(&f, 8) == "noreturn");
-    assert(kind(&f, 10) == "own");
-    assert(clean(&f, "return sizeof string struct switch true", 6));
-    assert(kind(&f, 2) == "string");
-    assert(kind(&f, 5) == "true");
-    assert(clean(&f, "u8 u16 u32 u64 void while", 6));
-    assert(kind(&f, 0) == "u8");
-    assert(kind(&f, 5) == "while");
+    assert(lex_env.clean(f, "as bool break case cast char continue default defer do", 10));
+    assert(lex_env.kind(f, 0) == "as");
+    assert(lex_env.kind(f, 5) == "char");
+    assert(lex_env.kind(f, 9) == "do");
+    assert(lex_env.clean(f, "else enum extern f32 f64 false fn for", 8));
+    assert(lex_env.kind(f, 0) == "else");
+    assert(lex_env.kind(f, 3) == "f32");
+    assert(lex_env.kind(f, 7) == "for");
+    assert(lex_env.clean(f, "i8 i16 i32 i64 if import mut new noreturn null own", 11));
+    assert(lex_env.kind(f, 0) == "i8");
+    assert(lex_env.kind(f, 8) == "noreturn");
+    assert(lex_env.kind(f, 10) == "own");
+    assert(lex_env.clean(f, "return sizeof string struct switch true", 6));
+    assert(lex_env.kind(f, 2) == "string");
+    assert(lex_env.kind(f, 5) == "true");
+    assert(lex_env.clean(f, "u8 u16 u32 u64 void while", 6));
+    assert(lex_env.kind(f, 0) == "u8");
+    assert(lex_env.kind(f, 5) == "while");
     // Ten and eight and eleven and six and six are the forty-one keywords.
     assert(10 + 8 + 11 + 6 + 6 == 41);
 }
 
 fn own_is_a_keyword() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "own mut node* n", 5));
-    assert(kind(&f, 0) == "own");
-    assert(kind(&f, 1) == "mut");
-    assert(kind(&f, 2) == "identifier");
-    assert(kind(&f, 3) == "*");
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "own mut node* n", 5));
+    assert(lex_env.kind(f, 0) == "own");
+    assert(lex_env.kind(f, 1) == "mut");
+    assert(lex_env.kind(f, 2) == "identifier");
+    assert(lex_env.kind(f, 3) == "*");
 }
 
 fn a_word_extending_a_keyword_is_an_identifier() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "iff i3 fnx structs _if if_ i32_t", 7));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "iff i3 fnx structs _if if_ i32_t", 7));
     u64 mut i = 0;
     while (i < 7) {
-        assert(kind(&f, i) == "identifier");
+        assert(lex_env.kind(f, i) == "identifier");
         i += 1;
     }
 }
 
 fn keywords_are_case_sensitive() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "If TRUE Fn i32 I32", 5));
-    assert(kind(&f, 0) == "identifier");
-    assert(kind(&f, 1) == "identifier");
-    assert(kind(&f, 2) == "identifier");
-    assert(kind(&f, 3) == "i32");
-    assert(kind(&f, 4) == "identifier");
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "If TRUE Fn i32 I32", 5));
+    assert(lex_env.kind(f, 0) == "identifier");
+    assert(lex_env.kind(f, 1) == "identifier");
+    assert(lex_env.kind(f, 2) == "identifier");
+    assert(lex_env.kind(f, 3) == "i32");
+    assert(lex_env.kind(f, 4) == "identifier");
 }
 
 // The universe functions are names, not keywords.
 fn universe_functions_are_not_keywords() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "del move assert panic print", 5));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "del move assert panic print", 5));
     u64 mut i = 0;
     while (i < 5) {
-        assert(kind(&f, i) == "identifier");
+        assert(lex_env.kind(f, i) == "identifier");
         i += 1;
     }
 }
 
 // The ten words reserved for future use are usable nowhere.
 fn reserved_words_are_errors() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(one_error(&f, "i32 const = 1;", 1, 5, "'const' is a reserved word"));
-    assert(count(&f) == 1);
-    assert(one_error(&f, "async", 1, 1, "'async' is a reserved word"));
-    assert(one_error(&f, "await", 1, 1, "'await' is a reserved word"));
-    assert(one_error(&f, "match", 1, 1, "'match' is a reserved word"));
-    assert(one_error(&f, "pub", 1, 1, "'pub' is a reserved word"));
-    assert(one_error(&f, "priv", 1, 1, "'priv' is a reserved word"));
-    assert(one_error(&f, "trait", 1, 1, "'trait' is a reserved word"));
-    assert(one_error(&f, "type", 1, 1, "'type' is a reserved word"));
-    assert(one_error(&f, "union", 1, 1, "'union' is a reserved word"));
-    assert(one_error(&f, "yield", 1, 1, "'yield' is a reserved word"));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.one_error(f, "i32 const = 1;", 1, 5, "'const' is a reserved word"));
+    assert(lex_env.count(f) == 1);
+    assert(lex_env.one_error(f, "async", 1, 1, "'async' is a reserved word"));
+    assert(lex_env.one_error(f, "await", 1, 1, "'await' is a reserved word"));
+    assert(lex_env.one_error(f, "match", 1, 1, "'match' is a reserved word"));
+    assert(lex_env.one_error(f, "pub", 1, 1, "'pub' is a reserved word"));
+    assert(lex_env.one_error(f, "priv", 1, 1, "'priv' is a reserved word"));
+    assert(lex_env.one_error(f, "trait", 1, 1, "'trait' is a reserved word"));
+    assert(lex_env.one_error(f, "type", 1, 1, "'type' is a reserved word"));
+    assert(lex_env.one_error(f, "union", 1, 1, "'union' is a reserved word"));
+    assert(lex_env.one_error(f, "yield", 1, 1, "'yield' is a reserved word"));
 }
 
 fn a_word_extending_a_reserved_word_is_an_identifier() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "constant types union_ _pub", 4));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "constant types union_ _pub", 4));
     u64 mut i = 0;
     while (i < 4) {
-        assert(kind(&f, i) == "identifier");
+        assert(lex_env.kind(f, i) == "identifier");
         i += 1;
     }
 }
@@ -456,18 +366,18 @@ fn a_word_extending_a_reserved_word_is_an_identifier() void {
 
 // Every operator lexes alone as its own kind, spelled as its name.
 fn every_operator_lexes_alone_as_its_kind() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
     i64 mut k = cast(lexer.tok_kind.plus, i64);
     i64 last = cast(lexer.tok_kind.at, i64);
     i64 mut seen = 0;
     while (k <= last) {
         string op = lexer.tok_kind_name(cast(k, lexer.tok_kind));
-        assert(clean(&f, op, 1));
-        assert(kind(&f, 0) == op);
-        assert(text(&f, 0) == op);
-        assert(covers(&f, 0, 0, op.len));
-        assert(at(&f, 1, 1, cast(op.len, u32) + 1));
+        assert(lex_env.clean(f, op, 1));
+        assert(lex_env.kind(f, 0) == op);
+        assert(lex_env.text(f, 0) == op);
+        assert(lex_env.covers(f, 0, 0, op.len));
+        assert(lex_env.at(f, 1, 1, cast(op.len, u32) + 1));
         seen += 1;
         k += 1;
     }
@@ -476,29 +386,30 @@ fn every_operator_lexes_alone_as_its_kind() void {
 }
 
 fn the_operator_list_of_d2_10() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
     // The list, in its order, split across lines of a hundred columns. The
     // kinds are the enum's own order, so the walk below is the list read back.
-    assert(clean(&f, "+ - * / % +% -% *% = += -= *= /= %= +%= -%= *%= &= |= ^= <<= >>=", 22));
+    assert(lex_env.clean(f, "+ - * / % +% -% *% = += -= *= /= %= +%= -%= *%= &= |= ^= <<= >>=",
+                         22));
     u64 mut i = 0;
     i64 mut k = cast(lexer.tok_kind.plus, i64);
     while (i < 22) {
-        assert(tok(&f, i).kind == cast(k, lexer.tok_kind));
+        assert(lex_env.tok(f, i).kind == cast(k, lexer.tok_kind));
         i += 1;
         k += 1;
     }
-    assert(clean(&f, "== != < <= > >= && || ! & | ^ ~ << >> ++ -- ? : . -> .. ...", 23));
+    assert(lex_env.clean(f, "== != < <= > >= && || ! & | ^ ~ << >> ++ -- ? : . -> .. ...", 23));
     i = 0;
     while (i < 23) {
-        assert(tok(&f, i).kind == cast(k, lexer.tok_kind));
+        assert(lex_env.tok(f, i).kind == cast(k, lexer.tok_kind));
         i += 1;
         k += 1;
     }
-    assert(clean(&f, "( ) [ ] { } , ; @", 9));
+    assert(lex_env.clean(f, "( ) [ ] { } , ; @", 9));
     i = 0;
     while (i < 9) {
-        assert(tok(&f, i).kind == cast(k, lexer.tok_kind));
+        assert(lex_env.tok(f, i).kind == cast(k, lexer.tok_kind));
         i += 1;
         k += 1;
     }
@@ -509,248 +420,248 @@ fn the_operator_list_of_d2_10() void {
 
 // The three-byte operators and the prefixes they extend.
 fn three_character_operators_and_their_prefixes() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "+%= +% + -%= -% - *%= *% * <<= << < >>= >> >", 15));
-    assert(kind(&f, 0) == "+%=");
-    assert(kind(&f, 1) == "+%");
-    assert(kind(&f, 2) == "+");
-    assert(kind(&f, 3) == "-%=");
-    assert(kind(&f, 4) == "-%");
-    assert(kind(&f, 5) == "-");
-    assert(kind(&f, 6) == "*%=");
-    assert(kind(&f, 7) == "*%");
-    assert(kind(&f, 8) == "*");
-    assert(kind(&f, 9) == "<<=");
-    assert(kind(&f, 10) == "<<");
-    assert(kind(&f, 11) == "<");
-    assert(kind(&f, 12) == ">>=");
-    assert(kind(&f, 13) == ">>");
-    assert(kind(&f, 14) == ">");
-    assert(covers(&f, 0, 0, 3));
-    assert(covers(&f, 1, 4, 2));
-    assert(covers(&f, 2, 7, 1));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "+%= +% + -%= -% - *%= *% * <<= << < >>= >> >", 15));
+    assert(lex_env.kind(f, 0) == "+%=");
+    assert(lex_env.kind(f, 1) == "+%");
+    assert(lex_env.kind(f, 2) == "+");
+    assert(lex_env.kind(f, 3) == "-%=");
+    assert(lex_env.kind(f, 4) == "-%");
+    assert(lex_env.kind(f, 5) == "-");
+    assert(lex_env.kind(f, 6) == "*%=");
+    assert(lex_env.kind(f, 7) == "*%");
+    assert(lex_env.kind(f, 8) == "*");
+    assert(lex_env.kind(f, 9) == "<<=");
+    assert(lex_env.kind(f, 10) == "<<");
+    assert(lex_env.kind(f, 11) == "<");
+    assert(lex_env.kind(f, 12) == ">>=");
+    assert(lex_env.kind(f, 13) == ">>");
+    assert(lex_env.kind(f, 14) == ">");
+    assert(lex_env.covers(f, 0, 0, 3));
+    assert(lex_env.covers(f, 1, 4, 2));
+    assert(lex_env.covers(f, 2, 7, 1));
 }
 
 // The longest match wins, with no space to separate the operands.
 fn longest_match_without_spaces() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "a+%=b", 3));
-    assert(kind(&f, 1) == "+%=");
-    assert(clean(&f, "a+%b", 3));
-    assert(kind(&f, 1) == "+%");
-    assert(kind(&f, 2) == "identifier");
-    assert(clean(&f, "a+b", 3));
-    assert(kind(&f, 1) == "+");
-    assert(clean(&f, "x<<=1", 3));
-    assert(kind(&f, 1) == "<<=");
-    assert(clean(&f, "x>>=1", 3));
-    assert(kind(&f, 1) == ">>=");
-    assert(clean(&f, "p->q", 3));
-    assert(kind(&f, 1) == "->");
-    assert(clean(&f, "a.b", 3));
-    assert(kind(&f, 1) == ".");
-    assert(clean(&f, "a..b", 3));
-    assert(kind(&f, 1) == "..");
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "a+%=b", 3));
+    assert(lex_env.kind(f, 1) == "+%=");
+    assert(lex_env.clean(f, "a+%b", 3));
+    assert(lex_env.kind(f, 1) == "+%");
+    assert(lex_env.kind(f, 2) == "identifier");
+    assert(lex_env.clean(f, "a+b", 3));
+    assert(lex_env.kind(f, 1) == "+");
+    assert(lex_env.clean(f, "x<<=1", 3));
+    assert(lex_env.kind(f, 1) == "<<=");
+    assert(lex_env.clean(f, "x>>=1", 3));
+    assert(lex_env.kind(f, 1) == ">>=");
+    assert(lex_env.clean(f, "p->q", 3));
+    assert(lex_env.kind(f, 1) == "->");
+    assert(lex_env.clean(f, "a.b", 3));
+    assert(lex_env.kind(f, 1) == ".");
+    assert(lex_env.clean(f, "a..b", 3));
+    assert(lex_env.kind(f, 1) == "..");
     // The lexer reads `...` before `..` before `.`.
-    assert(clean(&f, "a...b", 3));
-    assert(kind(&f, 1) == "...");
-    assert(covers(&f, 1, 1, 3));
+    assert(lex_env.clean(f, "a...b", 3));
+    assert(lex_env.kind(f, 1) == "...");
+    assert(lex_env.covers(f, 1, 1, 3));
 }
 
 fn runs_of_operator_characters_split_greedily() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "&&=", 2));
-    assert(kind(&f, 0) == "&&");
-    assert(kind(&f, 1) == "=");
-    assert(clean(&f, "||=", 2));
-    assert(kind(&f, 0) == "||");
-    assert(kind(&f, 1) == "=");
-    assert(clean(&f, "...", 1));
-    assert(kind(&f, 0) == "...");
-    assert(clean(&f, ".. .", 2));
-    assert(kind(&f, 0) == "..");
-    assert(kind(&f, 1) == ".");
-    assert(clean(&f, "===", 2));
-    assert(kind(&f, 0) == "==");
-    assert(kind(&f, 1) == "=");
-    assert(clean(&f, "->>", 2));
-    assert(kind(&f, 0) == "->");
-    assert(kind(&f, 1) == ">");
-    assert(clean(&f, "+++", 2));
-    assert(kind(&f, 0) == "++");
-    assert(kind(&f, 1) == "+");
-    assert(clean(&f, "-->", 2));
-    assert(kind(&f, 0) == "--");
-    assert(kind(&f, 1) == ">");
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "&&=", 2));
+    assert(lex_env.kind(f, 0) == "&&");
+    assert(lex_env.kind(f, 1) == "=");
+    assert(lex_env.clean(f, "||=", 2));
+    assert(lex_env.kind(f, 0) == "||");
+    assert(lex_env.kind(f, 1) == "=");
+    assert(lex_env.clean(f, "...", 1));
+    assert(lex_env.kind(f, 0) == "...");
+    assert(lex_env.clean(f, ".. .", 2));
+    assert(lex_env.kind(f, 0) == "..");
+    assert(lex_env.kind(f, 1) == ".");
+    assert(lex_env.clean(f, "===", 2));
+    assert(lex_env.kind(f, 0) == "==");
+    assert(lex_env.kind(f, 1) == "=");
+    assert(lex_env.clean(f, "->>", 2));
+    assert(lex_env.kind(f, 0) == "->");
+    assert(lex_env.kind(f, 1) == ">");
+    assert(lex_env.clean(f, "+++", 2));
+    assert(lex_env.kind(f, 0) == "++");
+    assert(lex_env.kind(f, 1) == "+");
+    assert(lex_env.clean(f, "-->", 2));
+    assert(lex_env.kind(f, 0) == "--");
+    assert(lex_env.kind(f, 1) == ">");
     // `::` is not a token: the module path separator is `.`.
-    assert(clean(&f, "::", 2));
-    assert(kind(&f, 0) == ":");
-    assert(kind(&f, 1) == ":");
-    assert(clean(&f, ":::", 3));
-    assert(kind(&f, 2) == ":");
-    assert(clean(&f, "<<<=", 2));
-    assert(kind(&f, 0) == "<<");
-    assert(kind(&f, 1) == "<=");
-    assert(clean(&f, "!==", 2));
-    assert(kind(&f, 0) == "!=");
-    assert(kind(&f, 1) == "=");
-    assert(clean(&f, "%%=", 2));
-    assert(kind(&f, 0) == "%");
-    assert(kind(&f, 1) == "%=");
+    assert(lex_env.clean(f, "::", 2));
+    assert(lex_env.kind(f, 0) == ":");
+    assert(lex_env.kind(f, 1) == ":");
+    assert(lex_env.clean(f, ":::", 3));
+    assert(lex_env.kind(f, 2) == ":");
+    assert(lex_env.clean(f, "<<<=", 2));
+    assert(lex_env.kind(f, 0) == "<<");
+    assert(lex_env.kind(f, 1) == "<=");
+    assert(lex_env.clean(f, "!==", 2));
+    assert(lex_env.kind(f, 0) == "!=");
+    assert(lex_env.kind(f, 1) == "=");
+    assert(lex_env.clean(f, "%%=", 2));
+    assert(lex_env.kind(f, 0) == "%");
+    assert(lex_env.kind(f, 1) == "%=");
 }
 
 fn slash_operators_beside_comments() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "a/=b//c\n/d", 5));
-    assert(kind(&f, 1) == "/=");
-    assert(kind(&f, 3) == "/");
-    assert(kind(&f, 4) == "identifier");
-    assert(clean(&f, "a / b", 3));
-    assert(kind(&f, 1) == "/");
-    assert(clean(&f, "*/", 2));
-    assert(kind(&f, 0) == "*");
-    assert(kind(&f, 1) == "/");
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "a/=b//c\n/d", 5));
+    assert(lex_env.kind(f, 1) == "/=");
+    assert(lex_env.kind(f, 3) == "/");
+    assert(lex_env.kind(f, 4) == "identifier");
+    assert(lex_env.clean(f, "a / b", 3));
+    assert(lex_env.kind(f, 1) == "/");
+    assert(lex_env.clean(f, "*/", 2));
+    assert(lex_env.kind(f, 0) == "*");
+    assert(lex_env.kind(f, 1) == "/");
 }
 
 // `@` is a one-byte operator token, the span suffix.
 fn at_lexes_as_the_span_suffix_token() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "@", 1));
-    assert(kind(&f, 0) == "@");
-    assert(text(&f, 0) == "@");
-    assert(at(&f, 0, 1, 1));
-    assert(covers(&f, 0, 0, 1));
-    assert(clean(&f, "a\n  @ b", 3));
-    assert(kind(&f, 1) == "@");
-    assert(at(&f, 1, 2, 3));
-    assert(covers(&f, 1, 4, 1));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "@", 1));
+    assert(lex_env.kind(f, 0) == "@");
+    assert(lex_env.text(f, 0) == "@");
+    assert(lex_env.at(f, 0, 1, 1));
+    assert(lex_env.covers(f, 0, 0, 1));
+    assert(lex_env.clean(f, "a\n  @ b", 3));
+    assert(lex_env.kind(f, 1) == "@");
+    assert(lex_env.at(f, 1, 2, 3));
+    assert(lex_env.covers(f, 1, 4, 1));
 }
 
 fn at_in_a_type_lexes_beside_its_neighbours() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
     // A span of writable bytes, `u8 mut@ mut s`.
-    assert(clean(&f, "u8 mut@ mut s", 5));
-    assert(kind(&f, 0) == "u8");
-    assert(kind(&f, 1) == "mut");
-    assert(kind(&f, 2) == "@");
-    assert(kind(&f, 3) == "mut");
-    assert(kind(&f, 4) == "identifier");
-    assert(covers(&f, 2, 6, 1));
+    assert(lex_env.clean(f, "u8 mut@ mut s", 5));
+    assert(lex_env.kind(f, 0) == "u8");
+    assert(lex_env.kind(f, 1) == "mut");
+    assert(lex_env.kind(f, 2) == "@");
+    assert(lex_env.kind(f, 3) == "mut");
+    assert(lex_env.kind(f, 4) == "identifier");
+    assert(lex_env.covers(f, 2, 6, 1));
     // Reference suffixes may be adjacent and repeat: `node*@`, `u8@*`, `u8@@`.
-    assert(clean(&f, "node*@ u8@* u8@@", 9));
-    assert(kind(&f, 1) == "*");
-    assert(kind(&f, 2) == "@");
-    assert(kind(&f, 4) == "@");
-    assert(kind(&f, 5) == "*");
-    assert(kind(&f, 7) == "@");
-    assert(kind(&f, 8) == "@");
+    assert(lex_env.clean(f, "node*@ u8@* u8@@", 9));
+    assert(lex_env.kind(f, 1) == "*");
+    assert(lex_env.kind(f, 2) == "@");
+    assert(lex_env.kind(f, 4) == "@");
+    assert(lex_env.kind(f, 5) == "*");
+    assert(lex_env.kind(f, 7) == "@");
+    assert(lex_env.kind(f, 8) == "@");
 }
 
 // No two-byte operator begins with `@`, so a run splits after each one.
 fn at_starts_no_longer_operator() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "@=", 2));
-    assert(kind(&f, 0) == "@");
-    assert(kind(&f, 1) == "=");
-    assert(clean(&f, "@@", 2));
-    assert(kind(&f, 0) == "@");
-    assert(kind(&f, 1) == "@");
-    assert(clean(&f, "a@b", 3));
-    assert(kind(&f, 1) == "@");
-    assert(kind(&f, 2) == "identifier");
-    assert(clean(&f, "x[..]@", 5));
-    assert(kind(&f, 4) == "@");
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "@=", 2));
+    assert(lex_env.kind(f, 0) == "@");
+    assert(lex_env.kind(f, 1) == "=");
+    assert(lex_env.clean(f, "@@", 2));
+    assert(lex_env.kind(f, 0) == "@");
+    assert(lex_env.kind(f, 1) == "@");
+    assert(lex_env.clean(f, "a@b", 3));
+    assert(lex_env.kind(f, 1) == "@");
+    assert(lex_env.kind(f, 2) == "identifier");
+    assert(lex_env.clean(f, "x[..]@", 5));
+    assert(lex_env.kind(f, 4) == "@");
 }
 
 fn at_inside_a_literal_or_a_comment_is_an_ordinary_byte() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
     // A string keeps `@` as a byte of its text.
-    assert(clean(&f, "\"a@b\"", 1));
-    assert(kind(&f, 0) == "string literal");
-    assert(text(&f, 0) == "a@b");
-    assert(clean(&f, "\"@\"", 1));
-    assert(text(&f, 0) == "@");
+    assert(lex_env.clean(f, "\"a@b\"", 1));
+    assert(lex_env.kind(f, 0) == "string literal");
+    assert(lex_env.text(f, 0) == "a@b");
+    assert(lex_env.clean(f, "\"@\"", 1));
+    assert(lex_env.text(f, 0) == "@");
     // A char literal holds its byte value, 0x40.
-    assert(clean(&f, "'@'", 1));
-    assert(kind(&f, 0) == "char literal");
-    assert(tok(&f, 0).ival == 0x40);
-    assert(covers(&f, 0, 0, 3));
+    assert(lex_env.clean(f, "'@'", 1));
+    assert(lex_env.kind(f, 0) == "char literal");
+    assert(lex_env.tok(f, 0).ival == 0x40);
+    assert(lex_env.covers(f, 0, 0, 3));
     // A comment swallows it.
-    assert(clean(&f, "a // @ @\n@", 2));
-    assert(kind(&f, 0) == "identifier");
-    assert(kind(&f, 1) == "@");
-    assert(at(&f, 1, 2, 1));
+    assert(lex_env.clean(f, "a // @ @\n@", 2));
+    assert(lex_env.kind(f, 0) == "identifier");
+    assert(lex_env.kind(f, 1) == "@");
+    assert(lex_env.at(f, 1, 2, 1));
 }
 
 fn a_statement_lexes_into_the_expected_sequence() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
     // An owned span of writable bytes from new(T, n).
-    assert(clean(&f, "u8 mut@ own mut s = new(u8, n +% 1);", 16));
-    assert(kind(&f, 0) == "u8");
-    assert(kind(&f, 1) == "mut");
-    assert(kind(&f, 2) == "@");
-    assert(kind(&f, 3) == "own");
-    assert(kind(&f, 4) == "mut");
-    assert(kind(&f, 5) == "identifier");
-    assert(kind(&f, 6) == "=");
-    assert(kind(&f, 7) == "new");
-    assert(kind(&f, 8) == "(");
-    assert(kind(&f, 9) == "u8");
-    assert(kind(&f, 10) == ",");
-    assert(kind(&f, 11) == "identifier");
-    assert(kind(&f, 12) == "+%");
-    assert(kind(&f, 13) == "integer literal");
-    assert(kind(&f, 14) == ")");
-    assert(kind(&f, 15) == ";");
+    assert(lex_env.clean(f, "u8 mut@ own mut s = new(u8, n +% 1);", 16));
+    assert(lex_env.kind(f, 0) == "u8");
+    assert(lex_env.kind(f, 1) == "mut");
+    assert(lex_env.kind(f, 2) == "@");
+    assert(lex_env.kind(f, 3) == "own");
+    assert(lex_env.kind(f, 4) == "mut");
+    assert(lex_env.kind(f, 5) == "identifier");
+    assert(lex_env.kind(f, 6) == "=");
+    assert(lex_env.kind(f, 7) == "new");
+    assert(lex_env.kind(f, 8) == "(");
+    assert(lex_env.kind(f, 9) == "u8");
+    assert(lex_env.kind(f, 10) == ",");
+    assert(lex_env.kind(f, 11) == "identifier");
+    assert(lex_env.kind(f, 12) == "+%");
+    assert(lex_env.kind(f, 13) == "integer literal");
+    assert(lex_env.kind(f, 14) == ")");
+    assert(lex_env.kind(f, 15) == ";");
 }
 
 fn every_kind_of_token_in_one_file() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "fn f(x) { s = \"a\"; c = 'b'; n = 1; y = 1.5; }", 23));
-    assert(kind(&f, 0) == "fn");
-    assert(kind(&f, 1) == "identifier");
-    assert(kind(&f, 2) == "(");
-    assert(kind(&f, 8) == "string literal");
-    assert(kind(&f, 12) == "char literal");
-    assert(kind(&f, 16) == "integer literal");
-    assert(kind(&f, 20) == "float literal");
-    assert(kind(&f, 22) == "}");
-    assert(kind(&f, 23) == "end of file");
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "fn f(x) { s = \"a\"; c = 'b'; n = 1; y = 1.5; }", 23));
+    assert(lex_env.kind(f, 0) == "fn");
+    assert(lex_env.kind(f, 1) == "identifier");
+    assert(lex_env.kind(f, 2) == "(");
+    assert(lex_env.kind(f, 8) == "string literal");
+    assert(lex_env.kind(f, 12) == "char literal");
+    assert(lex_env.kind(f, 16) == "integer literal");
+    assert(lex_env.kind(f, 20) == "float literal");
+    assert(lex_env.kind(f, 22) == "}");
+    assert(lex_env.kind(f, 23) == "end of file");
 }
 
 // `$cfg` is one compiler token. A shorter spelling or an identifier extension
 // is an error at `$`, not a `$cfg` token followed by an identifier.
 fn configuration_token_has_an_exact_identifier_boundary() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "$cfg", 1));
-    assert(kind(&f, 0) == "$cfg");
-    assert(covers(&f, 0, 0, 4));
-    assert(one_error(&f, "$", 1, 1, "unexpected character '$'"));
-    assert(one_error(&f, "$c", 1, 1, "unexpected character '$'"));
-    assert(one_error(&f, "$cf", 1, 1, "unexpected character '$'"));
-    assert(one_error(&f, "$cfgx", 1, 1, "unexpected character '$'"));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "$cfg", 1));
+    assert(lex_env.kind(f, 0) == "$cfg");
+    assert(lex_env.covers(f, 0, 0, 4));
+    assert(lex_env.one_error(f, "$", 1, 1, "unexpected character '$'"));
+    assert(lex_env.one_error(f, "$c", 1, 1, "unexpected character '$'"));
+    assert(lex_env.one_error(f, "$cf", 1, 1, "unexpected character '$'"));
+    assert(lex_env.one_error(f, "$cfgx", 1, 1, "unexpected character '$'"));
 }
 
 // `$if` follows the same exact boundary rule as `$cfg`.
 fn condition_token_has_an_exact_identifier_boundary() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
-    assert(clean(&f, "$if", 1));
-    assert(kind(&f, 0) == "$if");
-    assert(covers(&f, 0, 0, 3));
-    assert(one_error(&f, "$i", 1, 1, "unexpected character '$'"));
-    assert(one_error(&f, "$ifx", 1, 1, "unexpected character '$'"));
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "$if", 1));
+    assert(lex_env.kind(f, 0) == "$if");
+    assert(lex_env.covers(f, 0, 0, 3));
+    assert(lex_env.one_error(f, "$i", 1, 1, "unexpected character '$'"));
+    assert(lex_env.one_error(f, "$ifx", 1, 1, "unexpected character '$'"));
 }
 
 // ---- kinds and the token vector ------------------------------------------------
@@ -789,88 +700,186 @@ fn kind_names_are_distinct() void {
 
 // The vector grows and keeps every token, as containers.str_vec does.
 fn tokvec_grows_and_keeps_its_tokens() void {
-    lexer.tok_vec mut v = lexer.tokvec_create();
-    defer lexer.tokvec_free(&v);
-    assert(lexer.tokvec_count(&v) == 0);
+    lexer.tok_vec mut* own v = lexer.tokvec_make();
+    defer lexer.tokvec_drop_made(move(v));
+    assert(lexer.tokvec_count(v) == 0);
     u64 mut i = 0;
     while (i < 100) {
         lexer.token mut t = lexer.token{};
         t.kind = lexer.tok_kind.int_lit;
         t.ival = i;
         t.off = i * 2;
-        lexer.tokvec_push(&v, t);
+        lexer.tokvec_push(v, t);
         i += 1;
     }
-    assert(lexer.tokvec_count(&v) == 100);
+    assert(lexer.tokvec_count(v) == 100);
     i = 0;
     while (i < 100) {
-        assert(lexer.tokvec_at(&v, i).ival == i);
-        assert(lexer.tokvec_at(&v, i).off == i * 2);
+        assert(lexer.tokvec_at(v, i).ival == i);
+        assert(lexer.tokvec_at(v, i).off == i * 2);
         i += 1;
     }
-    lexer.tokvec_free(&v);
-    assert(lexer.tokvec_count(&v) == 0);
+    lexer.tokvec_free(v);
+    assert(lexer.tokvec_count(v) == 0);
 }
 
 // A reserve large enough for everything that follows grows the vector once,
 // which a push into the reserved room must not undo.
 fn tokvec_reserve_grows_once() void {
-    lexer.tok_vec mut v = lexer.tokvec_create();
-    defer lexer.tokvec_free(&v);
-    lexer.tokvec_reserve(&v, 1000);
-    assert(v.items.len >= 1000);
-    u64 cap = v.items.len;
+    lexer.tok_vec mut* own v = lexer.tokvec_make();
+    defer lexer.tokvec_drop_made(move(v));
+    lexer.tokvec_reserve(v, 1000);
+    assert(v->items.len >= 1000);
+    u64 cap = v->items.len;
     u64 mut i = 0;
     while (i < 1000) {
-        lexer.tokvec_push(&v, lexer.token{});
+        lexer.tokvec_push(v, lexer.token{});
         i += 1;
     }
-    assert(v.items.len == cap);
-    assert(lexer.tokvec_count(&v) == 1000);
+    assert(v->items.len == cap);
+    assert(lexer.tokvec_count(v) == 1000);
 }
 
 // Truncation drops the tokens after the length and keeps the rest. A length at
 // or past the end leaves the vector alone, which is what a resync on the first
 // line of a file relies on.
 fn tokvec_truncate_drops_the_tail() void {
-    lexer.tok_vec mut v = lexer.tokvec_create();
-    defer lexer.tokvec_free(&v);
+    lexer.tok_vec mut* own v = lexer.tokvec_make();
+    defer lexer.tokvec_drop_made(move(v));
     u64 mut i = 0;
     while (i < 10) {
         lexer.token mut t = lexer.token{};
         t.ival = i;
-        lexer.tokvec_push(&v, t);
+        lexer.tokvec_push(v, t);
         i += 1;
     }
-    lexer.tokvec_truncate(&v, 20);
-    assert(lexer.tokvec_count(&v) == 10);
-    lexer.tokvec_truncate(&v, 10);
-    assert(lexer.tokvec_count(&v) == 10);
-    lexer.tokvec_truncate(&v, 3);
-    assert(lexer.tokvec_count(&v) == 3);
-    assert(lexer.tokvec_at(&v, 2).ival == 2);
-    lexer.tokvec_truncate(&v, 0);
-    assert(lexer.tokvec_count(&v) == 0);
+    lexer.tokvec_truncate(v, 20);
+    assert(lexer.tokvec_count(v) == 10);
+    lexer.tokvec_truncate(v, 10);
+    assert(lexer.tokvec_count(v) == 10);
+    lexer.tokvec_truncate(v, 3);
+    assert(lexer.tokvec_count(v) == 3);
+    assert(lexer.tokvec_at(v, 2).ival == 2);
+    lexer.tokvec_truncate(v, 0);
+    assert(lexer.tokvec_count(v) == 0);
 }
 
 // A long file grows the output vector many times and every token survives it.
 fn lexing_a_long_file_grows_the_output() void {
-    fixture mut f = open_fixture();
-    defer close_fixture(&f);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
     u64 mut i = 0;
     while (i < 500) {
         strbuf.append(&b, "x = x + 1;\n");
         i += 1;
     }
-    assert(lex(&f, strbuf.view(&b)));
-    assert(count(&f) == 3001);
-    assert(at(&f, 3000, 501, 1));
-    assert(kind(&f, 2999) == ";");
-    assert(at(&f, 2999, 500, 10));
-    assert(covers(&f, 2999, 500 * 11 - 2, 1));
-    assert(errors(&f) == 0);
+    assert(lex_env.lex(f, strbuf.view(&b)));
+    assert(lex_env.count(f) == 3001);
+    assert(lex_env.at(f, 3000, 501, 1));
+    assert(lex_env.kind(f, 2999) == ";");
+    assert(lex_env.at(f, 2999, 500, 10));
+    assert(lex_env.covers(f, 2999, 500 * 11 - 2, 1));
+    assert(lex_env.errors(f) == 0);
+}
+
+// ---- the release of a vector and of a lexer environment ------------------------
+
+// The rounds of a leak probe, the round it samples early, and how far a sample may move.
+u64 LEAK_ROUNDS = 200;
+u64 LEAK_EARLY = 100;
+u64 LEAK_BOUND = 8192;
+
+// The slot that round `round` samples into: 0 for the early round, 1 and 2 for the last two
+// rounds, and 3 for a round that samples nothing.
+fn leak_slot(u64 round) u64 {
+    if (round == LEAK_EARLY) {
+        return 0;
+    }
+    if (round == LEAK_ROUNDS - 2) {
+        return 1;
+    }
+    if (round == LEAK_ROUNDS - 1) {
+        return 2;
+    }
+    return 3;
+}
+
+// The smaller of the distances from the early sample to the last two. A leak moves both late
+// samples, so the smaller distance costs a probe nothing.
+fn moved(u64[3] samples) u64 {
+    assert(samples[0] != 0 && samples[1] != 0 && samples[2] != 0);
+    u64 one = heap.distance(samples[1], samples[0]);
+    u64 other = heap.distance(samples[2], samples[0]);
+    if (one < other) {
+        return one;
+    }
+    return other;
+}
+
+// The tokens of each round of the vector probe.
+u64 LEAK_TOKENS = 1000;
+
+// Each round fills a vector of tokvec_make, empties it with tokvec_free, fills it again and ends
+// it with tokvec_drop_made. A deletion of the release of lexer.tokvec_drop, or of its call in
+// tokvec_free or in tokvec_drop_made, keeps a block of tokens in each round, and the live view
+// of support/heap.ft moves by that much.
+fn a_vector_in_an_allocation_leaves_the_heap_where_it_was() void {
+    u64[3] mut live_at = {};
+    u64 mut round = 0;
+    while (round < LEAK_ROUNDS) {
+        lexer.tok_vec mut* own v = lexer.tokvec_make();
+        u64 mut i = 0;
+        while (i < LEAK_TOKENS) {
+            lexer.tokvec_push(v, lexer.token{});
+            i += 1;
+        }
+        lexer.tokvec_free(v);
+        assert(lexer.tokvec_count(v) == 0);
+        i = 0;
+        while (i < LEAK_TOKENS) {
+            lexer.tokvec_push(v, lexer.token{});
+            i += 1;
+        }
+        lexer.tokvec_drop_made(move(v));
+        u64 slot = leak_slot(round);
+        if (slot < 3) {
+            live_at[slot] = heap.live_view();
+        }
+        round += 1;
+    }
+    assert(moved(live_at) < LEAK_BOUND);
+}
+
+// Each round lexes a file of string literals with an escape, which the session pool keeps, and
+// one error, which the sink records, and ends the environment with lex_env.drop_made. A deletion
+// of a release of lex_env.drop, or of its call in lex_env.drop_made, keeps the tokens or the
+// session of each round. The four lexer suites share support/lex_env.ft, so this probe holds its
+// drop for all four.
+fn an_environment_leaves_the_heap_where_it_was() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    u64 mut i = 0;
+    while (i < 100) {
+        strbuf.append(&b, "s = \"a\\tb\";\n");
+        i += 1;
+    }
+    strbuf.append(&b, "#\n");
+    u64[3] mut live_at = {};
+    u64 mut round = 0;
+    while (round < LEAK_ROUNDS) {
+        lex_env.env mut* own f = lex_env.make();
+        assert(!lex_env.lex(f, strbuf.view(&b)));
+        assert(lex_env.errors(f) == 1);
+        lex_env.drop_made(move(f));
+        u64 slot = leak_slot(round);
+        if (slot < 3) {
+            live_at[slot] = heap.live_view();
+        }
+        round += 1;
+    }
+    assert(moved(live_at) < LEAK_BOUND);
 }
 
 fn main() i32 {
@@ -920,6 +929,8 @@ fn main() i32 {
     tokvec_reserve_grows_once();
     tokvec_truncate_drops_the_tail();
     lexing_a_long_file_grows_the_output();
+    a_vector_in_an_allocation_leaves_the_heap_where_it_was();
+    an_environment_leaves_the_heap_where_it_was();
     println("ok");
     return 0;
 }

@@ -319,8 +319,8 @@ fn scan_string(scanner mut* sc) bool {
     u64 start = sc->pos;
     u32 line = sc->line;
     u32 col = sc->col;
-    lexer.tok_vec mut one = lexer.tokvec_create();
-    defer del(one.items);
+    lexer.tok_vec mut* own one = lexer.tokvec_make();
+    defer lexer.tokvec_drop_made(move(one));
     lexer.lexer mut* own lx = new(lexer.lexer);
     defer lexer.drop_made(move(lx));
     *lx = lexer.lexer{
@@ -330,7 +330,7 @@ fn scan_string(scanner mut* sc) bool {
         .pos = sc->pos,
         .line = sc->line,
         .col = sc->col,
-        .out = &one,
+        .out = one,
         .buf = strbuf.create(),
         .msg = strbuf.create(),
     };
@@ -346,7 +346,7 @@ fn scan_string(scanner mut* sc) bool {
     sc->line = lx->line;
     sc->col = lx->col;
     ftok mut t = scan_token(sc, ftok_kind.ft_string, start, line, col);
-    t.text = lexer.tokvec_at(&one, 0).text;
+    t.text = lexer.tokvec_at(one, 0).text;
     ftok_push(sc->out, t);
     return true;
 }
@@ -918,8 +918,8 @@ fn parse_type_text(fir_parser mut* p, string text, diag.loc at) types.node* {
 // Null after a diagnostic. The tokens and the parser stay local here, so the caller loads through
 // `p->pre.ck` with no local owner that a call can vacate.
 fn parse_type_tree(fir_parser mut* p, string text, diag.loc at, u64 before) ast.node mut* {
-    lexer.tok_vec mut toks = lexer.tokvec_create();
-    defer del(toks.items);
+    lexer.tok_vec mut* own toks = lexer.tokvec_make();
+    defer lexer.tokvec_drop_made(move(toks));
     lexer.lexer mut* own lx = new(lexer.lexer);
     defer lexer.drop_made(move(lx));
     *lx = lexer.lexer{
@@ -928,7 +928,7 @@ fn parse_type_tree(fir_parser mut* p, string text, diag.loc at, u64 before) ast.
         .src = text,
         .line = at.line,
         .col = at.col,
-        .out = &toks,
+        .out = toks,
         .buf = strbuf.create(),
         .msg = strbuf.create(),
     };
@@ -941,8 +941,8 @@ fn parse_type_tree(fir_parser mut* p, string text, diag.loc at, u64 before) ast.
     *pp = parser.parser{
         .sess = p->sess,
         .file = p->file,
-        .toks = &toks,
-        .ntoks = lexer.tokvec_count(&toks),
+        .toks = toks,
+        .ntoks = lexer.tokvec_count(toks),
         .arena = &p->arena,
         .last = diag.loc_make(p->file, 0, 0),
         .msg = strbuf.create(),

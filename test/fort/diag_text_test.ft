@@ -37,7 +37,7 @@ import std.strbuf;
 // appends nothing. The result tells a false answer from an empty buffer.
 fn rendered(string source, diag.loc l) string own {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     bool shown = diag.render(&b, source, l);
     assert(shown == (strbuf.view(&b).len > 0));
     if (!shown) {
@@ -176,36 +176,36 @@ fn lookup(diag.sources mut* asked, string path, string mut* out) bool {
 
 // The stderr of `report` with a lookup installed, and the paths that the lookup was asked for.
 fn reported(diag.sources mut* asked) string own {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    diag.set_text(&s, true);
-    diag.set_lookup(&s, lookup, asked);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    diag.set_text(s, true);
+    diag.set_lookup(s, lookup, asked);
     i32 saved = capture.begin(io.STDERR, "err.txt");
-    diag.error(&s, diag.loc_range("shown.ft", 2, 12, 2, 15), "constant 300 does not fit u8");
-    diag.note(&s, diag.loc_range("shown.ft", 2, 5, 2, 7), "the type is here");
+    diag.error(s, diag.loc_range("shown.ft", 2, 12, 2, 15), "constant 300 does not fit u8");
+    diag.note(s, diag.loc_range("shown.ft", 2, 5, 2, 7), "the type is here");
     // A file the lookup cannot read shows its header line alone.
-    diag.error(&s, diag.loc_range("gone.ft", 3, 5, 3, 6), "in a file nobody can read");
+    diag.error(s, diag.loc_range("gone.ft", 3, 5, 3, 6), "in a file nobody can read");
     // The empty range at 1:1 shows its header line alone and asks no lookup.
-    diag.error(&s, diag.loc_make("shown.ft", 1, 1), "no main");
+    diag.error(s, diag.loc_make("shown.ft", 1, 1), "no main");
     // A muted diagnostic writes nothing and asks no lookup.
-    diag.mute(&s);
-    diag.error(&s, diag.loc_range("shown.ft", 3, 5, 3, 11), "muted");
-    assert(diag.unmute(&s) == 1);
+    diag.mute(s);
+    diag.error(s, diag.loc_range("shown.ft", 3, 5, 3, 11), "muted");
+    assert(diag.unmute(s) == 1);
     // With the text off, nothing is written and no lookup is asked.
-    diag.set_text(&s, false);
-    diag.error(&s, diag.loc_range("shown.ft", 3, 5, 3, 11), "not written");
+    diag.set_text(s, false);
+    diag.error(s, diag.loc_range("shown.ft", 3, 5, 3, 11), "not written");
     capture.end(io.STDERR, saved);
     return capture.text("err.txt");
 }
 
 // Each header line is followed by the lines of its range, in report order.
 fn the_sink_writes_the_lines_after_each_header() void {
-    diag.sources mut asked = diag.sources{};
-    defer diag.free_sources(&asked);
-    string own got = reported(&asked);
-    defer del(got);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
+    diag.sources mut* own asked = diag.sources_make();
+    defer diag.sources_drop_made(move(asked));
+    string own got = reported(asked);
+    defer del(got);
     strbuf.append(&want, "shown.ft:2:12: error: constant 300 does not fit u8\n");
     strbuf.append(&want, "        u8 b = 300;\n");
     strbuf.append(&want, "               ^~~\n");
@@ -217,39 +217,39 @@ fn the_sink_writes_the_lines_after_each_header() void {
     assert(got == strbuf.view(&want));
     // shown.ft twice and gone.ft once. The 1:1 error, the muted error and the
     // error with the text off ask nothing.
-    assert(asked.texts.len == 3);
-    assert(containers.str_at(&asked.texts, 0) == "shown.ft");
-    assert(containers.str_at(&asked.texts, 1) == "shown.ft");
-    assert(containers.str_at(&asked.texts, 2) == "gone.ft");
+    assert(asked->texts.len == 3);
+    assert(containers.str_at(&asked->texts, 0) == "shown.ft");
+    assert(containers.str_at(&asked->texts, 1) == "shown.ft");
+    assert(containers.str_at(&asked->texts, 2) == "gone.ft");
     assert(capture.line_count(got) == 8);
 }
 
 // A file the lookup cannot read shows the header line alone.
 fn a_file_the_lookup_cannot_read_shows_the_header_alone() void {
-    diag.sources mut asked = diag.sources{};
-    defer diag.free_sources(&asked);
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    diag.set_text(&s, true);
-    diag.set_lookup(&s, lookup, &asked);
+    diag.sources mut* own asked = diag.sources_make();
+    defer diag.sources_drop_made(move(asked));
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    diag.set_text(s, true);
+    diag.set_lookup(s, lookup, asked);
     i32 saved = capture.begin(io.STDERR, "gone.txt");
     // Line 1 is where an empty text has a line of its own, so a sink that
     // rendered the empty text after a false answer would show it here.
-    diag.error(&s, diag.loc_range("gone.ft", 1, 5, 1, 7), "nothing to show");
+    diag.error(s, diag.loc_range("gone.ft", 1, 5, 1, 7), "nothing to show");
     capture.end(io.STDERR, saved);
     string own got = capture.text("gone.txt");
     defer del(got);
     assert(got == "gone.ft:1:5: error: nothing to show\n");
-    assert(asked.texts.len == 1);
+    assert(asked->texts.len == 1);
 }
 
 // Without a lookup the sink writes the header lines alone.
 fn no_lookup_writes_the_header_alone() void {
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    diag.set_text(&s, true);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    diag.set_text(s, true);
     i32 saved = capture.begin(io.STDERR, "plain.txt");
-    diag.error(&s, diag.loc_range("shown.ft", 2, 12, 2, 15), "constant 300 does not fit u8");
+    diag.error(s, diag.loc_range("shown.ft", 2, 12, 2, 15), "constant 300 does not fit u8");
     capture.end(io.STDERR, saved);
     string own got = capture.text("plain.txt");
     defer del(got);
@@ -259,15 +259,15 @@ fn no_lookup_writes_the_header_alone() void {
 // The header lines of this test's header directives, with the lines under
 // them, on the real stderr.
 fn the_rendered_lines_reach_stderr() void {
-    diag.sources mut asked = diag.sources{};
-    defer diag.free_sources(&asked);
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    diag.set_text(&s, true);
-    diag.set_lookup(&s, lookup, &asked);
-    diag.error(&s, diag.loc_range("shown.ft", 2, 12, 2, 15), "constant 300 does not fit u8");
-    diag.note(&s, diag.loc_range("shown.ft", 2, 5, 2, 7), "the type is here");
-    assert(asked.texts.len == 2);
+    diag.sources mut* own asked = diag.sources_make();
+    defer diag.sources_drop_made(move(asked));
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    diag.set_text(s, true);
+    diag.set_lookup(s, lookup, asked);
+    diag.error(s, diag.loc_range("shown.ft", 2, 12, 2, 15), "constant 300 does not fit u8");
+    diag.note(s, diag.loc_range("shown.ft", 2, 5, 2, 7), "the type is here");
+    assert(asked->texts.len == 2);
 }
 
 fn main() i32 {
@@ -288,60 +288,60 @@ fn main() i32 {
     the_rendered_lines_reach_stderr();
     println("sink ok");
 
-    diag.sink mut s = diag.create();
-    defer diag.free(&s);
-    diag.set_text(&s, true);
-    diag.begin_file(&s);
+    diag.sink mut* own s = diag.make();
+    defer diag.drop_made(move(s));
+    diag.set_text(s, true);
+    diag.begin_file(s);
 
     // A position with no extent prints its start like any other.
-    diag.error(&s, diag.loc_make("main.ft", 1, 1), "first error");
+    diag.error(s, diag.loc_make("main.ft", 1, 1), "first error");
 
     // A range prints its start alone: the end is what an editor underlines, and nothing
     // of it reaches the line.
-    diag.error(&s, diag.loc_range("main.ft", 12, 34, 14, 2), "undefined name 'x'");
+    diag.error(s, diag.loc_range("main.ft", 12, 34, 14, 2), "undefined name 'x'");
 
     // A note belongs to the error before it and is not counted.
-    diag.note(&s, diag.loc_make("main.ft", 12, 34), "declared here");
+    diag.note(s, diag.loc_make("main.ft", 12, 34), "declared here");
 
     // The line and the column are u32, and the largest one prints whole rather than
     // wrapping or being truncated.
-    diag.error(&s, diag.loc_make("lib/util.ft", 4294967295, 4294967295),
+    diag.error(s, diag.loc_make("lib/util.ft", 4294967295, 4294967295),
                "at the last position a u32 can hold");
 
     // An error with no position in the file uses the empty range at 1:1. Its file name
     // is empty and the line still has its two colons.
-    diag.error(&s, diag.loc_make("", 1, 1), "an error with no file");
+    diag.error(s, diag.loc_make("", 1, 1), "an error with no file");
 
     // An empty message keeps the `error: ` prefix, so a line is never
     // mistaken for something else.
-    diag.error(&s, diag.loc_make("main.ft", 7, 1), "");
+    diag.error(s, diag.loc_make("main.ft", 7, 1), "");
 
     // Six records, five of them errors: the text form changes none of that, and the note
     // spends nothing of the file's budget.
-    assert(diag.record_count(&s) == 6);
-    assert(diag.count(&s) == 5);
-    assert(diag.file_count(&s) == 5);
+    assert(diag.record_count(s) == 6);
+    assert(diag.count(s) == 5);
+    assert(diag.file_count(s) == 5);
 
     // Every record still carries what was reported, in order.
-    assert(diag.record_at(&s, 0).msg == "first error");
-    assert(diag.record_at(&s, 0).loc.line == 1);
-    assert(diag.record_at(&s, 1).loc.end_line == 14);
-    assert(diag.record_at(&s, 1).loc.end_col == 2);
-    assert(diag.record_at(&s, 2).severity == diag.severity.note);
-    assert(diag.record_at(&s, 3).loc.file == "lib/util.ft");
-    assert(diag.record_at(&s, 3).loc.col == 4294967295);
-    assert(diag.record_at(&s, 4).loc.file == "");
-    assert(diag.record_at(&s, 5).msg == "");
-    assert(diag.record_at(&s, 5).msg.len == 0);
+    assert(diag.record_at(s, 0).msg == "first error");
+    assert(diag.record_at(s, 0).loc.line == 1);
+    assert(diag.record_at(s, 1).loc.end_line == 14);
+    assert(diag.record_at(s, 1).loc.end_col == 2);
+    assert(diag.record_at(s, 2).severity == diag.severity.note);
+    assert(diag.record_at(s, 3).loc.file == "lib/util.ft");
+    assert(diag.record_at(s, 3).loc.col == 4294967295);
+    assert(diag.record_at(s, 4).loc.file == "");
+    assert(diag.record_at(s, 5).msg == "");
+    assert(diag.record_at(s, 5).msg.len == 0);
 
     // With the text off again, the next diagnostic is recorded and no line is
     // written. Being an error, it spends one more of the file's budget.
-    diag.set_text(&s, false);
-    diag.error(&s, diag.loc_make("main.ft", 99, 1), "this one is not on stderr");
-    assert(diag.record_count(&s) == 7);
-    assert(diag.count(&s) == 6);
-    assert(diag.file_count(&s) == 6);
-    assert(diag.record_at(&s, 6).msg == "this one is not on stderr");
+    diag.set_text(s, false);
+    diag.error(s, diag.loc_make("main.ft", 99, 1), "this one is not on stderr");
+    assert(diag.record_count(s) == 7);
+    assert(diag.count(s) == 6);
+    assert(diag.file_count(s) == 6);
+    assert(diag.record_at(s, 6).msg == "this one is not on stderr");
 
     println("ok");
     return 0;

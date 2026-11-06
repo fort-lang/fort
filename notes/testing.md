@@ -40,25 +40,27 @@ bullet at a time and without a rewrite.
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fir-run`,
   `library-interface`, `library-artifact`, `library-use`, `library-cache`, `fixpoint`,
   `aggregate-sites`, `aggregate-front`, `aggregate-lsp`, `aggregate-fir`, `aggregate-gen`,
-  `aggregate-library`, `aggregate-owner`, `tty`, `stack_depth` and `lsp-binary`; bootstrap0 has
-  none, since building bootstrap-1 proves the C compiler. `aggregate-sites` holds the sites of
-  `--aggregate-report` in src/fort, src/lsp and std on both targets at none, each line of a report
-  at a known form, and a control program at the one site of the module that it imports.
+  `aggregate-library`, `aggregate-owner`, `aggregate-parser`, `tty`, `stack_depth` and `lsp-binary`;
+  bootstrap0 has none, since building bootstrap-1 proves the C compiler. `aggregate-sites` holds the
+  sites of `--aggregate-report` in src/fort, src/lsp and std on both targets at none, each line of a
+  report at a known form, and a control program at the one site of the module that it imports.
   `aggregate-front` holds the sites of `--aggregate-report` and `--leak-report` in the suites
   test/fort/check_*, modules_* and session_* on both targets at none, and a control program at one
   site of each report. `aggregate-lsp` does the same for the suites of test/lsp. `aggregate-fir`
   does the same for the suites test/fort/fir_*, and also holds `drop` and `drop_made` of
-  support/fir_env.ft, lower_env.ft, llvm_env.ft, check_env.ft and modules_env.ft, which those
-  suites reach and no heap probe holds. `aggregate-gen` holds the suites test/fort/gen_* and
-  types_* as `aggregate-lsp` holds those of test/lsp, and `aggregate-library` holds the suites
+  support/fir_env.ft, lower_env.ft, llvm_env.ft, check_env.ft and modules_env.ft, which those suites
+  reach and no heap probe holds. `aggregate-gen` holds the suites test/fort/gen_* and types_* as
+  `aggregate-lsp` holds those of test/lsp, and `aggregate-library` holds the suites
   test/fort/library/*_test.ft and the programs of test/library in the same way, and
-  `aggregate-owner` the suites test/fort/owner/*_test.ft. The label `libraries` holds
-  `library-compiler` and `fort-modules-libraries`, which carry no step label, so `unit` and
-  `integration` leave them out; the CI job `libraries` runs them (`notes/environment.md` 7).
-  `stack_depth` gives each compiler of the build a 1 MB stack and a type of 254 nested groups
-  (D2.11). Before the checkers kept their suffixes on a stack of their own, that type needed 1792
-  KB in a darwin debug build. The unit tests of the tools (`lang_selftest`, `fort_lint_selftest`,
-  `mutate_selftest`) went on 2026-09-26.
+  `aggregate-owner` the suites test/fort/owner/*_test.ft. `aggregate-parser` does the same for the
+  suites test/fort/parser_*, lexer_*, index_*, json_* and diag_*, and for
+  test/fort/support/index_env.ft, json_env.ft, lex_env.ft and parse_env.ft, which only they import.
+  The label `libraries` holds `library-compiler` and `fort-modules-libraries`, which carry no step
+  label, so `unit` and `integration` leave them out; the CI job `libraries` runs them
+  (`notes/environment.md` 7). `stack_depth` gives each compiler of the build a 1 MB stack and a type
+  of 254 nested groups (D2.11). Before the checkers kept their suffixes on a stack of their own,
+  that type needed 1792 KB in a darwin debug build. The unit tests of the tools (`lang_selftest`,
+  `fort_lint_selftest`, `mutate_selftest`) went on 2026-09-26.
   On linux each target runs as `tools/vm <target>`.
 - **GitHub PR CI supplies the merge gate** (2026-10-01; T-306).
   `.github/workflows/ci.yml` runs on PRs against the repository.
