@@ -16,17 +16,27 @@ fn no_transfer(fir.func* f, u32 b, fir_flow.bits mut* set) void {
 }
 
 fn main() i32 {
+    // The set ends in a `del` after the last call of the exit: it comes before each local whose
+    // end calls.
+    fir_flow.bits[1] mut edge_gens = {fir_flow.bits_new(1)};
+    defer del(edge_gens[0].words);
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
-    fir.func mut f = fir_env.func_of(&e, "nothing");
-    fir.block_set_terminator(&f, 0, fir.term_return(fir_env.at(1, 1), 0));
-    fir.pred_table mut pt = fir.func_predecessors(&f);
-    fir_flow.dataflow mut d = fir_flow.dataflow_new(1, fir_flow.join_kind.join_union,
-                                                   no_transfer);
+    // `f` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.func mut* own f = fir.func_make();
+    *f = fir_env.func_of(&e, "nothing");
+    defer fir.func_drop_made(move(f));
+    fir.block_set_terminator(f, 0, fir.term_return(fir_env.at(1, 1), 0));
+    fir.pred_table mut* own pt = fir.pred_table_make();
+    *pt = fir.func_predecessors(f);
+    defer fir.pred_table_drop_made(move(pt));
+    fir_flow.dataflow mut* own d = fir_flow.dataflow_make(1, fir_flow.join_kind.join_union,
+                                                         no_transfer);
+    defer fir_flow.dataflow_drop_made(move(d));
     fir_flow.bits@ none = {};
     u32[1] to = {fir_flow.NO_EDGE};
-    fir_flow.bits[1] mut edge_gens = {fir_flow.bits_new(1)};
     println("ready");
-    fir_flow.dataflow_forward_edges(&f, &pt, &d, none, none, to[..], edge_gens[..]);
+    fir_flow.dataflow_forward_edges(f, pt, d, none, none, to[..], edge_gens[..]);
     return 0;
 }

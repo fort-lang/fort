@@ -98,7 +98,7 @@ fn open(env mut* e) void {
     check_env.open(&e->c);
     check_env.add(&e->c, "other.ft", "struct thing {\n    i32 v;\n}\n");
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     prelude_text(&b);
     if (!check_env.check_src(&e->c, strbuf.view(&b))) {
         u64 mut i = 0;
@@ -237,11 +237,13 @@ fn an_enum_table_needs_enum_member_in_the_prelude() void {
     open(&e);
     defer close(&e);
     fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e.c, "main"), &e.c.ck};
-    fir_parse.fir_parser mut p =
-        fir_parse.parser_create(&e.c.m.s, "t.fir", "enum_table main.color", pre);
-    defer fir_parse.parser_free(&p);
+    // `p` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir_parse.fir_parser mut* own p = fir_parse.parser_make();
+    *p = fir_parse.parser_create(&e.c.m.s, "t.fir", "enum_table main.color", pre);
+    defer fir_parse.parser_drop_made(move(p));
     fir.constant mut c = fir.constant{};
-    assert(!fir_parse.parse_constant(&p, &c));
+    assert(!fir_parse.parse_constant(p, &c));
     assert(check_env.errors(&e.c) == 1);
     assert(check_env.report_text(&e.c, 0) == "1:1: unknown type 'enum_member'");
 }

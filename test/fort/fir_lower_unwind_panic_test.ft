@@ -35,20 +35,30 @@ fn unwind_above_the_loop(lower_env.env mut* e) void {
     ast.node* decl = lower_env.decl(e, "f");
     ast.node* loop = ast.ast_child(decl->b, 0);
     ast.node* brk = ast.ast_child(loop->b, 0);
-    fir.func mut f = fir.func_new(&e->c.ck.types, decl->sym, decl->sym->ty);
-    defer fir.func_free(&f);
-    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e->c.ck, .f = &f};
-    defer fir_lower.scopes_free(&lw.scopes);
-    // the body, the loop and a block of deferred code inside the loop
-    fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_fn, 0, 0);
-    fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_loop, 0, 0);
-    fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_block, 0, 0);
-    lw.floor = 1;
-    u64 mut stop = 0;
-    assert(fir_lower.unwind(&lw, brk, fir_lower.exit_kind.x_break, &stop));
-    assert(stop == 1);
-    println("the break finds its loop above the floor");
-    lw.floor = 2;
-    fir_lower.unwind(&lw, brk, fir_lower.exit_kind.x_break, &stop);
+    // `f` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.func mut* own f = fir.func_make();
+    *f = fir.func_new(&e->c.ck.types, decl->sym, decl->sym->ty);
+    defer fir.func_drop_made(move(f));
+    // `lw` ends in a block of its own, so that its `del`s come after the last call of its exit.
+    {
+        fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e->c.ck, .f = f};
+        defer {
+            del(lw.scopes.items);
+            del(lw.defers.items);
+            del(lw.named.items);
+        }
+        // the body, the loop and a block of deferred code inside the loop
+        fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_fn, 0, 0);
+        fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_loop, 0, 0);
+        fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_block, 0, 0);
+        lw.floor = 1;
+        u64 mut stop = 0;
+        assert(fir_lower.unwind(&lw, brk, fir_lower.exit_kind.x_break, &stop));
+        assert(stop == 1);
+        println("the break finds its loop above the floor");
+        lw.floor = 2;
+        fir_lower.unwind(&lw, brk, fir_lower.exit_kind.x_break, &stop);
+    }
     println("the break left the deferred code");
 }

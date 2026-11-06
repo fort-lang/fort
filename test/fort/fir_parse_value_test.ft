@@ -25,25 +25,33 @@ fn temp(fir.func mut* f, types.node* ty) void {
     fir.local_add(f, ty, fir.local_kind.lk_temp, null, fir_env.at(1, 1));
 }
 
-fn make(fir_env.env mut* e) fixture {
-    fixture mut x = fixture{};
-    x.f = fir_env.func_of(e, "add");
+// The value of a case in an allocation of its own: a case lends it to calls, and drop_made ends it.
+fn make(fir_env.env mut* e) fixture mut* own {
+    fixture mut* own x = new(fixture);
+    x->f = fir_env.func_of(e, "add");
     types.table mut* tt = fir_env.tt(e);
     types.node* pair = fir_env.ty(e, "pair");
     types.node* pair_ptr = types.type_ptr(tt, pair, false, true);
     // _3 to _13, in the order of fir_print_value_test
-    temp(&x.f, pair);
-    temp(&x.f, pair_ptr);
-    temp(&x.f, types.type_array(tt, fir_env.i32_ty(e), 4));
-    temp(&x.f, fir_env.u64_ty(e));
-    temp(&x.f, types.type_string(tt, false));
-    temp(&x.f, types.type_span(tt, fir_env.i32_ty(e), false, true));
-    temp(&x.f, fir_env.ty(e, "add"));
-    temp(&x.f, fir_env.prim_ty(e, prim.prim_kind.prim_f64));
-    temp(&x.f, types.type_ptr(tt, pair_ptr, false, false));
-    temp(&x.f, fir_env.ty(e, "holder"));
-    temp(&x.f, types.type_ptr(tt, fir_env.i32_ty(e), false, false));
+    temp(&x->f, pair);
+    temp(&x->f, pair_ptr);
+    temp(&x->f, types.type_array(tt, fir_env.i32_ty(e), 4));
+    temp(&x->f, fir_env.u64_ty(e));
+    temp(&x->f, types.type_string(tt, false));
+    temp(&x->f, types.type_span(tt, fir_env.i32_ty(e), false, true));
+    temp(&x->f, fir_env.ty(e, "add"));
+    temp(&x->f, fir_env.prim_ty(e, prim.prim_kind.prim_f64));
+    temp(&x->f, types.type_ptr(tt, pair_ptr, false, false));
+    temp(&x->f, fir_env.ty(e, "holder"));
+    temp(&x->f, types.type_ptr(tt, fir_env.i32_ty(e), false, false));
     return x;
+}
+
+// Ends a value of make that the caller moves in.
+fn drop_made(fixture mut* own p) void {
+    fixture kept = move(*p);
+    del(p);
+    fir.func_drop(move(kept.f));
 }
 
 // ---- the spellings of fir_print_value_test ---------------------------------------------------
@@ -179,12 +187,15 @@ enum form {
 // the parse reports a diagnostic or leaves text behind. *kind is the kind of a parsed rvalue.
 fn parse_print(fir_env.env mut* e, fixture mut* x, form fm, string text, strbuf.str_buf mut* b,
                fir.rvalue_kind mut* kind) bool {
-    fir_parse.fir_parser mut p = fir_env.parser(e, text);
-    defer fir_parse.parser_free(&p);
+    // `p` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir_parse.fir_parser mut* own p = fir_parse.parser_make();
+    *p = fir_env.parser(e, text);
+    defer fir_parse.parser_drop_made(move(p));
     bool mut ok = false;
     switch (fm) {
     case form.fm_type:
-        types.node* t = fir_parse.parse_type_text(&p, text, fir_env.at(1, 1));
+        types.node* t = fir_parse.parse_type_text(p, text, fir_env.at(1, 1));
         ok = t != null;
         if (ok) {
             fir_print.print_type(t, b);
@@ -192,37 +203,37 @@ fn parse_print(fir_env.env mut* e, fixture mut* x, form fm, string text, strbuf.
         return ok;
     case form.fm_place:
         fir.place mut q = fir.place{};
-        ok = fir_parse.parse_place(&p, &x->f, &q);
+        ok = fir_parse.parse_place(p, &x->f, &q);
         if (ok) {
             fir_print.print_place(&x->f, q, b);
         }
     case form.fm_operand:
         fir.operand mut o = fir.operand{};
-        ok = fir_parse.parse_operand(&p, &x->f, &o);
+        ok = fir_parse.parse_operand(p, &x->f, &o);
         if (ok) {
             fir_print.print_operand(&x->f, o, b);
         }
     case form.fm_constant:
         fir.constant mut c = fir.constant{};
-        ok = fir_parse.parse_constant(&p, &c);
+        ok = fir_parse.parse_constant(p, &c);
         if (ok) {
             fir_print.print_constant(c, b);
         }
     case form.fm_rvalue:
         fir.rvalue mut r = fir.rvalue{};
-        ok = fir_parse.parse_rvalue(&p, &x->f, &r);
+        ok = fir_parse.parse_rvalue(p, &x->f, &r);
         if (ok) {
             fir_print.print_rvalue(&x->f, r, b);
             *kind = r.kind;
         }
     }
-    return ok && fir_parse.at_end(&p);
+    return ok && fir_parse.at_end(p);
 }
 
 // Holds that `text` parses as `fm` and prints back as it was.
 fn round(fir_env.env mut* e, fixture mut* x, form fm, string text) fir.rvalue_kind {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     fir.rvalue_kind mut kind = fir.rvalue_kind.rv_use;
     if (!parse_print(e, x, fm, text, &b, &kind)) {
         eprintln("fir_parse_value_test: <", text, "> does not parse");
@@ -235,7 +246,7 @@ fn round(fir_env.env mut* e, fixture mut* x, form fm, string text) fir.rvalue_ki
 // Holds that `text` does not parse as `fm` and gives the one diagnostic `want`.
 fn bad(fir_env.env mut* e, fixture mut* x, form fm, string text, string want) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     u64 before = fir_env.errors(e);
     fir.rvalue_kind mut kind = fir.rvalue_kind.rv_use;
     assert(!parse_print(e, x, fm, text, &b, &kind));
@@ -251,35 +262,35 @@ fn every_pinned_spelling_round_trips() void {
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
     defer fir_env.close(&e);
-    fixture mut x = make(&e);
-    defer fir.func_free(&x.f);
+    fixture mut* own x = make(&e);
+    defer drop_made(move(x));
     u64 mut n = 0;
     for (string text : TYPES) {
-        round(&e, &x, form.fm_type, text);
+        round(&e, x, form.fm_type, text);
         n += 1;
     }
     for (string text : PLACES) {
-        round(&e, &x, form.fm_place, text);
+        round(&e, x, form.fm_place, text);
         n += 1;
     }
     for (string text : OPERANDS) {
-        round(&e, &x, form.fm_operand, text);
+        round(&e, x, form.fm_operand, text);
         n += 1;
     }
     for (string text : CONSTANTS) {
-        round(&e, &x, form.fm_constant, text);
+        round(&e, x, form.fm_constant, text);
         n += 1;
     }
     u32 mut k = 0;
     for (string text : RVALUES) {
         // the list names every kind once, in the order of the enum
-        assert(round(&e, &x, form.fm_rvalue, text) == cast(k, fir.rvalue_kind));
+        assert(round(&e, x, form.fm_rvalue, text) == cast(k, fir.rvalue_kind));
         k += 1;
         n += 1;
     }
     assert(k == cast(fir.rvalue_kind.rv_call, u32) + 1);
     for (string text : EDGES) {
-        round(&e, &x, form.fm_rvalue, text);
+        round(&e, x, form.fm_rvalue, text);
         n += 1;
     }
     assert(fir_env.errors(&e) == 0);
@@ -289,10 +300,11 @@ fn every_pinned_spelling_round_trips() void {
 // ---- what a parse gives --------------------------------------------------------------------
 
 fn parse_constant(fir_env.env mut* e, string text) fir.constant {
-    fir_parse.fir_parser mut p = fir_env.parser(e, text);
-    defer fir_parse.parser_free(&p);
+    fir_parse.fir_parser mut* own p = fir_parse.parser_make();
+    *p = fir_env.parser(e, text);
+    defer fir_parse.parser_drop_made(move(p));
     fir.constant mut c = fir.constant{};
-    assert(fir_parse.parse_constant(&p, &c));
+    assert(fir_parse.parse_constant(p, &c));
     return c;
 }
 
@@ -332,25 +344,27 @@ fn symbol_names_resolve() void {
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
     defer fir_env.close(&e);
-    fixture mut x = make(&e);
-    defer fir.func_free(&x.f);
+    fixture mut* own x = make(&e);
+    defer drop_made(move(x));
     fir.constant table = parse_constant(&e, "enum_table main.color");
     assert(table.sym == fir_env.sym(&e, "color"));
     types.node* member = fir_env.ty(&e, "enum_member");
     assert(table.ty == types.type_ptr(fir_env.tt(&e), member, false, false));
     fir.constant add = parse_constant(&e, "fn main.add");
     assert(add.kind == fir.const_kind.ck_fn && add.sym == fir_env.sym(&e, "add"));
-    fir_parse.fir_parser mut p = fir_env.parser(&e, "global main.LIMIT global main.total");
-    defer fir_parse.parser_free(&p);
+    fir_parse.fir_parser mut* own p = fir_parse.parser_make();
+    *p = fir_env.parser(&e, "global main.LIMIT global main.total");
+    defer fir_parse.parser_drop_made(move(p));
     fir.place mut q = fir.place{};
-    assert(fir_parse.parse_place(&p, &x.f, &q));
+    assert(fir_parse.parse_place(p, &x->f, &q));
     assert(q.base == fir.base_kind.bk_global && q.global == fir_env.sym(&e, "LIMIT"));
-    assert(fir_parse.parse_place(&p, &x.f, &q));
+    assert(fir_parse.parse_place(p, &x->f, &q));
     assert(q.global == fir_env.sym(&e, "total"));
-    fir_parse.fir_parser mut c = fir_env.parser(&e, "call extern labs(const i64 1)");
-    defer fir_parse.parser_free(&c);
+    fir_parse.fir_parser mut* own c = fir_parse.parser_make();
+    *c = fir_env.parser(&e, "call extern labs(const i64 1)");
+    defer fir_parse.parser_drop_made(move(c));
     fir.rvalue mut r = fir.rvalue{};
-    assert(fir_parse.parse_rvalue(&c, &x.f, &r));
+    assert(fir_parse.parse_rvalue(c, &x->f, &r));
     assert(r.callee == fir.callee_kind.cl_extern && r.callee_sym == fir_env.sym(&e, "labs"));
     assert(fir_env.errors(&e) == 0);
 }
@@ -359,67 +373,67 @@ fn an_unknown_symbol_is_one_diagnostic() void {
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
     defer fir_env.close(&e);
-    fixture mut x = make(&e);
-    defer fir.func_free(&x.f);
-    bad(&e, &x, form.fm_place, "global main.NOPE", "1:8: unknown global 'main.NOPE'");
+    fixture mut* own x = make(&e);
+    defer drop_made(move(x));
+    bad(&e, x, form.fm_place, "global main.NOPE", "1:8: unknown global 'main.NOPE'");
     // A name of another kind, and a name without its module, are no global.
-    bad(&e, &x, form.fm_place, "global main.add", "1:8: unknown global 'main.add'");
-    bad(&e, &x, form.fm_place, "global LIMIT", "1:8: unknown global 'LIMIT'");
-    bad(&e, &x, form.fm_constant, "fn main.nope", "1:4: unknown function 'main.nope'");
-    bad(&e, &x, form.fm_constant, "fn main.LIMIT", "1:4: unknown function 'main.LIMIT'");
-    bad(&e, &x, form.fm_rvalue, "call extern nope()", "1:13: unknown extern 'nope'");
+    bad(&e, x, form.fm_place, "global main.add", "1:8: unknown global 'main.add'");
+    bad(&e, x, form.fm_place, "global LIMIT", "1:8: unknown global 'LIMIT'");
+    bad(&e, x, form.fm_constant, "fn main.nope", "1:4: unknown function 'main.nope'");
+    bad(&e, x, form.fm_constant, "fn main.LIMIT", "1:4: unknown function 'main.LIMIT'");
+    bad(&e, x, form.fm_rvalue, "call extern nope()", "1:13: unknown extern 'nope'");
     // An extern goes by its C name alone.
-    bad(&e, &x, form.fm_rvalue, "call extern main.puts()", "1:13: unknown extern 'main.puts'");
-    bad(&e, &x, form.fm_constant, "enum_table main.pair", "1:12: unknown enum 'main.pair'");
-    bad(&e, &x, form.fm_rvalue, "call fn other.add()", "1:9: unknown function 'other.add'");
+    bad(&e, x, form.fm_rvalue, "call extern main.puts()", "1:13: unknown extern 'main.puts'");
+    bad(&e, x, form.fm_constant, "enum_table main.pair", "1:12: unknown enum 'main.pair'");
+    bad(&e, x, form.fm_rvalue, "call fn other.add()", "1:9: unknown function 'other.add'");
 }
 
 fn malformed_text_is_one_diagnostic() void {
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
     defer fir_env.close(&e);
-    fixture mut x = make(&e);
-    defer fir.func_free(&x.f);
+    fixture mut* own x = make(&e);
+    defer drop_made(move(x));
     // The three cases of the ticket: a missing `)`, `copy` without a place, `cast` without `<`.
-    bad(&e, &x, form.fm_rvalue, "add(copy _1, copy _2",
+    bad(&e, x, form.fm_rvalue, "add(copy _1, copy _2",
         "1:21: expected ')', found the end of the text");
-    bad(&e, &x, form.fm_operand, "copy", "1:5: expected a place, found the end of the text");
-    bad(&e, &x, form.fm_rvalue, "cast i32(copy _1)", "1:6: expected '<', found 'i32'");
+    bad(&e, x, form.fm_operand, "copy", "1:5: expected a place, found the end of the text");
+    bad(&e, x, form.fm_rvalue, "cast i32(copy _1)", "1:6: expected '<', found 'i32'");
     // The count of operands.
-    bad(&e, &x, form.fm_rvalue, "add(copy _1)", "1:12: expected ',', found ')'");
-    bad(&e, &x, form.fm_rvalue, "not(copy _1, copy _2)", "1:1: 'not' takes one operand");
-    bad(&e, &x, form.fm_rvalue, "slice(_5, const u64 0)", "1:22: expected ',', found ')'");
-    bad(&e, &x, form.fm_rvalue, "call fn main.add(copy _1",
+    bad(&e, x, form.fm_rvalue, "add(copy _1)", "1:12: expected ',', found ')'");
+    bad(&e, x, form.fm_rvalue, "not(copy _1, copy _2)", "1:1: 'not' takes one operand");
+    bad(&e, x, form.fm_rvalue, "slice(_5, const u64 0)", "1:22: expected ',', found ')'");
+    bad(&e, x, form.fm_rvalue, "call fn main.add(copy _1",
         "1:25: expected ',' or ')', found the end of the text");
-    bad(&e, &x, form.fm_rvalue, "bogus(copy _1)", "1:1: expected an rvalue, found 'bogus'");
-    bad(&e, &x, form.fm_rvalue, "add(copy _1, copy _2, copy _1)", "1:1: 'add' takes two operands");
-    bad(&e, &x, form.fm_rvalue, "call extern 7()", "1:13: expected a name, found '7'");
-    bad(&e, &x, form.fm_rvalue, "addr mut _1", "1:10: expected '(', found '_1'");
+    bad(&e, x, form.fm_rvalue, "bogus(copy _1)", "1:1: expected an rvalue, found 'bogus'");
+    bad(&e, x, form.fm_rvalue, "add(copy _1, copy _2, copy _1)", "1:1: 'add' takes two operands");
+    bad(&e, x, form.fm_rvalue, "call extern 7()", "1:13: expected a name, found '7'");
+    bad(&e, x, form.fm_rvalue, "addr mut _1", "1:10: expected '(', found '_1'");
     // Places.
-    bad(&e, &x, form.fm_place, "_99", "1:1: unknown local '_99'");
-    bad(&e, &x, form.fm_place, "(_1)", "1:2: expected '*', found '_1'");
-    bad(&e, &x, form.fm_place, "_5[_6", "1:6: expected ']', found the end of the text");
-    bad(&e, &x, form.fm_place, "_3.-1", "1:4: a field number does not fit u32");
-    bad(&e, &x, form.fm_place, "bb1", "1:1: expected a place, found 'bb1'");
-    bad(&e, &x, form.fm_place, "_4294967296", "1:1: a local number does not fit u32");
-    bad(&e, &x, form.fm_place, "global 5", "1:8: expected a name, found '5'");
+    bad(&e, x, form.fm_place, "_99", "1:1: unknown local '_99'");
+    bad(&e, x, form.fm_place, "(_1)", "1:2: expected '*', found '_1'");
+    bad(&e, x, form.fm_place, "_5[_6", "1:6: expected ']', found the end of the text");
+    bad(&e, x, form.fm_place, "_3.-1", "1:4: a field number does not fit u32");
+    bad(&e, x, form.fm_place, "bb1", "1:1: expected a place, found 'bb1'");
+    bad(&e, x, form.fm_place, "_4294967296", "1:1: a local number does not fit u32");
+    bad(&e, x, form.fm_place, "global 5", "1:8: expected a name, found '5'");
     // Constants.
-    bad(&e, &x, form.fm_constant, "u8 256", "1:4: constant '256' does not fit 'u8'");
-    bad(&e, &x, form.fm_constant, "i8 -129", "1:4: constant '-129' does not fit 'i8'");
-    bad(&e, &x, form.fm_constant, "color 2147483648",
+    bad(&e, x, form.fm_constant, "u8 256", "1:4: constant '256' does not fit 'u8'");
+    bad(&e, x, form.fm_constant, "i8 -129", "1:4: constant '-129' does not fit 'i8'");
+    bad(&e, x, form.fm_constant, "color 2147483648",
         "1:7: constant '2147483648' does not fit 'color'");
-    bad(&e, &x, form.fm_constant, "char 256",
+    bad(&e, x, form.fm_constant, "char 256",
         "1:6: a char constant is a code point from 0 to 255");
-    bad(&e, &x, form.fm_constant, "f64 -1",
+    bad(&e, x, form.fm_constant, "f64 -1",
         "1:5: a float constant is the bits of its double, with no sign");
-    bad(&e, &x, form.fm_constant, "bool 1",
+    bad(&e, x, form.fm_constant, "bool 1",
         "1:6: an integer constant has an integer, char, enum or float type, not 'bool'");
-    bad(&e, &x, form.fm_constant, "i32",
+    bad(&e, x, form.fm_constant, "i32",
         "1:4: expected an integer after the type, found the end of the text");
-    bad(&e, &x, form.fm_constant, "bytes 1", "1:7: expected a string, found '1'");
-    bad(&e, &x, form.fm_constant, "zero nosuch", "1:6: unknown type 'nosuch'");
-    bad(&e, &x, form.fm_constant, ";", "1:1: expected a constant, found ';'");
-    bad(&e, &x, form.fm_operand, "take _1",
+    bad(&e, x, form.fm_constant, "bytes 1", "1:7: expected a string, found '1'");
+    bad(&e, x, form.fm_constant, "zero nosuch", "1:6: unknown type 'nosuch'");
+    bad(&e, x, form.fm_constant, ";", "1:1: expected a constant, found ';'");
+    bad(&e, x, form.fm_operand, "take _1",
         "1:1: expected an operand: 'copy', 'move' or 'const', found 'take'");
 }
 

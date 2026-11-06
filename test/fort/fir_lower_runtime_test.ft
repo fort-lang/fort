@@ -172,7 +172,7 @@ bad_entry[BAD_ENTRIES] BAD = {
 // `}` line, left out and `decl` added at the end, in *out. An empty `decl` leaves `name` out.
 fn runtime_with(string name, string decl, strbuf.str_buf mut* out) void {
     strbuf.str_buf mut head = strbuf.create();
-    defer strbuf.free(&head);
+    defer del(head.data);
     strbuf.append(&head, "fn ");
     strbuf.append(&head, name);
     strbuf.push(&head, '(');
@@ -203,7 +203,7 @@ fn check_over(lower_env.env mut* e, string runtime, string em) void {
     }
     modules_env.std_dir_without_runtime(&e->c.m, "std");
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     for (string line : SOURCE) {
         strbuf.append(&b, line);
         strbuf.push(&b, '\n');
@@ -219,13 +219,15 @@ fn check_over(lower_env.env mut* e, string runtime, string em) void {
 // Lowers the function `name` of the checked source, holds that the lowering refuses it and
 // leaves the function empty, and gives the report in *why.
 fn refusal(lower_env.env mut* e, string name, fir_lower.report mut* why) void {
-    fir.func mut f = fir.func{};
-    if (fir_lower.lower_function(&e->c.ck, lower_env.decl(e, name), &f, why)) {
-        fir.func_free(&f);
+    // `f` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.func mut* own f = fir.func_make();
+    defer fir.func_drop_made(move(f));
+    if (fir_lower.lower_function(&e->c.ck, lower_env.decl(e, name), f, why)) {
         eprintln("fir_lower_runtime_test: ", name, " lowers");
         panic("fir_lower_runtime_test.refusal: the lowering lowers the function");
     }
-    assert(f.locals.len == 0 && f.blocks.len == 0 && f.ops.len == 0 && f.projs.len == 0);
+    assert(f->locals.len == 0 && f->blocks.len == 0 && f->ops.len == 0 && f->projs.len == 0);
 }
 
 // Whether `text` is the line `want` and its newline. The reads of `text`, a view of a buffer of
@@ -238,7 +240,7 @@ fn is_line(string text, string want) bool {
 // rather than none, and the line `want` that `--fir` prints.
 fn expect_report(fir_lower.report* why, string name, bool signature, string want) void {
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     fir_lower.write_report(why, &got);
     string text = strbuf.view(&got);
     bool line = is_line(text, want);
@@ -259,7 +261,7 @@ fn an_entry_with_other_parameters_stops_the_lowering() void {
     defer lower_env.close(&e);
     for (bad_entry c : BAD) {
         strbuf.str_buf mut rt = strbuf.create();
-        defer strbuf.free(&rt);
+        defer del(rt.data);
         runtime_with(c.name, c.decl, &rt);
         check_over(&e, strbuf.view(&rt), "");
         fir_lower.report mut why = fir_lower.report{};
@@ -271,11 +273,11 @@ fn an_entry_with_other_parameters_stops_the_lowering() void {
 // The struct `enum_member` of another module is not the member record of std.rt: std/em.ft
 // declares one with the same fields, and a print_enum that takes it has other parameters.
 fn the_member_record_of_another_module_is_another_parameter() void {
+    strbuf.str_buf mut rt = strbuf.create();
+    defer del(rt.data);
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
-    strbuf.str_buf mut rt = strbuf.create();
-    defer strbuf.free(&rt);
     strbuf.append(&rt, "import std.em;\n");
     runtime_with("print_enum", "fn print_enum(i32 fd, i32 v, em.enum_member* m, u64 n) void {\n}",
                  &rt);
@@ -304,11 +306,11 @@ fn the_result_of_a_print_does_not_count() void {
     defer lower_env.close(&e);
     for (bad_entry c : FIT) {
         strbuf.str_buf mut rt = strbuf.create();
-        defer strbuf.free(&rt);
+        defer del(rt.data);
         runtime_with(c.name, c.decl, &rt);
         check_over(&e, strbuf.view(&rt), "");
         strbuf.str_buf mut call = strbuf.create();
-        defer strbuf.free(&call);
+        defer del(call.data);
         strbuf.append(&call, "call fn std.rt.");
         strbuf.append(&call, c.name);
         strbuf.push(&call, '(');
@@ -330,11 +332,11 @@ fn the_result_of_a_print_does_not_count() void {
 
 // The struct `enum_member` of another module in a span is another parameter too.
 fn a_span_of_the_member_record_of_another_module_is_another_parameter() void {
+    strbuf.str_buf mut rt = strbuf.create();
+    defer del(rt.data);
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
-    strbuf.str_buf mut rt = strbuf.create();
-    defer strbuf.free(&rt);
     strbuf.append(&rt, "import std.em;\n");
     runtime_with("print_enum", "fn print_enum(i32 fd, i32 v, em.enum_member@ table) void {\n}",
                  &rt);
@@ -368,7 +370,7 @@ fn a_missing_entry_is_no_entry_with_other_parameters() void {
     defer lower_env.close(&e);
     for (bad_entry c : BAD) {
         strbuf.str_buf mut rt = strbuf.create();
-        defer strbuf.free(&rt);
+        defer del(rt.data);
         runtime_with(c.name, "", &rt);
         check_over(&e, strbuf.view(&rt), "");
         fir_lower.report mut why = fir_lower.report{};

@@ -68,14 +68,17 @@ fn the_folded_temporary_of_the_worked_example_has_no_storage() void {
     };
     pass_env.mode[3] modes = {pass_env.CHECKED, pass_env.RELEASE, pass_env.NO_BOUNDS};
     for (pass_env.mode m : modes) {
-        fir.func mut f = llvm_env.lower(&e, WORKED[..], "f", m);
-        defer fir.func_free(&f);
-        assert(fir.local_count(&f) == 4);
-        assert(llvm_env.storage_of(&f, 0) == fir_llvm.storage.sk_result);
-        assert(llvm_env.storage_of(&f, 1) == fir_llvm.storage.sk_param);
-        assert(llvm_env.storage_of(&f, 2) == fir_llvm.storage.sk_named);
-        assert(llvm_env.storage_of(&f, 3) == fir_llvm.storage.sk_none);
-        llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+        // `f` lives in an allocation, so that the leak rule proves its end: no call changes the
+        // pointer, and drop_made holds each release once.
+        fir.func mut* own f = fir.func_make();
+        *f = llvm_env.lower(&e, WORKED[..], "f", m);
+        defer fir.func_drop_made(move(f));
+        assert(fir.local_count(f) == 4);
+        assert(llvm_env.storage_of(f, 0) == fir_llvm.storage.sk_result);
+        assert(llvm_env.storage_of(f, 1) == fir_llvm.storage.sk_param);
+        assert(llvm_env.storage_of(f, 2) == fir_llvm.storage.sk_named);
+        assert(llvm_env.storage_of(f, 3) == fir_llvm.storage.sk_none);
+        llvm_env.expect(&e, llvm_env.translate(&e, f), want[..]);
     }
 }
 
@@ -100,16 +103,17 @@ fn an_aggregate_result_and_parameter_have_no_alloca() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.func mut f = llvm_env.lower(&e, SHAPES[..], "same", pass_env.CHECKED);
-    defer fir.func_free(&f);
-    assert(llvm_env.storage_of(&f, 0) == fir_llvm.storage.sk_sret);
-    assert(llvm_env.storage_of(&f, 1) == fir_llvm.storage.sk_incoming);
+    fir.func mut* own f = fir.func_make();
+    *f = llvm_env.lower(&e, SHAPES[..], "same", pass_env.CHECKED);
+    defer fir.func_drop_made(move(f));
+    assert(llvm_env.storage_of(f, 0) == fir_llvm.storage.sk_sret);
+    assert(llvm_env.storage_of(f, 1) == fir_llvm.storage.sk_incoming);
     string[3] want = {
         "entry:",
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %p.in, \\",
         "i64 16, i1 false)",
     };
-    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    llvm_env.expect(&e, llvm_env.translate(&e, f), want[..]);
 }
 
 // `_0` of type `void` has no storage, and a scalar parameter is stored into its alloca before
@@ -118,15 +122,16 @@ fn a_void_result_has_no_storage() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.func mut f = llvm_env.lower(&e, SHAPES[..], "nothing", pass_env.CHECKED);
-    defer fir.func_free(&f);
-    assert(llvm_env.storage_of(&f, 0) == fir_llvm.storage.sk_none);
+    fir.func mut* own f = fir.func_make();
+    *f = llvm_env.lower(&e, SHAPES[..], "nothing", pass_env.CHECKED);
+    defer fir.func_drop_made(move(f));
+    assert(llvm_env.storage_of(f, 0) == fir_llvm.storage.sk_none);
     string[3] want = {
         "entry:",
         "  %x.0 = alloca i32, align 4",
         "  store i32 %x.in, ptr %x.0, align 4",
     };
-    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    llvm_env.expect(&e, llvm_env.translate(&e, f), want[..]);
 }
 
 // A scalar `_0` is `%result`, which each assignment of `_0` stores: the one agreed difference of
@@ -135,9 +140,10 @@ fn a_scalar_result_is_the_alloca_result() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.func mut f = llvm_env.lower(&e, SHAPES[..], "wrap", pass_env.CHECKED);
-    defer fir.func_free(&f);
-    assert(llvm_env.storage_of(&f, 3) == fir_llvm.storage.sk_register);
+    fir.func mut* own f = fir.func_make();
+    *f = llvm_env.lower(&e, SHAPES[..], "wrap", pass_env.CHECKED);
+    defer fir.func_drop_made(move(f));
+    assert(llvm_env.storage_of(f, 3) == fir_llvm.storage.sk_register);
     string[10] want = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -150,7 +156,7 @@ fn a_scalar_result_is_the_alloca_result() void {
         "  %t2 = add i32 %t0, %t1",
         "  store i32 %t2, ptr %result, align 4",
     };
-    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    llvm_env.expect(&e, llvm_env.translate(&e, f), want[..]);
 }
 
 // ---- the classification -------------------------------------------------------------------------
@@ -206,13 +212,14 @@ fn an_index_before_a_conditional_is_a_register() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.func mut f = llvm_env.lower(&e, CASES[..], "sel", pass_env.CHECKED);
-    defer fir.func_free(&f);
-    assert(llvm_env.storage_of(&f, 2) == fir_llvm.storage.sk_incoming);
-    assert(llvm_env.storage_of(&f, 4) == fir_llvm.storage.sk_register);
-    assert(llvm_env.storage_of(&f, 5) == fir_llvm.storage.sk_register);
-    assert(llvm_env.storage_of(&f, 6) == fir_llvm.storage.sk_register);
-    assert(llvm_env.storage_of(&f, 7) == fir_llvm.storage.sk_slot);
+    fir.func mut* own f = fir.func_make();
+    *f = llvm_env.lower(&e, CASES[..], "sel", pass_env.CHECKED);
+    defer fir.func_drop_made(move(f));
+    assert(llvm_env.storage_of(f, 2) == fir_llvm.storage.sk_incoming);
+    assert(llvm_env.storage_of(f, 4) == fir_llvm.storage.sk_register);
+    assert(llvm_env.storage_of(f, 5) == fir_llvm.storage.sk_register);
+    assert(llvm_env.storage_of(f, 6) == fir_llvm.storage.sk_register);
+    assert(llvm_env.storage_of(f, 7) == fir_llvm.storage.sk_slot);
     string[27] want = {
         "entry:",
         "  %c.0 = alloca i8, align 1",
@@ -242,7 +249,7 @@ fn an_index_before_a_conditional_is_a_register() void {
         "  %t9 = getelementptr inbounds i32, ptr %t8, i64 %t2",
         "  store i32 %t6, ptr %t9, align 4",
     };
-    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    llvm_env.expect(&e, llvm_env.translate(&e, f), want[..]);
 }
 
 // `y += (c ? 1 : 2)`: the old value `_4` and the overflow flag `_6` are registers, and the arm
@@ -251,12 +258,13 @@ fn a_compound_assignment_over_a_conditional() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.func mut f = llvm_env.lower(&e, CASES[..], "acc", pass_env.CHECKED);
-    defer fir.func_free(&f);
-    assert(llvm_env.storage_of(&f, 3) == fir_llvm.storage.sk_named);
-    assert(llvm_env.storage_of(&f, 4) == fir_llvm.storage.sk_register);
-    assert(llvm_env.storage_of(&f, 5) == fir_llvm.storage.sk_slot);
-    assert(llvm_env.storage_of(&f, 6) == fir_llvm.storage.sk_register);
+    fir.func mut* own f = fir.func_make();
+    *f = llvm_env.lower(&e, CASES[..], "acc", pass_env.CHECKED);
+    defer fir.func_drop_made(move(f));
+    assert(llvm_env.storage_of(f, 3) == fir_llvm.storage.sk_named);
+    assert(llvm_env.storage_of(f, 4) == fir_llvm.storage.sk_register);
+    assert(llvm_env.storage_of(f, 5) == fir_llvm.storage.sk_slot);
+    assert(llvm_env.storage_of(f, 6) == fir_llvm.storage.sk_register);
     string[29] want = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -288,7 +296,7 @@ fn a_compound_assignment_over_a_conditional() void {
         "  %t7 = load i32, ptr %y.2, align 4",
         "  store i32 %t7, ptr %result, align 4",
     };
-    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    llvm_env.expect(&e, llvm_env.translate(&e, f), want[..]);
 }
 
 // `switch` on an enum with no `default`: `_2`, the value widened for `fail_enum`, is a register,
@@ -297,10 +305,11 @@ fn an_enum_value_for_its_failure_block_is_a_register() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.func mut f = llvm_env.lower(&e, CASES[..], "pick", pass_env.CHECKED);
-    defer fir.func_free(&f);
-    assert(fir.local_count(&f) == 3);
-    assert(llvm_env.storage_of(&f, 2) == fir_llvm.storage.sk_register);
+    fir.func mut* own f = fir.func_make();
+    *f = llvm_env.lower(&e, CASES[..], "pick", pass_env.CHECKED);
+    defer fir.func_drop_made(move(f));
+    assert(fir.local_count(f) == 3);
+    assert(llvm_env.storage_of(f, 2) == fir_llvm.storage.sk_register);
     string[16] want = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -319,7 +328,7 @@ fn an_enum_value_for_its_failure_block_is_a_register() void {
         "",
         "L4:",
     };
-    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    llvm_env.expect(&e, llvm_env.translate(&e, f), want[..]);
 }
 
 // The `&&` temporary, which two statements assign, is a slot (spec/fir.md 12.1).
@@ -327,9 +336,10 @@ fn the_short_circuit_temporary_is_a_slot() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.func mut f = llvm_env.lower(&e, CASES[..], "both", pass_env.CHECKED);
-    defer fir.func_free(&f);
-    assert(llvm_env.storage_of(&f, 3) == fir_llvm.storage.sk_slot);
+    fir.func mut* own f = fir.func_make();
+    *f = llvm_env.lower(&e, CASES[..], "both", pass_env.CHECKED);
+    defer fir.func_drop_made(move(f));
+    assert(llvm_env.storage_of(f, 3) == fir_llvm.storage.sk_slot);
     string[25] want = {
         "entry:",
         "  %result = alloca i8, align 1",
@@ -357,7 +367,7 @@ fn the_short_circuit_temporary_is_a_slot() void {
         "  %t10 = zext i1 %t9 to i8",
         "  store i8 %t10, ptr %result, align 1",
     };
-    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    llvm_env.expect(&e, llvm_env.translate(&e, f), want[..]);
 }
 
 // The counter of a range `for`, which the start and the step assign, is a slot, and so is the
@@ -366,12 +376,13 @@ fn the_range_counter_is_a_slot() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.func mut f = llvm_env.lower(&e, CASES[..], "sum", pass_env.CHECKED);
-    defer fir.func_free(&f);
-    assert(llvm_env.storage_of(&f, 4) == fir_llvm.storage.sk_slot);
-    assert(llvm_env.storage_of(&f, 5) == fir_llvm.storage.sk_slot);
-    assert(llvm_env.storage_of(&f, 6) == fir_llvm.storage.sk_register);
-    assert(llvm_env.storage_of(&f, 7) == fir_llvm.storage.sk_register);
+    fir.func mut* own f = fir.func_make();
+    *f = llvm_env.lower(&e, CASES[..], "sum", pass_env.CHECKED);
+    defer fir.func_drop_made(move(f));
+    assert(llvm_env.storage_of(f, 4) == fir_llvm.storage.sk_slot);
+    assert(llvm_env.storage_of(f, 5) == fir_llvm.storage.sk_slot);
+    assert(llvm_env.storage_of(f, 6) == fir_llvm.storage.sk_register);
+    assert(llvm_env.storage_of(f, 7) == fir_llvm.storage.sk_register);
     string[37] want = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -411,7 +422,7 @@ fn the_range_counter_is_a_slot() void {
         "  %t14 = load i32, ptr %t.1, align 4",
         "  store i32 %t14, ptr %result, align 4",
     };
-    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    llvm_env.expect(&e, llvm_env.translate(&e, f), want[..]);
 }
 
 // The address of a named local is its alloca and prints nothing, so the register `_3 = addr
@@ -421,10 +432,11 @@ fn an_address_is_a_register_with_no_instruction() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.func mut f = llvm_env.lower(&e, CASES[..], "keep", pass_env.CHECKED);
-    defer fir.func_free(&f);
-    assert(llvm_env.storage_of(&f, 1) == fir_llvm.storage.sk_named);
-    assert(llvm_env.storage_of(&f, 2) == fir_llvm.storage.sk_register);
+    fir.func mut* own f = fir.func_make();
+    *f = llvm_env.lower(&e, CASES[..], "keep", pass_env.CHECKED);
+    defer fir.func_drop_made(move(f));
+    assert(llvm_env.storage_of(f, 1) == fir_llvm.storage.sk_named);
+    assert(llvm_env.storage_of(f, 2) == fir_llvm.storage.sk_register);
     u64 before = llvm_env.errors(&e);
     string[6] want = {
         "entry:",
@@ -434,15 +446,16 @@ fn an_address_is_a_register_with_no_instruction() void {
         "  %t0 = call i32 @\"main.lend\"(ptr %v.0)",
         "  store i32 %t0, ptr %result, align 4",
     };
-    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    llvm_env.expect(&e, llvm_env.translate(&e, f), want[..]);
     assert(llvm_env.errors(&e) == before);
     assert(!e.g.failed);
-    fir.func mut g = llvm_env.lower(&e, CASES[..], "drop", pass_env.CHECKED);
-    defer fir.func_free(&g);
-    assert(fir.local_count(&g) == 2);
-    assert(llvm_env.storage_of(&g, 1) == fir_llvm.storage.sk_register);
+    fir.func mut* own g = fir.func_make();
+    *g = llvm_env.lower(&e, CASES[..], "drop", pass_env.CHECKED);
+    defer fir.func_drop_made(move(g));
+    assert(fir.local_count(g) == 2);
+    assert(llvm_env.storage_of(g, 1) == fir_llvm.storage.sk_register);
     string[2] dropped = {"entry:", "  %t0 = call i32 @\"main.lend\"(ptr null)"};
-    llvm_env.expect(&e, llvm_env.translate(&e, &g), dropped[..]);
+    llvm_env.expect(&e, llvm_env.translate(&e, g), dropped[..]);
 }
 
 // Hand-written functions for the rules that a lowered function does not reach: a temporary that
@@ -539,10 +552,11 @@ fn the_rules_that_no_lowered_function_reaches() void {
     llvm_env.open(&e);
     defer llvm_env.close(&e);
     string[4] prelude = {"struct pair {", "    i32 a;", "    u64 b;", "}"};
-    fir.module mut m = llvm_env.parse(&e, prelude[..], RULES[..]);
-    defer fir.module_free(&m);
+    fir.module mut* own m = fir.module_make();
+    *m = llvm_env.parse(&e, prelude[..], RULES[..]);
+    defer fir.module_drop_made(move(m));
     // unnamed: no item names `_1` or `_2`
-    fir.func* unnamed = fir.module_function_at(&m, 0);
+    fir.func* unnamed = fir.module_function_at(m, 0);
     assert(llvm_env.storage_of(unnamed, 1) == fir_llvm.storage.sk_none);
     assert(llvm_env.storage_of(unnamed, 2) == fir_llvm.storage.sk_none);
     string[3] none = {
@@ -552,7 +566,7 @@ fn the_rules_that_no_lowered_function_reaches() void {
     };
     llvm_env.expect(&e, llvm_env.translate(&e, unnamed), none[..]);
     // mixed: s2 reads what s1 assigns
-    fir.func* mixed = fir.module_function_at(&m, 1);
+    fir.func* mixed = fir.module_function_at(m, 1);
     assert(llvm_env.storage_of(mixed, 1) == fir_llvm.storage.sk_slot);
     string[6] slot = {
         "entry:",
@@ -564,7 +578,7 @@ fn the_rules_that_no_lowered_function_reaches() void {
     };
     llvm_env.expect(&e, llvm_env.translate(&e, mixed), slot[..]);
     // early: bb1 reads `_1` before bb2 assigns it in the order of translation
-    fir.func* early = fir.module_function_at(&m, 2);
+    fir.func* early = fir.module_function_at(m, 2);
     assert(llvm_env.storage_of(early, 1) == fir_llvm.storage.sk_slot);
     string[10] late = {
         "entry:",
@@ -580,7 +594,7 @@ fn the_rules_that_no_lowered_function_reaches() void {
     };
     llvm_env.expect(&e, llvm_env.translate(&e, early), late[..]);
     // pointed: a register has no address, so `_1` is a slot; `_2` is a register
-    fir.func* pointed = fir.module_function_at(&m, 3);
+    fir.func* pointed = fir.module_function_at(m, 3);
     assert(llvm_env.storage_of(pointed, 1) == fir_llvm.storage.sk_slot);
     assert(llvm_env.storage_of(pointed, 2) == fir_llvm.storage.sk_register);
     string[6] through = {
@@ -593,15 +607,15 @@ fn the_rules_that_no_lowered_function_reaches() void {
     };
     llvm_env.expect(&e, llvm_env.translate(&e, pointed), through[..]);
     // tested: the `switch` of s1 reads `_2`, which s1 assigns
-    fir.func* tested = fir.module_function_at(&m, 4);
+    fir.func* tested = fir.module_function_at(m, 4);
     assert(llvm_env.storage_of(tested, 1) == fir_llvm.storage.sk_param);
     assert(llvm_env.storage_of(tested, 2) == fir_llvm.storage.sk_register);
     // whole: an aggregate temporary is a slot; `_2`, which nothing names, has no storage
-    fir.func* whole = fir.module_function_at(&m, 5);
+    fir.func* whole = fir.module_function_at(m, 5);
     assert(llvm_env.storage_of(whole, 1) == fir_llvm.storage.sk_slot);
     assert(llvm_env.storage_of(whole, 2) == fir_llvm.storage.sk_none);
     // twice: two assignments with one index make a slot
-    fir.func* twice = fir.module_function_at(&m, 6);
+    fir.func* twice = fir.module_function_at(m, 6);
     assert(llvm_env.storage_of(twice, 1) == fir_llvm.storage.sk_slot);
 }
 

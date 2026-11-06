@@ -1,0 +1,130 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| parse release ok
+//| parser release ok
+/// Checks that the FIR parser gives back every block that it takes (notes/testing.md 4): the
+/// tokens, the block references, the trees of the type spellings and the message buffer of a
+/// parser that fir_parse.parse_into frees, and a parser that fir_parse.parser_drop_made ends.
+import fort.diag;
+import fort.fir;
+import fir_env;
+import fort.fir_parse;
+import heap;
+import fort.session;
+import std.strbuf;
+
+// The count of the blocks of the chain.
+u32 BLOCKS = 60;
+
+// The count of the parses of the chain in one round of the parse probe. Each parse interns the
+// file name into the pool of the session, which grows by about 4128 bytes for 1000 parses, so a
+// round keeps few parses and that growth stays below fir_env.LEAK_BOUND.
+u64 PARSES = 5;
+
+// A function of BLOCKS blocks: a chain of diamonds, each of which assigns the temporary `_2` on
+// both arms, and a join that reads it and loops back to bb1.
+fn chain(strbuf.str_buf mut* b) void {
+    strbuf.append(b, "fn main.f(_1 (c): bool) -> i32 {\nlet _2: i32; let _3: i32;\n");
+    strbuf.append(b, "bb0: { goto bb1; }\n");
+    u32 mut k = 1;
+    while (k + 3 < BLOCKS) {
+        strbuf.append(b, "bb");
+        strbuf.append_u64(b, cast(k, u64));
+        strbuf.append(b, ": { switch(copy _1) -> [true: bb");
+        strbuf.append_u64(b, cast(k + 1, u64));
+        strbuf.append(b, ", otherwise: bb");
+        strbuf.append_u64(b, cast(k + 2, u64));
+        strbuf.append(b, "]; }\n");
+        u32 mut arm = 1;
+        while (arm < 3) {
+            strbuf.append(b, "bb");
+            strbuf.append_u64(b, cast(k + arm, u64));
+            strbuf.append(b, ": { _2 = const i32 1; goto bb");
+            strbuf.append_u64(b, cast(k + 3, u64));
+            strbuf.append(b, "; }\n");
+            arm += 1;
+        }
+        k += 3;
+    }
+    strbuf.append(b, "bb");
+    strbuf.append_u64(b, cast(k, u64));
+    strbuf.append(b, ": { _3 = copy _2; switch(copy _1) -> [true: bb1, otherwise: bb");
+    strbuf.append_u64(b, cast(k + 1, u64));
+    strbuf.append(b, "]; }\nbb");
+    strbuf.append_u64(b, cast(k + 1, u64));
+    strbuf.append(b, ": { _0 = copy _3; return; }\n}\n");
+}
+
+// A function that names a block that it does not have: the parser writes the message of the
+// error into its buffer and reports one error.
+string BAD = "fn main.f(_1 (c): bool) -> i32 {\nbb0: { goto bb7; }\n}\n";
+
+// Each round parses the chain PARSES times into a module of fir.module_make that
+// fir.module_drop_made ends, and parses BAD once under diag.mute. Each parse makes a parser in
+// fir_parse.parse_into and frees it there, so a deletion of any one of the four releases of
+// fir_parse.parser_drop keeps a block in each parse, and the live view of support/heap.ft moves.
+fn parses_leave_the_heap_where_they_were() void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer del(text.data);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    chain(&text);
+    u64[3] mut live_at = {};
+    u64 mut round = 0;
+    while (round < fir_env.LEAK_ROUNDS) {
+        u64 mut k = 0;
+        while (k < PARSES) {
+            fir.module mut* own m = fir.module_make();
+            fir_parse.parse_into(&e->c.m.s, "t.fir", strbuf.view(&text), fir_env.prelude(e), m);
+            assert(fir.module_function_count(m) == 1);
+            fir.module_drop_made(move(m));
+            k += 1;
+        }
+        diag.mute(session.diags(&e->c.m.s));
+        fir.module mut* own bad = fir.module_make();
+        fir_parse.parse_into(&e->c.m.s, "t.fir", BAD, fir_env.prelude(e), bad);
+        fir.module_drop_made(move(bad));
+        assert(diag.unmute(session.diags(&e->c.m.s)) == 1);
+        u64 slot = fir_env.leak_slot(round);
+        if (slot < 3) {
+            live_at[slot] = heap.live_view();
+        }
+        round += 1;
+    }
+    assert(fir_env.moved(live_at) < fir_env.LEAK_BOUND);
+}
+
+// Each round makes a parser over the chain in an allocation of fir_parse.parser_make and ends it
+// with fir_parse.parser_drop_made. The parser holds the tokens of the chain, so a deletion of the
+// call of fir_parse.parser_drop in parser_drop_made keeps them in each round, and the live view of
+// support/heap.ft moves.
+fn parsers_in_an_allocation_leave_the_heap_where_they_were() void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer del(text.data);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    chain(&text);
+    u64[3] mut live_at = {};
+    u64 mut round = 0;
+    while (round < fir_env.LEAK_ROUNDS) {
+        fir_parse.fir_parser mut* own p = fir_parse.parser_make();
+        *p = fir_env.parser(e, strbuf.view(&text));
+        assert(p->toks.len > cast(BLOCKS, u64));
+        fir_parse.parser_drop_made(move(p));
+        u64 slot = fir_env.leak_slot(round);
+        if (slot < 3) {
+            live_at[slot] = heap.live_view();
+        }
+        round += 1;
+    }
+    assert(fir_env.moved(live_at) < fir_env.LEAK_BOUND);
+}
+
+fn main() i32 {
+    parses_leave_the_heap_where_they_were();
+    println("parse release ok");
+    parsers_in_an_allocation_leave_the_heap_where_they_were();
+    println("parser release ok");
+    return 0;
+}

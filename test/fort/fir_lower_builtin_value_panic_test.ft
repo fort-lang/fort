@@ -34,11 +34,21 @@ fn lower_the_move(lower_env.env mut* e) void {
     ast.node* freed = check_env.node_in_main(&e->c, ast.ast_kind.k_call, "");
     ast.node* moved = ast.ast_child(freed, 0);
     println(moved->a->sym->name);
-    fir.func mut f = fir.func_new(&e->c.ck.types, decl->sym, decl->sym->ty);
-    defer fir.func_free(&f);
-    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e->c.ck, .f = &f};
-    defer fir_lower.scopes_free(&lw.scopes);
-    fir_lower.prescan(&f, decl->b);
-    fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_fn, 0, 0);
-    fir_lower.lower_builtin(&lw, moved);
+    // `f` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.func mut* own f = fir.func_make();
+    *f = fir.func_new(&e->c.ck.types, decl->sym, decl->sym->ty);
+    defer fir.func_drop_made(move(f));
+    // `lw` ends in a block of its own, so that its `del`s come after the last call of its exit.
+    {
+        fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e->c.ck, .f = f};
+        defer {
+            del(lw.scopes.items);
+            del(lw.defers.items);
+            del(lw.named.items);
+        }
+        fir_lower.prescan(f, decl->b);
+        fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_fn, 0, 0);
+        fir_lower.lower_builtin(&lw, moved);
+    }
 }

@@ -196,6 +196,18 @@ fn func_drop(func mut f) void {
     del(f.blocks.items);
 }
 
+// An empty function in an allocation of its own, for a function that lends the function to calls.
+fn func_make() func mut* own {
+    return new(func);
+}
+
+// Ends a function of func_make that the caller moves in.
+fn func_drop_made(func mut* own p) void {
+    func kept = move(*p);
+    del(p);
+    func_drop(move(kept));
+}
+
 // ---- places ---------------------------------------------------------------------
 
 enum proj_kind {
@@ -1170,10 +1182,26 @@ struct read_list {
     u64 len;
 }
 
-/// Frees the storage of `l`.
+/// Frees the storage of `l`. read_list_drop holds the release, and the move leaves the empty list.
 fn read_list_free(read_list mut* l) void {
-    del(l->items);
-    l->len = 0;
+    read_list_drop(move(*l));
+}
+
+// Frees a list that the caller moves in.
+fn read_list_drop(read_list mut l) void {
+    del(l.items);
+}
+
+// An empty list in an allocation of its own, for a function that lends the list to calls.
+fn read_list_make() read_list mut* own {
+    return new(read_list);
+}
+
+// Ends a list of read_list_make that the caller moves in.
+fn read_list_drop_made(read_list mut* own p) void {
+    read_list kept = move(*p);
+    del(p);
+    read_list_drop(move(kept));
 }
 
 // Appends `r` to `l`, growing as grown_capacity says.
@@ -1949,9 +1977,22 @@ fn pred_at(pred_table* pt, u32 b, u32 i) u32 {
     return pt->preds[cast(pt->first[cast(b, u64)], u64) + cast(i, u64)];
 }
 
-fn pred_table_free(pred_table mut* pt) void {
-    del(pt->first);
-    del(pt->preds);
+// Frees a table that the caller moves in: `first`, then `preds`.
+fn pred_table_drop(pred_table mut pt) void {
+    del(pt.first);
+    del(pt.preds);
+}
+
+// An empty table in an allocation of its own, for a function that lends the table to calls.
+fn pred_table_make() pred_table mut* own {
+    return new(pred_table);
+}
+
+// Ends a table of pred_table_make that the caller moves in.
+fn pred_table_drop_made(pred_table mut* own p) void {
+    pred_table kept = move(*p);
+    del(p);
+    pred_table_drop(move(kept));
 }
 
 // ---- the module --------------------------------------------------------------------------

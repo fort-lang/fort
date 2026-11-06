@@ -20,15 +20,26 @@ fn main() i32 {
     gen.emitter mut g = gen.emitter{};
     gen.gen_init(&g, &s, gen.gen_options{});
     defer gen.gen_free(&g);
-    types.table mut tt = types.table{};
-    defer types.type_table_free(&tt);
-    types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    // `tt` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
+    types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
     types.node*@ params = {};
-    fir.func mut f = fir.func_new(&tt, null, types.type_fn(&tt, i32t, params, false));
-    defer fir.func_free(&f);
-    fir_llvm.translator mut t = fir_llvm.open(&g, &f);
-    defer fir_llvm.close(&t);
-    println(fir_env.terminated(&f, 0));
-    fir_llvm.translate_terminator(&t, 0);
+    fir.func mut* own f = fir.func_make();
+    *f = fir.func_new(tt, null, types.type_fn(tt, i32t, params, false));
+    defer fir.func_drop_made(move(f));
+    // `t` ends in a block of its own, so that its `del`s come after the last call of its exit.
+    {
+        fir_llvm.translator mut t = fir_llvm.open(&g, f);
+        defer {
+            del(t.locals);
+            del(t.notes);
+            del(t.cont_of);
+            del(t.fail_label);
+        }
+        println(fir_env.terminated(f, 0));
+        fir_llvm.translate_terminator(&t, 0);
+    }
     return 0;
 }

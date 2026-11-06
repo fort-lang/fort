@@ -4,12 +4,15 @@
 //| lowered ok
 //| parsed ok
 //| list ok
+//| list release ok
 /// Checks stmt_read_all and term_read_all against stmt_read and term_read. A walk that fills a
 /// list must give, at each index, the read that a walk for that index alone gives, and no read
 /// past the last one. The cases are the functions of a fort source after the lowering and the
 /// functions of a FIR text with forms that the lowering writes rarely.
 import fort.fir;
+import fir_env;
 import fort.fir_lower;
+import heap;
 import lower_env;
 import pass_env;
 
@@ -184,20 +187,20 @@ string[NAME_COUNT] NAMES = {
 };
 
 fn the_lists_of_lowered_functions_agree() void {
+    fir.read_list mut l = fir.read_list{};
+    defer del(l.items);
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
     lower_env.check_lines(&e, SOURCE[..], true);
-    fir.read_list mut l = fir.read_list{};
-    defer fir.read_list_free(&l);
     tally mut t = tally{};
     u64 mut n = 0;
     while (n < NAME_COUNT) {
-        fir.func mut f = fir.func{};
+        fir.func mut* own f = fir.func_make();
+        defer fir.func_drop_made(move(f));
         fir_lower.report mut why = fir_lower.report{};
-        assert(fir_lower.lower_function(&e.c.ck, lower_env.decl(&e, NAMES[n]), &f, &why));
-        holds_for(&f, &l, &t);
-        fir.func_free(&f);
+        assert(fir_lower.lower_function(&e.c.ck, lower_env.decl(&e, NAMES[n]), f, &why));
+        holds_for(f, &l, &t);
         n += 1;
     }
     // the call of `wide` reads twenty arguments and the index local of each, so the list grows
@@ -281,6 +284,8 @@ string[TEXT_TAIL_LINES] TEXT_TAIL = {
 };
 
 fn the_lists_of_parsed_functions_agree() void {
+    fir.read_list mut l = fir.read_list{};
+    defer del(l.items);
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
@@ -297,17 +302,16 @@ fn the_lists_of_parsed_functions_agree() void {
         j += 1;
     }
     lines[k] = "}";
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], lines[..]);
-    defer fir.module_free(&m);
-    fir.read_list mut l = fir.read_list{};
-    defer fir.read_list_free(&l);
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(&e, PRELUDE[..], lines[..]);
+    defer fir.module_drop_made(move(m));
     tally mut t = tally{};
     u64 mut n = 0;
-    while (n < fir.module_function_count(&m)) {
-        holds_for(fir.module_function_at(&m, n), &l, &t);
+    while (n < fir.module_function_count(m)) {
+        holds_for(fir.module_function_at(m, n), &l, &t);
         n += 1;
     }
-    assert(fir.module_function_count(&m) == 2);
+    assert(fir.module_function_count(m) == 2);
     // the overwrite check reads its place with no use, and the store empties `_3`
     assert(t.not_uses == 1);
     assert(t.empties == 1);
@@ -318,27 +322,60 @@ fn the_lists_of_parsed_functions_agree() void {
 
 // A fill replaces the list, keeps its storage, and grows it by doubling past VEC_MIN_CAP.
 fn a_list_keeps_its_storage_across_fills() void {
-    fir.read_list mut l = fir.read_list{};
-    assert(l.len == 0 && l.items.len == 0);
+    // The list lives in an allocation, so that the frees under test run and its drop ends it.
+    fir.read_list mut* own l = fir.read_list_make();
+    defer fir.read_list_drop_made(move(l));
+    assert(l->len == 0 && l->items.len == 0);
     fir.read r = fir.read{fir.place_local(3), true, false};
     u64 mut k = 0;
     while (k < 40) {
-        fir.read_list_push(&l, r);
+        fir.read_list_push(l, r);
         k += 1;
     }
-    assert(l.len == 40);
-    assert(l.items.len == 64);
-    each_is(&l, 40, r);
-    fir.read_list_free(&l);
-    assert(l.len == 0 && l.items.len == 0);
+    assert(l->len == 40);
+    assert(l->items.len == 64);
+    each_is(l, 40, r);
+    fir.read_list_free(l);
+    assert(l->len == 0 && l->items.len == 0);
     // a statement that reads nothing empties a list that held reads
-    fir.read_list_push(&l, r);
+    fir.read_list_push(l, r);
     fir.statement live = fir.stmt_live(1, fir.statement{}.loc, 1);
-    fir.func f = fir.func{};
-    fir.stmt_read_all(&f, &live, &l);
-    assert(l.len == 0);
-    assert(l.items.len == 16);
-    fir.read_list_free(&l);
+    fir.func mut* own f = fir.func_make();
+    defer fir.func_drop_made(move(f));
+    fir.stmt_read_all(f, &live, l);
+    assert(l->len == 0);
+    assert(l->items.len == 16);
+    fir.read_list_free(l);
+}
+
+// The count of the reads that each round of the release probe pushes.
+u64 READS = 200;
+
+// A list in an allocation of fir.read_list_make, filled with READS reads and ended by
+// fir.read_list_drop_made, two hundred times, leaves the heap where it was. The list grows to 256
+// slots of fir.read, so a deletion of the release of its slots in fir.read_list_drop, or of the
+// call of that drop in fir.read_list_drop_made, keeps the slots in each round, and the live view
+// of support/heap.ft moves by that much.
+fn a_list_in_an_allocation_leaves_the_heap_where_it_was() void {
+    fir.read r = fir.read{fir.place_local(3), true, false};
+    u64[3] mut live_at = {};
+    u64 mut round = 0;
+    while (round < fir_env.LEAK_ROUNDS) {
+        fir.read_list mut* own l = fir.read_list_make();
+        u64 mut k = 0;
+        while (k < READS) {
+            fir.read_list_push(l, r);
+            k += 1;
+        }
+        assert(l->len == READS);
+        fir.read_list_drop_made(move(l));
+        u64 slot = fir_env.leak_slot(round);
+        if (slot < 3) {
+            live_at[slot] = heap.live_view();
+        }
+        round += 1;
+    }
+    assert(fir_env.moved(live_at) < fir_env.LEAK_BOUND);
 }
 
 fn main() i32 {
@@ -348,5 +385,7 @@ fn main() i32 {
     println("parsed ok");
     a_list_keeps_its_storage_across_fills();
     println("list ok");
+    a_list_in_an_allocation_leaves_the_heap_where_it_was();
+    println("list release ok");
     return 0;
 }

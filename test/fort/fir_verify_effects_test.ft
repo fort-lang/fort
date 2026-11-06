@@ -82,28 +82,37 @@ fn closes(fir_verify.effects* ef, u32 blocks) bool {
 // Holds the effects of the only function of `text` against the parts of `want` joined.
 fn expect_effects_of(lower_env.env mut* e, string@ text, string@ want_parts) void {
     strbuf.str_buf mut wanted = strbuf.create();
-    defer strbuf.free(&wanted);
+    defer del(wanted.data);
     u64 mut p = 0;
     while (p < want_parts.len) {
         strbuf.append(&wanted, want_parts[p]);
         p += 1;
     }
     string want = strbuf.view(&wanted);
-    fir.module mut m = parse(e, text);
-    defer fir.module_free(&m);
-    fir.func* f = fir.module_function_at(&m, 0);
-    fir_verify.effects mut ef = fir_verify.effects_of(f);
-    defer fir_verify.effects_free(&ef);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
-    effects_text(&ef, fir.block_count(f), &got);
-    if (strbuf.view(&got) != want) {
-        eprintln("got: ", strbuf.view(&got));
-        eprintln("want:", want);
-        panic("fir_verify_effects_test: the effects differ");
+    defer del(got.data);
+    // `m` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.module mut* own m = fir.module_make();
+    *m = parse(e, text);
+    defer fir.module_drop_made(move(m));
+    fir.func* f = fir.module_function_at(m, 0);
+    // `ef` ends in a block of its own, so that its `del`s come after the last call of its exit.
+    {
+        fir_verify.effects mut ef = fir_verify.effects_of(f);
+        defer {
+            del(ef.items);
+            del(ef.first);
+        }
+        effects_text(&ef, fir.block_count(f), &got);
+        if (strbuf.view(&got) != want) {
+            eprintln("got: ", strbuf.view(&got));
+            eprintln("want:", want);
+            panic("fir_verify_effects_test: the effects differ");
+        }
+        // the last entry of `first` closes the list
+        assert(closes(&ef, fir.block_count(f)));
     }
-    // the last entry of `first` closes the list
-    assert(closes(&ef, fir.block_count(f)));
 }
 
 // ---- the effect list -----------------------------------------------------------------------
@@ -204,13 +213,13 @@ fn sets_text(fir_verify.effects* e, u32 rule, strbuf.str_buf mut* out) void {
         }
         i += 1;
     }
-    fir_flow.bits_free(&gens[0]);
-    fir_flow.bits_free(&kills[0]);
+    del(gens[0].words);
+    del(kills[0].words);
 }
 
 fn expect_sets(fir_verify.effects* e, u32 rule, string want) void {
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     sets_text(e, rule, &got);
     if (strbuf.view(&got) != want) {
         eprintln("rule ", rule, " got: ", strbuf.view(&got), " want: ", want);
@@ -222,7 +231,10 @@ fn expect_sets(fir_verify.effects* e, u32 rule, string want) void {
 // so a block that only empties a temporary changes nothing for V13.
 fn the_last_deciding_effect_decides_the_block() void {
     fir_verify.effects mut e = fir_verify.effects{};
-    defer fir_verify.effects_free(&e);
+    defer {
+        del(e.items);
+        del(e.first);
+    }
     one_block(&e);
     // _1: fill then empty; _2: empty then fill; _3: empty alone; _0: read alone
     fir_verify.effect_push(&e, fir_verify.effect_kind.ef_fill, 1, 0);
@@ -314,8 +326,8 @@ fn the_sets_equal_the_effects_applied_in_order() void {
                 fir_flow.bits_subtract(&by_sets, &kills[0]);
                 fir_flow.bits_union(&by_sets, &gens[0]);
                 assert(fir_flow.bits_equal(&walked, &by_sets));
-                fir_flow.bits_free(&walked);
-                fir_flow.bits_free(&by_sets);
+                del(walked.words);
+                del(by_sets.words);
                 trial += 1;
             }
             u32 mut l = 0;
@@ -325,11 +337,12 @@ fn the_sets_equal_the_effects_applied_in_order() void {
                 }
                 l += 1;
             }
-            fir_flow.bits_free(&gens[0]);
-            fir_flow.bits_free(&kills[0]);
+            del(gens[0].words);
+            del(kills[0].words);
             rule += 1;
         }
-        fir_verify.effects_free(&e);
+        del(e.items);
+        del(e.first);
         round += 1;
     }
     // the cases decided temporaries, so the sets were not empty throughout
@@ -341,11 +354,12 @@ fn the_sets_equal_the_effects_applied_in_order() void {
 // The rule and the position of the violation of the only function of `text`, as
 // `V<rule> bb<b> <position>`, or `none`.
 fn verdict(lower_env.env mut* e, string@ text, strbuf.str_buf mut* out) void {
-    fir.module mut m = parse(e, text);
-    defer fir.module_free(&m);
+    fir.module mut* own m = fir.module_make();
+    *m = parse(e, text);
+    defer fir.module_drop_made(move(m));
     fir_verify.violation mut v = fir_verify.violation{};
     strbuf.clear(out);
-    if (!fir_verify.find_violation(fir.module_function_at(&m, 0), &e->rt, &v)) {
+    if (!fir_verify.find_violation(fir.module_function_at(m, 0), &e->rt, &v)) {
         strbuf.append(out, "none");
         return;
     }
@@ -359,7 +373,7 @@ fn verdict(lower_env.env mut* e, string@ text, strbuf.str_buf mut* out) void {
 
 fn expect_verdict(lower_env.env mut* e, string@ text, string want) void {
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     verdict(e, text, &got);
     if (strbuf.view(&got) != want) {
         eprintln("got: ", strbuf.view(&got), " want: ", want);

@@ -301,12 +301,15 @@ fn the_fold_needs_each_of_its_conditions() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
-    fir.module mut fm = pass_env.parse(&e, FOLD_PRELUDE[..], FOLD_TEXT[..]);
-    defer fir.module_free(&fm);
-    assert(fm.funcs.len == FOLD_COUNT);
+    // `fm` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.module mut* own fm = fir.module_make();
+    *fm = pass_env.parse(&e, FOLD_PRELUDE[..], FOLD_TEXT[..]);
+    defer fir.module_drop_made(move(fm));
+    assert(fm->funcs.len == FOLD_COUNT);
     u64 mut k = 0;
     while (k < FOLD_COUNT) {
-        fir.func mut* f = function_mut(&fm, k);
+        fir.func mut* f = function_mut(fm, k);
         u32 before = assignments(f, FOLD_TEMPS[k]);
         u32 blocks = fir.block_count(f);
         pass_env.build(&e, f, pass_env.RELEASE);
@@ -388,13 +391,14 @@ fn the_merge_leaves_a_loop_and_the_entry() void {
         if (k == 1) {
             lines[5] = "        check(copy _1, overflow) -> bb0;";
         }
-        fir.module mut fm = pass_env.parse(&e, prelude[..], lines[..]);
-        fir.func mut* f = &fm.funcs.items[0];
+        fir.module mut* own fm = fir.module_make();
+        *fm = pass_env.parse(&e, prelude[..], lines[..]);
+        fir.func mut* f = &fm->funcs.items[0];
         pass_env.build_proved(f, true, false);
         assert(fir.block_count(f) == 2);
         pass_env.numbered(f);
         expect_goto(f, 1, cast(1 - k, u32));
-        fir.module_free(&fm);
+        fir.module_drop_made(move(fm));
         k += 1;
     }
 }
@@ -490,9 +494,10 @@ fn a_block_after_a_merge_starts_empty() void {
         "    }",
         "}",
     };
-    fir.module mut fm = pass_env.parse(&e, prelude[..], text[..]);
-    defer fir.module_free(&fm);
-    fir.func mut* f = &fm.funcs.items[0];
+    fir.module mut* own fm = fir.module_make();
+    *fm = pass_env.parse(&e, prelude[..], text[..]);
+    defer fir.module_drop_made(move(fm));
+    fir.func mut* f = &fm->funcs.items[0];
     pass_env.build(&e, f, pass_env.RELEASE);
     assert(fir.block_count(f) == 3);
     u32 mut k = 0;
