@@ -606,21 +606,23 @@ fn same_verdicts(prover.proof* a, prover.proof* b) void {
 // `name` names the function in a failure.
 fn expect_function(fir.func* f, string want, string name) void {
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     strbuf.str_buf mut plain = strbuf.create();
-    defer strbuf.free(&plain);
-    prover.proof mut p = prover.prove(f);
-    defer prover.free(&p);
-    prover.proof mut q = prover.prove_causes(f, true);
-    defer prover.free(&q);
-    same_verdicts(&p, &q);
+    defer del(plain.data);
+    prover.proof mut* own p = prover.make();
+    *p = prover.prove(f);
+    defer prover.drop_made(move(p));
+    prover.proof mut* own q = prover.make();
+    *q = prover.prove_causes(f, true);
+    defer prover.drop_made(move(q));
+    same_verdicts(p, q);
     without_causes(want, &plain);
-    write_verdicts(f, &p, false, &got);
+    write_verdicts(f, p, false, &got);
     if (strbuf.view(&got) != strbuf.view(&plain)) {
         eprintln(name, " gives ", strbuf.view(&got), " and not ", strbuf.view(&plain));
         panic("prover_aggregate_test: a verdict differs");
     }
-    write_verdicts(f, &q, true, &got);
+    write_verdicts(f, q, true, &got);
     if (strbuf.view(&got) != want) {
         eprintln(name, " gives ", strbuf.view(&got), " with its causes and not ", want);
         panic("prover_aggregate_test: a cause differs");
@@ -630,12 +632,12 @@ fn expect_function(fir.func* f, string want, string name) void {
 // Each local of an owning aggregate type has its obligation at each exit of its scope, and the
 // pass proves it with the fact of each owner below the local; no other local has one.
 fn each_exit_holds_the_owners_below_its_local() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], CASES[..]);
-    defer fir.module_free(&m);
-    expect_module(&e, &m, VERDICTS[..]);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], CASES[..]);
+    defer fir.module_drop_made(move(m));
+    expect_module(e, m, VERDICTS[..]);
 }
 
 // Holds that the verifier accepts each function of `m` and that function `k` gives the verdicts
@@ -817,16 +819,15 @@ fn lower(lower_env.env mut* e, string name, fir.func mut* out) void {
 
 // Each exit kind and each cause has its verdict in the lowering of fort source.
 fn each_exit_of_lowered_source_has_its_verdict() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, SOURCE[..], true);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, SOURCE[..], true);
     u64 mut k = 0;
     while (k < SOURCE_NAMES.len) {
-        fir.func mut f = fir.func{};
-        lower(&e, SOURCE_NAMES[k], &f);
-        expect_function(&f, SOURCE_VERDICTS[k], SOURCE_NAMES[k]);
-        fir.func_free(&f);
+        fir.func mut* own f = fir.func_make();
+        lower(e, SOURCE_NAMES[k], f);
+        expect_function(f, SOURCE_VERDICTS[k], SOURCE_NAMES[k]);
+        fir.func_drop_made(move(f));
         k += 1;
     }
 }
@@ -1140,22 +1141,22 @@ u32[22] FORM_INNER = {0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 
 // Each form ends its local where the shape before it does not, and adds no site of part 2.
 fn each_form_ends_its_local() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, FORM_SOURCE[..], true);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, FORM_SOURCE[..], true);
     u64 mut k = 0;
     while (k < FORM_NAMES.len) {
-        fir.func mut f = fir.func{};
-        lower(&e, FORM_NAMES[k], &f);
-        expect_function(&f, FORM_VERDICTS[k], FORM_NAMES[k]);
-        prover.proof mut p = prover.prove(&f);
-        if (p.inner_leaks != FORM_INNER[k] || prover.has_error(&p)) {
+        fir.func mut* own f = fir.func_make();
+        lower(e, FORM_NAMES[k], f);
+        expect_function(f, FORM_VERDICTS[k], FORM_NAMES[k]);
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(f);
+        if (p->inner_leaks != FORM_INNER[k] || prover.has_error(p)) {
             eprintln(FORM_NAMES[k], " gives another count of sites of part 2, or an error");
             panic("prover_aggregate_test: a form changes part 2");
         }
-        prover.free(&p);
-        fir.func_free(&f);
+        prover.drop_made(move(p));
+        fir.func_drop_made(move(f));
         k += 1;
     }
 }
@@ -1183,11 +1184,12 @@ string[13] WORK = {
 // Proves `f` within `limit` and holds its work, that the exit of `n` gets `exit`, and that the
 // exit of `w` gets `aggregate`, with the cause 4 when the aggregate work passes the limit.
 fn expect_limit(fir.func* f, u64 limit, string exit, string aggregate) void {
-    prover.proof mut p = prover.prove_within(f, limit);
-    defer prover.free(&p);
-    assert(p.leak_work == 10 && p.inner_work == 10 && p.aggregate_work == 52);
-    assert(p.aggregate_over == (52 > limit) && p.leak_over == (10 > limit));
-    expect_proof(f, &p, exit, aggregate);
+    prover.proof mut* own p = prover.make();
+    *p = prover.prove_within(f, limit);
+    defer prover.drop_made(move(p));
+    assert(p->leak_work == 10 && p->inner_work == 10 && p->aggregate_work == 52);
+    assert(p->aggregate_over == (52 > limit) && p->leak_over == (10 > limit));
+    expect_proof(f, p, exit, aggregate);
 }
 
 // Holds that the one exit of `n` of the proof `p` of `f` gets `exit` and that the one exit of
@@ -1210,12 +1212,12 @@ fn expect_proof(fir.func* f, prover.proof* p, string exit, string aggregate) voi
 // the exit takes the cause 4, while the leak work keeps the verdict of `n`. Past the leak work the
 // pass proves neither, and counts the exit of `w` once.
 fn the_aggregate_work_has_a_limit_of_its_own() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], WORK[..]);
-    defer fir.module_free(&m);
-    expect_limits(&e, &m);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], WORK[..]);
+    defer fir.module_drop_made(move(m));
+    expect_limits(e, m);
 }
 
 // The limits of the_aggregate_work_has_a_limit_of_its_own over the function of `m`.
@@ -1290,7 +1292,7 @@ string[7] LIMIT_REPORTED = {
 // Holds that `got` holds the lines of `want`, each after `file` and with a line feed.
 fn expect_lines(string got, string file, string@ want) void {
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     u64 mut k = 0;
     while (k < want.len) {
         strbuf.append(&text, file);
@@ -1319,20 +1321,22 @@ fn drop_call(fir.func mut* f) void {
 // 0, after the last statement of its first `return` is gone when `dropped`.
 fn report_function(lower_env.env mut* e, string name, bool limit, bool dropped,
                    strbuf.str_buf mut* out) void {
-    fir.func mut f = fir.func{};
-    defer fir.func_free(&f);
-    lower(e, name, &f);
+    fir.func mut* own f = fir.func_make();
+    defer fir.func_drop_made(move(f));
+    lower(e, name, f);
     if (dropped) {
-        drop_call(&f);
+        drop_call(f);
     }
     if (limit) {
-        prover.proof mut p = prover.prove_within(&f, 0);
-        defer prover.free(&p);
-        report.write_aggregates(&f, &p, &e->c.m.s, out);
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove_within(f, 0);
+        defer prover.drop_made(move(p));
+        report.write_aggregates(f, p, &e->c.m.s, out);
     } else {
-        prover.proof mut q = prover.prove_causes(&f, true);
-        defer prover.free(&q);
-        report.write_aggregates(&f, &q, &e->c.m.s, out);
+        prover.proof mut* own q = prover.make();
+        *q = prover.prove_causes(f, true);
+        defer prover.drop_made(move(q));
+        report.write_aggregates(f, q, &e->c.m.s, out);
     }
 }
 
@@ -1341,29 +1345,28 @@ fn report_function(lower_env.env mut* e, string name, bool limit, bool dropped,
 // It writes no diagnostic: such an exit is no error until refinement R1 (D17.20). Past the work
 // limit the first line takes the note of the leak limit.
 fn the_report_names_the_first_owner_of_each_exit() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, SOURCE[..], true);
-    string file = lower_env.decl_file(&e, "keep");
-    assert(str.ends_with(file, "main.ft"));
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
-    u64 before = check_env.reports(&e.c);
+    defer del(got.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, SOURCE[..], true);
+    string file = lower_env.decl_file(e, "keep");
+    assert(str.ends_with(file, "main.ft"));
+    u64 before = check_env.reports(&e->c);
     u64 mut k = 0;
     while (k < SOURCE_NAMES.len) {
-        report_function(&e, SOURCE_NAMES[k], false, false, &got);
+        report_function(e, SOURCE_NAMES[k], false, false, &got);
         k += 1;
     }
     expect_lines(strbuf.view(&got), file, REPORTED[..]);
     strbuf.clear(&got);
-    report_function(&e, "temp_arg", false, true, &got);
-    report_function(&e, "temp_cond", false, true, &got);
+    report_function(e, "temp_arg", false, true, &got);
+    report_function(e, "temp_cond", false, true, &got);
     expect_lines(strbuf.view(&got), file, TEMP_REPORTED[..]);
     strbuf.clear(&got);
-    report_function(&e, "loop_exits", true, false, &got);
+    report_function(e, "loop_exits", true, false, &got);
     expect_lines(strbuf.view(&got), file, LIMIT_REPORTED[..]);
-    assert(check_env.reports(&e.c) == before);
+    assert(check_env.reports(&e->c) == before);
 }
 
 // A FIR text with locations and no tree: a parameter gives its declared name and the names of
@@ -1399,14 +1402,14 @@ string[6] TEXT_REPORTED = {
 
 // With no tree, the report names a temporary by its FIR place.
 fn the_report_of_a_fir_text_names_the_fir_place() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], TEXT[..]);
-    defer fir.module_free(&m);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
-    report_text(&e, &m, &got);
+    defer del(got.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], TEXT[..]);
+    defer fir.module_drop_made(move(m));
+    report_text(e, m, &got);
     expect_lines(strbuf.view(&got), "t.fir", TEXT_REPORTED[..]);
 }
 
@@ -1415,9 +1418,10 @@ fn the_report_of_a_fir_text_names_the_fir_place() void {
 fn report_text(lower_env.env mut* e, fir.module* m, strbuf.str_buf mut* out) void {
     fir.func* f = fir.module_function_at(m, 0);
     pass_env.verified(e, f, "prover_aggregate_test: the verifier refuses the input");
-    prover.proof mut p = prover.prove_causes(f, true);
-    defer prover.free(&p);
-    report.write_aggregates(f, &p, &e->c.m.s, out);
+    prover.proof mut* own p = prover.make();
+    *p = prover.prove_causes(f, true);
+    defer prover.drop_made(move(p));
+    report.write_aggregates(f, p, &e->c.m.s, out);
 }
 
 fn main() i32 {

@@ -163,19 +163,32 @@ struct proof {
     bool aggregate_over;
 }
 
+// Frees each vector of `p`. drop holds the releases, and the move leaves the zero proof, whose
+// counts are 0.
 fn free(proof mut* p) void {
-    del(p->proved);
-    del(p->stores);
-    del(p->exits);
-    del(p->inners);
-    del(p->uses);
-    del(p->aggregates);
-    p->checks = 0;
-    p->unproved = 0;
-    p->leaks = 0;
-    p->inner_leaks = 0;
-    p->use_unproved = 0;
-    p->aggregate_leaks = 0;
+    drop(move(*p));
+}
+
+// Frees a proof that the caller moves in: each vector.
+fn drop(proof mut p) void {
+    del(p.proved);
+    del(p.stores);
+    del(p.exits);
+    del(p.inners);
+    del(p.uses);
+    del(p.aggregates);
+}
+
+// An empty proof in an allocation of its own, for a function that lends the proof to calls.
+fn make() proof mut* own {
+    return new(proof);
+}
+
+// Ends a proof of make that the caller moves in.
+fn drop_made(proof mut* own p) void {
+    proof kept = move(*p);
+    del(p);
+    drop(move(kept));
 }
 
 /// Whether the check that ends block `b` is proved, or true when block `b` ends in another
@@ -1095,6 +1108,27 @@ fn prove_all(fir.func* f, u64 limit, u64 use_limit, bool causes) proof {
     proof mut out = proof{};
     out.proved = new(bool, cast(n, u64));
     prove_into(f, limit, use_limit, causes, &out);
+    return out;
+}
+
+// A proof as prove does, in an allocation of its own that drop_made ends, for a function that
+// lends the proof to calls.
+fn prove_made(fir.func* f) proof mut* own {
+    return prove_all_made(f, WORK_LIMIT, USE_LIMIT, false);
+}
+
+// A proof as prove_causes does, in an allocation of its own that drop_made ends.
+fn prove_causes_made(fir.func* f, bool causes) proof mut* own {
+    return prove_all_made(f, WORK_LIMIT, USE_LIMIT, causes);
+}
+
+// Proves as prove_all does, into a fresh allocation: the pass knows each owner of a fresh `new`
+// empty, so no store of a whole proof follows a make.
+fn prove_all_made(fir.func* f, u64 limit, u64 use_limit, bool causes) proof mut* own {
+    u32 n = fir.block_count(f);
+    proof mut* own out = new(proof);
+    out->proved = new(bool, cast(n, u64));
+    prove_into(f, limit, use_limit, causes, out);
     return out;
 }
 

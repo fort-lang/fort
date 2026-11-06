@@ -1775,20 +1775,13 @@ fn fir_entry(session.session mut* s, analysis mut* an, options* opts) i32 {
         fir_lower.report mut why = fir_lower.report{};
         if (fir_lower.lower_function(&an->ck, gen.refs_at(&decls, i), f, &why)) {
             fir_verify.verify(f, &rt);
-            prover.proof mut verdicts = run_emptiness(s, f, false);
-            defer {
-                del(verdicts.proved);
-                del(verdicts.stores);
-                del(verdicts.exits);
-                del(verdicts.inners);
-                del(verdicts.uses);
-                del(verdicts.aggregates);
-            }
-            if (prover.has_error(&verdicts)) {
+            prover.proof mut* own verdicts = run_emptiness(s, f, false);
+            defer prover.drop_made(move(verdicts));
+            if (prover.has_error(verdicts)) {
                 proved = false;
             }
             if (build) {
-                fir_passes.build_mode(f, opts->release, opts->no_bounds_check, &verdicts);
+                fir_passes.build_mode(f, opts->release, opts->no_bounds_check, verdicts);
                 fir_verify.verify(f, &rt);
             }
             fir_print.print_function(f, &text);
@@ -1833,16 +1826,9 @@ fn report_function(fir.func mut* f, fir_verify.runtime* rt, diag.loc at, bool re
                    bool no_bounds, strbuf.str_buf mut* out) void {
     if (report_violation(f, rt, at, out)) {
         // the proof decides which overwrite checks the pass removes, and reports nothing here
-        prover.proof mut verdicts = prover.prove(f);
-        defer {
-            del(verdicts.proved);
-            del(verdicts.stores);
-            del(verdicts.exits);
-            del(verdicts.inners);
-            del(verdicts.uses);
-            del(verdicts.aggregates);
-        }
-        fir_passes.build_mode(f, release, no_bounds, &verdicts);
+        prover.proof mut* own verdicts = prover.prove_made(f);
+        defer prover.drop_made(move(verdicts));
+        fir_passes.build_mode(f, release, no_bounds, verdicts);
         report_violation(f, rt, at, out);
     }
 }
@@ -1885,12 +1871,12 @@ fn report_declaration(analysis mut* an, options* opts, ast.node* decl, fir_verif
 // error of rule (b) and its notes at each use that the pass does not prove (D17.21, spec/fir.md
 // 11). With `causes`, the proof gives the cause of each exit of a local of an owning aggregate type
 // that it does not prove (prover.prove_causes), which changes no verdict. Returns the proof, which
-// the caller frees.
-fn run_emptiness(session.session mut* s, fir.func* f, bool causes) prover.proof {
-    prover.proof verdicts = prover.prove_causes(f, causes);
-    report.write(f, &verdicts, s);
-    report.write_leaks(f, &verdicts, s);
-    report.write_uses(f, &verdicts, s);
+// the caller ends through prover.drop_made.
+fn run_emptiness(session.session mut* s, fir.func* f, bool causes) prover.proof mut* own {
+    prover.proof mut* own verdicts = prover.prove_causes_made(f, causes);
+    report.write(f, verdicts, s);
+    report.write_leaks(f, verdicts, s);
+    report.write_uses(f, verdicts, s);
     return verdicts;
 }
 
@@ -1927,25 +1913,18 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts,
             fir.check_kind mut missing = fir.check_kind.chk_overflow;
             if (fir_verify.runtime_holds(f, &rt, &missing)) {
                 fir_verify.verify(f, &rt);
-                prover.proof mut verdicts = run_emptiness(s, f, opts->aggregate_report);
-                defer {
-                    del(verdicts.proved);
-                    del(verdicts.stores);
-                    del(verdicts.exits);
-                    del(verdicts.inners);
-                    del(verdicts.uses);
-                    del(verdicts.aggregates);
-                }
+                prover.proof mut* own verdicts = run_emptiness(s, f, opts->aggregate_report);
+                defer prover.drop_made(move(verdicts));
                 if (opts->leak_report) {
-                    report.write_inners(f, &verdicts, s, &leaks);
+                    report.write_inners(f, verdicts, s, &leaks);
                 }
                 if (opts->aggregate_report) {
-                    report.write_aggregates(f, &verdicts, s, &leaks);
+                    report.write_aggregates(f, verdicts, s, &leaks);
                 }
-                if (prover.has_error(&verdicts)) {
+                if (prover.has_error(verdicts)) {
                     proved = false;
                 } else {
-                    summary.add(calls, f, verdicts.inner_work);
+                    summary.add(calls, f, verdicts->inner_work);
                 }
             }
         }
@@ -2249,14 +2228,9 @@ fn run_test_passes(fir.module mut* m, test_pass@ passes, fir_verify.runtime* rt,
                 fir_verify.verify(f, rt);
             } else if (p.kind == test_pass_kind.tp_build) {
                 // the pass removes the overwrite checks that the emptiness pass proves
-                prover.proof mut verdicts = prover.prove(f);
-                fir_passes.build_mode(f, p.release, p.no_bounds, &verdicts);
-                del(verdicts.proved);
-                del(verdicts.stores);
-                del(verdicts.exits);
-                del(verdicts.inners);
-                del(verdicts.uses);
-                del(verdicts.aggregates);
+                prover.proof mut* own verdicts = prover.prove_made(f);
+                fir_passes.build_mode(f, p.release, p.no_bounds, verdicts);
+                prover.drop_made(move(verdicts));
             }
             k += 1;
         }

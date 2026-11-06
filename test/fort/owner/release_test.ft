@@ -141,25 +141,25 @@ fn lower(lower_env.env mut* e, string name, fir.func mut* out) void {
 fn report_all(lower_env.env mut* e, string@ names, strbuf.str_buf mut* got) void {
     u64 mut k = 0;
     while (k < names.len) {
-        fir.func mut f = fir.func{};
-        lower(e, names[k], &f);
-        prover.proof mut p = prover.prove(&f);
-        report.write_inners(&f, &p, &e->c.m.s, got);
-        prover.free(&p);
-        fir.func_free(&f);
+        fir.func mut* own f = fir.func_make();
+        lower(e, names[k], f);
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(f);
+        report.write_inners(f, p, &e->c.m.s, got);
+        prover.drop_made(move(p));
+        fir.func_drop_made(move(f));
         k += 1;
     }
 }
 
 // The pass proves each obligation of part 2 of the forms of PROVED, so the report has no line.
 fn the_pass_proves_the_forms_of_the_migration() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, FORMS[..], true);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
-    report_all(&e, PROVED[..], &got);
+    defer del(got.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, FORMS[..], true);
+    report_all(e, PROVED[..], &got);
     if (strbuf.view(&got) != "") {
         eprintln(strbuf.view(&got));
         panic("release_test: the report names a site of a proved form");
@@ -168,17 +168,16 @@ fn the_pass_proves_the_forms_of_the_migration() void {
 
 // The report names one site of each form of UNPROVED, at the `del` keyword.
 fn the_pass_does_not_prove_the_forms_next_to_them() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, FORMS[..], true);
-    string file = lower_env.decl_file(&e, "walk_free");
-    assert(str.ends_with(file, "main.ft"));
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
-    report_all(&e, UNPROVED[..], &got);
+    defer del(got.data);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, FORMS[..], true);
+    string file = lower_env.decl_file(e, "walk_free");
+    assert(str.ends_with(file, "main.ft"));
+    report_all(e, UNPROVED[..], &got);
     u64 mut k = 0;
     while (k < UNPROVED_LINES.len) {
         strbuf.append(&want, file);

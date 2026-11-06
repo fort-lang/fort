@@ -5604,21 +5604,22 @@ fn write_verdicts(fir.func* f, prover.proof* p, strbuf.str_buf mut* out) void {
 // Parses `text` against PRELUDE, holds that the verifier accepts each function, proves each one,
 // and holds that function `k` of the module gives the verdicts `want[k]`.
 fn expect(string@ text, string@ want) void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], text);
-    defer fir.module_free(&m);
-    assert(m.funcs.len == want.len);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], text);
+    defer fir.module_drop_made(move(m));
+    assert(m->funcs.len == want.len);
     u64 mut k = 0;
-    while (k < m.funcs.len) {
-        fir.func* f = fir.module_function_at(&m, k);
-        pass_env.verified(&e, f, "prover_test: the verifier refuses the input");
-        prover.proof mut p = prover.prove(f);
-        write_verdicts(f, &p, &got);
-        prover.free(&p);
+    while (k < m->funcs.len) {
+        fir.func* f = fir.module_function_at(m, k);
+        pass_env.verified(e, f, "prover_test: the verifier refuses the input");
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(f);
+        write_verdicts(f, p, &got);
+        prover.drop_made(move(p));
         if (strbuf.view(&got) != want[k]) {
             eprintln("function ", k, " gives ", strbuf.view(&got), " and not ", want[k]);
             panic("prover_test: a verdict differs");
@@ -5825,30 +5826,35 @@ string[13] ORDER_CHECKED = {
 // stands right before and that writes no scratch local, plus 2 blocks times 4 locals: the store
 // into the temporary `_3` adds nothing to the first count. prover.free ends the list.
 fn the_proof_lists_each_store_in_block_order() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], ORDER[..]);
-    defer fir.module_free(&m);
-    fir.func* f = fir.module_function_at(&m, 0);
-    pass_env.verified(&e, f, "prover_test: the verifier refuses the input");
-    prover.proof mut p = prover.prove(f);
-    assert(p.checks == 0 && p.stores.len == 3 && p.unproved == 1 && !p.over);
-    assert(p.work == 34);
-    assert(p.stores[0].block == 0 && p.stores[0].index == 2 && p.stores[0].proved);
-    assert(p.stores[1].block == 1 && p.stores[1].index == 0 && !p.stores[1].proved);
-    assert(p.stores[2].block == 1 && p.stores[2].index == 1 && p.stores[2].proved);
-    assert(prover.is_proved(&p, 0) && prover.is_proved(&p, 1));
-    prover.free(&p);
-    assert(p.stores.len == 0 && p.proved.len == 0 && p.checks == 0 && p.unproved == 0);
-    fir.module mut c = pass_env.parse(&e, PRELUDE[..], ORDER_CHECKED[..]);
-    defer fir.module_free(&c);
-    fir.func* g = fir.module_function_at(&c, 0);
-    prover.proof mut q = prover.prove(g);
-    defer prover.free(&q);
-    assert(q.checks == 1 && q.stores.len == 3 && q.unproved == 1 && q.work == 20);
-    assert(q.stores[0].block == 0 && q.stores[0].index == 1 && q.stores[0].proved);
-    assert(q.stores[1].proved && !q.stores[2].proved && prover.is_proved(&q, 0));
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], ORDER[..]);
+    defer fir.module_drop_made(move(m));
+    fir.func* f = fir.module_function_at(m, 0);
+    pass_env.verified(e, f, "prover_test: the verifier refuses the input");
+    prover.proof mut* own p = prover.make();
+    *p = prover.prove(f);
+    // the free is under test, and prover.drop_made ends the empty proof that it leaves
+    defer prover.drop_made(move(p));
+    assert(p->checks == 0 && p->stores.len == 3 && p->unproved == 1 && !p->over);
+    assert(p->work == 34);
+    assert(p->stores[0].block == 0 && p->stores[0].index == 2 && p->stores[0].proved);
+    assert(p->stores[1].block == 1 && p->stores[1].index == 0 && !p->stores[1].proved);
+    assert(p->stores[2].block == 1 && p->stores[2].index == 1 && p->stores[2].proved);
+    assert(prover.is_proved(p, 0) && prover.is_proved(p, 1));
+    prover.free(p);
+    assert(p->stores.len == 0 && p->proved.len == 0 && p->checks == 0 && p->unproved == 0);
+    fir.module mut* own c = fir.module_make();
+    *c = pass_env.parse(e, PRELUDE[..], ORDER_CHECKED[..]);
+    defer fir.module_drop_made(move(c));
+    fir.func* g = fir.module_function_at(c, 0);
+    prover.proof mut* own q = prover.make();
+    *q = prover.prove(g);
+    defer prover.drop_made(move(q));
+    assert(q->checks == 1 && q->stores.len == 3 && q->unproved == 1 && q->work == 20);
+    assert(q->stores[0].block == 0 && q->stores[0].index == 1 && q->stores[0].proved);
+    assert(q->stores[1].proved && !q->stores[2].proved && prover.is_proved(q, 0));
 }
 
 // ---- the examples over fort source -------------------------------------------------------------
@@ -6173,20 +6179,20 @@ fn lower(lower_env.env mut* e, string name, fir.func mut* out) void {
 
 // The examples of the rule give their verdicts when the pass reads their lowering.
 fn the_examples_of_the_rule_hold_over_lowered_source() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, EXAMPLES[..], true);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, EXAMPLES[..], true);
     u64 mut k = 0;
     while (k < EXAMPLE_NAMES.len) {
-        fir.func mut f = fir.func{};
-        lower(&e, EXAMPLE_NAMES[k], &f);
-        prover.proof mut p = prover.prove(&f);
-        write_verdicts(&f, &p, &got);
-        prover.free(&p);
-        fir.func_free(&f);
+        fir.func mut* own f = fir.func_make();
+        lower(e, EXAMPLE_NAMES[k], f);
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(f);
+        write_verdicts(f, p, &got);
+        prover.drop_made(move(p));
+        fir.func_drop_made(move(f));
         if (strbuf.view(&got) != EXAMPLE_VERDICTS[k]) {
             eprintln(EXAMPLE_NAMES[k], " gives ", strbuf.view(&got), " and not ",
                      EXAMPLE_VERDICTS[k]);
@@ -6690,21 +6696,22 @@ fn write_exits(fir.func* f, prover.proof* p, strbuf.str_buf mut* out) void {
 // Parses `text` against PRELUDE, holds that the verifier accepts each function, proves each one,
 // and holds that function `k` of the module gives the exit verdicts `want[k]`.
 fn expect_exits(string@ text, string@ want) void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], text);
-    defer fir.module_free(&m);
-    assert(m.funcs.len == want.len);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], text);
+    defer fir.module_drop_made(move(m));
+    assert(m->funcs.len == want.len);
     u64 mut k = 0;
-    while (k < m.funcs.len) {
-        fir.func* f = fir.module_function_at(&m, k);
-        pass_env.verified(&e, f, "prover_test: the verifier refuses the input");
-        prover.proof mut p = prover.prove(f);
-        write_exits(f, &p, &got);
-        prover.free(&p);
+    while (k < m->funcs.len) {
+        fir.func* f = fir.module_function_at(m, k);
+        pass_env.verified(e, f, "prover_test: the verifier refuses the input");
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(f);
+        write_exits(f, p, &got);
+        prover.drop_made(move(p));
         if (strbuf.view(&got) != want[k]) {
             eprintln("function ", k, " gives ", strbuf.view(&got), " and not ", want[k]);
             panic("prover_test: an exit verdict differs");
@@ -6720,20 +6727,20 @@ fn each_exit_holds_the_obligation_of_its_owner_local() void {
 
 // Each exit kind of D17.20 has its obligation in the lowering of fort source.
 fn each_exit_kind_of_lowered_source_has_its_obligation() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, EXIT_KINDS[..], true);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, EXIT_KINDS[..], true);
     u64 mut k = 0;
     while (k < EXIT_KIND_NAMES.len) {
-        fir.func mut f = fir.func{};
-        lower(&e, EXIT_KIND_NAMES[k], &f);
-        prover.proof mut p = prover.prove(&f);
-        write_exits(&f, &p, &got);
-        prover.free(&p);
-        fir.func_free(&f);
+        fir.func mut* own f = fir.func_make();
+        lower(e, EXIT_KIND_NAMES[k], f);
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(f);
+        write_exits(f, p, &got);
+        prover.drop_made(move(p));
+        fir.func_drop_made(move(f));
         if (strbuf.view(&got) != EXIT_KIND_VERDICTS[k]) {
             eprintln(EXIT_KIND_NAMES[k], " gives ", strbuf.view(&got), " and not ",
                      EXIT_KIND_VERDICTS[k]);
@@ -7414,22 +7421,23 @@ fn write_inners(fir.func* f, prover.proof* p, strbuf.str_buf mut* out) void {
 // and holds that function `k` of the module gives the verdicts of part 2 `want[k]`. An obligation
 // of part 2 is no error: has_error holds only with an error of D17.11, of part 1 or of rule (b).
 fn expect_inners(string@ text, string@ want) void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], text);
-    defer fir.module_free(&m);
-    assert(m.funcs.len == want.len);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], text);
+    defer fir.module_drop_made(move(m));
+    assert(m->funcs.len == want.len);
     u64 mut k = 0;
-    while (k < m.funcs.len) {
-        fir.func* f = fir.module_function_at(&m, k);
-        pass_env.verified(&e, f, "prover_test: the verifier refuses the input");
-        prover.proof mut p = prover.prove(f);
-        write_inners(f, &p, &got);
-        assert(prover.has_error(&p) == (p.unproved > 0 || p.leaks > 0 || p.use_unproved > 0));
-        prover.free(&p);
+    while (k < m->funcs.len) {
+        fir.func* f = fir.module_function_at(m, k);
+        pass_env.verified(e, f, "prover_test: the verifier refuses the input");
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(f);
+        write_inners(f, p, &got);
+        assert(prover.has_error(p) == (p->unproved > 0 || p->leaks > 0 || p->use_unproved > 0));
+        prover.drop_made(move(p));
         if (strbuf.view(&got) != want[k]) {
             eprintln("function ", k, " gives ", strbuf.view(&got), " and not ", want[k]);
             panic("prover_test: a verdict of part 2 differs");
@@ -7446,20 +7454,20 @@ fn each_release_holds_the_obligation_of_its_inner_owners() void {
 
 // The obligations of part 2 hold in the lowering of fort source too.
 fn each_release_of_lowered_source_has_its_obligation() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, INNER_KINDS[..], true);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, INNER_KINDS[..], true);
     u64 mut k = 0;
     while (k < INNER_KIND_NAMES.len) {
-        fir.func mut f = fir.func{};
-        lower(&e, INNER_KIND_NAMES[k], &f);
-        prover.proof mut p = prover.prove(&f);
-        write_inners(&f, &p, &got);
-        prover.free(&p);
-        fir.func_free(&f);
+        fir.func mut* own f = fir.func_make();
+        lower(e, INNER_KIND_NAMES[k], f);
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(f);
+        write_inners(f, p, &got);
+        prover.drop_made(move(p));
+        fir.func_drop_made(move(f));
         if (strbuf.view(&got) != INNER_KIND_VERDICTS[k]) {
             eprintln(INNER_KIND_NAMES[k], " gives ", strbuf.view(&got), " and not ",
                      INNER_KIND_VERDICTS[k]);
@@ -7550,38 +7558,39 @@ string[26] SCALE = {
 // fact. The 50000 owners of `c0` are 11 steps deep, so their 600000 steps pass the limit, which
 // keeps the memory of the paths within the limit too.
 fn the_proof_of_part_2_is_linear_in_the_inner_owners() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], SCALE[..]);
-    defer fir.module_free(&m);
+    strbuf.str_buf mut got = strbuf.create();
+    defer del(got.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], SCALE[..]);
+    defer fir.module_drop_made(move(m));
     u64[4] owners = {170000, 101000, 100000, 50000};
     u64[4] steps = {3, 5, 3, 12};
     u64[4] units = {2, 2, 3, 2};
     bool[4] proved = {false, false, true, false};
     u64 mut k = 0;
     while (k < 4) {
-        fir.func* f = fir.module_function_at(&m, k);
-        prover.proof mut p = prover.prove(f);
-        assert(p.inners.len == 1 && p.inners[0].owners == owners[k]);
+        fir.func* f = fir.module_function_at(m, k);
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(f);
+        assert(p->inners.len == 1 && p->inners[0].owners == owners[k]);
         // the fact of `_1`, the place of the `del`, adds 1 step
-        assert(p.inner_work == p.leak_work + units[k] * (owners[k] * steps[k] + 1));
-        assert(p.inner_over == (k == 3) && !p.leak_over);
-        assert(p.inner_work <= prover.WORK_LIMIT || k == 3);
-        assert(p.inners[0].proved == proved[k]);
+        assert(p->inner_work == p->leak_work + units[k] * (owners[k] * steps[k] + 1));
+        assert(p->inner_over == (k == 3) && !p->leak_over);
+        assert(p->inner_work <= prover.WORK_LIMIT || k == 3);
+        assert(p->inners[0].proved == proved[k]);
         if (proved[k]) {
-            assert(p.inners[0].first == owners[k] && p.inner_leaks == 0);
+            assert(p->inners[0].first == owners[k] && p->inner_leaks == 0);
         } else {
-            assert(p.inners[0].first == 0 && p.inner_leaks == 1);
+            assert(p->inners[0].first == 0 && p->inner_leaks == 1);
         }
-        prover.free(&p);
+        prover.drop_made(move(p));
         k += 1;
     }
     // the order of the owners of a `deep`: the 100 elements of a block, then its field `f`; its
     // deepest path, `blocks[i].e[j]`, takes 4 steps
-    types.node* deep = param_object(&m, 1);
-    strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    types.node* deep = param_object(m, 1);
     report.append_steps(deep, 100, false, &got);
     assert(strbuf.view(&got) == ".blocks[0].f");
     strbuf.clear(&got);
@@ -7656,11 +7665,16 @@ string[12] DOUBLING_TEXT = {
 // passes the limit of the inner work, and the report writes its first inner owner, 60 field steps
 // deep. `d30` holds 2^30 inner owners, under the cap, 31 steps deep.
 fn the_inner_owners_of_a_doubling_chain_take_one_walk() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    strbuf.str_buf mut got = strbuf.create();
+    defer del(got.data);
+    strbuf.str_buf mut owner = strbuf.create();
+    defer del(owner.data);
+    strbuf.str_buf mut want = strbuf.create();
+    defer del(want.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     strbuf.append(&b, "struct d0 {\n    i32 mut* own p;\n}");
     u64 mut k = 1;
     while (k <= DOUBLING) {
@@ -7675,36 +7689,33 @@ fn the_inner_owners_of_a_doubling_chain_take_one_walk() void {
     }
     string mut@ own lines = split_lines(strbuf.view(&b));
     defer del(lines);
-    fir.module mut m = pass_env.parse(&e, lines, DOUBLING_TEXT[..]);
-    defer fir.module_free(&m);
-    types.node* top = param_object(&m, 0);
-    types.node* half = param_object(&m, 1);
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, lines, DOUBLING_TEXT[..]);
+    defer fir.module_drop_made(move(m));
+    types.node* top = param_object(m, 0);
+    types.node* half = param_object(m, 1);
     assert(place.count_owners(top) == types.OWNER_CAP && place.depth_to_owners(top) == 60);
     assert(place.count_owners(half) == 1073741824 && place.depth_to_owners(half) == 31);
-    prover.proof mut p = prover.prove(fir.module_function_at(&m, 0));
-    defer prover.free(&p);
-    assert(p.inners.len == 1 && p.inners[0].owners == types.OWNER_CAP && p.inner_over);
-    assert(!p.inners[0].proved && p.inners[0].first == 0 && !prover.has_error(&p));
-    strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
-    report.write_inners(fir.module_function_at(&m, 0), &p, &e.c.m.s, &got);
-    strbuf.str_buf mut owner = strbuf.create();
-    defer strbuf.free(&owner);
+    prover.proof mut* own p = prover.make();
+    *p = prover.prove(fir.module_function_at(m, 0));
+    defer prover.drop_made(move(p));
+    assert(p->inners.len == 1 && p->inners[0].owners == types.OWNER_CAP && p->inner_over);
+    assert(!p->inners[0].proved && p->inners[0].first == 0 && !prover.has_error(p));
+    report.write_inners(fir.module_function_at(m, 0), p, &e->c.m.s, &got);
     strbuf.append(&owner, "(*_1)");
     k = 0;
     while (k <= DOUBLING) {
         strbuf.append(&owner, ".0");
         k += 1;
     }
-    strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
     strbuf.append(&want, "t.fir:3:1: leak: cannot prove '");
     strbuf.append(&want, strbuf.view(&owner));
     strbuf.append(&want, "' is empty before this del\n");
     assert(str.starts_with(strbuf.view(&got), strbuf.view(&want)));
-    prover.proof mut q = prover.prove(fir.module_function_at(&m, 1));
-    defer prover.free(&q);
-    assert(q.inners.len == 1 && q.inners[0].owners == 1073741824 && q.inner_over);
+    prover.proof mut* own q = prover.make();
+    *q = prover.prove(fir.module_function_at(m, 1));
+    defer prover.drop_made(move(q));
+    assert(q->inners.len == 1 && q->inners[0].owners == 1073741824 && q->inner_over);
 }
 
 // The inner owners of a type: the fields in the order of their declarations and the elements from
@@ -7713,16 +7724,16 @@ fn the_inner_owners_of_a_doubling_chain_take_one_walk() void {
 // a `shelf` (i21), a `bin` (i1), a `holder` (i12), a pointer to an owner (i13), a `plain` (i29)
 // and a `label` (i30). A `big` (i23) counts OWNER_CAP.
 fn the_inner_owners_of_a_type_follow_their_order() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], INNERS[..]);
-    defer fir.module_free(&m);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
-    types.node* shelf = param_object(&m, 20);
+    defer del(want.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], INNERS[..]);
+    defer fir.module_drop_made(move(m));
+    types.node* shelf = param_object(m, 20);
     assert(place.count_owners(shelf) == 9);
     write_owner_steps(shelf, false, &got);
     join_words(SHELF_NAMED[..], &want);
@@ -7730,23 +7741,23 @@ fn the_inner_owners_of_a_type_follow_their_order() void {
     write_owner_steps(shelf, true, &got);
     join_words(SHELF_NUMBERED[..], &want);
     assert(strbuf.view(&got) == strbuf.view(&want));
-    types.node* bin = param_object(&m, 0);
+    types.node* bin = param_object(m, 0);
     write_owner_steps(bin, false, &got);
     assert(place.count_owners(bin) == 3 && strbuf.view(&got) == ".a .e[0] .e[1]");
-    types.node* holder = param_object(&m, 11);
+    types.node* holder = param_object(m, 11);
     write_owner_steps(holder, false, &got);
     assert(place.count_owners(holder) == 1 && strbuf.view(&got) == ".b");
     // the pointer that does not own, `holder mut*` itself, holds no inner owner
-    assert(place.count_owners(param_type(&m, 11)) == 0);
-    types.node* owner = param_object(&m, 12);
+    assert(place.count_owners(param_type(m, 11)) == 0);
+    types.node* owner = param_object(m, 12);
     write_owner_steps(owner, false, &got);
     assert(place.count_owners(owner) == 1 && strbuf.view(&got) == "");
-    types.node* plain = param_object(&m, 28);
+    types.node* plain = param_object(m, 28);
     assert(place.count_owners(plain) == 0);
-    types.node* label = param_object(&m, 29);
+    types.node* label = param_object(m, 29);
     write_owner_steps(label, false, &got);
     assert(place.count_owners(label) == 1 && strbuf.view(&got) == ".text");
-    types.node* big = param_object(&m, 22);
+    types.node* big = param_object(m, 22);
     assert(place.count_owners(big) == types.OWNER_CAP);
     // the steps of the deepest path after its deref bound the prefix of place.put_inner_paths:
     // `bins[i].e[j]` of a `shelf` takes 4, `e[j]` of a `bin` 2 and `text` of a `label` 1
@@ -7766,51 +7777,56 @@ fn the_inner_owners_of_a_type_follow_their_order() void {
 // owner, and the verdicts of D17.11 and of part 1 do not change, because the leak work keeps its
 // own count.
 fn the_inner_work_stops_the_proof_of_part_2() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], INNERS[..]);
-    defer fir.module_free(&m);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     strbuf.str_buf mut exits = strbuf.create();
-    defer strbuf.free(&exits);
+    defer del(exits.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], INNERS[..]);
+    defer fir.module_drop_made(move(m));
     // i2: 6 statements and 1 terminator, no check, 1 block and 4 locals, so a leak work of 7 for
     // its parameter and 4; the 3 inner owners of its one obligation take 9 steps, `(*_1).0` and
     // `(*_1).1[c]` with their deref, and the fact of `_1`, the place of the `del`, takes 1 more
     // than its 0 projections, so they add 10 * 7
-    fir.func* i2 = fir.module_function_at(&m, 1);
-    prover.proof mut whole = prover.prove(i2);
-    assert(whole.work == 0 && whole.leak_work == 11 && whole.inner_work == 81);
-    assert(!whole.leak_over && !whole.inner_over && whole.inner_leaks == 0);
-    prover.free(&whole);
-    prover.proof mut at = prover.prove_within(i2, 81);
-    write_inners(i2, &at, &got);
-    assert(!at.inner_over && strbuf.view(&got) == "dP");
-    prover.free(&at);
-    prover.proof mut past = prover.prove_within(i2, 80);
-    write_inners(i2, &past, &got);
-    write_exits(i2, &past, &exits);
-    assert(past.inner_over && !past.leak_over && strbuf.view(&got) == "dU0");
-    assert(strbuf.view(&exits) == "rqP" && !prover.has_error(&past));
-    prover.free(&past);
+    fir.func* i2 = fir.module_function_at(m, 1);
+    prover.proof mut* own whole = prover.make();
+    *whole = prover.prove(i2);
+    assert(whole->work == 0 && whole->leak_work == 11 && whole->inner_work == 81);
+    assert(!whole->leak_over && !whole->inner_over && whole->inner_leaks == 0);
+    prover.drop_made(move(whole));
+    prover.proof mut* own at = prover.make();
+    *at = prover.prove_within(i2, 81);
+    write_inners(i2, at, &got);
+    assert(!at->inner_over && strbuf.view(&got) == "dP");
+    prover.drop_made(move(at));
+    prover.proof mut* own past = prover.make();
+    *past = prover.prove_within(i2, 80);
+    write_inners(i2, past, &got);
+    write_exits(i2, past, &exits);
+    assert(past->inner_over && !past->leak_over && strbuf.view(&got) == "dU0");
+    assert(strbuf.view(&exits) == "rqP" && !prover.has_error(past));
+    prover.drop_made(move(past));
     // i4: the leak work passes the limit too, so the exit of `q` is unproved
-    fir.func* i4 = fir.module_function_at(&m, 3);
-    prover.proof mut both = prover.prove_within(i4, 0);
-    write_inners(i4, &both, &got);
-    assert(both.inner_over && both.leak_over && strbuf.view(&got) == "dU0");
-    prover.free(&both);
+    fir.func* i4 = fir.module_function_at(m, 3);
+    prover.proof mut* own both = prover.make();
+    *both = prover.prove_within(i4, 0);
+    write_inners(i4, both, &got);
+    assert(both->inner_over && both->leak_over && strbuf.view(&got) == "dU0");
+    prover.drop_made(move(both));
     // i23: the 2^32 + 1 inner owners of a `big` count OWNER_CAP, and their product with the 2
     // statements and terminators stops at OWNER_CAP too, so the inner work alone passes the limit
-    fir.func* i23 = fir.module_function_at(&m, 22);
-    prover.proof mut wide = prover.prove(i23);
-    assert(wide.inners.len == 1 && wide.inners[0].owners == types.OWNER_CAP);
-    write_inners(i23, &wide, &got);
-    write_exits(i23, &wide, &exits);
-    assert(wide.inner_work == wide.leak_work + types.OWNER_CAP);
-    assert(wide.inner_over && !wide.leak_over && strbuf.view(&got) == "dU0");
+    fir.func* i23 = fir.module_function_at(m, 22);
+    prover.proof mut* own wide = prover.make();
+    *wide = prover.prove(i23);
+    assert(wide->inners.len == 1 && wide->inners[0].owners == types.OWNER_CAP);
+    write_inners(i23, wide, &got);
+    write_exits(i23, wide, &exits);
+    assert(wide->inner_work == wide->leak_work + types.OWNER_CAP);
+    assert(wide->inner_over && !wide->leak_over && strbuf.view(&got) == "dU0");
     assert(strbuf.view(&exits) == "rbP");
-    prover.free(&wide);
+    prover.drop_made(move(wide));
     // the caps of the sums and the products, at their boundaries
     assert(types.capped_product(types.OWNER_CAP, 2) == types.OWNER_CAP);
     assert(types.capped_product(3, 5) == 15 && types.capped_product(0, types.OWNER_CAP) == 0);
@@ -8538,7 +8554,7 @@ string[35] NULLS_VERDICTS = {
 // part 2 (write_inners).
 fn write_all(fir.func* f, prover.proof* p, strbuf.str_buf mut* out) void {
     strbuf.str_buf mut part = strbuf.create();
-    defer strbuf.free(&part);
+    defer del(part.data);
     strbuf.clear(out);
     write_verdicts(f, p, &part);
     strbuf.append(out, strbuf.view(&part));
@@ -8553,21 +8569,22 @@ fn write_all(fir.func* f, prover.proof* p, strbuf.str_buf mut* out) void {
 // Parses `text` against PRELUDE, holds that the verifier accepts each function, proves each one,
 // and holds that function `k` of the module gives all the verdicts `want[k]` (write_all).
 fn expect_all(string@ text, string@ want) void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], text);
-    defer fir.module_free(&m);
-    assert(m.funcs.len == want.len);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], text);
+    defer fir.module_drop_made(move(m));
+    assert(m->funcs.len == want.len);
     u64 mut k = 0;
-    while (k < m.funcs.len) {
-        fir.func* f = fir.module_function_at(&m, k);
-        pass_env.verified(&e, f, "prover_test: the verifier refuses the input");
-        prover.proof mut p = prover.prove(f);
-        write_all(f, &p, &got);
-        prover.free(&p);
+    while (k < m->funcs.len) {
+        fir.func* f = fir.module_function_at(m, k);
+        pass_env.verified(e, f, "prover_test: the verifier refuses the input");
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(f);
+        write_all(f, p, &got);
+        prover.drop_made(move(p));
         if (strbuf.view(&got) != want[k]) {
             eprintln("function ", k, " gives ", strbuf.view(&got), " and not ", want[k]);
             panic("prover_test: a verdict after a test against null differs");
@@ -8729,28 +8746,28 @@ string[14] NULL_KIND_VERDICTS = {
 // verdicts of part 2 (write_inners) and `ok`, or `error` for an error of D17.11, of part 1 or of
 // rule (b).
 fn each_test_against_null_of_lowered_source_gives_its_fact() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, NULL_KINDS[..], true);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, NULL_KINDS[..], true);
     u64 mut k = 0;
     while (k < NULL_KIND_NAMES.len) {
-        fir.func mut f = fir.func{};
-        lower(&e, NULL_KIND_NAMES[k], &f);
-        prover.proof mut p = prover.prove(&f);
-        write_inners(&f, &p, &got);
+        fir.func mut* own f = fir.func_make();
+        lower(e, NULL_KIND_NAMES[k], f);
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(f);
+        write_inners(f, p, &got);
         if (strbuf.view(&got).len > 0) {
             strbuf.push(&got, ' ');
         }
-        if (prover.has_error(&p)) {
+        if (prover.has_error(p)) {
             strbuf.append(&got, "error");
         } else {
             strbuf.append(&got, "ok");
         }
-        prover.free(&p);
-        fir.func_free(&f);
+        prover.drop_made(move(p));
+        fir.func_drop_made(move(f));
         if (strbuf.view(&got) != NULL_KIND_VERDICTS[k]) {
             eprintln(NULL_KIND_NAMES[k], " gives ", strbuf.view(&got), " and not ",
                      NULL_KIND_VERDICTS[k]);
@@ -8808,9 +8825,10 @@ fn write_unproved(fir.func* f, prover.proof* p, session.session mut* s,
 // before it or held in each round.
 // The probe runs first in main, as the probe of fir_flow_test does.
 fn the_proofs_leave_the_heap_where_it_was() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    strbuf.str_buf mut out = strbuf.create();
+    defer del(out.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     // one module holds both texts: a second parse in one environment checks the prelude again
     string mut@ own text = new(string, HELD.len + EXITS.len + INNERS.len);
     defer del(text);
@@ -8823,21 +8841,21 @@ fn the_proofs_leave_the_heap_where_it_was() void {
             text[i] = INNERS[i - HELD.len - EXITS.len];
         }
     }
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], text);
-    defer fir.module_free(&m);
-    strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], text);
+    defer fir.module_drop_made(move(m));
     u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < fir_env.LEAK_ROUNDS) {
         u64 mut k = 0;
         while (k < PROOFS) {
             u64 mut i = 0;
-            while (i < m.funcs.len) {
-                prover.proof mut p = prover.prove(fir.module_function_at(&m, i));
+            while (i < m->funcs.len) {
+                prover.proof mut* own p = prover.make();
+                *p = prover.prove(fir.module_function_at(m, i));
                 strbuf.clear(&out);
-                write_unproved(fir.module_function_at(&m, i), &p, &e.c.m.s, &out);
-                prover.free(&p);
+                write_unproved(fir.module_function_at(m, i), p, &e->c.m.s, &out);
+                prover.drop_made(move(p));
                 i += 1;
             }
             k += 1;
@@ -9026,22 +9044,24 @@ fn write_scratch(u64 n, strbuf.str_buf mut* out) void {
 // no scratch local is unproved, but a store into a scratch local is no error (D17.11).
 fn expect_store_work(lower_env.env mut* e, fir_parse.prelude pre, string text, u64 n, u64 lvalue,
                      u64 work, bool proved) void {
-    fir.module mut m = fir_parse.parse_module(&e->c.m.s, "t.fir", text, pre);
-    defer fir.module_free(&m);
-    assert(check_env.errors(&e->c) == 0 && m.funcs.len == 1);
-    fir.func* f = fir.module_function_at(&m, 0);
+    fir.module mut* own m = fir.module_make();
+    *m = fir_parse.parse_module(&e->c.m.s, "t.fir", text, pre);
+    defer fir.module_drop_made(move(m));
+    assert(check_env.errors(&e->c) == 0 && m->funcs.len == 1);
+    fir.func* f = fir.module_function_at(m, 0);
     pass_env.verified(e, f, "prover_test: the verifier refuses the generated function");
-    prover.proof mut p = prover.prove(f);
-    defer prover.free(&p);
-    if (p.work != work) {
-        eprintln("work ", p.work, " and not ", work);
+    prover.proof mut* own p = prover.make();
+    *p = prover.prove(f);
+    defer prover.drop_made(move(p));
+    if (p->work != work) {
+        eprintln("work ", p->work, " and not ", work);
         panic("prover_test: the work differs");
     }
-    assert(p.checks == 0 && p.stores.len == n);
+    assert(p->checks == 0 && p->stores.len == n);
     if (proved) {
-        assert(!p.over && p.unproved == 0);
+        assert(!p->over && p->unproved == 0);
     } else {
-        assert(p.over && cast(p.unproved, u64) == lvalue);
+        assert(p->over && cast(p->unproved, u64) == lvalue);
     }
 }
 
@@ -9050,22 +9070,24 @@ fn expect_store_work(lower_env.env mut* e, fir_parse.prelude pre, string text, u
 // is set.
 fn expect_work(lower_env.env mut* e, fir_parse.prelude pre, string text, u64 work, bool proved)
     void {
-    fir.module mut m = fir_parse.parse_module(&e->c.m.s, "t.fir", text, pre);
-    defer fir.module_free(&m);
-    assert(check_env.errors(&e->c) == 0 && m.funcs.len == 1);
-    fir.func* f = fir.module_function_at(&m, 0);
+    fir.module mut* own m = fir.module_make();
+    *m = fir_parse.parse_module(&e->c.m.s, "t.fir", text, pre);
+    defer fir.module_drop_made(move(m));
+    assert(check_env.errors(&e->c) == 0 && m->funcs.len == 1);
+    fir.func* f = fir.module_function_at(m, 0);
     pass_env.verified(e, f, "prover_test: the verifier refuses the generated function");
-    prover.proof mut p = prover.prove(f);
-    defer prover.free(&p);
-    if (p.work != work) {
-        eprintln("work ", p.work, " and not ", work);
+    prover.proof mut* own p = prover.make();
+    *p = prover.prove(f);
+    defer prover.drop_made(move(p));
+    if (p->work != work) {
+        eprintln("work ", p->work, " and not ", work);
         panic("prover_test: the work differs");
     }
-    assert(p.checks > 0);
+    assert(p->checks > 0);
     if (proved) {
-        assert(!p.over && p.unproved == 0);
+        assert(!p->over && p->unproved == 0);
     } else {
-        assert(p.over && p.unproved == p.checks);
+        assert(p->over && p->unproved == p->checks);
     }
 }
 
@@ -9077,47 +9099,50 @@ fn expect_work(lower_env.env mut* e, fir_parse.prelude pre, string text, u64 wor
 // the work of a small function proves it, and a limit one less proves none of its checks.
 fn the_work_limit_stops_the_proof_of_a_function() void {
     assert(prover.WORK_LIMIT == 1048576);
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, PRELUDE[..], true);
-    fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e.c, "main"), &e.c.ck};
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, PRELUDE[..], true);
+    fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e->c, "main"), &e->c.ck};
     write_elements(511, &text);
-    expect_work(&e, pre, strbuf.view(&text), 1046530, true);
+    expect_work(e, pre, strbuf.view(&text), 1046530, true);
     write_elements(512, &text);
-    expect_work(&e, pre, strbuf.view(&text), 1050626, false);
+    expect_work(e, pre, strbuf.view(&text), 1050626, false);
     write_wide(1022, &text);
-    expect_work(&e, pre, strbuf.view(&text), 1048573, true);
+    expect_work(e, pre, strbuf.view(&text), 1048573, true);
     write_wide(1023, &text);
-    expect_work(&e, pre, strbuf.view(&text), 1049599, false);
+    expect_work(e, pre, strbuf.view(&text), 1049599, false);
     write_chain(1021, &text);
-    expect_work(&e, pre, strbuf.view(&text), 1046534, true);
+    expect_work(e, pre, strbuf.view(&text), 1046534, true);
     write_chain(1022, &text);
-    expect_work(&e, pre, strbuf.view(&text), 1048581, false);
+    expect_work(e, pre, strbuf.view(&text), 1048581, false);
     // the stores that no check stands right before count in the first count as checks do
     write_lone(590, &text);
-    expect_store_work(&e, pre, strbuf.view(&text), 1180, 590, 1045482, true);
+    expect_store_work(e, pre, strbuf.view(&text), 1180, 590, 1045482, true);
     write_lone(591, &text);
-    expect_store_work(&e, pre, strbuf.view(&text), 1182, 591, 1049027, false);
+    expect_store_work(e, pre, strbuf.view(&text), 1182, 591, 1049027, false);
     // 5000 owning temporaries, each passed on, as `take(new(node))` lowers: a work of 10001
     write_scratch(5000, &text);
-    expect_store_work(&e, pre, strbuf.view(&text), 5000, 0, 10001, true);
-    fir.module mut held = pass_env.parse(&e, PRELUDE[..], HELD[..]);
-    defer fir.module_free(&held);
-    fir.func* f = fir.module_function_at(&held, 4);
-    prover.proof mut whole = prover.prove(f);
-    defer prover.free(&whole);
-    assert(whole.checks == 3 && whole.unproved == 0 && !whole.over && whole.work > 0);
-    prover.proof mut at = prover.prove_within(f, whole.work);
-    defer prover.free(&at);
-    assert(at.unproved == 0 && !at.over && at.work == whole.work);
-    prover.proof mut under = prover.prove_within(f, whole.work - 1);
-    defer prover.free(&under);
+    expect_store_work(e, pre, strbuf.view(&text), 5000, 0, 10001, true);
+    fir.module mut* own held = fir.module_make();
+    *held = pass_env.parse(e, PRELUDE[..], HELD[..]);
+    defer fir.module_drop_made(move(held));
+    fir.func* f = fir.module_function_at(held, 4);
+    prover.proof mut* own whole = prover.make();
+    *whole = prover.prove(f);
+    defer prover.drop_made(move(whole));
+    assert(whole->checks == 3 && whole->unproved == 0 && !whole->over && whole->work > 0);
+    prover.proof mut* own at = prover.make();
+    *at = prover.prove_within(f, whole->work);
+    defer prover.drop_made(move(at));
+    assert(at->unproved == 0 && !at->over && at->work == whole->work);
+    prover.proof mut* own under = prover.make();
+    *under = prover.prove_within(f, whole->work - 1);
+    defer prover.drop_made(move(under));
     // past the limit, each of the three checks and each of the three stores of `h5` into no
     // scratch local is unproved; its three stores into temporaries are no error (D17.11)
-    assert(under.over && under.stores.len == 6 && under.unproved == 6);
+    assert(under->over && under->stores.len == 6 && under->unproved == 6);
 }
 
 // The leak work adds the statements and the terminators times the owner locals that are no scratch
@@ -9125,56 +9150,65 @@ fn the_work_limit_stops_the_proof_of_a_function() void {
 // and a named local has no obligation at a `return`. The work of D17.11 and the verdicts of the
 // overwrite proof do not change below their own limit.
 fn the_leak_work_stops_the_proof_of_the_exits() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], EXITS[..]);
-    defer fir.module_free(&m);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], EXITS[..]);
+    defer fir.module_drop_made(move(m));
     // x2: 8 statements and terminators, 1 check, 2 blocks and 3 locals: a work of 8 * 1 + 6, and
     // the fact of `n` adds 8
-    fir.func* x2 = fir.module_function_at(&m, 1);
-    prover.proof mut whole = prover.prove(x2);
-    assert(whole.work == 14 && whole.leak_work == 22 && !whole.over && !whole.leak_over);
-    prover.free(&whole);
-    prover.proof mut at = prover.prove_within(x2, 22);
-    write_exits(x2, &at, &got);
-    assert(!at.leak_over && at.unproved == 0 && strbuf.view(&got) == "dnP rtP");
-    prover.free(&at);
-    prover.proof mut leak_under = prover.prove_within(x2, 21);
-    write_exits(x2, &leak_under, &got);
-    assert(leak_under.leak_over && !leak_under.over && leak_under.unproved == 0);
+    fir.func* x2 = fir.module_function_at(m, 1);
+    prover.proof mut* own whole = prover.make();
+    *whole = prover.prove(x2);
+    assert(whole->work == 14 && whole->leak_work == 22 && !whole->over && !whole->leak_over);
+    prover.drop_made(move(whole));
+    prover.proof mut* own at = prover.make();
+    *at = prover.prove_within(x2, 22);
+    write_exits(x2, at, &got);
+    assert(!at->leak_over && at->unproved == 0 && strbuf.view(&got) == "dnP rtP");
+    prover.drop_made(move(at));
+    prover.proof mut* own leak_under = prover.make();
+    *leak_under = prover.prove_within(x2, 21);
+    write_exits(x2, leak_under, &got);
+    assert(leak_under->leak_over && !leak_under->over && leak_under->unproved == 0);
     assert(strbuf.view(&got) == "dnU rtP");
-    prover.free(&leak_under);
+    prover.drop_made(move(leak_under));
     // past the limit of D17.11 the check and its store are unproved too
-    prover.proof mut under = prover.prove_within(x2, 13);
-    write_exits(x2, &under, &got);
-    assert(under.over && under.leak_over && under.unproved == 2 && strbuf.view(&got) == "dnU rtP");
-    prover.free(&under);
+    prover.proof mut* own under = prover.make();
+    *under = prover.prove_within(x2, 13);
+    write_exits(x2, under, &got);
+    assert(under->over && under->leak_over && under->unproved == 2);
+    assert(strbuf.view(&got) == "dnU rtP");
+    prover.drop_made(move(under));
     // x4: no check and no store, so no work of D17.11; 2 * 1 + 2 with its parameter
-    fir.func* x4 = fir.module_function_at(&m, 3);
-    prover.proof mut param = prover.prove_within(x4, 4);
-    write_exits(x4, &param, &got);
-    assert(param.work == 0 && param.leak_work == 4 && !param.leak_over);
+    fir.func* x4 = fir.module_function_at(m, 3);
+    prover.proof mut* own param = prover.make();
+    *param = prover.prove_within(x4, 4);
+    write_exits(x4, param, &got);
+    assert(param->work == 0 && param->leak_work == 4 && !param->leak_over);
     assert(strbuf.view(&got) == "rpP");
-    prover.free(&param);
-    prover.proof mut param_under = prover.prove_within(x4, 3);
-    write_exits(x4, &param_under, &got);
-    assert(param_under.leak_over && !param_under.over && strbuf.view(&got) == "rpU");
-    prover.free(&param_under);
+    prover.drop_made(move(param));
+    prover.proof mut* own param_under = prover.make();
+    *param_under = prover.prove_within(x4, 3);
+    write_exits(x4, param_under, &got);
+    assert(param_under->leak_over && !param_under->over && strbuf.view(&got) == "rpU");
+    prover.drop_made(move(param_under));
     // x6: past the limit, the exit of a scratch local holds even when it holds an allocation
-    fir.func* x6 = fir.module_function_at(&m, 5);
-    prover.proof mut temp = prover.prove_within(x6, 1);
-    write_exits(x6, &temp, &got);
-    assert(temp.leak_work == 2 && temp.leak_over && strbuf.view(&got) == "rtP");
-    prover.free(&temp);
+    fir.func* x6 = fir.module_function_at(m, 5);
+    prover.proof mut* own temp = prover.make();
+    *temp = prover.prove_within(x6, 1);
+    write_exits(x6, temp, &got);
+    assert(temp->leak_work == 2 && temp->leak_over && strbuf.view(&got) == "rtP");
+    prover.drop_made(move(temp));
     // x12: past the limit, a named local has no obligation at a `return`
-    fir.func* x12 = fir.module_function_at(&m, 11);
-    prover.proof mut named = prover.prove_within(x12, 0);
-    write_exits(x12, &named, &got);
-    assert(named.leak_over && strbuf.view(&got) == "rtP");
-    prover.free(&named);
+    fir.func* x12 = fir.module_function_at(m, 11);
+    prover.proof mut* own named = prover.make();
+    *named = prover.prove_within(x12, 0);
+    write_exits(x12, named, &got);
+    assert(named->leak_over && strbuf.view(&got) == "rtP");
+    prover.drop_made(move(named));
 }
 
 fn main() i32 {
