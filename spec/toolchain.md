@@ -2276,13 +2276,21 @@ An FFI test under `test/lang/run/ffi/`, with its helper in `test/lang/ffi/helper
 //! link: ffi/helpers.c
 //! stdout:
 //| 12
+import extern;
+
+// C: helper_add, test/lang/ffi/helpers.c. Gives back a plus b.
+// gives: nothing. writes: nothing. keeps: nothing. calls: nothing. frees: nothing.
 extern fn helper_add(i32 a, i32 b) i32;
 
+// C call helper_add: no pointer argument.
 fn main() i32 {
     println(helper_add(5, 7));
     return 0;
 }
 ```
+
+The test module writes `import extern;`, because only a trusted module declares or calls an
+`extern fn`, and each declaration and each call has a row (D9.8).
 
 ```c
 int32_t helper_add(int32_t a, int32_t b) { return a + b; }

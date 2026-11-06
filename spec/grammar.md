@@ -74,7 +74,9 @@ Notes:
 ## 2. Module structure
 
 ```ebnf
-module      = { import_decl | compile_module_if } { top_decl } ; (* D9.3, D21.3 *)
+module      = [ trust_decl ] { import_decl | compile_module_if } { top_decl } ; (* D9.3, D21.3 *)
+
+trust_decl  = "import" "extern" ";" ;                    (* D9.3, D9.8 *)
 
 import_decl = "import" import_path [ "as" identifier ] ";"
             | "import" import_path "." "{" import_item { "," import_item } [ "," ] "}" ";" ;
@@ -93,10 +95,15 @@ compile_decl_if = "$if" "(" expr ")" decl_branch
                   [ "else" decl_branch ] ;                           (* D21.2 *)
 decl_branch = "{" { top_decl } "}" ;
 
-interface_module = { interface_import } { interface_decl } ;          (* D9.11 *)
+interface_module = [ trust_decl ] { interface_import } { interface_decl } ; (* D9.8, D9.11 *)
 interface_import = "import" import_path "as" identifier ";" ;
 interface_decl   = fn_signature | extern_decl | struct_decl | enum_decl | global_decl ;
 ```
+
+A `trust_decl` imports no module and binds no name. It makes the module trusted, so the module
+may declare an `extern fn` (D9.8). It is the first item of a module or of a section of an
+interface file, and a module `$if` holds none. `extern` is a keyword, so no `import_path` starts
+with it.
 
 The parser reads each section of an interface file (D9.11, `module-system.md` 10.3) as an
 `interface_module`, and every other file as a `module`. A `fn_signature` is therefore a syntax

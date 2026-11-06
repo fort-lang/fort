@@ -177,6 +177,7 @@ an `extern` signature is erased and records the C side's convention (D17.13). A 
 `own` (D17.3):
 
 ```fort
+import extern;  // a trusted module (D9.8); rows omitted
 extern fn malloc(u64 n) void mut* own;   // storage of no type the caller may write (D17.13)
 extern fn free(void* own p) void;
 
@@ -594,6 +595,7 @@ string, the entries of `std.rt` that the compiler calls included. A range of the
 that extends beyond the object, or `hi < lo`, is undefined behavior (D10.7).
 
 ```fort
+import extern;                       // a trusted module (D9.8); rows omitted
 import std.libc;
 import std.str;
 
@@ -627,6 +629,7 @@ write, and that mark drops to `void* own` at the call to `free` (D3.11, D5.4). F
 typed view of that storage, so a program that wants typed storage uses `new`.
 
 ```fort
+import extern;  // a trusted module (D9.8); rows omitted
 extern fn malloc(u64 n) void mut* own;
 void mut* own blob = malloc(16);
 point mut* own pt = cast(move(blob), point mut* own);   // error: no type for a void*
@@ -733,6 +736,7 @@ copy it into a NUL-terminated buffer first (D13.2, D13.4). Writing through a str
 cast to `u8 mut@` is undefined when the bytes are read-only (D10.7).
 
 ```fort
+import extern;  // a trusted module (D9.8); rows omitted
 string lit = "path";                 // bytes: p a t h NUL; lit.len == 4
 string sub = lit[0..2];              // "pa", no NUL after 'a'
 extern fn open(char* path, i32 flags, ...) i32;
@@ -766,6 +770,7 @@ Spans, strings, structs and fixed arrays never cross an `extern` boundary (D9.8,
 the element type of the C parameter first: `cast(s, u8@).ptr`.
 
 ```fort
+import extern;  // a trusted module (D9.8); rows omitted
 extern fn write(i32 fd, u8* buf, u64 n) i64;
 extern fn memset(u8 mut* p, i32 c, u64 n) void;
 
@@ -796,6 +801,7 @@ function allocates the buffer (D17.13; `stdlib.md` 2.2 declares `realpath` so). 
 `extern` result that does not start an allocation is undefined (D10.7).
 
 ```fort
+import extern;                                     // a trusted module (D9.8); rows omitted
 extern fn malloc(u64 n) void mut* own;
 extern fn free(void* own p) void;
 extern fn read_line(u64 mut* len) char mut* own;   // C documents: the caller frees with free()
@@ -1011,15 +1017,17 @@ pointer place, an argument of an `extern fn` included (D3.14). No span expressio
 pointer but in `str.from_cstr` and `rt.args_init` (D6.9). No pointer arithmetic exists (D10.4), and
 each index and each span of a fixed array, a span or a string is checked (D10.6). The `.ptr` of a
 span or a string is legal only where no fort code loads or stores through it, so `&s[0]`, which is
-checked, names an element (D3.5). A pointer type that C gives marks `mut` only where it says
-`own`, where a parameter of the same type marks the level, or where the extern has no parameter
-that can carry a pointer (D17.13). C gives fort code only storage that C gave, or storage that
-fort code gave to C, with the whole pointee inside it (A7 of `ownership-design.md` 5.1). So a read
+checked, names an element (D3.5). Only a trusted module declares or calls an `extern fn`, or
+names a boundary function, and the rows of each declaration and each call say why A7 holds
+(D9.8). C gives fort code only storage that C
+gave, or storage that fort code gave to C, with the whole pointee inside it (A7 of
+`ownership-design.md` 5.1). So a read
 or a write of a local goes through a value that derives from an address of that local that its run
 took, and fort code reaches a frame of a C
 function, or a byte of the allocator outside each live allocation, only through a pointer that C
 gave to that storage. A build with `--no-bounds-check` is outside this guarantee (D10.6), and so
-are an `extern fn` declaration or C code that breaks A7 and a call of an `extern fn` whose
+are a row that is wrong, C code that breaks A7, and a call in a trusted module of an
+`extern fn` whose
 arguments break the contract of the C function, such as a `char*` with no NUL inside its storage
 for `strlen` (A7).
 

@@ -108,7 +108,8 @@ library follows:
   turns an exact-size buffer into one without a second allocation. Sub-strings, `strbuf.view`
   results and file contents are not NUL-terminated either. The one way to hand a string to C
   is `str.to_cstr`, which always copies; `io.open_read`, `io.open_write` and `sys.env` use it
-  internally (D13.4). In the other direction, `str.from_cstr` wraps a C string without copying.
+  internally (D13.4). In the other direction, `str.from_cstr` wraps a C string without copying,
+  and only a trusted module names it (D9.8).
 - Out-parameters. Scalar results use `i64 mut* out` and similar. A function that produces a
   whole file or stream fills a `strbuf.str_buf` through `strbuf.str_buf mut* out`, so that the
   caller can keep reading into the same storage and release it once; `io.read_file_bytes`
@@ -120,7 +121,15 @@ library follows:
   the type system refuses a buffer the caller may not write (2.2). A buffer of no fixed type is
   `void*`, or `void mut*` where C writes it (D3.11); reaching either takes a `cast`, so the
   caller decides what C may write into. An `extern` that hides a C write behind a buffer
-  without `mut` lies about C, and no rule inside fort reaches it (D3.14).
+  without `mut` lies about C, and no compile rule reaches it: its audit row is wrong (D9.8).
+- Each module that the compiler loads from the library is trusted (D9.8): it may declare and call
+  an `extern fn`, and each declaration and each call has an audit row (A7 of
+  `ownership-design.md` 5.1). A module that does not write `import extern;` calls no extern and
+  names no boundary function: a function of a trusted module with a parameter whose type reaches
+  a pointer to `char`, `u8` or `void`, also through a function pointer type, such as
+  `str.from_cstr`, `libc.snprintf_float`, `rt.print_enum`, `rt.args_init` and the entries of
+  `std.rt` that take a C string. It calls the functions of the library that take spans and
+  strings, whose bounds the checker checks.
 
 ### 1.5 Naming
 
@@ -365,8 +374,8 @@ comparator reads each element through a cast from a `void*`, which no cast allow
 allocation of C, so each result says `own`, and `closedir` takes it with `move`; a `del` of it
 frees the memory and leaves the descriptor open. `readdir` gives a typed `dirent*`, a view of
 storage of C that the next `readdir` of the stream can change, or null at the end of the stream
-and on an error. `__errno_location` has no pointer parameter, so its `i32 mut*` result names
-storage of C and stays legal (D17.13).
+and on an error. The `i32 mut*` result of `__errno_location` names storage of C that C lets
+the caller write, and its audit row says so (D9.8, D17.13).
 Ownership: `malloc`, `calloc` and `free` carry it in their types, so a
 `calloc` result is released like a `malloc` one and not dropped; every other extern here takes
 and returns views, and the library wraps every ownership-bearing call below.
@@ -379,7 +388,8 @@ writes a file atomically with a temporary file beside the target and a `rename` 
 must free it, but one symbol has one signature (D9.8) and a cast never adds `own` (D3.14), so
 fort code cannot free that result. `std.os.real_path` is the owning form: it allocates a buffer
 of `PATH_MAX` bytes with `new` and passes it (2.14, D17.13).
-Direct use looks like `libc.write(fd, cast(s, u8@).ptr, s.len) == cast(s.len, i64)`, which
+Only a trusted module calls these declarations (D9.8). In a trusted module, direct use looks
+like `libc.write(fd, cast(s, u8@).ptr, s.len) == cast(s.len, i64)`, which
 writes a string to a descriptor, bypassing the runtime's buffers; the `cast` is there because a
 `string` carries `char*` and not `u8*`, and it casts the string because no cast takes a `.ptr`
 (D3.5). `libc.read(fd, buf.ptr, buf.len)` on a `u8 mut@` needs none.
@@ -569,7 +579,8 @@ fn is_hex(char ch) bool
 - `from_cstr`: wraps the C string at `p` as `p[0..libc.strlen(p)]` cast to `string`; no copy,
   so the result aliases `p` and stays valid as long as `p` does. `from_cstr(null)` is the zero
   string. It is the one trusted form by which a program gets a span from a raw pointer: no other
-  function takes a span of a raw pointer but `rt.args_init`, which no source calls (D6.9).
+  function takes a span of a raw pointer but `rt.args_init`, which no source calls (D6.9). Only a
+  trusted module names `from_cstr`, because it takes a `char*` (D9.8).
   It trusts that a NUL ends `p` inside its storage, as `strlen` does; a `p` with no such NUL is
   outside the guarantee of D10.7 (A7 of `ownership-design.md` 5.1). It takes no `.ptr` (D3.5): the
   `.ptr` of an empty span names the byte after its object, and strlen would read from there. Pass
@@ -1168,7 +1179,6 @@ fn local_port(i32 fd, u16 mut* out) bool
 
 ```fort
 import std.io;
-import std.libc;
 import std.net;
 
 fn serve_one(u16 port) bool {
@@ -1176,12 +1186,12 @@ fn serve_one(u16 port) bool {
     if (server < 0) {
         return false;
     }
-    defer libc.close(server);
+    defer io.close(server);
     i32 session = net.accept(server);
     if (session < 0) {
         return false;
     }
-    defer libc.close(session);
+    defer io.close(session);
     u8[4096] mut buf = {};
     i64 n = io.read(session, buf[..]);
     return n > 0 && io.write_all(session, buf[0..cast(n, u64)]);

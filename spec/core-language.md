@@ -654,9 +654,9 @@ element type carrying the element level's mutability (`i32*` for `i32@`, `i32 mu
 `i32 mut@`, `node* mut*` for `node* mut@`) and never `own` at its outermost reference
 (`u8 mut*` for `u8 mut@ own`, `node mut* own mut*` for `node mut* own mut@ own`, D17.3); a
 string has `.len` (`u64`) and `.ptr` (`char*`). A `.ptr` is legal only as it stands: as an
-argument of an `extern fn` that can give fort code no pointer, and as an operand of `==` or `!=`
-(D3.5). No cast takes it, and `str.from_cstr` takes none: the `.ptr` of an empty span names the
-byte after its object. `&s[0]` names the first element, with a check, and
+argument of an `extern fn`, which only a trusted module calls (D9.8), and as an operand of `==`
+or `!=` (D3.5). No cast takes it, and `str.from_cstr` takes none: the `.ptr` of an empty span
+names the byte after its object. `&s[0]` names the first element, with a check, and
 `cast(&s[0], void*)` gives its address to a `void*`.
 Fixed arrays have no `.ptr`. `.len` of any expression of fixed-array type is a constant
 expression and its operand is not evaluated (`m[i].len` is `4` for `i32[3][4] m`); `.len` of
@@ -795,6 +795,7 @@ place, which must be written `cast(move(x), ...)` (D17.5), so that the bytes kee
 from an `own` rvalue is refused (D17.8).
 
 ```fort
+import extern;  // a trusted module (D9.8); rows omitted
 bool b = cast(1, bool);            // error: cannot cast integer to bool; write '1 != 0'
 u32@ u = cast(s, u32@);          // error: cannot cast i32@ to u32@
 i32@ v = cast(p, i32@);          // error: cannot cast pointer to span; use 'p[0..n]'
@@ -802,7 +803,7 @@ point q = cast(r, point);          // error: cannot cast to struct type point
 i32 mut* w = cast(cp, i32 mut*);   // error unless cp is a mut pointer: no cast adds mut
 i32 c = cast('a', i32) - '0';      // 49
 u8 t = cast(300, u8);              // 44: 300 is i32, then truncated
-u8 mut* own m = cast(libc.malloc(64), u8 mut* own);   // ok: own rvalue to own type; del(m) frees
+u8 mut* own m = cast(move(o), u8 mut* own);   // ok for a u8 mut* own o: own to own, o is null
 u8 mut* own a2 = cast(c_alloc(64), u8 mut* own);      // ok: extern fn c_alloc(u64) void mut* own
 u8 mut* own a3 = cast(c_view(64), u8 mut* own);       // error: extern fn c_view(u64) void mut*
 string own s1 = cast(move(buf), string own);          // ok: the target says own; 'buf' is emptied

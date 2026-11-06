@@ -85,6 +85,7 @@ syntax error at its opening `$if`.
 | `import std.str.cmp;`                    | `cmp` to that declaration       | `cmp(a, b)`       |
 | `import std.str.cmp as compare;`         | `compare` to that declaration   | `compare(a, b)`   |
 | `import std.str.{find, cmp as compare};` | `find` and `compare` separately | `find(s, c)`      |
+| `import extern;`                         | nothing: the module is trusted  | `extern fn` (8.1) |
 
 Resolution of `import a.b.c;` (D9.3). The grammar does not know whether `c` is a module or a
 declaration; the loader tries two readings, of which exactly one must succeed:
@@ -227,6 +228,7 @@ The names in the table stay injective on both targets (D9.7, `toolchain.md` 6 it
 ### 8.1 Declaration and allowed types
 
 ```fort
+import extern;  // a trusted module (D9.8); rows omitted
 extern fn write(i32 fd, u8* buf, u64 n) i64;
 extern fn strlen(char* s) u64;
 extern fn exit(i32 status) noreturn;
@@ -243,6 +245,43 @@ form from an unnamed callee (D3.10).
 A fort function can wrap a direct C call and act as a function pointer.
 Both targets mark extern call sites and extern declarations `nobuiltin`.
 The declaration mark keeps a failed allocation observable when the caller reads no storage.
+
+**Only a trusted module meets C** (D9.8). Each module that the compiler loads from its standard
+library directory or builds with `fort --lib std <root>` is trusted, and a name does not make a
+module trusted. Another module is trusted when its first item is `import extern;`, which imports no
+module (D9.3). Only a trusted module declares an `extern fn`, calls one, or names a boundary
+function: a function of a trusted module with a parameter whose type reaches a pointer to `char`,
+`u8` or `void`, also through a function pointer type, such as `str.from_cstr`. Each is an error in
+any other module. Each `extern fn` of a trusted module has a declaration row in its `//` lines
+directly above it, below its `///` text, which gives the C function, the source of its contract and
+the five points of A7 of `ownership-design.md` 5.1. Each call of an extern, of a boundary function
+or of a function pointer that C gave has a call row in the `//` lines of its function. The row names
+a source for each pointer and each length that C reads or writes, at any depth, in the order of
+D9.8, why each length fits the bound of each pointer that C uses it with, in bytes, and the NUL of
+each C string. `tools/fort_lint.py` reports a missing row, but in `test/lang/fail` and in a program
+that a suite holds as text. Other modules call the functions of `std` that take spans and strings. A
+trusted module outside `std` starts as this test module does:
+
+```fort
+import extern;
+import std.libc;
+
+// C: helper_add, test/lang/ffi/helpers.c. Gives back a plus b.
+// gives: nothing. writes: nothing. keeps: nothing. calls: nothing. frees: nothing.
+extern fn helper_add(i32 a, i32 b) i32;
+
+/// The sum of two numbers, through C.
+// C call helper_add: no pointer argument.
+fn sum(i32 a, i32 b) i32 {
+    return helper_add(a, b);
+}
+
+/// Writes the bytes of b to the descriptor fd.
+// C call write: buf is the `.ptr` of the span b and n is `b.len`, so C reads `b.len` bytes of b.
+fn put(i32 fd, u8@ b) i64 {
+    return libc.write(fd, b.ptr, b.len);
+}
+```
 
 A fixed `fn (P) R` in an extern signature is allowed when its own signature is extern-legal,
 result type included, since C calls through it with the same convention (D9.8, D9.9): the rule
@@ -293,6 +332,7 @@ enum being the same fix:
 
 ```fort
 // shade.ft
+import extern;  // a trusted module (D9.8); rows omitted
 enum color { red, green }
 extern fn paint(color c) void;                  // the enum's own module spells it `color`
 fn paint_red() void { paint(color.red); }       // reachable from elsewhere through this
@@ -300,11 +340,13 @@ fn paint_red() void { paint(color.red); }       // reachable from elsewhere thro
 
 ```fort
 // main.ft
+import extern;  // a trusted module (D9.8); rows omitted
 import shade;
 extern fn paint(shade.color c) void;            // the only other spelling there is; one type
 ```
 
 ```fort
+import extern;  // a trusted module (D9.8); rows omitted
 extern fn malloc(u64 n) void mut* own;
 extern fn free(void* own p) void;
 extern fn strdup(char* s) char mut* own;        // C documents: the caller frees
@@ -359,6 +401,7 @@ Fort definitions and function-pointer types have no variable tails (D8.3).
 A C extern may mark a final variable tail after at least one fixed parameter:
 
 ```fort
+import extern;  // a trusted module (D9.8); rows omitted
 extern fn printf(char* fmt, ...) i32;
 i32 n = printf("%d\n".ptr, cast(c, i32));
 ```
@@ -390,6 +433,7 @@ A fort function is a valid C callback exactly when its signature is extern-legal
 symbol is dotted (`main.by_value`), which C cannot spell, but a callback is passed by value:
 
 ```fort
+import extern;  // a trusted module (D9.8); rows omitted
 extern fn qsort(i32 mut* base, u64 n, u64 size, fn (i32*, i32*) i32 cmp) void;
 
 fn by_value(i32* a, i32* b) i32 {
@@ -409,16 +453,17 @@ element, because no cast gives a type to a `void*` (D3.14). `std.sort` sorts typ
 ### 8.6 Spans and strings
 
 Spans and strings never cross the boundary whole (D9.8, D13.4). Pass `.ptr` and `.len`: `s.ptr`
-of a `string` is `char*`; `xs.ptr` of a `T@` is `T*`, or `T mut*` for `T mut@`. A `.ptr` goes
-only to an `extern fn` that can give fort code no pointer; each other extern takes the address
-of an element, `&s[0]` (D3.5). A string literal is NUL-terminated (D3.7) and so is every element
+of a `string` is `char*`; `xs.ptr` of a `T@` is `T*`, or `T mut*` for `T mut@`. Only a trusted
+module calls an `extern fn` (8.1), and the call row of the function says where the bound of each
+`.ptr` comes from (D3.5, D9.8). A string literal is NUL-terminated (D3.7) and so is every element
 of `args` (D8.6); a string obtained as a span or read from a file is not. A C function expecting
 a terminator gets a copy: allocate `char mut@ own tmp = new(char, s.len + 1);` under a
 `defer del(tmp);`, copy the characters, and pass `tmp.ptr`; the last element is already `'\0'`
 (D10.2). Memory received from C as `T*` becomes no span: only `str.from_cstr` and
-`rt.args_init` take a span of a raw pointer (D6.9). A C string becomes a `string` through
-`str.from_cstr`, and a C string that C wrote into a buffer of fort code through
-`str.from_cbuf`; other bytes go into a buffer of fort code through `memcpy`. When C hands the
+`rt.args_init` take a span of a raw pointer (D6.9). In a trusted module a C string becomes a
+`string` through `str.from_cstr`. In each module a C string that C wrote into a buffer of fort
+code becomes a `string` through `str.from_cbuf`, and a trusted module copies other bytes into a
+buffer of fort code through `memcpy`. When C hands the
 memory over for good, its `extern` declares the result `own` (D17.13). The pointer is then the
 owner, and `del(p)` frees it (D17.3); memory from `new` may likewise be freed by C `free` and memory
 from `malloc` by `del` (D10.3). A span expression is always a view and a cast never adds `own`
@@ -432,6 +477,7 @@ value of `*out` is unknown to it (D17.11); the caller initializes the slot to `{
 `del` frees nothing.
 
 ```fort
+import extern;  // a trusted module (D9.8); rows omitted
 extern fn c_read_all(u64 mut* n) u8 mut* own;   // C documents: the caller frees
 
 fn read_all(u8 mut@ own mut* out) bool {
@@ -459,6 +505,7 @@ fn wrong(u8 mut@ own mut* out) void {
 
 ```fort
 // hello.ft
+import extern;  // a trusted module (D9.8); rows omitted
 extern fn write(i32 fd, u8* buf, u64 n) i64;
 extern fn strlen(char* s) u64;
 
