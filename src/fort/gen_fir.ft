@@ -55,26 +55,19 @@ fn check_fir(gen.emitter mut* g, fir_verify.runtime* rt, fir.func mut* f) bool {
 fn check_proved(gen.emitter mut* g, fir_verify.runtime* rt, fir.func mut* f,
                 summary.graph mut* calls) bool {
     fir_verify.verify(f, rt);
-    prover.proof mut verdicts = prover.prove(f);
-    defer {
-        del(verdicts.proved);
-        del(verdicts.stores);
-        del(verdicts.exits);
-        del(verdicts.inners);
-        del(verdicts.uses);
-        del(verdicts.aggregates);
-    }
-    if (prover.has_error(&verdicts)) {
-        report.write(f, &verdicts, g->sess);
-        report.write_leaks(f, &verdicts, g->sess);
-        report.write_uses(f, &verdicts, g->sess);
+    prover.proof mut* own verdicts = prover.prove_made(f);
+    defer prover.drop_made(move(verdicts));
+    if (prover.has_error(verdicts)) {
+        report.write(f, verdicts, g->sess);
+        report.write_leaks(f, verdicts, g->sess);
+        report.write_uses(f, verdicts, g->sess);
         g->failed = true;
         return false;
     }
     if (calls != null) {
-        summary.add(calls, f, verdicts.inner_work);
+        summary.add(calls, f, verdicts->inner_work);
     }
-    fir_passes.build_mode(f, g->opts.release, g->opts.no_bounds_check, &verdicts);
+    fir_passes.build_mode(f, g->opts.release, g->opts.no_bounds_check, verdicts);
     fir_verify.runtime strict = fir_verify.unexcused(rt);
     fir_verify.verify(f, &strict);
     return true;

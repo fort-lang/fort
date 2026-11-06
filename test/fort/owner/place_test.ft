@@ -118,7 +118,7 @@ fn write_path(place.survey* c, place.path p, strbuf.str_buf mut* out) void {
 // Holds that the paths `paths` of `c` read `want`, one word each, with a space between them.
 fn expect_paths(place.survey* c, place.path@ paths, string want) void {
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     u64 mut k = 0;
     while (k < paths.len) {
         if (k > 0) {
@@ -191,17 +191,16 @@ fn info_at(place.survey* c, u64 k) place.local_info {
 // pointer that does not own, the local itself for an owning pointer, and each field and each
 // element at a constant index for a struct and a fixed array, in the order of next_owner_step.
 fn the_owners_follow_the_order_of_the_type() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = fir.module{};
-    fir.func mut* f = open_locals(&e, &m);
-    defer fir.module_free(&m);
+    strbuf.str_buf mut shelf = strbuf.create();
+    defer del(shelf.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    fir.func mut* f = open_locals(e, m);
+    defer fir.module_drop_made(move(m));
     place.survey mut* own c = survey_of(f);
     defer place.drop_made(move(c));
     expect_local_owners(c, 1, "_1.0.0 _1.0.1 _1.2[0] _1.2[1] _1.3");
-    strbuf.str_buf mut shelf = strbuf.create();
-    defer strbuf.free(&shelf);
     strbuf.append(&shelf, "_2.0[0].0.0 _2.0[0].0.1 _2.0[0].2[0] _2.0[0].2[1] _2.0[0].3 ");
     strbuf.append(&shelf, "_2.0[1].0.0 _2.0[1].0.1 _2.0[1].2[0] _2.0[1].2[1] _2.0[1].3");
     expect_local_owners(c, 2, strbuf.view(&shelf));
@@ -210,16 +209,17 @@ fn the_owners_follow_the_order_of_the_type() void {
     expect_local_owners(c, 5, "");
     expect_local_owners(c, 6, "");
     // below a keyed element, each path keeps the key of the element
-    fir_flow.bits mut stale = fir_flow.bits_new(fir.local_count(f));
-    defer fir_flow.bits_free(&stale);
-    place.path b = place.trace(c, place_of(f, 2, ".0[8]"), &stale);
+    fir_flow.bits mut* own stale = fir_flow.bits_make();
+    *stale = fir_flow.bits_new(fir.local_count(f));
+    defer fir_flow.bits_drop_made(move(stale));
+    place.path b = place.trace(c, place_of(f, 2, ".0[8]"), stale);
     types.node* t = fir.place_type(f, place_of(f, 2, ".0[8]"));
     place.path mut@ own below = new(place.path, place.count_owners(t));
     defer del(below);
     place.put_owners_below(c, b, t, below);
     expect_paths(c, below, "_2.0[_4].0.0 _2.0[_4].0.1 _2.0[_4].2[0] _2.0[_4].2[1] _2.0[_4].3");
     // a path below a pair takes its two fields
-    place.path p = place.trace(c, place_of(f, 1, ".0"), &stale);
+    place.path p = place.trace(c, place_of(f, 1, ".0"), stale);
     place.path mut@ own pair = new(place.path, 2);
     defer del(pair);
     place.put_owners_below(c, p, fir.place_type(f, place_of(f, 1, ".0")), pair);
@@ -236,20 +236,20 @@ fn the_owners_follow_the_order_of_the_type() void {
 // no key. The rank of a key counts the local keys in the order of the steps, and the local keys
 // before a length count only the steps before it. A stale temporary gives no key.
 fn the_keys_of_a_path_count_and_rank_their_locals() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = fir.module{};
-    fir.func mut* f = open_locals(&e, &m);
-    defer fir.module_free(&m);
+    strbuf.str_buf mut got = strbuf.create();
+    defer del(got.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    fir.func mut* f = open_locals(e, m);
+    defer fir.module_drop_made(move(m));
     place.survey mut* own c = survey_of(f);
     defer place.drop_made(move(c));
-    fir_flow.bits mut stale = fir_flow.bits_new(fir.local_count(f));
-    defer fir_flow.bits_free(&stale);
-    strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    fir_flow.bits mut* own stale = fir_flow.bits_make();
+    *stale = fir_flow.bits_new(fir.local_count(f));
+    defer fir_flow.bits_drop_made(move(stale));
     // `s.boxes[k].e[1]`: one local key, `k`, at the second step
-    place.path one = place.trace(c, place_of(f, 2, ".0[8].2[9]"), &stale);
+    place.path one = place.trace(c, place_of(f, 2, ".0[8].2[9]"), stale);
     write_path(c, one, &got);
     assert(strbuf.view(&got) == "_2.0[_4].2[1]" && one.tracked);
     assert(place.local_keys(c, one) == 1);
@@ -258,7 +258,7 @@ fn the_keys_of_a_path_count_and_rank_their_locals() void {
     assert(place.local_keys_before(c, one, 1) == 0 && place.local_keys_before(c, one, 2) == 1);
     assert(place.local_keys_before(c, one, 4) == 1 && place.local_keys_before(c, one, 9) == 1);
     // `s.boxes[j].e[k]`: two local keys, `j` first
-    place.path two = place.trace(c, place_of(f, 2, ".0[7].2[8]"), &stale);
+    place.path two = place.trace(c, place_of(f, 2, ".0[7].2[8]"), stale);
     strbuf.clear(&got);
     write_path(c, two, &got);
     assert(strbuf.view(&got) == "_2.0[_7].2[_4]" && two.tracked);
@@ -266,17 +266,17 @@ fn the_keys_of_a_path_count_and_rank_their_locals() void {
     assert(place.key_rank(c, two, 7) == 1 && place.key_rank(c, two, 4) == 2);
     assert(place.local_keys_before(c, two, 3) == 1);
     // the same local twice: its rank is that of its first step
-    place.path twice = place.trace(c, place_of(f, 2, ".0[4].2[8]"), &stale);
+    place.path twice = place.trace(c, place_of(f, 2, ".0[4].2[8]"), stale);
     assert(place.local_keys(c, twice) == 2 && place.key_rank(c, twice, 4) == 1);
     // a temporary with two stores gives no key, so the path is not tracked
-    place.path none = place.trace(c, place_of(f, 1, ".2[10]"), &stale);
+    place.path none = place.trace(c, place_of(f, 1, ".2[10]"), stale);
     strbuf.clear(&got);
     write_path(c, none, &got);
     assert(strbuf.view(&got) == "_1.2[?]" && !none.tracked);
     assert(place.local_keys(c, none) == 0 && place.key_rank(c, none, 10) == 0);
     // a stale copy of `k` gives no key either
-    fir_flow.bits_set(&stale, 8);
-    place.path old = place.trace(c, place_of(f, 2, ".0[8]"), &stale);
+    fir_flow.bits_set(stale, 8);
+    place.path old = place.trace(c, place_of(f, 2, ".0[8]"), stale);
     assert(!old.tracked && place.local_keys(c, old) == 0);
     println("keys ok");
 }
@@ -285,36 +285,36 @@ fn the_keys_of_a_path_count_and_rank_their_locals() void {
 // constant index the owners of the elements before it. A path that stops above an owner gives the
 // number of the first owner below it, and steps from a later step count from there.
 fn the_rank_of_an_owner_follows_the_type() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = fir.module{};
-    fir.func mut* f = open_locals(&e, &m);
-    defer fir.module_free(&m);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    fir.func mut* f = open_locals(e, m);
+    defer fir.module_drop_made(move(m));
     place.survey mut* own c = survey_of(f);
     defer place.drop_made(move(c));
-    fir_flow.bits mut stale = fir_flow.bits_new(fir.local_count(f));
-    defer fir_flow.bits_free(&stale);
+    fir_flow.bits mut* own stale = fir_flow.bits_make();
+    *stale = fir_flow.bits_new(fir.local_count(f));
+    defer fir_flow.bits_drop_made(move(stale));
     types.node* shelf = fir_env.local_type(f, 2);
     types.node* box = fir_env.local_type(f, 1);
     // `s.boxes[1].e[?]`: the five owners of `boxes[0]`, then `p.a` and `p.b`; an index with no key
     // adds nothing
-    place.path deep = place.trace(c, place_of(f, 2, ".0[9].2[10]"), &stale);
+    place.path deep = place.trace(c, place_of(f, 2, ".0[9].2[10]"), stale);
     assert(place.rank_in(c, shelf, deep, 0) == 5 + 2);
-    place.path above = place.trace(c, place_of(f, 2, ".0[9]"), &stale);
+    place.path above = place.trace(c, place_of(f, 2, ".0[9]"), stale);
     assert(place.rank_in(c, shelf, above, 0) == 5);
-    place.path field = place.trace(c, place_of(f, 2, ".0[9].3"), &stale);
+    place.path field = place.trace(c, place_of(f, 2, ".0[9].3"), stale);
     assert(place.rank_in(c, shelf, field, 0) == 9);
     // from the third step, `.3` of a `box` is its last owner
     assert(place.rank_in(c, box, field, 2) == 4);
     // `b.v` holds no owner: the owners of `p` come before it
-    place.path plain = place.trace(c, place_of(f, 1, ".1"), &stale);
+    place.path plain = place.trace(c, place_of(f, 1, ".1"), stale);
     assert(place.rank_in(c, box, plain, 0) == 2);
     // the whole local is its first owner
-    place.path whole = place.trace(c, place_of(f, 1, ""), &stale);
+    place.path whole = place.trace(c, place_of(f, 1, ""), stale);
     assert(place.rank_in(c, box, whole, 0) == 0);
     // an index with a local key counts as no element
-    place.path keyed = place.trace(c, place_of(f, 2, ".0[8].0.1"), &stale);
+    place.path keyed = place.trace(c, place_of(f, 2, ".0[8].0.1"), stale);
     assert(place.rank_in(c, shelf, keyed, 0) == 1);
     println("ranks ok");
 }
@@ -322,9 +322,10 @@ fn the_rank_of_an_owner_follows_the_type() void {
 // Holds what place.first_read_owner gives for the read of `text` below the local `n` of `c`.
 fn expect_read(place.survey mut* c, fir.func mut* f, u32 n, string text, bool found, u64 rank,
                bool below) void {
-    fir_flow.bits mut stale = fir_flow.bits_new(fir.local_count(f));
-    defer fir_flow.bits_free(&stale);
-    place.path r = place.trace(c, place_of(f, n, text), &stale);
+    fir_flow.bits mut* own stale = fir_flow.bits_make();
+    *stale = fir_flow.bits_new(fir.local_count(f));
+    defer fir_flow.bits_drop_made(move(stale));
+    place.path r = place.trace(c, place_of(f, n, text), stale);
     u64 mut got_rank = 99;
     bool mut got_below = false;
     bool got = place.first_read_owner(c, r, &got_rank, &got_below);
@@ -339,12 +340,11 @@ fn expect_read(place.survey mut* c, fir.func mut* f, u32 n, string text, bool fo
 // index, and counts from its local. A read of a place with no owner below it and in no owner reads
 // none.
 fn the_owner_of_a_read_follows_its_place() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = fir.module{};
-    fir.func mut* f = open_locals(&e, &m);
-    defer fir.module_free(&m);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    fir.func mut* f = open_locals(e, m);
+    defer fir.module_drop_made(move(m));
     place.survey mut* own c = survey_of(f);
     defer place.drop_made(move(c));
     expect_read(c, f, 1, "", true, 0, true);
@@ -369,21 +369,21 @@ fn the_owner_of_a_read_follows_its_place() void {
 // A part of a place is below it and longer: a field, an element of a fixed array, or a part of one
 // of them. A place is no part of itself, and no place is a part of a place below it.
 fn a_part_is_a_longer_place_below() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = fir.module{};
-    fir.func mut* f = open_locals(&e, &m);
-    defer fir.module_free(&m);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    fir.func mut* f = open_locals(e, m);
+    defer fir.module_drop_made(move(m));
     place.survey mut* own c = survey_of(f);
     defer place.drop_made(move(c));
-    fir_flow.bits mut stale = fir_flow.bits_new(fir.local_count(f));
-    defer fir_flow.bits_free(&stale);
-    place.path data = place.trace(c, place_of(f, 1, ".3"), &stale);
-    place.path ptr = place.trace(c, place_of(f, 1, ".3.0"), &stale);
-    place.path whole = place.trace(c, place_of(f, 1, ""), &stale);
-    place.path element = place.trace(c, place_of(f, 1, ".2[9]"), &stale);
-    place.path other = place.trace(c, place_of(f, 2, ".0[9]"), &stale);
+    fir_flow.bits mut* own stale = fir_flow.bits_make();
+    *stale = fir_flow.bits_new(fir.local_count(f));
+    defer fir_flow.bits_drop_made(move(stale));
+    place.path data = place.trace(c, place_of(f, 1, ".3"), stale);
+    place.path ptr = place.trace(c, place_of(f, 1, ".3.0"), stale);
+    place.path whole = place.trace(c, place_of(f, 1, ""), stale);
+    place.path element = place.trace(c, place_of(f, 1, ".2[9]"), stale);
+    place.path other = place.trace(c, place_of(f, 2, ".0[9]"), stale);
     assert(place.is_part(c, ptr, data) && place.is_part(c, ptr, whole));
     assert(place.is_part(c, data, whole) && place.is_part(c, element, whole));
     assert(!place.is_part(c, data, data) && !place.is_part(c, whole, data));
@@ -423,12 +423,12 @@ string[22] HELD = {
 // function with a temporary that copies a local, and not for one whose index temporaries copy
 // constants.
 fn a_light_survey_counts_the_stores() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], HELD[..]);
-    defer fir.module_free(&m);
-    fir.func* f = fir.module_function_at(&m, 0);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], HELD[..]);
+    defer fir.module_drop_made(move(m));
+    fir.func* f = fir.module_function_at(m, 0);
     place.survey mut* own full = survey_of(f);
     defer place.drop_made(move(full));
     u64 n = cast(fir.local_count(f), u64);
@@ -457,9 +457,9 @@ fn a_light_survey_counts_the_stores() void {
     assert(info_at(light, 5).assigns == 3 && info_at(light, 2).assigns == 1);
     assert(info_at(full, 3).held && light->held.len == 0 && full->held.len == 1);
     assert(!place.has_local_sources(full) && !place.has_local_sources(light));
-    fir.module mut locals = fir.module{};
-    fir.func mut* first = open_locals(&e, &locals);
-    defer fir.module_free(&locals);
+    fir.module mut* own locals = fir.module_make();
+    fir.func mut* first = open_locals(e, locals);
+    defer fir.module_drop_made(move(locals));
     place.survey mut* own sourced = survey_of(first);
     defer place.drop_made(move(sourced));
     assert(place.has_local_sources(sourced));
@@ -551,16 +551,16 @@ fn expect_test(fir.module* m, u64 k, bool found, u32 target, u32 other) void {
 // The edge of the other value goes to the block that the switch names for the value that the
 // flag holds when the place is not null (D17.21).
 fn a_test_gives_the_edge_of_each_value() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], TESTS[..]);
-    defer fir.module_free(&m);
-    expect_test(&m, 0, true, 1, 2);
-    expect_test(&m, 1, true, 2, 1);
-    expect_test(&m, 2, true, 1, 2);
-    expect_test(&m, 3, true, 2, 1);
-    expect_test(&m, 4, false, 0, 0);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], TESTS[..]);
+    defer fir.module_drop_made(move(m));
+    expect_test(m, 0, true, 1, 2);
+    expect_test(m, 1, true, 2, 1);
+    expect_test(m, 2, true, 1, 2);
+    expect_test(m, 3, true, 2, 1);
+    expect_test(m, 4, false, 0, 0);
     println("tests ok");
 }
 

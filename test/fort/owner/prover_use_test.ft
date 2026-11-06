@@ -2206,22 +2206,23 @@ fn write_uses(prover.proof* p, strbuf.str_buf mut* out) void {
 // Parses `text` against PRELUDE, holds that the verifier accepts each function, proves each one,
 // and holds that function `k` of the module gives the uses `want[k]`.
 fn expect(string@ text, string@ want) void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], text);
-    defer fir.module_free(&m);
-    assert(m.funcs.len == want.len);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], text);
+    defer fir.module_drop_made(move(m));
+    assert(m->funcs.len == want.len);
     u64 mut k = 0;
-    while (k < m.funcs.len) {
-        fir.func* f = fir.module_function_at(&m, k);
-        pass_env.verified(&e, f, "prover_use_test: the verifier refuses the input");
-        prover.proof mut p = prover.prove(f);
-        write_uses(&p, &got);
-        assert(!p.use_over);
-        prover.free(&p);
+    while (k < m->funcs.len) {
+        fir.func* f = fir.module_function_at(m, k);
+        pass_env.verified(e, f, "prover_use_test: the verifier refuses the input");
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(f);
+        write_uses(p, &got);
+        assert(!p->use_over);
+        prover.drop_made(move(p));
         if (strbuf.view(&got) != want[k]) {
             eprintln("function ", k, " gives '", strbuf.view(&got), "' and not '", want[k], "'");
             panic("prover_use_test: the uses differ");
@@ -2350,15 +2351,16 @@ fn the_expose_group_holds() void {
 // `work`, and gives whether it passed the limit.
 fn expect_limit(fir.module* m, u64 k, u64 limit, string want, u64 work) bool {
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
-    prover.proof mut p = prover.prove_limits(&m->funcs.items[k], prover.WORK_LIMIT, limit);
-    defer prover.free(&p);
-    write_uses(&p, &got);
-    if (strbuf.view(&got) != want || p.use_work != work) {
-        eprintln("gives '", strbuf.view(&got), "' with the work ", p.use_work);
+    defer del(got.data);
+    prover.proof mut* own p = prover.make();
+    *p = prover.prove_limits(&m->funcs.items[k], prover.WORK_LIMIT, limit);
+    defer prover.drop_made(move(p));
+    write_uses(p, &got);
+    if (strbuf.view(&got) != want || p->use_work != work) {
+        eprintln("gives '", strbuf.view(&got), "' with the work ", p->use_work);
         panic("prover_use_test: the limit gives another proof");
     }
-    return p.use_over;
+    return p->use_over;
 }
 
 // The charge of v1 is one walk of its one block: its 2 statements, its terminator and its 3 acts
@@ -2375,48 +2377,51 @@ fn expect_limit(fir.module* m, u64 k, u64 limit, string want, u64 work) bool {
 // weight times the values counted up to there, also when the limit is below the charge of the
 // first blocks.
 fn the_limit_of_the_work_stops_the_proof() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut vacate = pass_env.parse(&e, PRELUDE[..], VACATE[..]);
-    defer fir.module_free(&vacate);
-    assert(!expect_limit(&vacate, 0, 6, "U1d0.0", 6));
-    assert(expect_limit(&vacate, 0, 5, "U1n", 6));
-    assert(!expect_limit(&vacate, 0, prover.USE_LIMIT, "U1d0.0", 6));
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own vacate = fir.module_make();
+    *vacate = pass_env.parse(e, PRELUDE[..], VACATE[..]);
+    defer fir.module_drop_made(move(vacate));
+    assert(!expect_limit(vacate, 0, 6, "U1d0.0", 6));
+    assert(expect_limit(vacate, 0, 5, "U1n", 6));
+    assert(!expect_limit(vacate, 0, prover.USE_LIMIT, "U1d0.0", 6));
     // a function that reads no owner takes no charge
-    assert(!expect_limit(&vacate, 7, 0, "", 0));
-    fir.module mut paths = pass_env.parse(&e, PRELUDE[..], PATHS[..]);
-    defer fir.module_free(&paths);
-    assert(!expect_limit(&paths, 1, 23, "U1d2.1", 23));
-    assert(expect_limit(&paths, 1, 22, "U1n", 23));
-    assert(expect_limit(&paths, 1, 12, "U1n", 16));
-    assert(expect_limit(&paths, 1, 11, "U1n", 12));
+    assert(!expect_limit(vacate, 7, 0, "", 0));
+    fir.module mut* own paths = fir.module_make();
+    *paths = pass_env.parse(e, PRELUDE[..], PATHS[..]);
+    defer fir.module_drop_made(move(paths));
+    assert(!expect_limit(paths, 1, 23, "U1d2.1", 23));
+    assert(expect_limit(paths, 1, 22, "U1n", 23));
+    assert(expect_limit(paths, 1, 12, "U1n", 16));
+    assert(expect_limit(paths, 1, 11, "U1n", 12));
     // the first pass passes 5 at bb2, with 11, and its charge is still that of the whole pass
-    assert(expect_limit(&paths, 1, 5, "U1n", 12));
+    assert(expect_limit(paths, 1, 5, "U1n", 12));
     // a function with no `move`, no `del` and no call that vacates takes no charge, also past a
     // limit of 0
-    assert(!expect_limit(&paths, 4, 0, "P1 P1", 0));
+    assert(!expect_limit(paths, 4, 0, "P1 P1", 0));
     // k2 has 7 items and 11 acts in its one block, 18, and one owner, `b[k]`, with one local key:
     // 2 values, so its first pass charges 36, and its fixpoint walks the block once
-    fir.module mut keys = pass_env.parse(&e, PRELUDE[..], KEYS[..]);
-    defer fir.module_free(&keys);
-    assert(!expect_limit(&keys, 1, 36, "P1", 36));
-    assert(expect_limit(&keys, 1, 35, "U1n", 36));
+    fir.module mut* own keys = fir.module_make();
+    *keys = pass_env.parse(e, PRELUDE[..], KEYS[..]);
+    defer fir.module_drop_made(move(keys));
+    assert(!expect_limit(keys, 1, 36, "P1", 36));
+    assert(expect_limit(keys, 1, 35, "U1n", 36));
     // below 18 the one owner of the read `b[k]` passes the limit before its key counts: 18 times 1
-    assert(expect_limit(&keys, 1, 17, "U1n", 18));
+    assert(expect_limit(keys, 1, 17, "U1n", 18));
     // k7 weighs 3, 4 and 1 in its three blocks, 8, with the 2 values of `b[k]`: 16. At 13 the count
     // stops at the key of `b[k]`, 16, before the fixpoint, which would stop at bb1 with 14; at 7
     // the owner alone passes it: 8
-    assert(!expect_limit(&keys, 6, 16, "U1d0.0", 16));
-    assert(expect_limit(&keys, 6, 15, "U1n", 16));
-    assert(expect_limit(&keys, 6, 13, "U1n", 16));
-    assert(expect_limit(&keys, 6, 7, "U1n", 8));
+    assert(!expect_limit(keys, 6, 16, "U1d0.0", 16));
+    assert(expect_limit(keys, 6, 15, "U1n", 16));
+    assert(expect_limit(keys, 6, 13, "U1n", 16));
+    assert(expect_limit(keys, 6, 7, "U1n", 8));
     // n3 has 5 items and 9 acts, 14, and the 4 owners of the memory local `t`: 56. Past the limit
     // its read through `_2` names the first owner of `t`
-    fir.module mut nested = pass_env.parse(&e, PRELUDE[..], NESTED[..]);
-    defer fir.module_free(&nested);
-    assert(!expect_limit(&nested, 2, 56, "U1d0.2#2", 56));
-    assert(expect_limit(&nested, 2, 55, "U1n", 56));
+    fir.module mut* own nested = fir.module_make();
+    *nested = pass_env.parse(e, PRELUDE[..], NESTED[..]);
+    defer fir.module_drop_made(move(nested));
+    assert(!expect_limit(nested, 2, 56, "U1d0.2#2", 56));
+    assert(expect_limit(nested, 2, 55, "U1n", 56));
     // the default limit is 2^24
     assert(prover.USE_LIMIT == 16777216);
     println("limit ok");

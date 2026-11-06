@@ -624,7 +624,7 @@ fn error_lines(string@ want) u64 {
 fn expect_diagnostics(lower_env.env mut* e, u64 before, u64 errors, string file, string@ want)
     void {
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     diagnostics(e, before, &got);
     expect_lines(strbuf.view(&got), file, want);
     assert(check_env.errors(&e->c) == errors + error_lines(want));
@@ -634,7 +634,7 @@ fn expect_diagnostics(lower_env.env mut* e, u64 before, u64 errors, string file,
 // else.
 fn expect_lines(string got, string file, string@ want) void {
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     u64 mut k = 0;
     while (k < want.len) {
         strbuf.append(&text, file);
@@ -651,29 +651,29 @@ fn expect_lines(string got, string file, string@ want) void {
 // The errors name each use of USES that the pass does not prove, in the file of the function,
 // each with its note, and each such use is an error of the proof (has_error).
 fn the_errors_name_each_unproved_use() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, USES[..], true);
-    string file = lower_env.decl_file(&e, "deleted");
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, USES[..], true);
+    string file = lower_env.decl_file(e, "deleted");
     assert(str.ends_with(file, "main.ft"));
-    u64 before = check_env.reports(&e.c);
-    u64 errors = check_env.errors(&e.c);
+    u64 before = check_env.reports(&e->c);
+    u64 errors = check_env.errors(&e->c);
     u64 mut k = 0;
     while (k < USE_NAMES.len) {
-        fir.func mut f = fir.func{};
-        lower(&e, USE_NAMES[k], &f);
-        prover.proof mut p = prover.prove(&f);
-        u64 mark = check_env.errors(&e.c);
-        report.write_uses(&f, &p, &e.c.m.s);
+        fir.func mut* own f = fir.func_make();
+        lower(e, USE_NAMES[k], f);
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(f);
+        u64 mark = check_env.errors(&e->c);
+        report.write_uses(f, p, &e->c.m.s);
         // an error of rule (b) is an error of the proof, and a proof with no use writes none
-        assert(prover.has_error(&p) == (p.use_unproved > 0 || p.unproved > 0 || p.leaks > 0));
-        assert((check_env.errors(&e.c) > mark) == (p.use_unproved > 0));
-        prover.free(&p);
-        fir.func_free(&f);
+        assert(prover.has_error(p) == (p->use_unproved > 0 || p->unproved > 0 || p->leaks > 0));
+        assert((check_env.errors(&e->c) > mark) == (p->use_unproved > 0));
+        prover.drop_made(move(p));
+        fir.func_drop_made(move(f));
         k += 1;
     }
-    expect_diagnostics(&e, before, errors, file, USE_LINES[..]);
+    expect_diagnostics(e, before, errors, file, USE_LINES[..]);
     println("uses ok");
 }
 
@@ -742,21 +742,22 @@ string[6] TEXT_USE_LINES = {
 
 // With no tree, the errors of rule (b) name the FIR place where no name stands.
 fn the_errors_of_a_fir_text_name_the_fir_place() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, TEXT_PRELUDE[..], TEXT_USES[..]);
-    defer fir.module_free(&m);
-    u64 before = check_env.reports(&e.c);
-    u64 errors = check_env.errors(&e.c);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, TEXT_PRELUDE[..], TEXT_USES[..]);
+    defer fir.module_drop_made(move(m));
+    u64 before = check_env.reports(&e->c);
+    u64 errors = check_env.errors(&e->c);
     u64 mut f = 0;
-    while (f < m.funcs.len) {
-        prover.proof mut p = prover.prove(fir.module_function_at(&m, f));
-        report.write_uses(fir.module_function_at(&m, f), &p, &e.c.m.s);
-        prover.free(&p);
+    while (f < m->funcs.len) {
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(fir.module_function_at(m, f));
+        report.write_uses(fir.module_function_at(m, f), p, &e->c.m.s);
+        prover.drop_made(move(p));
         f += 1;
     }
-    expect_diagnostics(&e, before, errors, "t.fir", TEXT_USE_LINES[..]);
+    expect_diagnostics(e, before, errors, "t.fir", TEXT_USE_LINES[..]);
     println("fir text ok");
 }
 
@@ -785,32 +786,33 @@ string[2] THROUGH_LIMIT_LINES = {
 // Lowers the function `name` of USES, which `e` checked, proves it within a limit of rule (b) of
 // 0, and holds that its diagnostics are those of `want` and that `unproved` uses are not proved.
 fn expect_past_limit(lower_env.env mut* e, string name, u32 unproved, string@ want) void {
-    fir.func mut f = fir.func{};
-    defer fir.func_free(&f);
-    lower(e, name, &f);
-    prover.proof mut over = prover.prove_limits(&f, prover.WORK_LIMIT, 0);
-    defer prover.free(&over);
-    assert(over.use_over && over.use_unproved == unproved && prover.has_error(&over));
+    fir.func mut* own f = fir.func_make();
+    defer fir.func_drop_made(move(f));
+    lower(e, name, f);
+    prover.proof mut* own over = prover.make();
+    *over = prover.prove_limits(f, prover.WORK_LIMIT, 0);
+    defer prover.drop_made(move(over));
+    assert(over->use_over && over->use_unproved == unproved && prover.has_error(over));
     u64 before = check_env.reports(&e->c);
     u64 errors = check_env.errors(&e->c);
-    report.write_uses(&f, &over, &e->c.m.s);
+    report.write_uses(f, over, &e->c.m.s);
     expect_diagnostics(e, before, errors, lower_env.decl_file(e, name), want);
 }
 
 fn the_first_error_past_the_limit_names_the_limit() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, USES[..], true);
-    expect_past_limit(&e, "pointer", 2, POINTER_LIMIT_LINES[..]);
-    fir.func mut g = fir.func{};
-    defer fir.func_free(&g);
-    lower(&e, "refilled", &g);
-    prover.proof mut proved = prover.prove(&g);
-    defer prover.free(&proved);
-    assert(!proved.use_over && proved.use_unproved == 0 && !prover.has_error(&proved));
-    expect_past_limit(&e, "refilled", 1, REFILLED_LIMIT_LINES[..]);
-    expect_past_limit(&e, "array_through", 1, THROUGH_LIMIT_LINES[..]);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, USES[..], true);
+    expect_past_limit(e, "pointer", 2, POINTER_LIMIT_LINES[..]);
+    fir.func mut* own g = fir.func_make();
+    defer fir.func_drop_made(move(g));
+    lower(e, "refilled", g);
+    prover.proof mut* own proved = prover.make();
+    *proved = prover.prove(g);
+    defer prover.drop_made(move(proved));
+    assert(!proved->use_over && proved->use_unproved == 0 && !prover.has_error(proved));
+    expect_past_limit(e, "refilled", 1, REFILLED_LIMIT_LINES[..]);
+    expect_past_limit(e, "array_through", 1, THROUGH_LIMIT_LINES[..]);
     println("limit ok");
 }
 
@@ -842,25 +844,25 @@ fn move_operation(fir.func mut* f, prover.proof* p) void {
 // Lowers the function `name` of USES, which `e` checked, moves the operation of the note of its
 // first unproved use (move_operation), and writes the errors of the function.
 fn write_moved_operation(lower_env.env mut* e, string name) void {
-    fir.func mut f = fir.func{};
-    defer fir.func_free(&f);
-    lower(e, name, &f);
-    prover.proof mut p = prover.prove(&f);
-    defer prover.free(&p);
-    move_operation(&f, &p);
-    report.write_uses(&f, &p, &e->c.m.s);
+    fir.func mut* own f = fir.func_make();
+    defer fir.func_drop_made(move(f));
+    lower(e, name, f);
+    prover.proof mut* own p = prover.make();
+    *p = prover.prove(f);
+    defer prover.drop_made(move(p));
+    move_operation(f, p);
+    report.write_uses(f, p, &e->c.m.s);
 }
 
 fn a_note_with_no_operation_in_the_tree_names_the_place_of_the_error() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, USES[..], true);
-    u64 before = check_env.reports(&e.c);
-    u64 errors = check_env.errors(&e.c);
-    write_moved_operation(&e, "unkeyed");
-    write_moved_operation(&e, "fields");
-    expect_diagnostics(&e, before, errors, lower_env.decl_file(&e, "fields"), FALLBACK_LINES[..]);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, USES[..], true);
+    u64 before = check_env.reports(&e->c);
+    u64 errors = check_env.errors(&e->c);
+    write_moved_operation(e, "unkeyed");
+    write_moved_operation(e, "fields");
+    expect_diagnostics(e, before, errors, lower_env.decl_file(e, "fields"), FALLBACK_LINES[..]);
     println("fallback ok");
 }
 

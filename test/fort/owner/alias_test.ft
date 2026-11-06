@@ -169,22 +169,23 @@ fn verdict(bool proved) char {
 // and holds that function `k` of the module gives the verdicts `want[k]` (write_all), and that
 // the kill rules read the map of owner.alias in each function that has one.
 fn expect(string@ text, string@ want) void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], text);
-    defer fir.module_free(&m);
-    assert(m.funcs.len == want.len);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], text);
+    defer fir.module_drop_made(move(m));
+    assert(m->funcs.len == want.len);
     u64 mut k = 0;
-    while (k < m.funcs.len) {
-        fir.func* f = fir.module_function_at(&m, k);
-        pass_env.verified(&e, f, "alias_test: the verifier refuses the input");
-        prover.proof mut p = prover.prove(f);
-        write_all(f, &p, &got);
-        assert(p.alias_on == (p.alias_work > 0));
-        prover.free(&p);
+    while (k < m->funcs.len) {
+        fir.func* f = fir.module_function_at(m, k);
+        pass_env.verified(e, f, "alias_test: the verifier refuses the input");
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(f);
+        write_all(f, p, &got);
+        assert(p->alias_on == (p->alias_work > 0));
+        prover.drop_made(move(p));
         if (strbuf.view(&got) != want[k]) {
             eprintln("function ", k, " gives ", strbuf.view(&got), " and not ", want[k]);
             panic("alias_test: a verdict differs");
@@ -1612,36 +1613,36 @@ fn lower(lower_env.env mut* e, string name, fir.func mut* out) void {
 }
 
 fn each_step_holds_over_lowered_source() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, SOURCE[..], true);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     strbuf.str_buf mut all = strbuf.create();
-    defer strbuf.free(&all);
+    defer del(all.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, SOURCE[..], true);
     u64 mut k = 0;
     while (k < SOURCE_NAMES.len) {
-        fir.func mut f = fir.func{};
-        lower(&e, SOURCE_NAMES[k], &f);
-        prover.proof mut p = prover.prove(&f);
-        write_all(&f, &p, &all);
+        fir.func mut* own f = fir.func_make();
+        lower(e, SOURCE_NAMES[k], f);
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(f);
+        write_all(f, p, &all);
         strbuf.clear(&got);
         string inners = strbuf.view(&all)[str_after_last(strbuf.view(&all), '|')..];
         if (inners.len > 0) {
             strbuf.append(&got, inners[1..]);
             strbuf.push(&got, ' ');
         }
-        if (prover.has_error(&p)) {
+        if (prover.has_error(p)) {
             strbuf.append(&got, "error ");
-            strbuf.append_u64(&got, cast(p.unproved, u64));
+            strbuf.append_u64(&got, cast(p->unproved, u64));
             strbuf.push(&got, ' ');
-            strbuf.append_u64(&got, cast(p.leaks, u64));
+            strbuf.append_u64(&got, cast(p->leaks, u64));
         } else {
             strbuf.append(&got, "ok");
         }
-        prover.free(&p);
-        fir.func_free(&f);
+        prover.drop_made(move(p));
+        fir.func_drop_made(move(f));
         if (strbuf.view(&got) != SOURCE_VERDICTS[k]) {
             eprintln(SOURCE_NAMES[k], " gives ", strbuf.view(&got), " and not ",
                      SOURCE_VERDICTS[k]);
@@ -1696,25 +1697,28 @@ string[24] CHARGE = {
 // Each transfer of a block charges its statements and its terminator times the bits of the state:
 // a function with no memory local gets no map and no charge.
 fn each_transfer_of_a_block_charges_its_units() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], CHARGE[..]);
-    defer fir.module_free(&m);
-    fir.func* f = fir.module_function_at(&m, 0);
-    pass_env.verified(&e, f, "alias_test: the verifier refuses the input");
-    prover.proof mut p = prover.prove(f);
-    defer prover.free(&p);
-    if (p.alias_work != 135 || !p.alias_on) {
-        eprintln("charge ", p.alias_work, " and not 135");
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], CHARGE[..]);
+    defer fir.module_drop_made(move(m));
+    fir.func* f = fir.module_function_at(m, 0);
+    pass_env.verified(e, f, "alias_test: the verifier refuses the input");
+    prover.proof mut* own p = prover.make();
+    *p = prover.prove(f);
+    defer prover.drop_made(move(p));
+    if (p->alias_work != 135 || !p->alias_on) {
+        eprintln("charge ", p->alias_work, " and not 135");
         panic("alias_test: the charge differs");
     }
     // s7 of STRAIGHT has no memory local
-    fir.module mut none = pass_env.parse(&e, PRELUDE[..], STRAIGHT[..]);
-    defer fir.module_free(&none);
-    prover.proof mut q = prover.prove(&none.funcs.items[6]);
-    defer prover.free(&q);
-    assert(q.alias_work == 0 && !q.alias_on);
+    fir.module mut* own none = fir.module_make();
+    *none = pass_env.parse(e, PRELUDE[..], STRAIGHT[..]);
+    defer fir.module_drop_made(move(none));
+    prover.proof mut* own q = prover.make();
+    *q = prover.prove(&none->funcs.items[6]);
+    defer prover.drop_made(move(q));
+    assert(q->alias_work == 0 && !q->alias_on);
 }
 
 // ---- the limit ---------------------------------------------------------------------------------
@@ -1760,22 +1764,24 @@ fn write_limit(u64 fillers, strbuf.str_buf mut* out) void {
 // Parses the one function of `text`, proves it, and holds its charge and its verdicts.
 fn expect_limit(lower_env.env mut* e, fir_parse.prelude pre, string text, u64 work, string want)
     void {
-    fir.module mut m = fir_parse.parse_module(&e->c.m.s, "t.fir", text, pre);
-    defer fir.module_free(&m);
-    assert(check_env.errors(&e->c) == 0 && m.funcs.len == 1);
-    fir.func* f = fir.module_function_at(&m, 0);
-    pass_env.verified(e, f, "alias_test: the verifier refuses the generated function");
-    prover.proof mut p = prover.prove(f);
-    defer prover.free(&p);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
-    write_all(f, &p, &got);
-    if (p.alias_work != work || strbuf.view(&got) != want) {
-        eprintln("charge ", p.alias_work, " and not ", work, "; ", strbuf.view(&got), " and not ",
+    defer del(got.data);
+    fir.module mut* own m = fir.module_make();
+    *m = fir_parse.parse_module(&e->c.m.s, "t.fir", text, pre);
+    defer fir.module_drop_made(move(m));
+    assert(check_env.errors(&e->c) == 0 && m->funcs.len == 1);
+    fir.func* f = fir.module_function_at(m, 0);
+    pass_env.verified(e, f, "alias_test: the verifier refuses the generated function");
+    prover.proof mut* own p = prover.make();
+    *p = prover.prove(f);
+    defer prover.drop_made(move(p));
+    write_all(f, p, &got);
+    if (p->alias_work != work || strbuf.view(&got) != want) {
+        eprintln("charge ", p->alias_work, " and not ", work, "; ", strbuf.view(&got), " and not ",
                  want);
         panic("alias_test: the limit gives another verdict");
     }
-    assert(p.alias_on == (work <= alias.WORK_LIMIT));
+    assert(p->alias_on == (work <= alias.WORK_LIMIT));
 }
 
 // The filler temporaries of write_loop.
@@ -1857,23 +1863,22 @@ fn write_loop(u64 chain, u64 fillers, strbuf.str_buf mut* out) void {
 // passes the limit on a later turn and turns the map off there.
 fn the_limit_falls_back_to_the_kill_rules_before_the_refinement() void {
     assert(alias.WORK_LIMIT == 16777216);
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, PRELUDE[..], true);
-    fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e.c, "main"), &e.c.ck};
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, PRELUDE[..], true);
+    fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e->c, "main"), &e->c.ck};
     write_limit(8181, &text);
-    expect_limit(&e, pre, strbuf.view(&text), 16777216, "P/PPP | rxP rtP rtP |");
+    expect_limit(e, pre, strbuf.view(&text), 16777216, "P/PPP | rxP rtP rtP |");
     write_limit(8182, &text);
-    expect_limit(&e, pre, strbuf.view(&text), 16779264, "U/PPP | rxP rtP rtP |");
+    expect_limit(e, pre, strbuf.view(&text), 16779264, "U/PPP | rxP rtP rtP |");
     write_limit(8200, &text);
-    expect_limit(&e, pre, strbuf.view(&text), 16816128, "U/PPP | rxP rtP rtP |");
+    expect_limit(e, pre, strbuf.view(&text), 16816128, "U/PPP | rxP rtP rtP |");
     write_loop(3, 676, &text);
-    expect_limit(&e, pre, strbuf.view(&text), 7104940, "P/PPP | rxP rtP rtP |");
+    expect_limit(e, pre, strbuf.view(&text), 7104940, "P/PPP | rxP rtP rtP |");
     write_loop(8, 900, &text);
-    expect_limit(&e, pre, strbuf.view(&text), 17137425, "U/PPP | rxP rtP rtP |");
+    expect_limit(e, pre, strbuf.view(&text), 17137425, "U/PPP | rxP rtP rtP |");
 }
 
 fn main() i32 {

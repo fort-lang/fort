@@ -92,22 +92,22 @@ fn same(string got, string want) bool {
 // Parses `text`, adds each function with the work 1, orders the graph and holds its components
 // against `want`.
 fn expect_order(string@ text, string want) void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], text);
-    defer fir.module_free(&m);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], text);
+    defer fir.module_drop_made(move(m));
     u64 mut i = 0;
-    while (i < m.funcs.len) {
-        summary.add(&g, fir.module_function_at(&m, i), 1);
+    while (i < m->funcs.len) {
+        summary.add(g, fir.module_function_at(m, i), 1);
         i += 1;
     }
-    summary.order(&g);
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    assert(same(components_of(&g, &b), want));
+    summary.order(g);
+    assert(same(components_of(g, &b), want));
 }
 
 // ---- the order -----------------------------------------------------------------------------
@@ -329,16 +329,16 @@ fn functions_with_no_call_keep_the_order_of_add() void {
 }
 
 fn an_empty_graph_has_no_component() void {
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    summary.order(&g);
-    assert(summary.component_count(&g) == 0);
-    assert(summary.node_count(&g) == 0);
-    summary.solve(&g, summary.WORK_LIMIT);
-    summary.table mut t = summary.table{};
-    defer summary.free_table(&t);
-    summary.collect(&g, &t);
-    assert(summary.entry_count(&t) == 0);
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    summary.order(g);
+    assert(summary.component_count(g) == 0);
+    assert(summary.node_count(g) == 0);
+    summary.solve(g, summary.WORK_LIMIT);
+    summary.table mut* own t = summary.table_make();
+    defer summary.table_drop_made(move(t));
+    summary.collect(g, t);
+    assert(summary.entry_count(t) == 0);
 }
 
 // ---- the edges -----------------------------------------------------------------------------
@@ -399,116 +399,116 @@ string[19] TWICE = {
 };
 
 fn a_call_through_a_value_adds_no_edge() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    u64[2] works = {1, 1};
-    fir.module mut m = graph_of(&e, VALUE[..], works[..], &g);
-    defer fir.module_free(&m);
-    summary.order(&g);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    assert(same(components_of(&g, &b), "main.via | main.target"));
+    defer del(b.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    u64[2] works = {1, 1};
+    fir.module mut* own m = fir.module_make();
+    *m = graph_of(e, VALUE[..], works[..], g);
+    defer fir.module_drop_made(move(m));
+    summary.order(g);
+    assert(same(components_of(g, &b), "main.via | main.target"));
     // the call through the value is no direct call of `via`
-    assert(node_at(&g, 0).call_count == 0);
-    assert(node_at(&g, 1).call_count == 1);
+    assert(node_at(g, 0).call_count == 0);
+    assert(node_at(g, 1).call_count == 1);
 }
 
 fn an_extern_call_adds_no_node_and_no_edge() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    u64[1] works = {1};
-    fir.module mut m = graph_of(&e, EXTERN[..], works[..], &g);
-    defer fir.module_free(&m);
-    summary.order(&g);
-    assert(summary.node_count(&g) == 1);
-    assert(node_at(&g, 0).call_count == 0);
-    assert(g.calls.len == 0);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    assert(same(components_of(&g, &b), "main.outer"));
-    assert(!summary.component_at(&g, 0).cyclic);
+    defer del(b.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    u64[1] works = {1};
+    fir.module mut* own m = fir.module_make();
+    *m = graph_of(e, EXTERN[..], works[..], g);
+    defer fir.module_drop_made(move(m));
+    summary.order(g);
+    assert(summary.node_count(g) == 1);
+    assert(node_at(g, 0).call_count == 0);
+    assert(g->calls.len == 0);
+    assert(same(components_of(g, &b), "main.outer"));
+    assert(!summary.component_at(g, 0).cyclic);
 }
 
 fn a_call_of_a_function_outside_the_graph_adds_no_edge() void {
     // `pong` gets no node, as a function that the pass did not prove: the call of `ping` names
     // no node, and `pong` reads no summary of `ping`'s cycle
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], CYCLE[..]);
-    defer fir.module_free(&m);
-    summary.add(&g, fir.module_function_at(&m, 0), 1);
-    summary.add(&g, fir.module_function_at(&m, 2), 1);
-    summary.order(&g);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    assert(same(components_of(&g, &b), "main.ping | main.leaf"));
-    assert(g.calls.len == 1);
-    assert(g.targets.len == 1);
-    assert(target_at(&g, 0) == -1);
+    defer del(b.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], CYCLE[..]);
+    defer fir.module_drop_made(move(m));
+    summary.add(g, fir.module_function_at(m, 0), 1);
+    summary.add(g, fir.module_function_at(m, 2), 1);
+    summary.order(g);
+    assert(same(components_of(g, &b), "main.ping | main.leaf"));
+    assert(g->calls.len == 1);
+    assert(g->targets.len == 1);
+    assert(target_at(g, 0) == -1);
 }
 
 fn two_calls_of_one_callee_are_one_dependency() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    u64[2] works = {1, 1};
-    fir.module mut m = graph_of(&e, TWICE[..], works[..], &g);
-    defer fir.module_free(&m);
-    summary.order(&g);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    assert(same(components_of(&g, &b), "*main.twice main.once"));
-    assert(node_at(&g, 0).call_count == 2);
-    assert(target_at(&g, 0) == 1 && target_at(&g, 1) == 1);
+    defer del(b.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    u64[2] works = {1, 1};
+    fir.module mut* own m = fir.module_make();
+    *m = graph_of(e, TWICE[..], works[..], g);
+    defer fir.module_drop_made(move(m));
+    summary.order(g);
+    assert(same(components_of(g, &b), "*main.twice main.once"));
+    assert(node_at(g, 0).call_count == 2);
+    assert(target_at(g, 0) == 1 && target_at(g, 1) == 1);
 }
 
 fn a_self_call_is_found_among_other_calls() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
     u64[4] works = {1, 1, 1, 1};
-    fir.module mut m = graph_of(&e, TWO_CYCLES[..], works[..], &g);
-    defer fir.module_free(&m);
-    summary.order(&g);
-    assert(!node_at(&g, 0).calls_itself);
-    assert(!node_at(&g, 1).calls_itself);
-    assert(!node_at(&g, 2).calls_itself);
-    assert(node_at(&g, 3).calls_itself);
+    fir.module mut* own m = fir.module_make();
+    *m = graph_of(e, TWO_CYCLES[..], works[..], g);
+    defer fir.module_drop_made(move(m));
+    summary.order(g);
+    assert(!node_at(g, 0).calls_itself);
+    assert(!node_at(g, 1).calls_itself);
+    assert(!node_at(g, 2).calls_itself);
+    assert(node_at(g, 3).calls_itself);
 }
 
 fn a_second_order_gives_the_same_components_and_takes_new_nodes() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], CYCLE[..]);
-    defer fir.module_free(&m);
-    summary.add(&g, fir.module_function_at(&m, 0), 1);
-    summary.add(&g, fir.module_function_at(&m, 1), 1);
-    summary.order(&g);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    assert(same(components_of(&g, &b), "*main.ping main.pong"));
-    summary.order(&g);
-    assert(same(components_of(&g, &b), "*main.ping main.pong"));
+    defer del(b.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], CYCLE[..]);
+    defer fir.module_drop_made(move(m));
+    summary.add(g, fir.module_function_at(m, 0), 1);
+    summary.add(g, fir.module_function_at(m, 1), 1);
+    summary.order(g);
+    assert(same(components_of(g, &b), "*main.ping main.pong"));
+    summary.order(g);
+    assert(same(components_of(g, &b), "*main.ping main.pong"));
     // a node added after the order takes part in the next one
-    summary.add(&g, fir.module_function_at(&m, 2), 1);
-    summary.order(&g);
-    assert(same(components_of(&g, &b), "main.leaf | *main.ping main.pong"));
+    summary.add(g, fir.module_function_at(m, 2), 1);
+    summary.order(g);
+    assert(same(components_of(g, &b), "main.leaf | *main.ping main.pong"));
 }
 
 // The FIR text of a chain of `n` functions, `main.f0` to `main.f<n-1>`, each of which calls the
@@ -535,32 +535,32 @@ fn chain_text(u64 n, strbuf.str_buf mut* out) string {
 }
 
 fn a_long_chain_is_ordered_by_the_walk_of_its_own_stack() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     u64 n = 2000;
     string[1] lines = {chain_text(n, &text)};
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], lines[..]);
-    defer fir.module_free(&m);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], lines[..]);
+    defer fir.module_drop_made(move(m));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
     u64 mut i = 0;
-    while (i < m.funcs.len) {
-        summary.add(&g, fir.module_function_at(&m, i), 1);
+    while (i < m->funcs.len) {
+        summary.add(g, fir.module_function_at(m, i), 1);
         i += 1;
     }
-    summary.solve(&g, summary.WORK_LIMIT);
-    assert(summary.component_count(&g) == n);
+    summary.solve(g, summary.WORK_LIMIT);
+    assert(summary.component_count(g) == n);
     // the last function of the chain calls nothing, so it comes first, and `f0` comes last
-    assert(summary.node_symbol(&g, summary.member(&g, 0, 0)) == "main.f1999");
-    assert(summary.node_symbol(&g, summary.member(&g, n - 1, 0)) == "main.f0");
+    assert(summary.node_symbol(g, summary.member(g, 0, 0)) == "main.f1999");
+    assert(summary.node_symbol(g, summary.member(g, n - 1, 0)) == "main.f0");
     u64 mut c = 0;
     while (c < n) {
-        summary.component comp = summary.component_at(&g, c);
+        summary.component comp = summary.component_at(g, c);
         assert(comp.count == 1 && !comp.cyclic && comp.rounds == 1 && comp.work == 1);
-        assert(summary.member(&g, c, 0) == n - 1 - c);
+        assert(summary.member(g, c, 0) == n - 1 - c);
         c += 1;
     }
 }
@@ -582,111 +582,111 @@ fn the_limit_of_a_component_is_two_to_the_26() void {
 }
 
 fn each_analysis_charges_its_work_to_its_component() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = solve_cycle(&e, &g, summary.WORK_LIMIT);
-    defer fir.module_free(&m);
-    summary.component leaf = summary.component_at(&g, 0);
-    summary.component loop = summary.component_at(&g, 1);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = solve_cycle(e, g, summary.WORK_LIMIT);
+    defer fir.module_drop_made(move(m));
+    summary.component leaf = summary.component_at(g, 0);
+    summary.component loop = summary.component_at(g, 1);
     assert(leaf.work == 3 && leaf.rounds == 1 && !leaf.over);
     // one round of two members
     assert(loop.work == 12 && loop.rounds == 1 && !loop.over);
 }
 
 fn the_work_passes_the_limit_only_when_it_is_greater() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
     // at the limit
-    fir.module mut m = solve_cycle(&e, &g, 12);
-    defer fir.module_free(&m);
-    assert(!summary.component_at(&g, 1).over);
-    assert(!summary.component_at(&g, 0).over);
+    fir.module mut* own m = fir.module_make();
+    *m = solve_cycle(e, g, 12);
+    defer fir.module_drop_made(move(m));
+    assert(!summary.component_at(g, 1).over);
+    assert(!summary.component_at(g, 0).over);
     // one past the limit: the cycle is over, and the component before it is not
-    summary.solve(&g, 11);
-    assert(summary.component_at(&g, 1).over);
-    assert(summary.component_at(&g, 1).work == 12);
-    assert(!summary.component_at(&g, 0).over);
+    summary.solve(g, 11);
+    assert(summary.component_at(g, 1).over);
+    assert(summary.component_at(g, 1).work == 12);
+    assert(!summary.component_at(g, 0).over);
     // each component has a limit of its own: 3 passes 2, and 12 does
-    summary.solve(&g, 2);
-    assert(summary.component_at(&g, 0).over);
-    assert(summary.component_at(&g, 1).over);
+    summary.solve(g, 2);
+    assert(summary.component_at(g, 0).over);
+    assert(summary.component_at(g, 1).over);
     // a solve after an over one starts each component again
-    summary.solve(&g, summary.WORK_LIMIT);
-    assert(!summary.component_at(&g, 0).over);
-    assert(!summary.component_at(&g, 1).over);
-    assert(summary.component_at(&g, 1).work == 12);
+    summary.solve(g, summary.WORK_LIMIT);
+    assert(!summary.component_at(g, 0).over);
+    assert(!summary.component_at(g, 1).over);
+    assert(summary.component_at(g, 1).work == 12);
 }
 
 fn a_component_over_its_limit_leaves_the_next_one_alone() void {
     // TWO_CYCLES with the works 2 (`top`), 3 (`up`), 5 (`down`) and 7 (`low`): against a limit of
     // 7, the cycle of `up` and `down` (8) is over, and `low` (7) and `top` (2) are not
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
     u64[4] works = {2, 3, 5, 7};
-    fir.module mut m = graph_of(&e, TWO_CYCLES[..], works[..], &g);
-    defer fir.module_free(&m);
-    summary.solve(&g, 7);
-    assert(!summary.component_at(&g, 0).over && summary.component_at(&g, 0).work == 7);
-    assert(summary.component_at(&g, 1).over && summary.component_at(&g, 1).work == 8);
-    assert(!summary.component_at(&g, 2).over && summary.component_at(&g, 2).work == 2);
+    fir.module mut* own m = fir.module_make();
+    *m = graph_of(e, TWO_CYCLES[..], works[..], g);
+    defer fir.module_drop_made(move(m));
+    summary.solve(g, 7);
+    assert(!summary.component_at(g, 0).over && summary.component_at(g, 0).work == 7);
+    assert(summary.component_at(g, 1).over && summary.component_at(g, 1).work == 8);
+    assert(!summary.component_at(g, 2).over && summary.component_at(g, 2).work == 2);
     // each component took one round, the over one too, because V1 changes no member
-    assert(summary.component_at(&g, 1).rounds == 1);
+    assert(summary.component_at(g, 1).rounds == 1);
     // a limit of 1 leaves no component under it but none of no work
-    summary.solve(&g, 1);
+    summary.solve(g, 1);
     u64 mut c = 0;
     while (c < 3) {
-        assert(summary.component_at(&g, c).over);
+        assert(summary.component_at(g, c).over);
         c += 1;
     }
 }
 
 fn a_component_of_no_work_passes_no_limit() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
     u64[1] works = {0};
-    fir.module mut m = graph_of(&e, ONE[..], works[..], &g);
-    defer fir.module_free(&m);
-    summary.solve(&g, 0);
-    assert(summary.component_at(&g, 0).work == 0);
-    assert(!summary.component_at(&g, 0).over);
+    fir.module mut* own m = fir.module_make();
+    *m = graph_of(e, ONE[..], works[..], g);
+    defer fir.module_drop_made(move(m));
+    summary.solve(g, 0);
+    assert(summary.component_at(g, 0).work == 0);
+    assert(!summary.component_at(g, 0).over);
     // one unit of work passes a limit of 0
-    summary.graph mut h = summary.graph{};
-    defer summary.free(&h);
-    summary.add(&h, fir.module_function_at(&m, 0), 1);
-    summary.solve(&h, 0);
-    assert(summary.component_at(&h, 0).over);
+    summary.graph mut* own h = summary.make();
+    defer summary.drop_made(move(h));
+    summary.add(h, fir.module_function_at(m, 0), 1);
+    summary.solve(h, 0);
+    assert(summary.component_at(h, 0).over);
 }
 
 fn a_sum_that_passes_the_largest_u64_stays_at_it() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
     u64 most = 18446744073709551615;
     u64[3] works = {most, most - 1, 2};
-    fir.module mut m = graph_of(&e, CYCLE[..], works[..], &g);
-    defer fir.module_free(&m);
-    summary.solve(&g, summary.WORK_LIMIT);
-    assert(summary.component_at(&g, 1).work == most);
-    assert(summary.component_at(&g, 1).over);
-    assert(summary.component_at(&g, 0).work == 2);
+    fir.module mut* own m = fir.module_make();
+    *m = graph_of(e, CYCLE[..], works[..], g);
+    defer fir.module_drop_made(move(m));
+    summary.solve(g, summary.WORK_LIMIT);
+    assert(summary.component_at(g, 1).work == most);
+    assert(summary.component_at(g, 1).over);
+    assert(summary.component_at(g, 0).work == 2);
     // the largest u64 itself passes no limit of the largest u64
-    summary.solve(&g, most);
-    assert(summary.component_at(&g, 1).work == most);
-    assert(!summary.component_at(&g, 1).over);
+    summary.solve(g, most);
+    assert(summary.component_at(g, 1).work == most);
+    assert(!summary.component_at(g, 1).over);
 }
 
 // ---- the rounds ----------------------------------------------------------------------------
@@ -749,198 +749,198 @@ fn the_kinds_have_their_words_and_their_order() void {
 }
 
 fn must_lines_start_present_and_only_go() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = ordered_cycle(&e, &g);
-    defer fir.module_free(&m);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = ordered_cycle(e, g);
+    defer fir.module_drop_made(move(m));
     // the start takes the must lines and no may line
     summary.line[4] begin = {KEEP_1, EMPTY_1, EMPTY_0, KEPT_2};
-    summary.start(&g, 0, begin[..]);
-    assert(same(lines_of(&g, 0, &b), "empty (*_1).0, empty (*_1).1, kept (*_2)"));
+    summary.start(g, 0, begin[..]);
+    assert(same(lines_of(g, 0, &b), "empty (*_1).0, empty (*_1).1, kept (*_2)"));
     // a must line that the analysis does not find again goes
     summary.line[2] found = {EMPTY_1, KEPT_2};
-    assert(summary.give(&g, 1, 0, found[..], 1, summary.WORK_LIMIT));
-    assert(same(lines_of(&g, 0, &b), "empty (*_1).1, kept (*_2)"));
+    assert(summary.give(g, 1, 0, found[..], 1, summary.WORK_LIMIT));
+    assert(same(lines_of(g, 0, &b), "empty (*_1).1, kept (*_2)"));
     // a must line that the member does not hold does not come in
     summary.line[2] more = {EMPTY_0, EMPTY_1};
-    assert(summary.give(&g, 1, 0, more[..], 1, summary.WORK_LIMIT));
-    assert(same(lines_of(&g, 0, &b), "empty (*_1).1"));
+    assert(summary.give(g, 1, 0, more[..], 1, summary.WORK_LIMIT));
+    assert(same(lines_of(g, 0, &b), "empty (*_1).1"));
     // the same lines again change nothing
-    assert(!summary.give(&g, 1, 0, more[..], 1, summary.WORK_LIMIT));
-    assert(same(lines_of(&g, 0, &b), "empty (*_1).1"));
+    assert(!summary.give(g, 1, 0, more[..], 1, summary.WORK_LIMIT));
+    assert(same(lines_of(g, 0, &b), "empty (*_1).1"));
     // no line found: each must line goes
     summary.line[1] none = {};
-    assert(summary.give(&g, 1, 0, none[..0], 1, summary.WORK_LIMIT));
-    assert(same(lines_of(&g, 0, &b), ""));
+    assert(summary.give(g, 1, 0, none[..0], 1, summary.WORK_LIMIT));
+    assert(same(lines_of(g, 0, &b), ""));
 }
 
 fn may_lines_start_absent_and_only_come() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = ordered_cycle(&e, &g);
-    defer fir.module_free(&m);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = ordered_cycle(e, g);
+    defer fir.module_drop_made(move(m));
     summary.line[1] none = {};
-    summary.start(&g, 1, none[..0]);
-    assert(same(lines_of(&g, 1, &b), ""));
+    summary.start(g, 1, none[..0]);
+    assert(same(lines_of(g, 1, &b), ""));
     // a may line that the analysis finds comes in
     summary.line[2] found = {KEEP_2, RESULT_1};
-    assert(summary.give(&g, 1, 1, found[..], 1, summary.WORK_LIMIT));
-    assert(same(lines_of(&g, 1, &b), "result _1, keep _2"));
+    assert(summary.give(g, 1, 1, found[..], 1, summary.WORK_LIMIT));
+    assert(same(lines_of(g, 1, &b), "result _1, keep _2"));
     // a may line that the analysis does not find again stays
     summary.line[1] other = {KEEP_1};
-    assert(summary.give(&g, 1, 1, other[..], 1, summary.WORK_LIMIT));
-    assert(same(lines_of(&g, 1, &b), "result _1, keep _1, keep _2"));
-    assert(!summary.give(&g, 1, 1, none[..0], 1, summary.WORK_LIMIT));
-    assert(same(lines_of(&g, 1, &b), "result _1, keep _1, keep _2"));
+    assert(summary.give(g, 1, 1, other[..], 1, summary.WORK_LIMIT));
+    assert(same(lines_of(g, 1, &b), "result _1, keep _1, keep _2"));
+    assert(!summary.give(g, 1, 1, none[..0], 1, summary.WORK_LIMIT));
+    assert(same(lines_of(g, 1, &b), "result _1, keep _1, keep _2"));
 }
 
 fn a_member_of_no_cycle_takes_what_its_pass_finds() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = ordered_cycle(&e, &g);
-    defer fir.module_free(&m);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = ordered_cycle(e, g);
+    defer fir.module_drop_made(move(m));
     // `leaf` takes a must line that no start gave, in the order of compare, and each line once
     summary.line[4] found = {KEEP_1, EMPTY_0, KEEP_1, KEPT_2};
-    assert(summary.give(&g, 0, 2, found[..], 1, summary.WORK_LIMIT));
-    assert(same(lines_of(&g, 2, &b), "empty (*_1).0, kept (*_2), keep _1"));
-    assert(!summary.give(&g, 0, 2, found[..], 1, summary.WORK_LIMIT));
+    assert(summary.give(g, 0, 2, found[..], 1, summary.WORK_LIMIT));
+    assert(same(lines_of(g, 2, &b), "empty (*_1).0, kept (*_2), keep _1"));
+    assert(!summary.give(g, 0, 2, found[..], 1, summary.WORK_LIMIT));
     // a second pass replaces its lines, a may line too
     summary.line[1] fewer = {EMPTY_1};
-    assert(summary.give(&g, 0, 2, fewer[..], 1, summary.WORK_LIMIT));
-    assert(same(lines_of(&g, 2, &b), "empty (*_1).1"));
+    assert(summary.give(g, 0, 2, fewer[..], 1, summary.WORK_LIMIT));
+    assert(same(lines_of(g, 2, &b), "empty (*_1).1"));
     // one pass: no round follows, whatever the pass changed
-    assert(!summary.end_round(&g, 0, true));
-    assert(summary.component_at(&g, 0).rounds == 1);
-    assert(summary.component_at(&g, 0).work == 3);
-    assert(same(lines_of(&g, 2, &b), "empty (*_1).1"));
+    assert(!summary.end_round(g, 0, true));
+    assert(summary.component_at(g, 0).rounds == 1);
+    assert(summary.component_at(g, 0).work == 3);
+    assert(same(lines_of(g, 2, &b), "empty (*_1).1"));
 }
 
 fn the_rounds_end_after_a_round_that_changes_no_member() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = ordered_cycle(&e, &g);
-    defer fir.module_free(&m);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = ordered_cycle(e, g);
+    defer fir.module_drop_made(move(m));
     summary.line[2] begin = {EMPTY_0, EMPTY_1};
-    summary.start(&g, 0, begin[..]);
-    summary.start(&g, 1, begin[..]);
+    summary.start(g, 0, begin[..]);
+    summary.start(g, 1, begin[..]);
     // round 1: `ping` loses a line
     summary.line[1] found = {EMPTY_1};
-    bool mut changed = summary.give(&g, 1, 0, found[..], 4, summary.WORK_LIMIT);
-    if (summary.give(&g, 1, 1, begin[..], 4, summary.WORK_LIMIT)) {
+    bool mut changed = summary.give(g, 1, 0, found[..], 4, summary.WORK_LIMIT);
+    if (summary.give(g, 1, 1, begin[..], 4, summary.WORK_LIMIT)) {
         changed = true;
     }
     assert(changed);
-    assert(summary.end_round(&g, 1, changed));
+    assert(summary.end_round(g, 1, changed));
     // round 2: `pong` loses the line that `ping` lost
-    changed = summary.give(&g, 1, 0, found[..], 4, summary.WORK_LIMIT);
-    if (summary.give(&g, 1, 1, found[..], 4, summary.WORK_LIMIT)) {
+    changed = summary.give(g, 1, 0, found[..], 4, summary.WORK_LIMIT);
+    if (summary.give(g, 1, 1, found[..], 4, summary.WORK_LIMIT)) {
         changed = true;
     }
     assert(changed);
-    assert(summary.end_round(&g, 1, changed));
+    assert(summary.end_round(g, 1, changed));
     // round 3 changes nothing, and the rounds end
-    changed = summary.give(&g, 1, 0, found[..], 4, summary.WORK_LIMIT);
-    if (summary.give(&g, 1, 1, found[..], 4, summary.WORK_LIMIT)) {
+    changed = summary.give(g, 1, 0, found[..], 4, summary.WORK_LIMIT);
+    if (summary.give(g, 1, 1, found[..], 4, summary.WORK_LIMIT)) {
         changed = true;
     }
     assert(!changed);
-    assert(!summary.end_round(&g, 1, changed));
-    summary.component loop = summary.component_at(&g, 1);
+    assert(!summary.end_round(g, 1, changed));
+    summary.component loop = summary.component_at(g, 1);
     assert(loop.rounds == 3 && loop.work == 24 && !loop.over);
-    assert(same(lines_of(&g, 0, &b), "empty (*_1).1"));
-    assert(same(lines_of(&g, 1, &b), "empty (*_1).1"));
+    assert(same(lines_of(g, 0, &b), "empty (*_1).1"));
+    assert(same(lines_of(g, 1, &b), "empty (*_1).1"));
 }
 
 fn past_the_limit_each_must_line_is_absent() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = ordered_cycle(&e, &g);
-    defer fir.module_free(&m);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = ordered_cycle(e, g);
+    defer fir.module_drop_made(move(m));
     // must lines alone: the safe value of a may line is present, which V1, with no may kind,
     // cannot give (spec/ownership-design.md 8.1)
     summary.line[3] begin = {EMPTY_0, EMPTY_1, KEPT_2};
     summary.line[2] lines = {EMPTY_0, KEPT_2};
-    summary.start(&g, 0, begin[..]);
-    summary.start(&g, 1, begin[..]);
-    assert(summary.give(&g, 1, 0, lines[..], 6, 10));
-    assert(summary.give(&g, 1, 1, lines[..], 4, 10));
-    assert(!summary.component_at(&g, 1).over);
+    summary.start(g, 0, begin[..]);
+    summary.start(g, 1, begin[..]);
+    assert(summary.give(g, 1, 0, lines[..], 6, 10));
+    assert(summary.give(g, 1, 1, lines[..], 4, 10));
+    assert(!summary.component_at(g, 1).over);
     // at the limit the rounds go on while a member changes
-    assert(summary.end_round(&g, 1, true));
-    assert(same(lines_of(&g, 0, &b), "empty (*_1).0, kept (*_2)"));
+    assert(summary.end_round(g, 1, true));
+    assert(same(lines_of(g, 0, &b), "empty (*_1).0, kept (*_2)"));
     // one more unit of work passes it: the rounds end, and each must line is absent
-    assert(!summary.give(&g, 1, 0, lines[..], 1, 10));
-    assert(summary.component_at(&g, 1).over);
-    assert(!summary.end_round(&g, 1, true));
-    assert(same(lines_of(&g, 0, &b), ""));
-    assert(same(lines_of(&g, 1, &b), ""));
+    assert(!summary.give(g, 1, 0, lines[..], 1, 10));
+    assert(summary.component_at(g, 1).over);
+    assert(!summary.end_round(g, 1, true));
+    assert(same(lines_of(g, 0, &b), ""));
+    assert(same(lines_of(g, 1, &b), ""));
     // the component before it keeps its lines
     summary.line[1] found = {KEEP_2};
-    assert(summary.give(&g, 0, 2, found[..], 1, 10));
-    assert(!summary.end_round(&g, 0, true));
-    assert(same(lines_of(&g, 2, &b), "keep _2"));
+    assert(summary.give(g, 0, 2, found[..], 1, 10));
+    assert(!summary.end_round(g, 0, true));
+    assert(same(lines_of(g, 2, &b), "keep _2"));
 }
 
 fn a_component_of_no_cycle_past_its_limit_loses_its_must_lines() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = ordered_cycle(&e, &g);
-    defer fir.module_free(&m);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = ordered_cycle(e, g);
+    defer fir.module_drop_made(move(m));
     summary.line[1] found = {EMPTY_0};
-    assert(summary.give(&g, 0, 2, found[..], 11, 10));
-    assert(summary.component_at(&g, 0).over);
-    assert(!summary.end_round(&g, 0, true));
-    assert(same(lines_of(&g, 2, &b), ""));
+    assert(summary.give(g, 0, 2, found[..], 11, 10));
+    assert(summary.component_at(g, 0).over);
+    assert(!summary.end_round(g, 0, true));
+    assert(same(lines_of(g, 2, &b), ""));
 }
 
 fn the_lines_of_a_member_do_not_borrow_the_storage_of_the_caller() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = ordered_cycle(&e, &g);
-    defer fir.module_free(&m);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = ordered_cycle(e, g);
+    defer fir.module_drop_made(move(m));
     strbuf.append(&text, "(*_3).4");
     summary.line[1] found = {summary.line{summary.kind.k_empty, strbuf.view(&text)}};
-    assert(summary.give(&g, 0, 2, found[..], 1, summary.WORK_LIMIT));
+    assert(summary.give(g, 0, 2, found[..], 1, summary.WORK_LIMIT));
     strbuf.clear(&text);
     strbuf.append(&text, "XXXXXXX");
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    assert(same(lines_of(&g, 2, &b), "empty (*_3).4"));
+    assert(same(lines_of(g, 2, &b), "empty (*_3).4"));
 }
 
 // `pair` has 2 parameters and `wide` 11, and the two call each other; `none` has none and calls
@@ -1009,181 +1009,181 @@ fn ordered_params(lower_env.env mut* e, summary.graph mut* g) fir.module {
 }
 
 fn add_counts_the_parameters_of_each_function() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = ordered_params(&e, &g);
-    defer fir.module_free(&m);
-    assert(node_at(&g, 0).params == 2);
-    assert(node_at(&g, 1).params == 11);
-    assert(node_at(&g, 2).params == 0);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = ordered_params(e, g);
+    defer fir.module_drop_made(move(m));
+    assert(node_at(g, 0).params == 2);
+    assert(node_at(g, 1).params == 11);
+    assert(node_at(g, 2).params == 0);
     // the locals after the parameters do not count
-    assert(fir.local_count(fir.module_function_at(&m, 1)) == 13);
+    assert(fir.local_count(fir.module_function_at(m, 1)) == 13);
 }
 
 fn past_the_limit_each_may_line_is_present_and_each_must_line_absent() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = ordered_params(&e, &g);
-    defer fir.module_free(&m);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    summary.line[2] begin = {EMPTY_0, KEPT_2};
-    summary.start(&g, 0, begin[..]);
-    summary.start(&g, 1, begin[..]);
-    summary.line[2] found = {EMPTY_0, KEEP_1};
-    assert(summary.give(&g, 0, 0, found[..], 3, 4));
-    assert(!summary.component_at(&g, 0).over);
-    assert(summary.give(&g, 0, 1, found[..], 2, 4));
-    assert(summary.component_at(&g, 0).over);
-    assert(same(lines_of(&g, 0, &b), "empty (*_1).0, keep _1"));
-    assert(!summary.end_round(&g, 0, true));
-    // the must line goes, and each may line of each parameter comes
-    assert(same(lines_of(&g, 0, &b), "result _1, result _2, keep _1, keep _2"));
+    defer del(b.data);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
-    assert(same(lines_of(&g, 1, &b), wide_safe(&want)));
+    defer del(want.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = ordered_params(e, g);
+    defer fir.module_drop_made(move(m));
+    summary.line[2] begin = {EMPTY_0, KEPT_2};
+    summary.start(g, 0, begin[..]);
+    summary.start(g, 1, begin[..]);
+    summary.line[2] found = {EMPTY_0, KEEP_1};
+    assert(summary.give(g, 0, 0, found[..], 3, 4));
+    assert(!summary.component_at(g, 0).over);
+    assert(summary.give(g, 0, 1, found[..], 2, 4));
+    assert(summary.component_at(g, 0).over);
+    assert(same(lines_of(g, 0, &b), "empty (*_1).0, keep _1"));
+    assert(!summary.end_round(g, 0, true));
+    // the must line goes, and each may line of each parameter comes
+    assert(same(lines_of(g, 0, &b), "result _1, result _2, keep _1, keep _2"));
+    assert(same(lines_of(g, 1, &b), wide_safe(&want)));
     // a member with no parameter has no line past the limit
     summary.line[1] must = {EMPTY_1};
-    assert(summary.give(&g, 1, 2, must[..], 5, 4));
-    assert(same(lines_of(&g, 2, &b), "empty (*_1).1"));
-    assert(!summary.end_round(&g, 1, false));
-    assert(same(lines_of(&g, 2, &b), ""));
+    assert(summary.give(g, 1, 2, must[..], 5, 4));
+    assert(same(lines_of(g, 2, &b), "empty (*_1).1"));
+    assert(!summary.end_round(g, 1, false));
+    assert(same(lines_of(g, 2, &b), ""));
 }
 
 fn a_component_at_its_limit_keeps_what_it_found() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = ordered_params(&e, &g);
-    defer fir.module_free(&m);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = ordered_params(e, g);
+    defer fir.module_drop_made(move(m));
     summary.line[1] must = {EMPTY_1};
-    assert(summary.give(&g, 1, 2, must[..], 4, 4));
-    assert(!summary.end_round(&g, 1, false));
-    assert(same(lines_of(&g, 2, &b), "empty (*_1).1"));
+    assert(summary.give(g, 1, 2, must[..], 4, 4));
+    assert(!summary.end_round(g, 1, false));
+    assert(same(lines_of(g, 2, &b), "empty (*_1).1"));
 }
 
 fn solve_past_the_limit_writes_the_safe_value_into_the_table() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = ordered_params(&e, &g);
-    defer fir.module_free(&m);
-    // a limit of 0: each component of work 1 passes it
-    summary.solve(&g, 0);
-    assert(summary.component_at(&g, 0).over && summary.component_at(&g, 1).over);
-    summary.table mut t = summary.table{};
-    defer summary.free_table(&t);
-    summary.collect(&g, &t);
-    // `none` has no parameter, so it has no line and no entry
-    assert(summary.entry_count(&t) == 2);
-    assert(summary.symbol(&t, 0) == "main.pair" && summary.symbol(&t, 1) == "main.wide");
-    assert(summary.lines(&t, 1).len == 22);
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
-    summary.write(&t, "main", &out);
+    defer del(out.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = ordered_params(e, g);
+    defer fir.module_drop_made(move(m));
+    // a limit of 0: each component of work 1 passes it
+    summary.solve(g, 0);
+    assert(summary.component_at(g, 0).over && summary.component_at(g, 1).over);
+    summary.table mut* own t = summary.table_make();
+    defer summary.table_drop_made(move(t));
+    summary.collect(g, t);
+    // `none` has no parameter, so it has no line and no entry
+    assert(summary.entry_count(t) == 2);
+    assert(summary.symbol(t, 0) == "main.pair" && summary.symbol(t, 1) == "main.wide");
+    assert(summary.lines(t, 1).len == 22);
+    summary.write(t, "main", &out);
     string want_head = "fort-summaries 1\nlibrary main\nfn main.pair\nresult _1\nresult _2\n";
     assert(str.starts_with(strbuf.view(&out), want_head));
-    summary.table mut back = summary.table{};
-    defer summary.free_table(&back);
-    assert(summary.parse(strbuf.view(&out), "main", &back));
-    assert(summary.entry_count(&back) == 2);
+    summary.table mut* own back = summary.table_make();
+    defer summary.table_drop_made(move(back));
+    assert(summary.parse(strbuf.view(&out), "main", back));
+    assert(summary.entry_count(back) == 2);
     // under the limit of a build, V1 gives no line
-    summary.solve(&g, summary.WORK_LIMIT);
-    summary.table mut none = summary.table{};
-    defer summary.free_table(&none);
-    summary.collect(&g, &none);
-    assert(summary.entry_count(&none) == 0);
+    summary.solve(g, summary.WORK_LIMIT);
+    summary.table mut* own none = summary.table_make();
+    defer summary.table_drop_made(move(none));
+    summary.collect(g, none);
+    assert(summary.entry_count(none) == 0);
 }
 
 // ---- solve ---------------------------------------------------------------------------------
 
 fn solve_gives_no_line_in_v1_and_one_round_to_each_component() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    u64[4] works = {2, 3, 5, 7};
-    fir.module mut m = graph_of(&e, TWO_CYCLES[..], works[..], &g);
-    defer fir.module_free(&m);
-    summary.solve(&g, summary.WORK_LIMIT);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    assert(same(components_of(&g, &b), "*main.low | *main.up main.down | main.top"));
+    defer del(b.data);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    u64[4] works = {2, 3, 5, 7};
+    fir.module mut* own m = fir.module_make();
+    *m = graph_of(e, TWO_CYCLES[..], works[..], g);
+    defer fir.module_drop_made(move(m));
+    summary.solve(g, summary.WORK_LIMIT);
+    assert(same(components_of(g, &b), "*main.low | *main.up main.down | main.top"));
     // V1 has no kind of line: each analysis finds none, so each cycle takes one round
-    assert(summary.component_at(&g, 0).rounds == 1 && summary.component_at(&g, 0).work == 7);
-    assert(summary.component_at(&g, 1).rounds == 1 && summary.component_at(&g, 1).work == 8);
-    assert(summary.component_at(&g, 2).rounds == 1 && summary.component_at(&g, 2).work == 2);
+    assert(summary.component_at(g, 0).rounds == 1 && summary.component_at(g, 0).work == 7);
+    assert(summary.component_at(g, 1).rounds == 1 && summary.component_at(g, 1).work == 8);
+    assert(summary.component_at(g, 2).rounds == 1 && summary.component_at(g, 2).work == 2);
     u64 mut n = 0;
-    while (n < summary.node_count(&g)) {
-        assert(summary.node_lines(&g, n).len == 0);
+    while (n < summary.node_count(g)) {
+        assert(summary.node_lines(g, n).len == 0);
         n += 1;
     }
-    summary.table mut t = summary.table{};
-    defer summary.free_table(&t);
-    summary.collect(&g, &t);
-    assert(summary.entry_count(&t) == 0);
+    summary.table mut* own t = summary.table_make();
+    defer summary.table_drop_made(move(t));
+    summary.collect(g, t);
+    assert(summary.entry_count(t) == 0);
 }
 
 fn solve_starts_from_no_line() void {
     // lines that a hand-run left are gone after solve, which V1 gives no line
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = ordered_cycle(&e, &g);
-    defer fir.module_free(&m);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = ordered_cycle(e, g);
+    defer fir.module_drop_made(move(m));
     summary.line[2] found = {EMPTY_0, KEEP_1};
-    assert(summary.give(&g, 0, 2, found[..], 1, summary.WORK_LIMIT));
-    summary.start(&g, 0, found[..]);
-    summary.solve(&g, summary.WORK_LIMIT);
-    assert(summary.node_lines(&g, 0).len == 0);
-    assert(summary.node_lines(&g, 2).len == 0);
-    assert(summary.component_at(&g, 0).work == 1);
-    assert(summary.component_at(&g, 1).work == 2);
+    assert(summary.give(g, 0, 2, found[..], 1, summary.WORK_LIMIT));
+    summary.start(g, 0, found[..]);
+    summary.solve(g, summary.WORK_LIMIT);
+    assert(summary.node_lines(g, 0).len == 0);
+    assert(summary.node_lines(g, 2).len == 0);
+    assert(summary.component_at(g, 0).work == 1);
+    assert(summary.component_at(g, 1).work == 2);
 }
 
 // ---- the table -----------------------------------------------------------------------------
 
 fn collect_puts_each_node_with_a_line_in_byte_order_of_the_symbol() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    fir.module mut m = ordered_cycle(&e, &g);
-    defer fir.module_free(&m);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    fir.module mut* own m = fir.module_make();
+    *m = ordered_cycle(e, g);
+    defer fir.module_drop_made(move(m));
     summary.line[2] pong_lines = {KEEP_2, EMPTY_1};
     summary.line[1] leaf_lines = {RESULT_1};
-    summary.start(&g, 1, pong_lines[..]);
-    assert(summary.give(&g, 1, 1, pong_lines[..], 1, summary.WORK_LIMIT));
-    assert(summary.give(&g, 0, 2, leaf_lines[..], 1, summary.WORK_LIMIT));
-    summary.table mut t = summary.table{};
-    defer summary.free_table(&t);
-    summary.collect(&g, &t);
+    summary.start(g, 1, pong_lines[..]);
+    assert(summary.give(g, 1, 1, pong_lines[..], 1, summary.WORK_LIMIT));
+    assert(summary.give(g, 0, 2, leaf_lines[..], 1, summary.WORK_LIMIT));
+    summary.table mut* own t = summary.table_make();
+    defer summary.table_drop_made(move(t));
+    summary.collect(g, t);
     // `ping` has no line, so it has no entry
-    assert(summary.entry_count(&t) == 2);
-    assert(summary.symbol(&t, 0) == "main.leaf");
-    assert(summary.symbol(&t, 1) == "main.pong");
-    assert(summary.same_lines(summary.lines(&t, 0), leaf_lines[..]));
+    assert(summary.entry_count(t) == 2);
+    assert(summary.symbol(t, 0) == "main.leaf");
+    assert(summary.symbol(t, 1) == "main.pong");
+    assert(summary.same_lines(summary.lines(t, 0), leaf_lines[..]));
     summary.line[2] sorted = {EMPTY_1, KEEP_2};
-    assert(summary.same_lines(summary.lines(&t, 1), sorted[..]));
-    assert(summary.find(&t, "main.leaf") == 0);
-    assert(summary.find(&t, "main.pong") == 1);
-    assert(summary.find(&t, "main.ping") == -1);
+    assert(summary.same_lines(summary.lines(t, 1), sorted[..]));
+    assert(summary.find(t, "main.leaf") == 0);
+    assert(summary.find(t, "main.pong") == 1);
+    assert(summary.find(t, "main.ping") == -1);
 }
 
 fn main() i32 {

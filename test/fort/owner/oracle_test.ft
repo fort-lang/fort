@@ -5308,18 +5308,38 @@ struct batch {
     exit_vec aggregates;
 }
 
-fn free_batch(batch mut* bt) void {
-    del(bt->items);
-    strbuf.free(&bt->text);
-    fir.module_free(&bt->m);
-    del(bt->sites.items);
-    del(bt->exits.items);
-    del(bt->deads.items);
-    del(bt->inners.items);
-    del(bt->casts.items);
-    del(bt->forged.items);
-    del(bt->uses.items);
-    del(bt->aggregates.items);
+// A batch of `kind` over the hand case `lines`, with `count` items, in an allocation of its own:
+// each step of a run takes the batch by pointer.
+fn batch_make(family kind, string@ lines, u64 count) batch mut* own {
+    batch mut* own bt = new(batch);
+    bt->kind = kind;
+    bt->lines = lines;
+    bt->items = new(item, count);
+    return bt;
+}
+
+// Frees a batch that the caller moves in: the items, the text, the module, then each vector of
+// sites.
+fn batch_drop(batch mut bt) void {
+    del(bt.items);
+    strbuf.drop(move(bt.text));
+    fir.module_drop(move(bt.m));
+    del(bt.sites.items);
+    del(bt.exits.items);
+    del(bt.deads.items);
+    del(bt.inners.items);
+    del(bt.casts.items);
+    del(bt.forged.items);
+    del(bt.uses.items);
+    del(bt.aggregates.items);
+}
+
+// Ends a batch of batch_make that the caller moves in: the value moves out before the `del` of the
+// allocation, and batch_drop frees it.
+fn batch_drop_made(batch mut* own p) void {
+    batch kept = move(*p);
+    del(p);
+    batch_drop(move(kept));
 }
 
 // Whether `s` is a function of the entry module of the batch.
@@ -5414,7 +5434,7 @@ fn item_of(batch* bt, ast.sym* s) u64 {
 fn check_batch(check_env.env mut* c, batch mut* bt) bool {
     check_env.reopen(c);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     run_env.join(&b, run_env.RUNTIME[..]);
     check_env.add(c, "std/rt.ft", strbuf.view(&b));
     strbuf.clear(&b);
@@ -5464,16 +5484,15 @@ fn lower_one(check_env.env mut* c, batch mut* bt, ast.sym* s, fir_verify.runtime
     ast.node* body = s->node;
     u32 line = s->decl.line;
     bool in_main = is_in_main(s);
-    fir.func mut f = fir.func{};
+    fir.func mut* own f = fir.func_make();
+    // an accepted function moves out into the module, and the drop ends the empty value
+    defer fir.func_drop_made(move(f));
     fir_lower.report mut why = fir_lower.report{};
-    bool lowered = fir_lower.lower_function(&c->ck, body, &f, &why);
+    bool lowered = fir_lower.lower_function(&c->ck, body, f, &why);
     fir_verify.violation mut v = fir_verify.violation{};
-    if (lowered && !fir_verify.find_violation(&f, rt, &v)) {
-        fir.module_add_function(&bt->m, move(f));
+    if (lowered && !fir_verify.find_violation(f, rt, &v)) {
+        fir.module_add_function(&bt->m, move(*f));
         return true;
-    }
-    if (lowered) {
-        fir.func_free(&f);
     }
     if (!in_main || !drop_at(bt, line)) {
         panic("oracle_test.lower_batch: the lowering or the verifier refuses a declaration");
@@ -5485,7 +5504,7 @@ fn lower_one(check_env.env mut* c, batch mut* bt, ast.sym* s, fir_verify.runtime
 // function keeps every rule of the verifier.
 fn parse_batch(check_env.env mut* c, batch mut* bt) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     generator.write_lines(&b, bt->lines);
     fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(c, "main"), &c->ck};
     fir.module_free(&bt->m);
@@ -5581,9 +5600,10 @@ fn prove_batch(batch mut* bt) void {
     for (u64 mut i = 0; i < bt->m.funcs.len; i++) {
         fir.func* f = &bt->m.funcs.items[i];
         u64 owner = item_of(bt, f->sym);
-        prover.proof mut p = prover.prove(f);
-        add_proof(bt, f, owner, &p);
-        prover.free(&p);
+        prover.proof mut* own p = prover.make();
+        *p = prover.prove(f);
+        add_proof(bt, f, owner, p);
+        prover.drop_made(move(p));
     }
 }
 
@@ -6115,7 +6135,7 @@ fn is_after_forged(batch* bt, ast.sym* fn_sym, u32 line, u32 col) bool {
 // The symbol of the function `prefix` and `index` of the entry module.
 fn symbol(check_env.env* c, string prefix, u64 index) ast.sym* {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, prefix);
     strbuf.append_u64(&b, index);
     ast.sym* s = check_env.sym_main(c, strbuf.view(&b));
@@ -6127,37 +6147,34 @@ fn symbol(check_env.env* c, string prefix, u64 index) ast.sym* {
 
 // Runs the program whose `main` is `s`.
 fn run_program(check_env.env mut* c, batch mut* bt, ast.sym* s, counts mut* n) void {
-    interpreter.machine mut it = interpreter.machine{};
-    interpreter.init(&it, &c->ck, &bt->m, true);
-    defer interpreter.free(&it);
+    interpreter.machine mut* own it = interpreter.make(&c->ck, &bt->m, true);
+    defer interpreter.drop_made(move(it));
     string[1] argv = {"oracle"};
-    interpreter.run_program(&it, s, argv[..]);
-    collect(bt, &it, n);
+    interpreter.run_program(it, s, argv[..]);
+    collect(bt, it, n);
 }
 
 // Runs the function `s` of the exhaustive family with the input `input`: bit 0 is the `bool`,
 // bit 1 the index, and bits 2 and 3 say that the fields of `*q` are live.
 fn run_drive(check_env.env mut* c, batch mut* bt, ast.sym* s, u64 input, counts mut* n) void {
-    interpreter.machine mut it = interpreter.machine{};
-    interpreter.init(&it, &c->ck, &bt->m, true);
-    defer interpreter.free(&it);
+    interpreter.machine mut* own it = interpreter.make(&c->ck, &bt->m, true);
+    defer interpreter.drop_made(move(it));
     u64[5] mut args = {};
-    args[0] = interpreter.code_address(&it, s);
+    args[0] = interpreter.code_address(it, s);
     for (u64 mut bit = 0; bit < 4; bit++) {
         args[bit + 1] = (input >> bit) & 1;
     }
-    interpreter.run_function(&it, check_env.sym_main(c, generator.DRIVE), args[..]);
-    collect(bt, &it, n);
+    interpreter.run_function(it, check_env.sym_main(c, generator.DRIVE), args[..]);
+    collect(bt, it, n);
 }
 
 // Runs the shape or the FIR case `s`, which takes no argument.
 fn run_shape(check_env.env mut* c, batch mut* bt, ast.sym* s, counts mut* n) void {
-    interpreter.machine mut it = interpreter.machine{};
-    interpreter.init(&it, &c->ck, &bt->m, true);
-    defer interpreter.free(&it);
+    interpreter.machine mut* own it = interpreter.make(&c->ck, &bt->m, true);
+    defer interpreter.drop_made(move(it));
     u64[1] none = {0};
-    interpreter.run_function(&it, s, none[..0]);
-    collect(bt, &it, n);
+    interpreter.run_function(it, s, none[..0]);
+    collect(bt, it, n);
 }
 
 // Whether the input `input` of run_drive changes only what a function with the inputs `reads`
@@ -6522,46 +6539,43 @@ fn print_counts(string name, counts* n) void {
 // hand case `lines`, and adds its counts to `total`.
 fn run_set(check_env.env mut* c, family kind, string@ lines, u64 first, u64 count, string name,
            counts mut* total) void {
-    batch mut bt = batch{};
-    bt.kind = kind;
-    bt.lines = lines;
-    bt.items = new(item, count);
-    defer free_batch(&bt);
+    batch mut* own bt = batch_make(kind, lines, count);
+    defer batch_drop_made(move(bt));
     for (u64 mut k = 0; k < count; k++) {
-        bt.items[k].index = first + k;
+        bt->items[k].index = first + k;
     }
-    prepare(c, &bt);
-    relocate(&bt);
-    prove_batch(&bt);
+    prepare(c, bt);
+    relocate(bt);
+    prove_batch(bt);
     counts mut n = counts{};
-    run_batch(c, &bt, &n);
+    run_batch(c, bt, &n);
     bool listed = kind == family.fm_hand || kind == family.fm_fir;
-    judge(&bt, name, listed, &n);
+    judge(bt, name, listed, &n);
     if (listed) {
         println(name, ": sites ", n.sites, ", rejected ", n.rejected, ", with an event ",
                 n.events, ", false rejects ", n.false_rejects);
     }
-    judge_exits(&bt, name, listed, &n);
+    judge_exits(bt, name, listed, &n);
     if (listed) {
         println(name, ": leak sites ", n.leak[LEAK_SITES], ", rejected ", n.leak[LEAK_REJECTED],
                 ", with an event ", n.leak[LEAK_EVENTS], ", false rejects ",
                 n.leak[LEAK_FALSE_REJECTS]);
     }
-    judge_inners(&bt, name, listed, &n);
+    judge_inners(bt, name, listed, &n);
     // a set prints the line of part 2 only when it holds a site of part 2 or a leak of a span
     if (listed && (n.inner[LEAK_SITES] > 0 || n.spans > 0)) {
         println(name, ": part 2 sites ", n.inner[LEAK_SITES], ", rejected ",
                 n.inner[LEAK_REJECTED], ", with an event ", n.inner[LEAK_EVENTS],
                 ", false rejects ", n.inner[LEAK_FALSE_REJECTS], ", span leaks ", n.spans);
     }
-    judge_aggregates(&bt, name, listed, &n);
+    judge_aggregates(bt, name, listed, &n);
     // a set prints the line of the owning aggregate locals only when it holds such a site
     if (listed && n.aggregate[LEAK_SITES] > 0) {
         println(name, ": aggregate sites ", n.aggregate[LEAK_SITES], ", rejected ",
                 n.aggregate[LEAK_REJECTED], ", with an event ", n.aggregate[LEAK_EVENTS],
                 ", false rejects ", n.aggregate[LEAK_FALSE_REJECTS]);
     }
-    judge_uses(&bt, name, listed, &n);
+    judge_uses(bt, name, listed, &n);
     // a set prints the line of rule (b) only when it holds a site of rule (b) or an event of it
     bool used = n.uses[LEAK_SITES] > 0 || n.use_callee + n.use_unnamed > 0;
     if (listed && used) {
@@ -6599,7 +6613,7 @@ fn run_cases(check_env.env mut* c, string@ all, string@ names, string prefix, co
     void {
     for (u64 mut k = 0; k < names.len; k++) {
         strbuf.str_buf mut name = strbuf.create();
-        defer strbuf.free(&name);
+        defer del(name.data);
         strbuf.append(&name, prefix);
         strbuf.append(&name, names[k]);
         run_set(c, family.fm_hand, case_lines(all, k), 0, 1, strbuf.view(&name), total);
@@ -6607,23 +6621,22 @@ fn run_cases(check_env.env mut* c, string@ all, string@ names, string prefix, co
 }
 
 fn main() i32 {
-    check_env.env mut c = check_env.env{};
-    check_env.open(&c);
-    defer check_env.close(&c);
+    check_env.env mut* own c = check_env.make();
+    defer check_env.drop_made(move(c));
     counts mut hand = counts{};
-    run_cases(&c, HAND[..], HAND_NAMES[..], "hand ", &hand);
-    run_cases(&c, ITEMS[..], ITEM_NAMES[..], "item ", &hand);
-    run_cases(&c, EXIT_CASES[..], EXIT_NAMES[..], "exit ", &hand);
-    run_cases(&c, DEL_CASES[..], DEL_NAMES[..], "del ", &hand);
-    run_cases(&c, USE_CASES[..], USE_NAMES[..], "use ", &hand);
-    run_cases(&c, AGG_CASES[..], AGG_NAMES[..], "aggregate ", &hand);
+    run_cases(c, HAND[..], HAND_NAMES[..], "hand ", &hand);
+    run_cases(c, ITEMS[..], ITEM_NAMES[..], "item ", &hand);
+    run_cases(c, EXIT_CASES[..], EXIT_NAMES[..], "exit ", &hand);
+    run_cases(c, DEL_CASES[..], DEL_NAMES[..], "del ", &hand);
+    run_cases(c, USE_CASES[..], USE_NAMES[..], "use ", &hand);
+    run_cases(c, AGG_CASES[..], AGG_NAMES[..], "aggregate ", &hand);
     u64 mut functions = 0;
     for (string line : FIR_CASES) {
         if (str.starts_with(line, "fn ")) {
             functions += 1;
         }
     }
-    run_set(&c, family.fm_fir, FIR_CASES[..], 0, functions, "fir", &hand);
+    run_set(c, family.fm_fir, FIR_CASES[..], 0, functions, "fir", &hand);
     print_counts("hand", &hand);
     counts mut exhaustive = counts{};
     u64 total = generator.exhaustive_count(N);
@@ -6632,7 +6645,7 @@ fn main() i32 {
         if (first + count > total) {
             count = total - first;
         }
-        run_set(&c, family.fm_exhaustive, HAND[..0], first, count, "exhaustive", &exhaustive);
+        run_set(c, family.fm_exhaustive, HAND[..0], first, count, "exhaustive", &exhaustive);
     }
     println("exhaustive: n ", N, ", functions ", total);
     print_counts("exhaustive", &exhaustive);
@@ -6658,7 +6671,7 @@ fn main() i32 {
             if (first + count > variants + 1) {
                 count = variants + 1 - first;
             }
-            run_set(&c, family.fm_seeded, lines, first, count, "seeded", &seeded);
+            run_set(c, family.fm_seeded, lines, first, count, "seeded", &seeded);
         }
     }
     print_counts("seeded", &seeded);
@@ -6669,7 +6682,7 @@ fn main() i32 {
         if (first + count > count_shapes) {
             count = count_shapes - first;
         }
-        run_set(&c, family.fm_shapes, HAND[..0], first, count, "shapes", &shapes);
+        run_set(c, family.fm_shapes, HAND[..0], first, count, "shapes", &shapes);
     }
     print_counts("shapes", &shapes);
     if (hand.false_accepts + exhaustive.false_accepts + seeded.false_accepts
