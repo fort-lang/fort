@@ -242,17 +242,17 @@ fn nested(strbuf.str_buf mut* b, u64 depth, char open, char close) void {
 
 fn nesting_to_the_limit_is_accepted() void {
     strbuf.str_buf mut source = strbuf.create();
-    defer strbuf.free(&source);
-    json.doc mut d = json.create();
-    defer json.free(&d);
+    defer del(source.data);
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
     nested(&source, DEPTH_LIMIT, '[', ']');
-    assert(json.parse(&d, strbuf.view(&source)));
-    assert(json.node_count(&d) == DEPTH_LIMIT + 1);
+    assert(json.parse(d, strbuf.view(&source)));
+    assert(json.node_count(d) == DEPTH_LIMIT + 1);
 }
 
 fn nesting_past_the_limit_is_refused() void {
     strbuf.str_buf mut source = strbuf.create();
-    defer strbuf.free(&source);
+    defer del(source.data);
     nested(&source, DEPTH_LIMIT + 1, '[', ']');
     lsp_json_env.refused(strbuf.view(&source), DEPTH_LIMIT, "the nesting is too deep");
 }
@@ -261,7 +261,7 @@ fn objects_and_arrays_share_the_limit() void {
     // One level of each, alternating, reaches the same limit: the counter is
     // the containers open and not the brackets of one kind.
     strbuf.str_buf mut source = strbuf.create();
-    defer strbuf.free(&source);
+    defer del(source.data);
     strbuf.clear(&source);
     u64 mut i = 0;
     while (i < DEPTH_LIMIT / 2) {
@@ -274,16 +274,16 @@ fn objects_and_arrays_share_the_limit() void {
         strbuf.append(&source, "}]");
         i += 1;
     }
-    json.doc mut d = json.create();
-    defer json.free(&d);
-    assert(json.parse(&d, strbuf.view(&source)));
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
+    assert(json.parse(d, strbuf.view(&source)));
     // One array and one object per pair, the number, and the absent node.
-    assert(json.node_count(&d) == DEPTH_LIMIT + 2);
+    assert(json.node_count(d) == DEPTH_LIMIT + 2);
 }
 
 fn a_deep_object_is_refused_like_a_deep_array() void {
     strbuf.str_buf mut source = strbuf.create();
-    defer strbuf.free(&source);
+    defer del(source.data);
     strbuf.clear(&source);
     u64 mut i = 0;
     while (i < DEPTH_LIMIT + 1) {
@@ -309,24 +309,24 @@ fn the_first_rule_broken_is_the_one_recorded() void {
 }
 
 fn a_refused_document_holds_no_tree() void {
-    json.doc mut d = json.create();
-    defer json.free(&d);
-    assert(!json.parse(&d, "[1,2"));
-    assert(json.root(&d) == 0);
-    assert(!json.has(&d, json.root(&d)));
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
+    assert(!json.parse(d, "[1,2"));
+    assert(json.root(d) == 0);
+    assert(!json.has(d, json.root(d)));
 }
 
 fn a_refused_document_is_usable_again() void {
-    json.doc mut d = json.create();
-    defer json.free(&d);
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
     u64 mut i = 0;
     while (i < 100) {
-        assert(!json.parse(&d, "{\"a\":}"));
-        assert(json.error_offset(&d) == 5);
+        assert(!json.parse(d, "{\"a\":}"));
+        assert(json.error_offset(d) == 5);
         i += 1;
     }
-    assert(json.parse(&d, "{\"a\":1}"));
-    assert(json.error_message(&d) == "");
+    assert(json.parse(d, "{\"a\":1}"));
+    assert(json.error_message(d) == "");
 }
 
 fn the_offset_is_a_byte_and_not_a_character() void {

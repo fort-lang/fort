@@ -46,21 +46,43 @@ fn create(i32 in_fd, i32 out_fd) server {
 }
 
 // Clears the session and its buffers. A second call has no effect.
+// drop holds the releases, and the move leaves the zero value. The server keeps what rpc.free
+// and json.free keep: the descriptors, the read size and the body limit of the conn, and the
+// input limit of the document.
 fn free(server mut* s) void {
-    rpc.free(&s->conn);
-    json.free(&s->doc);
-    docs.free(&s->open_docs);
-    strbuf.free(&s->body);
-    strbuf.free(&s->msg);
-    strbuf.free(&s->id_text);
-    s->current = rpc.msg_id{};
-    s->handling = false;
-    s->cancelled = false;
-    s->initialize_seen = false;
-    s->ready = false;
-    s->shutdown_seen = false;
-    s->exit_seen = false;
+    server kept = move(*s);
+    s->conn.in_fd = kept.conn.in_fd;
+    s->conn.out_fd = kept.conn.out_fd;
+    s->conn.chunk = kept.conn.chunk;
+    s->conn.max_content = kept.conn.max_content;
+    s->doc.limit = kept.doc.limit;
     s->enc = text.position_encoding.enc_utf16;
+    drop(move(kept));
+}
+
+// Frees a server that the caller moves in: the connection, the document, the open documents, then
+// the three buffers.
+fn drop(server mut s) void {
+    rpc.drop(move(s.conn));
+    json.drop(move(s.doc));
+    docs.drop(move(s.open_docs));
+    del(s.body.data);
+    del(s.msg.data);
+    del(s.id_text.data);
+}
+
+// A server of create in an allocation of its own, for a function that lends the server to calls.
+fn make(i32 in_fd, i32 out_fd) server mut* own {
+    server mut* own s = new(server);
+    *s = create(in_fd, out_fd);
+    return s;
+}
+
+// Ends a server of make that the caller moves in.
+fn drop_made(server mut* own p) void {
+    server kept = move(*p);
+    del(p);
+    drop(move(kept));
 }
 
 // Returns true after the client sends `initialized`.
@@ -438,22 +460,7 @@ fn run(server mut* s) i32 {
 // The whole of a session over a pair of descriptors: the server, the loop and
 // the release of everything it took.
 fn serve(i32 in_fd, i32 out_fd) i32 {
-    server mut s = create(in_fd, out_fd);
-    defer {
-        free(&s);
-        // The leak rule reads no callee: after the calls, the test of a loop proves each chain
-        // empty, and each other owner takes a `del`.
-        while (s.doc.last != null) {
-            json.free(&s.doc);
-        }
-        del(s.conn.in_buf.data);
-        del(s.conn.out_buf.data);
-        del(s.doc.chunks);
-        del(s.doc.bytes.data);
-        del(s.open_docs.items);
-        del(s.body.data);
-        del(s.msg.data);
-        del(s.id_text.data);
-    }
-    return run(&s);
+    server mut* own s = make(in_fd, out_fd);
+    defer drop_made(move(s));
+    return run(s);
 }

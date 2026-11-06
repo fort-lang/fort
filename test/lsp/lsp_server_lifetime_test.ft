@@ -25,6 +25,7 @@ import std.strbuf;
 // The probes hold the live view of support/heap.ft: the bytes of the blocks that the allocator
 // does not hold as free. At d2f5b2b6 a deletion of each of the six releases of server.free
 // moved the live view of the session probe by 173184 bytes or more under glibc 2.39 and 2.43.
+// server.drop holds those releases now, and server.free and server.drop_made reach it.
 // The address of a fresh block is no view here: a round of this file allocates tens of
 // kilobytes and gives all of it back, which leaves free chunks of every size, and a 32-byte
 // block moved 22800 bytes with no leak.
@@ -52,7 +53,7 @@ u64 DOCUMENTS_ROUNDS = 80;
 // SESSION_ROUNDS. `moved` takes the smallest distance over the last 16 rounds. So the nearest
 // late sample is round 185 (`i == 184`) and the span the bound covers is 164 rounds. 8192 over
 // 164 is about 50 bytes a round. So a leak below 50 bytes per session sits under this probe and
-// a leak above it does not. Every release of server.free is far above that.
+// a leak above it does not. Every release of server.drop is far above that.
 
 // The messages of the long session, and how many of them the probe holds
 // against the early sample. Two thousand didChange notifications of a
@@ -108,7 +109,7 @@ fn text_into(strbuf.str_buf mut* b) void {
 // A didChange of `uri` carrying `body`.
 fn change_into(strbuf.str_buf mut* script, string uri, string body, i64 version) void {
     strbuf.str_buf mut params = strbuf.create();
-    defer strbuf.free(&params);
+    defer del(params.data);
     strbuf.append(&params, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",");
     strbuf.append(&params, "\"params\":{\"textDocument\":{\"uri\":\"");
     strbuf.append(&params, uri);
@@ -123,7 +124,7 @@ fn change_into(strbuf.str_buf mut* script, string uri, string body, i64 version)
 // A didOpen of `uri` carrying `body`.
 fn open_into(strbuf.str_buf mut* script, string uri, string body) void {
     strbuf.str_buf mut params = strbuf.create();
-    defer strbuf.free(&params);
+    defer del(params.data);
     strbuf.append(&params, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",");
     strbuf.append(&params, "\"params\":{\"textDocument\":{\"uri\":\"");
     strbuf.append(&params, uri);
@@ -136,7 +137,7 @@ fn open_into(strbuf.str_buf mut* script, string uri, string body) void {
 // A didClose of `uri`.
 fn close_into(strbuf.str_buf mut* script, string uri) void {
     strbuf.str_buf mut params = strbuf.create();
-    defer strbuf.free(&params);
+    defer del(params.data);
     strbuf.append(&params, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didClose\",");
     strbuf.append(&params, "\"params\":{\"textDocument\":{\"uri\":\"");
     strbuf.append(&params, uri);
@@ -156,9 +157,9 @@ fn session(string path) i32 {
     assert(in_fd >= 0);
     i32 out_fd = io.open_write(ANSWER_FILE);
     assert(out_fd >= 0);
-    server.server mut srv = server.create(in_fd, out_fd);
-    i32 status = server.run(&srv);
-    server.free(&srv);
+    server.server mut* own srv = server.make(in_fd, out_fd);
+    i32 status = server.run(srv);
+    server.drop_made(move(srv));
     assert(io.close(in_fd));
     assert(io.close(out_fd));
     return status;
@@ -169,7 +170,7 @@ fn session(string path) i32 {
 fn the_session_script(strbuf.str_buf mut* script) void {
     strbuf.clear(script);
     strbuf.str_buf mut body = strbuf.create();
-    defer strbuf.free(&body);
+    defer del(body.data);
     text_into(&body);
     frame_into(script, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}");
     frame_into(script, "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
@@ -189,12 +190,12 @@ fn the_session_script(strbuf.str_buf mut* script) void {
     // implemented" message in another. So a round that keeps either of those
     // two buffers moves the live view by a kibibyte or more in each round.
     strbuf.str_buf mut long_name = strbuf.create();
-    defer strbuf.free(&long_name);
+    defer del(long_name.data);
     while (long_name.len < TEXT_BYTES) {
         strbuf.append(&long_name, "aMethodNoServerImplements/");
     }
     strbuf.str_buf mut long_request = strbuf.create();
-    defer strbuf.free(&long_request);
+    defer del(long_request.data);
     strbuf.append(&long_request, "{\"jsonrpc\":\"2.0\",\"id\":\"");
     strbuf.append(&long_request, strbuf.view(&long_name));
     strbuf.append(&long_request, "\",\"method\":\"");
@@ -208,7 +209,7 @@ fn the_session_script(strbuf.str_buf mut* script) void {
 
 fn a_session_gives_back_everything_it_took() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     the_session_script(&script);
     write_script(SESSION_FILE, strbuf.view(&script));
     u64 mut early = 0;
@@ -240,9 +241,9 @@ fn a_session_of_two_thousand_messages_does_not_grow() void {
     // it answered, and the store holds one text at a time. The live view must
     // therefore stand still from the two-hundredth message to the last.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     strbuf.str_buf mut body = strbuf.create();
-    defer strbuf.free(&body);
+    defer del(body.data);
     text_into(&body);
     frame_into(&script, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}");
     open_into(&script, "file:///a.ft", strbuf.view(&body));
@@ -257,7 +258,7 @@ fn a_session_of_two_thousand_messages_does_not_grow() void {
     assert(in_fd >= 0);
     i32 out_fd = io.open_write(ANSWER_FILE);
     assert(out_fd >= 0);
-    server.server mut srv = server.create(in_fd, out_fd);
+    server.server mut* own srv = server.make(in_fd, out_fd);
     u64 mut early = 0;
     u64[16] mut late = u64[16]{};
     u64 mut seen = 0;
@@ -265,7 +266,7 @@ fn a_session_of_two_thousand_messages_does_not_grow() void {
     u64 steps = MESSAGES + 2;
     // step answers false at the end of the stream, which is where the script
     // ends. Every message before that is one step.
-    while (server.step(&srv)) {
+    while (server.step(srv)) {
         seen += 1;
         if (seen == EARLY_MESSAGE) {
             early = heap.live_view();
@@ -276,16 +277,16 @@ fn a_session_of_two_thousand_messages_does_not_grow() void {
     }
     lsp_env.check_u64(seen, steps, "the messages of the long session");
     // The document holds the last text the client sent.
-    lsp_env.check(docs.text_of(server.documents(&srv), "file:///a.ft"), strbuf.view(&body),
+    lsp_env.check(docs.text_of(server.documents(srv), "file:///a.ft"), strbuf.view(&body),
                   "the text after two thousand changes");
-    lsp_env.check_i64(docs.version_of(server.documents(&srv), "file:///a.ft"),
+    lsp_env.check_i64(docs.version_of(server.documents(srv), "file:///a.ft"),
                       cast(MESSAGES, i64) + 1, "the version after two thousand changes");
     u64 live_moved = moved(early, late);
     if (live_moved >= BOUND) {
         println("the live view moved ", live_moved);
     }
     assert(live_moved < BOUND);
-    server.free(&srv);
+    server.drop_made(move(srv));
     assert(io.close(in_fd));
     assert(io.close(out_fd));
 }
@@ -297,12 +298,12 @@ fn a_session_of_many_documents_gives_them_all_back() void {
     // documents. This exercises store
     // growth and removal inside the server loop.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     strbuf.str_buf mut body = strbuf.create();
-    defer strbuf.free(&body);
+    defer del(body.data);
     text_into(&body);
     strbuf.str_buf mut uri = strbuf.create();
-    defer strbuf.free(&uri);
+    defer del(uri.data);
     frame_into(&script, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}");
     u64 mut i = 0;
     while (i < 50) {

@@ -32,14 +32,14 @@ fn digest_of(string script, i32 mut* status) string own {
     lsp_env.pipe_ends in_ends = lsp_env.open_pipe();
     lsp_env.pipe_ends out_ends = lsp_env.open_pipe();
     lsp_env.feed(in_ends, script);
-    server.server mut srv = server.create(in_ends.read_fd, out_ends.write_fd);
-    *status = server.run(&srv);
-    server.free(&srv);
+    server.server mut* own srv = server.make(in_ends.read_fd, out_ends.write_fd);
+    *status = server.run(srv);
+    server.drop_made(move(srv));
     assert(io.close(in_ends.read_fd));
     assert(io.close(out_ends.write_fd));
     string own answers = lsp_env.drain(out_ends);
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
+    defer del(out.data);
     digest_into(&out, answers);
     del(answers);
     return strbuf.take(&out);
@@ -47,8 +47,8 @@ fn digest_of(string script, i32 mut* status) string own {
 
 // The digest of the frames in `answers`.
 fn digest_into(strbuf.str_buf mut* out, string answers) void {
-    json.doc mut d = json.create();
-    defer json.free(&d);
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
     u64 mut at = 0;
     u64 mut seen = 0;
     while (at < answers.len) {
@@ -68,22 +68,22 @@ fn digest_into(strbuf.str_buf mut* out, string answers) void {
             strbuf.append(out, " ");
         }
         seen += 1;
-        assert(json.parse(&d, body));
-        u32 root = json.root(&d);
-        u32 id = json.member_of(&d, root, "id");
-        if (id != 0 && json.kind_of(&d, id) == json.value_kind.k_int) {
-            strbuf.append_i64(out, json.int_of(&d, id));
-        } else if (id != 0 && json.kind_of(&d, id) == json.value_kind.k_string) {
-            strbuf.append(out, json.text_of(&d, id));
+        assert(json.parse(d, body));
+        u32 root = json.root(d);
+        u32 id = json.member_of(d, root, "id");
+        if (id != 0 && json.kind_of(d, id) == json.value_kind.k_int) {
+            strbuf.append_i64(out, json.int_of(d, id));
+        } else if (id != 0 && json.kind_of(d, id) == json.value_kind.k_string) {
+            strbuf.append(out, json.text_of(d, id));
         } else {
             strbuf.append(out, "null");
         }
         strbuf.append(out, ":");
-        u32 error = json.member_of(&d, root, "error");
+        u32 error = json.member_of(d, root, "error");
         if (error == 0) {
             strbuf.append(out, "ok");
         } else {
-            strbuf.append_i64(out, json.int_of(&d, json.member_of(&d, error, "code")));
+            strbuf.append_i64(out, json.int_of(d, json.member_of(d, error, "code")));
         }
         at = end + 4 + len;
     }
@@ -119,7 +119,7 @@ fn frame_into(strbuf.str_buf mut* b, string body) void {
 // A request of `id` calling `method` with `params`.
 fn request_into(strbuf.str_buf mut* b, i64 id, string method, string params) void {
     strbuf.str_buf mut body = strbuf.create();
-    defer strbuf.free(&body);
+    defer del(body.data);
     strbuf.append(&body, "{\"jsonrpc\":\"2.0\",\"id\":");
     strbuf.append_i64(&body, id);
     strbuf.append(&body, ",\"method\":\"");
@@ -133,7 +133,7 @@ fn request_into(strbuf.str_buf mut* b, i64 id, string method, string params) voi
 // A notification calling `method` with `params`.
 fn note_into(strbuf.str_buf mut* b, string method, string params) void {
     strbuf.str_buf mut body = strbuf.create();
-    defer strbuf.free(&body);
+    defer del(body.data);
     strbuf.append(&body, "{\"jsonrpc\":\"2.0\",\"method\":\"");
     strbuf.append(&body, method);
     strbuf.append(&body, "\",\"params\":");
@@ -161,7 +161,7 @@ fn answers_are(string script, string want, i64 status, string what) void {
 fn a_request_before_initialize_is_not_served() void {
     // Every request but `initialize` answers -32002 before initialize.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     request_into(&script, 2, "shutdown", "null");
     request_into(&script, 3, "textDocument/hover", "{}");
     request_into(&script, 4, "$/madeUp", "{}");
@@ -171,7 +171,7 @@ fn a_request_before_initialize_is_not_served() void {
 
 fn a_notification_before_initialize_is_dropped() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     note_into(&script, "initialized", "{}");
     note_into(&script, "textDocument/didOpen",
               "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"text\":\"x\"}}");
@@ -182,7 +182,7 @@ fn a_notification_before_initialize_is_dropped() void {
 
 fn initialize_is_served_once() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     request_into(&script, 2, "initialize", "{}");
     request_into(&script, 3, "initialize", "{}");
@@ -191,7 +191,7 @@ fn initialize_is_served_once() void {
 
 fn a_request_after_shutdown_is_refused() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     request_into(&script, 2, "shutdown", "null");
     request_into(&script, 3, "shutdown", "null");
@@ -203,7 +203,7 @@ fn a_request_after_shutdown_is_refused() void {
 
 fn a_notification_after_shutdown_is_dropped() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     request_into(&script, 2, "shutdown", "null");
     note_into(&script, "initialized", "{}");
@@ -216,18 +216,18 @@ fn a_notification_after_shutdown_is_dropped() void {
 
 fn exit_ends_the_loop_in_every_state() void {
     strbuf.str_buf mut before = strbuf.create();
-    defer strbuf.free(&before);
+    defer del(before.data);
     note_into(&before, "exit", "null");
     request_into(&before, 1, "initialize", "{}");
     answers_are(strbuf.view(&before), "", 1, "exit before initialize");
     strbuf.str_buf mut after = strbuf.create();
-    defer strbuf.free(&after);
+    defer del(after.data);
     initialize_into(&after);
     note_into(&after, "exit", "null");
     request_into(&after, 2, "shutdown", "null");
     answers_are(strbuf.view(&after), "1:ok", 1, "exit after initialize");
     strbuf.str_buf mut twice = strbuf.create();
-    defer strbuf.free(&twice);
+    defer del(twice.data);
     initialize_into(&twice);
     request_into(&twice, 2, "shutdown", "null");
     note_into(&twice, "exit", "null");
@@ -239,7 +239,7 @@ fn exit_ends_the_loop_in_every_state() void {
 
 fn a_method_the_server_does_not_implement_is_not_found() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     request_into(&script, 2, "textDocument/hover", "{}");
     request_into(&script, 3, "textDocument/definition", "{}");
@@ -252,7 +252,7 @@ fn a_method_the_server_does_not_implement_is_not_found() void {
 
 fn a_notification_the_server_does_not_implement_is_dropped() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     note_into(&script, "$/setTrace", "{\"value\":\"verbose\"}");
     note_into(&script, "workspace/didChangeConfiguration", "{}");
@@ -266,7 +266,7 @@ fn exit_as_a_request_is_a_method_that_is_not_found() void {
     // client that is broken, and ending the loop would leave its request
     // unanswered. So the server answers it and reads on.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     request_into(&script, 2, "exit", "null");
     request_into(&script, 3, "shutdown", "null");
@@ -277,7 +277,7 @@ fn shutdown_as_a_notification_is_dropped() void {
     // `shutdown` is a request. As a notification it cannot be answered, so it
     // is dropped and the session is still not shutting down.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     note_into(&script, "shutdown", "null");
     note_into(&script, "exit", "null");
@@ -287,7 +287,7 @@ fn shutdown_as_a_notification_is_dropped() void {
 fn initialize_as_a_notification_is_dropped() void {
     // It cannot be answered, so the server is still not initialized.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     note_into(&script, "initialize", "{}");
     request_into(&script, 2, "shutdown", "null");
     answers_are(strbuf.view(&script), "2:-32002", 1, "initialize as a notification");
@@ -297,7 +297,7 @@ fn initialize_as_a_notification_is_dropped() void {
 
 fn an_answer_carries_the_id_of_its_request() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     request_into(&script, 0, "textDocument/hover", "{}");
     request_into(&script, -7, "textDocument/hover", "{}");
@@ -308,7 +308,7 @@ fn an_answer_carries_the_id_of_its_request() void {
 
 fn a_string_id_is_answered_as_a_string() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     frame_into(&script, "{\"jsonrpc\":\"2.0\",\"id\":\"abc\",\"method\":\"textDocument/hover\"}");
     frame_into(&script, "{\"jsonrpc\":\"2.0\",\"id\":\"\",\"method\":\"textDocument/hover\"}");
@@ -317,7 +317,7 @@ fn a_string_id_is_answered_as_a_string() void {
 
 fn a_message_that_breaks_a_rule_is_an_invalid_request() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     // No version, a version of another kind, no method and no result, a method
     // of another kind. It also sends an id of a kind JSON-RPC forbids.
@@ -335,7 +335,7 @@ fn a_message_that_breaks_a_rule_is_an_invalid_request() void {
 
 fn a_response_is_dropped() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     frame_into(&script, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}");
     frame_into(&script, "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}");
@@ -345,7 +345,7 @@ fn a_response_is_dropped() void {
 
 fn a_body_that_is_no_json_is_a_parse_error() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     frame_into(&script, "{");
     frame_into(&script, "");
@@ -366,13 +366,13 @@ fn with_store(string script, string uri, string want_text, i64 want_version, u64
     lsp_env.pipe_ends in_ends = lsp_env.open_pipe();
     lsp_env.pipe_ends out_ends = lsp_env.open_pipe();
     lsp_env.feed(in_ends, script);
-    server.server mut srv = server.create(in_ends.read_fd, out_ends.write_fd);
-    server.run(&srv);
-    docs.store* open_docs = server.documents(&srv);
+    server.server mut* own srv = server.make(in_ends.read_fd, out_ends.write_fd);
+    server.run(srv);
+    docs.store* open_docs = server.documents(srv);
     lsp_env.check_u64(docs.count(open_docs), want_count, what);
     lsp_env.check(docs.text_of(open_docs, uri), want_text, what);
     lsp_env.check_i64(docs.version_of(open_docs, uri), want_version, what);
-    server.free(&srv);
+    server.drop_made(move(srv));
     assert(io.close(in_ends.read_fd));
     assert(io.close(out_ends.write_fd));
     string own answers = lsp_env.drain(out_ends);
@@ -381,7 +381,7 @@ fn with_store(string script, string uri, string want_text, i64 want_version, u64
 
 fn didopen_holds_the_text_and_the_version() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     note_into(&script, "textDocument/didOpen",
               "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":4,\"text\":\"body\"}}");
@@ -392,7 +392,7 @@ fn didopen_without_a_version_holds_zero() void {
     // The protocol always sends one. A client that does not gets the version
     // the store starts a document at.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     note_into(&script, "textDocument/didOpen",
               "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"text\":\"body\"}}");
@@ -401,7 +401,7 @@ fn didopen_without_a_version_holds_zero() void {
 
 fn didopen_with_a_version_of_another_kind_holds_zero() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     note_into(&script, "textDocument/didOpen",
               "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":1.5,\"text\":\"b\"}}");
@@ -410,7 +410,7 @@ fn didopen_with_a_version_of_another_kind_holds_zero() void {
 
 fn didopen_of_the_empty_text_opens_a_document() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     note_into(&script, "textDocument/didOpen",
               "{\"textDocument\":{\"uri\":\"file:///new.ft\",\"version\":1,\"text\":\"\"}}");
@@ -421,10 +421,10 @@ fn didopen_carries_the_escapes_of_the_text() void {
     // The text of a message is JSON, so a newline and a quote arrive escaped
     // and the store holds the bytes they stand for.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     strbuf.str_buf mut params = strbuf.create();
-    defer strbuf.free(&params);
+    defer del(params.data);
     strbuf.append(&params, "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":1,");
     strbuf.append(&params, "\"text\":\"a\\nb\\t\\\"c\\\"\\u00e9\"}}");
     note_into(&script, "textDocument/didOpen", strbuf.view(&params));
@@ -433,7 +433,7 @@ fn didopen_carries_the_escapes_of_the_text() void {
 
 fn didopen_without_the_parameters_it_needs_is_dropped() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     frame_into(&script, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\"}");
     note_into(&script, "textDocument/didOpen", "[]");
@@ -446,12 +446,12 @@ fn didopen_without_the_parameters_it_needs_is_dropped() void {
 
 fn didchange_takes_the_text_of_the_last_change() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     note_into(&script, "textDocument/didOpen",
               "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":1,\"text\":\"one\"}}");
     strbuf.str_buf mut params = strbuf.create();
-    defer strbuf.free(&params);
+    defer del(params.data);
     strbuf.append(&params, "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":2},");
     strbuf.append(&params, "\"contentChanges\":[{\"text\":\"two\"},{\"text\":\"three\"}]}");
     note_into(&script, "textDocument/didChange", strbuf.view(&params));
@@ -461,12 +461,12 @@ fn didchange_takes_the_text_of_the_last_change() void {
 fn didchange_with_no_changes_leaves_the_document_alone() void {
     // The client sent no text to hold, so the version does not move either.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     note_into(&script, "textDocument/didOpen",
               "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":1,\"text\":\"one\"}}");
     strbuf.str_buf mut params = strbuf.create();
-    defer strbuf.free(&params);
+    defer del(params.data);
     strbuf.append(&params, "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":2},");
     strbuf.append(&params, "\"contentChanges\":[]}");
     note_into(&script, "textDocument/didChange", strbuf.view(&params));
@@ -475,12 +475,12 @@ fn didchange_with_no_changes_leaves_the_document_alone() void {
 
 fn didchange_without_a_version_keeps_the_one_it_had() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     note_into(&script, "textDocument/didOpen",
               "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":5,\"text\":\"one\"}}");
     strbuf.str_buf mut params = strbuf.create();
-    defer strbuf.free(&params);
+    defer del(params.data);
     strbuf.append(&params, "{\"textDocument\":{\"uri\":\"file:///a.ft\"},");
     strbuf.append(&params, "\"contentChanges\":[{\"text\":\"two\"}]}");
     note_into(&script, "textDocument/didChange", strbuf.view(&params));
@@ -489,10 +489,10 @@ fn didchange_without_a_version_keeps_the_one_it_had() void {
 
 fn didchange_of_a_document_that_is_not_open_is_dropped() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     strbuf.str_buf mut params = strbuf.create();
-    defer strbuf.free(&params);
+    defer del(params.data);
     strbuf.append(&params, "{\"textDocument\":{\"uri\":\"file:///b.ft\",\"version\":2},");
     strbuf.append(&params, "\"contentChanges\":[{\"text\":\"two\"}]}");
     note_into(&script, "textDocument/didChange", strbuf.view(&params));
@@ -501,12 +501,12 @@ fn didchange_of_a_document_that_is_not_open_is_dropped() void {
 
 fn didchange_with_changes_of_the_wrong_kind_is_dropped() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     note_into(&script, "textDocument/didOpen",
               "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":1,\"text\":\"one\"}}");
     strbuf.str_buf mut params = strbuf.create();
-    defer strbuf.free(&params);
+    defer del(params.data);
     strbuf.append(&params, "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":2},");
     strbuf.append(&params, "\"contentChanges\":{\"text\":\"two\"}}");
     note_into(&script, "textDocument/didChange", strbuf.view(&params));
@@ -525,7 +525,7 @@ fn didchange_with_changes_of_the_wrong_kind_is_dropped() void {
 
 fn didclose_removes_the_document() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     note_into(&script, "textDocument/didOpen",
               "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":1,\"text\":\"one\"}}");
@@ -535,7 +535,7 @@ fn didclose_removes_the_document() void {
 
 fn didclose_of_a_document_that_is_not_open_changes_nothing() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     note_into(&script, "textDocument/didOpen",
               "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":1,\"text\":\"one\"}}");
@@ -547,12 +547,12 @@ fn didclose_of_a_document_that_is_not_open_changes_nothing() void {
 
 fn didsave_changes_nothing() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     note_into(&script, "textDocument/didOpen",
               "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":1,\"text\":\"one\"}}");
     strbuf.str_buf mut params = strbuf.create();
-    defer strbuf.free(&params);
+    defer del(params.data);
     strbuf.append(&params, "{\"textDocument\":{\"uri\":\"file:///a.ft\"},");
     strbuf.append(&params, "\"text\":\"the text on disk, which the server did not ask for\"}");
     note_into(&script, "textDocument/didSave", strbuf.view(&params));
@@ -566,24 +566,26 @@ fn the_server_is_ready_only_after_the_initialized_notification() void {
     lsp_env.pipe_ends in_ends = lsp_env.open_pipe();
     lsp_env.pipe_ends out_ends = lsp_env.open_pipe();
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     lsp_env.feed(in_ends, strbuf.view(&script));
-    server.server mut srv = server.create(in_ends.read_fd, out_ends.write_fd);
-    assert(!server.is_ready(&srv));
-    server.run(&srv);
+    server.server mut* own srv = server.make(in_ends.read_fd, out_ends.write_fd);
+    assert(!server.is_ready(srv));
+    server.run(srv);
     // initialize alone does not make a server ready.
-    assert(!server.is_ready(&srv));
-    json.doc mut d = json.create();
-    defer json.free(&d);
-    assert(json.parse(&d, "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}"));
+    assert(!server.is_ready(srv));
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
+    assert(json.parse(d, "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}"));
     rpc.message mut m = rpc.message{};
-    rpc.classify(&d, &m);
-    server.dispatch(&srv, &d, &m);
-    assert(server.is_ready(&srv));
-    // Free clears the flag with the rest of the session state.
-    server.free(&srv);
-    assert(!server.is_ready(&srv));
+    rpc.classify(d, &m);
+    server.dispatch(srv, d, &m);
+    assert(server.is_ready(srv));
+    // Free clears the flag with the rest of the session state. The free is under test, and the
+    // drop gets what it leaves.
+    server.free(srv);
+    assert(!server.is_ready(srv));
+    server.drop_made(move(srv));
     assert(io.close(in_ends.read_fd));
     assert(io.close(out_ends.write_fd));
     string own answers = lsp_env.drain(out_ends);
@@ -596,13 +598,13 @@ fn a_notification_before_initialize_leaves_the_server_unready() void {
     lsp_env.pipe_ends in_ends = lsp_env.open_pipe();
     lsp_env.pipe_ends out_ends = lsp_env.open_pipe();
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     note_into(&script, "initialized", "{}");
     lsp_env.feed(in_ends, strbuf.view(&script));
-    server.server mut srv = server.create(in_ends.read_fd, out_ends.write_fd);
-    server.run(&srv);
-    assert(!server.is_ready(&srv));
-    server.free(&srv);
+    server.server mut* own srv = server.make(in_ends.read_fd, out_ends.write_fd);
+    server.run(srv);
+    assert(!server.is_ready(srv));
+    server.drop_made(move(srv));
     assert(io.close(in_ends.read_fd));
     assert(io.close(out_ends.write_fd));
     string own answers = lsp_env.drain(out_ends);
@@ -612,6 +614,30 @@ fn a_notification_before_initialize_leaves_the_server_unready() void {
 
 // ---- what free leaves ------------------------------------------------------------
 
+fn a_freed_server_keeps_the_settings_of_its_conn_and_of_its_document() void {
+    // free takes back the documents, the buffers and the state of the session. It keeps what
+    // rpc.free and json.free keep: the descriptors, the read size and the body limit of the
+    // conn, and the input limit of the document. The encoding goes back to UTF-16. The
+    // descriptors 7 and 8 take no read and no write here.
+    server.server mut* own srv = server.make(7, 8);
+    defer server.drop_made(move(srv));
+    rpc.set_chunk(server.connection(srv), 5);
+    rpc.set_max_content(server.connection(srv), 60);
+    json.set_max_bytes(&srv->doc, 40);
+    srv->enc = text.position_encoding.enc_utf8;
+    docs.open(&srv->open_docs, "file:///a.ft", "x", 1);
+    strbuf.append(&srv->body, "a body");
+    server.free(srv);
+    lsp_env.check_u64(docs.count(server.documents(srv)), 0, "the store after free");
+    lsp_env.check_u64(srv->body.len, 0, "the body after free");
+    assert(server.encoding(srv) == text.position_encoding.enc_utf16);
+    lsp_env.check_u64(rpc.chunk_of(server.connection(srv)), 5, "the read size after free");
+    lsp_env.check_u64(rpc.max_content(server.connection(srv)), 60, "the body limit after free");
+    lsp_env.check_u64(json.max_bytes(&srv->doc), 40, "the input limit after free");
+    lsp_env.check_i64(cast(srv->conn.in_fd, i64), 7, "the input after free");
+    lsp_env.check_i64(cast(srv->conn.out_fd, i64), 8, "the output after free");
+}
+
 fn a_server_that_was_freed_is_one_no_client_has_spoken_to() void {
     // free takes the lifecycle back to where create left it. So a server value
     // that is reused does not answer a second client as though it had already
@@ -619,31 +645,32 @@ fn a_server_that_was_freed_is_one_no_client_has_spoken_to() void {
     lsp_env.pipe_ends in_ends = lsp_env.open_pipe();
     lsp_env.pipe_ends out_ends = lsp_env.open_pipe();
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     request_into(&script, 2, "shutdown", "null");
     lsp_env.feed(in_ends, strbuf.view(&script));
-    server.server mut srv = server.create(in_ends.read_fd, out_ends.write_fd);
-    lsp_env.check_i64(cast(server.run(&srv), i64), 0, "the first session");
-    assert(server.encoding(&srv) == text.position_encoding.enc_utf16);
-    server.free(&srv);
+    server.server mut* own srv = server.make(in_ends.read_fd, out_ends.write_fd);
+    lsp_env.check_i64(cast(server.run(srv), i64), 0, "the first session");
+    assert(server.encoding(srv) == text.position_encoding.enc_utf16);
+    // The free is under test. The drop below releases what the request after it takes.
+    server.free(srv);
     // The store is empty, no request is in flight. And the lifecycle is back
     // at the start: the next request is answered as one before initialize.
-    lsp_env.check_u64(docs.count(server.documents(&srv)), 0, "the store after free");
-    assert(!server.is_cancelled(&srv));
-    assert(server.current_id(&srv).kind == rpc.id_kind.id_absent);
-    json.doc mut d = json.create();
-    defer json.free(&d);
-    assert(json.parse(&d, "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"shutdown\"}"));
+    lsp_env.check_u64(docs.count(server.documents(srv)), 0, "the store after free");
+    assert(!server.is_cancelled(srv));
+    assert(server.current_id(srv).kind == rpc.id_kind.id_absent);
+    strbuf.str_buf mut digest = strbuf.create();
+    defer del(digest.data);
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
+    assert(json.parse(d, "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"shutdown\"}"));
     rpc.message mut m = rpc.message{};
-    rpc.classify(&d, &m);
-    server.dispatch(&srv, &d, &m);
-    server.free(&srv);
+    rpc.classify(d, &m);
+    server.dispatch(srv, d, &m);
+    server.drop_made(move(srv));
     assert(io.close(in_ends.read_fd));
     assert(io.close(out_ends.write_fd));
     string own answers = lsp_env.drain(out_ends);
-    strbuf.str_buf mut digest = strbuf.create();
-    defer strbuf.free(&digest);
     digest_into(&digest, answers);
     lsp_env.check(strbuf.view(&digest), "1:ok 2:ok 9:-32002", "a server that was freed");
     del(answers);
@@ -656,21 +683,21 @@ fn a_frame_above_the_cap_of_the_conn_ends_the_loop() void {
     lsp_env.pipe_ends in_ends = lsp_env.open_pipe();
     lsp_env.pipe_ends out_ends = lsp_env.open_pipe();
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     request_into(&script, 2, "textDocument/hover", "{}");
     request_into(&script, 3, "shutdown", "null");
     lsp_env.feed(in_ends, strbuf.view(&script));
-    server.server mut srv = server.create(in_ends.read_fd, out_ends.write_fd);
+    server.server mut* own srv = server.make(in_ends.read_fd, out_ends.write_fd);
     // A cap below the second frame, which is 74 bytes of body.
-    rpc.set_max_content(server.connection(&srv), 60);
-    lsp_env.check_i64(cast(server.run(&srv), i64), 1, "the status after a frame that is too large");
-    server.free(&srv);
+    rpc.set_max_content(server.connection(srv), 60);
+    lsp_env.check_i64(cast(server.run(srv), i64), 1, "the status after a frame that is too large");
+    server.drop_made(move(srv));
     assert(io.close(in_ends.read_fd));
     assert(io.close(out_ends.write_fd));
     string own answers = lsp_env.drain(out_ends);
     strbuf.str_buf mut digest = strbuf.create();
-    defer strbuf.free(&digest);
+    defer del(digest.data);
     digest_into(&digest, answers);
     lsp_env.check(strbuf.view(&digest), "1:ok", "the answers before the frame that is too large");
     del(answers);
@@ -685,14 +712,14 @@ fn a_frame_whose_header_field_holds_a_bare_line_feed_ends_the_loop() void {
     // five-byte body declared by a field containing a line feed.
     // And the two would disagree about where the next frame begins.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     strbuf.append(&script, "Content-Length: 5\r\nX: a\nContent-Length: 2\r\n\r\n{}abc");
     answers_are(strbuf.view(&script), "1:ok", 1, "a header field with a bare line feed");
     // A bare carriage return in the same place ends it the same way, and so
     // does one in the first frame, before anything is answered.
     strbuf.str_buf mut second = strbuf.create();
-    defer strbuf.free(&second);
+    defer del(second.data);
     initialize_into(&second);
     strbuf.append(&second, "Content-Length: 5\r\nX: a\rContent-Length: 2\r\n\r\n{}abc");
     answers_are(strbuf.view(&second), "1:ok", 1, "a header field with a bare carriage return");
@@ -707,7 +734,7 @@ fn a_frame_whose_field_name_holds_a_space_ends_the_loop() void {
     // parser that trims the name takes 48 bytes containing another
     // request. Thus, the parsers disagree about message boundaries.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     initialize_into(&script);
     strbuf.append(&script, "Content-Length : 48\r\n");
     strbuf.append(&script, "Content-Length: 2\r\n\r\n{}");
@@ -718,7 +745,7 @@ fn a_frame_whose_field_name_holds_a_space_ends_the_loop() void {
     // it. Thus, a JavaScript reader such as vscode-jsonrpc takes the
     // 48 bytes and delivers the request this server must not let through.
     strbuf.str_buf mut tabbed = strbuf.create();
-    defer strbuf.free(&tabbed);
+    defer del(tabbed.data);
     initialize_into(&tabbed);
     strbuf.append(&tabbed, "Content-Length\x0B: 48\r\n");
     strbuf.append(&tabbed, "Content-Length: 2\r\n\r\n{}");
@@ -731,19 +758,19 @@ fn a_frame_whose_field_name_holds_a_space_ends_the_loop() void {
 // The encoding the server holds after that initialize.
 fn negotiates(string params, text.position_encoding want, string what) void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     request_into(&script, 1, "initialize", params);
     lsp_env.pipe_ends in_ends = lsp_env.open_pipe();
     lsp_env.pipe_ends out_ends = lsp_env.open_pipe();
     lsp_env.feed(in_ends, strbuf.view(&script));
-    server.server mut srv = server.create(in_ends.read_fd, out_ends.write_fd);
-    server.run(&srv);
-    if (server.encoding(&srv) != want) {
+    server.server mut* own srv = server.make(in_ends.read_fd, out_ends.write_fd);
+    server.run(srv);
+    if (server.encoding(srv) != want) {
         println("case: ", what);
-        println("  the server answered ", text.encoding_name(server.encoding(&srv)));
+        println("  the server answered ", text.encoding_name(server.encoding(srv)));
     }
-    assert(server.encoding(&srv) == want);
-    server.free(&srv);
+    assert(server.encoding(srv) == want);
+    server.drop_made(move(srv));
     assert(io.close(in_ends.read_fd));
     assert(io.close(out_ends.write_fd));
     string own answers = lsp_env.drain(out_ends);
@@ -752,7 +779,7 @@ fn negotiates(string params, text.position_encoding want, string what) void {
 
 fn the_first_name_the_server_implements_is_the_one() void {
     strbuf.str_buf mut params = strbuf.create();
-    defer strbuf.free(&params);
+    defer del(params.data);
     strbuf.append(&params, "{\"capabilities\":{\"general\":{\"positionEncodings\":");
     strbuf.append(&params, "[\"utf-32\",\"utf-16\",\"utf-8\"]}}}");
     negotiates(strbuf.view(&params), text.position_encoding.enc_utf16, "utf-32 utf-16 utf-8");
@@ -764,7 +791,7 @@ fn the_first_name_the_server_implements_is_the_one() void {
 
 fn a_list_the_server_cannot_read_leaves_utf16() void {
     strbuf.str_buf mut params = strbuf.create();
-    defer strbuf.free(&params);
+    defer del(params.data);
     strbuf.append(&params, "{\"capabilities\":{\"general\":{\"positionEncodings\":");
     strbuf.append(&params, "[7,null,{},[],\"utf-8\"]}}}");
     // The names that are no strings are passed over, and the one string the
@@ -823,6 +850,7 @@ fn main() i32 {
     the_server_is_ready_only_after_the_initialized_notification();
     a_notification_before_initialize_leaves_the_server_unready();
     a_server_that_was_freed_is_one_no_client_has_spoken_to();
+    a_freed_server_keeps_the_settings_of_its_conn_and_of_its_document();
     a_frame_above_the_cap_of_the_conn_ends_the_loop();
     a_frame_whose_header_field_holds_a_bare_line_feed_ends_the_loop();
     a_frame_whose_field_name_holds_a_space_ends_the_loop();

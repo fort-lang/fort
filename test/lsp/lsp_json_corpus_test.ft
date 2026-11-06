@@ -150,17 +150,17 @@ fn every_accepted_document_parses() void {
     string mut@ own corpus = new(string, ACCEPTED_COUNT);
     defer del(corpus);
     accepted_into(corpus);
-    json.doc mut d = json.create();
-    defer json.free(&d);
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
     u64 mut i = 0;
     while (i < ACCEPTED_COUNT) {
-        if (!json.parse(&d, corpus[i])) {
+        if (!json.parse(d, corpus[i])) {
             println("case: ", corpus[i]);
-            println("  refused at ", json.error_offset(&d), ": ", json.error_message(&d));
+            println("  refused at ", json.error_offset(d), ": ", json.error_message(d));
         }
-        assert(json.parse(&d, corpus[i]));
-        assert(json.root(&d) != 0);
-        assert(json.error_message(&d) == "");
+        assert(json.parse(d, corpus[i]));
+        assert(json.root(d) != 0);
+        assert(json.error_message(d) == "");
         i += 1;
     }
 }
@@ -184,7 +184,7 @@ fn whitespace_around_a_document_changes_nothing() void {
     defer del(corpus);
     accepted_into(corpus);
     strbuf.str_buf mut padded = strbuf.create();
-    defer strbuf.free(&padded);
+    defer del(padded.data);
     u64 mut i = 0;
     while (i < ACCEPTED_COUNT) {
         strbuf.clear(&padded);
@@ -203,18 +203,18 @@ fn a_document_nested_in_an_array_parses_the_same_way() void {
     defer del(corpus);
     accepted_into(corpus);
     strbuf.str_buf mut wrapped = strbuf.create();
-    defer strbuf.free(&wrapped);
-    json.doc mut d = json.create();
-    defer json.free(&d);
+    defer del(wrapped.data);
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
     u64 mut i = 0;
     while (i < ACCEPTED_COUNT) {
         strbuf.clear(&wrapped);
         strbuf.append(&wrapped, "{\"k\":[");
         strbuf.append(&wrapped, corpus[i]);
         strbuf.append(&wrapped, "]}");
-        assert(json.parse(&d, strbuf.view(&wrapped)));
-        u32 array = json.member_of(&d, json.root(&d), "k");
-        assert(json.count_of(&d, array) == 1);
+        assert(json.parse(d, strbuf.view(&wrapped)));
+        u32 array = json.member_of(d, json.root(d), "k");
+        assert(json.count_of(d, array) == 1);
         i += 1;
     }
 }
@@ -225,20 +225,20 @@ fn every_refused_document_is_refused_with_an_offset() void {
     string mut@ own corpus = new(string, REFUSED_COUNT);
     defer del(corpus);
     refused_into(corpus);
-    json.doc mut d = json.create();
-    defer json.free(&d);
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
     u64 mut i = 0;
     while (i < REFUSED_COUNT) {
-        if (json.parse(&d, corpus[i])) {
+        if (json.parse(d, corpus[i])) {
             println("case: ", corpus[i]);
             println("  parsed, and a refusal was expected");
         }
-        assert(!json.parse(&d, corpus[i]));
+        assert(!json.parse(d, corpus[i]));
         // The offset names a byte of the document or the byte after its end,
         // which is where a document that stops too early fails.
-        assert(json.error_offset(&d) <= corpus[i].len);
-        assert(json.error_message(&d) != "");
-        assert(json.root(&d) == 0);
+        assert(json.error_offset(d) <= corpus[i].len);
+        assert(json.error_message(d) != "");
+        assert(json.root(d) == 0);
         i += 1;
     }
 }
@@ -249,19 +249,19 @@ fn a_refused_document_ends_no_program() void {
     string mut@ own corpus = new(string, REFUSED_COUNT);
     defer del(corpus);
     refused_into(corpus);
-    json.doc mut d = json.create();
-    defer json.free(&d);
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
     u64 mut rounds = 0;
     while (rounds < 10) {
         u64 mut i = 0;
         while (i < REFUSED_COUNT) {
-            assert(!json.parse(&d, corpus[i]));
+            assert(!json.parse(d, corpus[i]));
             i += 1;
         }
         rounds += 1;
     }
     assert(rounds == 10);
-    assert(json.parse(&d, "[1]"));
+    assert(json.parse(d, "[1]"));
 }
 
 fn a_refused_document_nested_in_a_container_is_refused_too() void {
@@ -269,9 +269,9 @@ fn a_refused_document_nested_in_a_container_is_refused_too() void {
     defer del(corpus);
     refused_into(corpus);
     strbuf.str_buf mut wrapped = strbuf.create();
-    defer strbuf.free(&wrapped);
-    json.doc mut d = json.create();
-    defer json.free(&d);
+    defer del(wrapped.data);
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
     // The empty document is the one case the wrapper turns into a good one.
     // `[]` Is an array with no element, and not an array holding a document
     // that broke a rule.
@@ -282,11 +282,11 @@ fn a_refused_document_nested_in_a_container_is_refused_too() void {
         strbuf.append(&wrapped, "[");
         strbuf.append(&wrapped, corpus[i]);
         strbuf.append(&wrapped, "]");
-        if (json.parse(&d, strbuf.view(&wrapped))) {
+        if (json.parse(d, strbuf.view(&wrapped))) {
             println("case: ", strbuf.view(&wrapped));
             println("  parsed, and a refusal was expected");
         }
-        assert(!json.parse(&d, strbuf.view(&wrapped)));
+        assert(!json.parse(d, strbuf.view(&wrapped)));
         i += 1;
     }
 }
@@ -338,29 +338,29 @@ fn every_message_the_module_builds_has_a_document() void {
     messages_into(table);
     bool mut@ own seen = new(bool, MESSAGE_COUNT);
     defer del(seen);
-    json.doc mut d = json.create();
-    defer json.free(&d);
+    strbuf.str_buf mut deep = strbuf.create();
+    defer del(deep.data);
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
     string mut@ own corpus = new(string, REFUSED_COUNT);
     defer del(corpus);
     refused_into(corpus);
     u64 mut i = 0;
     while (i < REFUSED_COUNT) {
-        mark(&d, table, seen, corpus[i]);
+        mark(d, table, seen, corpus[i]);
         i += 1;
     }
     // Two messages need a document built rather than written: the one past
     // the depth limit, and the one past the cap on a source.
-    strbuf.str_buf mut deep = strbuf.create();
-    defer strbuf.free(&deep);
     u64 mut level = 0;
     while (level < json.JSON_MAX_DEPTH + 1) {
         strbuf.push(&deep, '[');
         level += 1;
     }
-    mark(&d, table, seen, strbuf.view(&deep));
-    json.set_max_bytes(&d, 10);
-    mark(&d, table, seen, "[1,2,3,4,5]");
-    json.set_max_bytes(&d, 0);
+    mark(d, table, seen, strbuf.view(&deep));
+    json.set_max_bytes(d, 10);
+    mark(d, table, seen, "[1,2,3,4,5]");
+    json.set_max_bytes(d, 0);
     u64 mut covered = 0;
     u64 mut k = 0;
     while (k < MESSAGE_COUNT) {

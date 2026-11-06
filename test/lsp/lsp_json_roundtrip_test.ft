@@ -84,12 +84,12 @@ fn the_corpus_covers_every_kind_but_the_absent_one() void {
     corpus_into(corpus);
     bool mut@ own seen = new(bool, KIND_COUNT);
     defer del(seen);
-    json.doc mut d = json.create();
-    defer json.free(&d);
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
     u64 mut i = 0;
     while (i < CORPUS_SIZE) {
-        assert(json.parse(&d, corpus[i]));
-        mark_kinds(&d, json.root(&d), seen);
+        assert(json.parse(d, corpus[i]));
+        mark_kinds(d, json.root(d), seen);
         i += 1;
     }
     // k_none is the kind of handle 0 and of nothing the reader builds.
@@ -122,7 +122,7 @@ fn a_bare_value_of_each_kind_is_its_own_document() void {
 
 fn a_message_of_the_protocol_round_trips() void {
     strbuf.str_buf mut source = strbuf.create();
-    defer strbuf.free(&source);
+    defer del(source.data);
     strbuf.append(&source, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":");
     strbuf.append(&source, "{\"capabilities\":{\"textDocumentSync\":1,");
     strbuf.append(&source, "\"diagnosticProvider\":{\"interFileDependencies\":true,");
@@ -132,7 +132,7 @@ fn a_message_of_the_protocol_round_trips() void {
 
 fn a_document_of_diagnostics_round_trips() void {
     strbuf.str_buf mut source = strbuf.create();
-    defer strbuf.free(&source);
+    defer del(source.data);
     strbuf.append(&source, "{\"diagnostics\":[{\"range\":{\"start\":{\"line\":0,");
     strbuf.append(&source, "\"character\":4},\"end\":{\"line\":0,\"character\":9}},");
     strbuf.append(&source, "\"severity\":1,\"message\":\"unknown name 'x'\",");
@@ -142,7 +142,7 @@ fn a_document_of_diagnostics_round_trips() void {
 
 fn a_wide_array_round_trips() void {
     strbuf.str_buf mut source = strbuf.create();
-    defer strbuf.free(&source);
+    defer del(source.data);
     strbuf.push(&source, '[');
     u64 mut i = 0;
     while (i < 2000) {
@@ -158,7 +158,7 @@ fn a_wide_array_round_trips() void {
 
 fn a_deep_document_round_trips() void {
     strbuf.str_buf mut source = strbuf.create();
-    defer strbuf.free(&source);
+    defer del(source.data);
     u64 mut i = 0;
     while (i < 64) {
         strbuf.push(&source, '[');
@@ -174,7 +174,7 @@ fn a_deep_document_round_trips() void {
 
 fn a_document_of_long_strings_round_trips() void {
     strbuf.str_buf mut source = strbuf.create();
-    defer strbuf.free(&source);
+    defer del(source.data);
     strbuf.append(&source, "[\"");
     u64 mut i = 0;
     while (i < 5000) {
@@ -193,20 +193,20 @@ fn writing_and_reading_again_reaches_a_fixed_point() void {
     string mut@ own corpus = new(string, CORPUS_SIZE);
     defer del(corpus);
     corpus_into(corpus);
-    json.doc mut first = json.create();
-    defer json.free(&first);
-    json.doc mut second = json.create();
-    defer json.free(&second);
     strbuf.str_buf mut once = strbuf.create();
-    defer strbuf.free(&once);
+    defer del(once.data);
     strbuf.str_buf mut twice = strbuf.create();
-    defer strbuf.free(&twice);
+    defer del(twice.data);
+    json.doc mut* own first = json.make();
+    defer json.drop_made(move(first));
+    json.doc mut* own second = json.make();
+    defer json.drop_made(move(second));
     u64 mut i = 0;
     while (i < CORPUS_SIZE) {
-        assert(json.parse(&first, corpus[i]));
-        string written = lsp_json_env.written(&first, &once);
-        assert(json.parse(&second, written));
-        lsp_json_env.check(lsp_json_env.written(&second, &twice), written, corpus[i]);
+        assert(json.parse(first, corpus[i]));
+        string written = lsp_json_env.written(first, &once);
+        assert(json.parse(second, written));
+        lsp_json_env.check(lsp_json_env.written(second, &twice), written, corpus[i]);
         i += 1;
     }
 }
@@ -221,27 +221,27 @@ fn a_document_that_is_not_the_writer_s_spelling_reads_as_the_writer_s() void {
 fn the_writer_writes_a_document_after_other_bytes() void {
     // The buffer belongs to the caller and is not emptied, which is what lets
     // a server write a header and a body into one buffer.
-    json.doc mut d = json.create();
-    defer json.free(&d);
-    assert(json.parse(&d, "{\"a\":1}"));
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
+    defer del(out.data);
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
+    assert(json.parse(d, "{\"a\":1}"));
     strbuf.append(&out, "before:");
     json.writer mut w = json.writer{};
     json.write_init(&w, &out);
-    json.write_document(&w, &d);
+    json.write_document(&w, d);
     lsp_json_env.check(strbuf.view(&out), "before:{\"a\":1}", "a document after other bytes");
 }
 
 fn a_subtree_is_written_on_its_own() void {
-    json.doc mut d = json.create();
-    defer json.free(&d);
-    assert(json.parse(&d, "{\"a\":[1,{\"b\":null}]}"));
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
+    defer del(out.data);
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
+    assert(json.parse(d, "{\"a\":[1,{\"b\":null}]}"));
     json.writer mut w = json.writer{};
     json.write_init(&w, &out);
-    json.write_value(&w, &d, json.member_of(&d, json.root(&d), "a"));
+    json.write_value(&w, d, json.member_of(d, json.root(d), "a"));
     lsp_json_env.check(strbuf.view(&out), "[1,{\"b\":null}]", "a subtree alone");
 }
 
@@ -249,7 +249,7 @@ fn a_document_is_built_by_hand_and_read_back() void {
     // The writer is usable without a reader, which is how a server answers a
     // request it built itself.
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
+    defer del(out.data);
     json.writer mut w = json.writer{};
     json.write_init(&w, &out);
     json.write_object_begin(&w);
@@ -272,18 +272,18 @@ fn a_document_is_built_by_hand_and_read_back() void {
     json.write_object_end(&w);
     json.write_array_end(&w);
     json.write_object_end(&w);
-    json.doc mut d = json.create();
-    defer json.free(&d);
-    assert(json.parse(&d, strbuf.view(&out)));
-    u32 root = json.root(&d);
-    assert(json.count_of(&d, root) == 7);
-    assert(json.text_of(&d, json.member_of(&d, root, "size")) == "18446744073709551615");
-    assert(json.kind_of(&d, json.member_of(&d, root, "size")) == json.value_kind.k_float);
-    assert(json.int_of(&d, json.member_of(&d, root, "id")) == -3);
-    assert(json.count_of(&d, json.member_of(&d, root, "items")) == 2);
     strbuf.str_buf mut again = strbuf.create();
-    defer strbuf.free(&again);
-    lsp_json_env.check(lsp_json_env.written(&d, &again), strbuf.view(&out),
+    defer del(again.data);
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
+    assert(json.parse(d, strbuf.view(&out)));
+    u32 root = json.root(d);
+    assert(json.count_of(d, root) == 7);
+    assert(json.text_of(d, json.member_of(d, root, "size")) == "18446744073709551615");
+    assert(json.kind_of(d, json.member_of(d, root, "size")) == json.value_kind.k_float);
+    assert(json.int_of(d, json.member_of(d, root, "id")) == -3);
+    assert(json.count_of(d, json.member_of(d, root, "items")) == 2);
+    lsp_json_env.check(lsp_json_env.written(d, &again), strbuf.view(&out),
         "a document built by hand");
 }
 

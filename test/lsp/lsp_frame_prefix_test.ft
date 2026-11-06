@@ -54,24 +54,24 @@ fn frame_into(strbuf.str_buf mut* b, string body) void {
 fn frames_of(string script, u64 chunk) string own {
     lsp_env.pipe_ends ends = lsp_env.open_pipe();
     lsp_env.feed(ends, script);
-    rpc.conn mut c = rpc.create(ends.read_fd, ends.write_fd);
-    defer rpc.free(&c);
-    rpc.set_chunk(&c, chunk);
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
+    defer del(out.data);
+    rpc.conn mut* own c = rpc.make(ends.read_fd, ends.write_fd);
+    defer rpc.drop_made(move(c));
+    rpc.set_chunk(c, chunk);
     string mut body = "";
     u64 mut seen = 0;
-    while (rpc.read_frame(&c, &body)) {
+    while (rpc.read_frame(c, &body)) {
         if (seen > 0) {
             strbuf.append(&out, "|");
         }
         strbuf.append(&out, body);
         seen += 1;
     }
-    if (rpc.has_failed(&c)) {
+    if (rpc.has_failed(c)) {
         strbuf.append(&out, "!");
     } else {
-        assert(rpc.at_eof(&c));
+        assert(rpc.at_eof(c));
         strbuf.append(&out, ".");
     }
     assert(io.close(ends.read_fd));
@@ -108,7 +108,7 @@ fn frames_in(string digest) u64 {
 
 fn a_prefix_answers_the_frames_that_are_whole() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     script_into(&script);
     string whole = strbuf.view(&script);
     u64 mut clean = 0;
@@ -135,7 +135,7 @@ fn a_prefix_answers_the_same_whatever_the_read_size() void {
     // A read size of one byte splits every frame at every byte, which is the
     // other half of the same property. The frames are a function of the bytes.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     script_into(&script);
     string whole = strbuf.view(&script);
     u64 mut at = 0;
@@ -161,9 +161,9 @@ fn the_clean_ends_are_the_ends_of_the_frames() void {
     // The prefix that ends where frame k ends answers exactly k frames and
     // ends cleanly. No other prefix does.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     strbuf.str_buf mut so_far = strbuf.create();
-    defer strbuf.free(&so_far);
+    defer del(so_far.data);
     script_into(&script);
     string whole = strbuf.view(&script);
     frame_into(&so_far, "{}");
@@ -215,7 +215,7 @@ fn fails(string script, string what) void {
 
 fn the_frames_of_a_prefix_are_counted() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     script_into(&script);
     string whole = strbuf.view(&script);
     string own got = frames_of(whole, 1);
@@ -234,7 +234,7 @@ fn a_stream_that_begins_inside_a_frame_is_an_error() void {
     // suffix is an error record or a later frame
     // in the script. No suffix is an unknown body.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     script_into(&script);
     string whole = strbuf.view(&script);
     u64 mut at = 1;
@@ -277,31 +277,31 @@ fn every_byte_value_survives_a_body() void {
     // unchanged. The reader above it is what refuses the ones JSON does not
     // allow.
     strbuf.str_buf mut body = strbuf.create();
-    defer strbuf.free(&body);
+    defer del(body.data);
     u64 mut i = 0;
     while (i < 256) {
         strbuf.push_byte(&body, cast(i, u8));
         i += 1;
     }
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     frame_into(&script, strbuf.view(&body));
     frame_into(&script, "{}");
     lsp_env.pipe_ends ends = lsp_env.open_pipe();
     lsp_env.feed(ends, strbuf.view(&script));
-    rpc.conn mut c = rpc.create(ends.read_fd, ends.write_fd);
-    defer rpc.free(&c);
-    rpc.set_chunk(&c, 3);
+    rpc.conn mut* own c = rpc.make(ends.read_fd, ends.write_fd);
+    defer rpc.drop_made(move(c));
+    rpc.set_chunk(c, 3);
     string mut got = "";
-    assert(rpc.read_frame(&c, &got));
+    assert(rpc.read_frame(c, &got));
     lsp_env.check_u64(got.len, 256, "the length of a body of every byte");
     check_every_byte(got);
     // The frame after it is read as well, so no byte of the first ended the
     // frame early.
-    assert(rpc.read_frame(&c, &got));
+    assert(rpc.read_frame(c, &got));
     lsp_env.check(got, "{}", "the frame after a body of every byte");
-    assert(!rpc.read_frame(&c, &got));
-    assert(rpc.at_eof(&c));
+    assert(!rpc.read_frame(c, &got));
+    assert(rpc.at_eof(c));
     assert(io.close(ends.read_fd));
 }
 

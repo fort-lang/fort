@@ -164,19 +164,40 @@ fn set_max_bytes(doc mut* d, u64 limit) void {
 }
 
 // Empties the document and releases its storage. A second call has no effect.
+// drop holds the releases. The document keeps its limit.
 fn free(doc mut* d) void {
-    while (d->last != null) {
+    doc kept = move(*d);
+    d->limit = kept.limit;
+    reset(d);
+    drop(move(kept));
+}
+
+// Frees a document that the caller moves in: each chunk from the last, the chunks, then the
+// bytes.
+fn drop(doc mut d) void {
+    while (d.last != null) {
         // `del` is shallow, so delete the slots before the chunk.
-        node_chunk mut* own chunk = move(d->last);
+        node_chunk mut* own chunk = move(d.last);
         node_chunk mut* own before = move(chunk->made_before);
         del(chunk->slots);
         del(chunk);
-        d->last = move(before);
+        d.last = move(before);
     }
-    del(d->chunks);
-    d->chunk_count = 0;
-    strbuf.free(&d->bytes);
-    reset(d);
+    del(d.chunks);
+    del(d.bytes.data);
+}
+
+// A document of create in an allocation of its own, for a function that lends the document to
+// calls. The zero value of `new` is the document of create.
+fn make() doc mut* own {
+    return new(doc);
+}
+
+// Ends a document of make that the caller moves in.
+fn drop_made(doc mut* own p) void {
+    doc kept = move(*p);
+    del(p);
+    drop(move(kept));
 }
 
 // Empties the document and keeps storage for the next parse.

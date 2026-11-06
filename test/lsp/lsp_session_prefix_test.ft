@@ -44,7 +44,7 @@ fn session_into(strbuf.str_buf mut* b) void {
     frame_into(b, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}");
     frame_into(b, "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
     strbuf.str_buf mut note = strbuf.create();
-    defer strbuf.free(&note);
+    defer del(note.data);
     strbuf.append(&note, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":");
     strbuf.append(&note, "{\"textDocument\":{\"uri\":\"file:///a.ft\",\"version\":1,");
     strbuf.append(&note, "\"text\":\"fn main() i32\"}}}");
@@ -85,9 +85,9 @@ fn answers_of(string script, i32 mut* status) string own {
     lsp_env.pipe_ends in_ends = lsp_env.open_pipe();
     lsp_env.pipe_ends out_ends = lsp_env.open_pipe();
     lsp_env.feed(in_ends, script);
-    server.server mut srv = server.create(in_ends.read_fd, out_ends.write_fd);
-    *status = server.run(&srv);
-    server.free(&srv);
+    server.server mut* own srv = server.make(in_ends.read_fd, out_ends.write_fd);
+    *status = server.run(srv);
+    server.drop_made(move(srv));
     assert(io.close(in_ends.read_fd));
     assert(io.close(out_ends.write_fd));
     return lsp_env.drain(out_ends);
@@ -117,7 +117,7 @@ string SHUTDOWN_ANSWER = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":null}";
 
 fn a_prefix_answers_a_prefix_of_the_session() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     session_into(&script);
     string whole = strbuf.view(&script);
     i32 mut status = -1;
@@ -147,7 +147,7 @@ fn a_prefix_answers_a_prefix_of_the_session() void {
     // where the last frame begins. So the count is the length of that frame
     // and one for the prefix that ends exactly at it.
     strbuf.str_buf mut last = strbuf.create();
-    defer strbuf.free(&last);
+    defer del(last.data);
     frame_into(&last, "{\"jsonrpc\":\"2.0\",\"method\":\"exit\",\"params\":null}");
     lsp_env.check_u64(shut, last.len + 1, "the prefixes that end after the shutdown");
     del(all);
@@ -158,7 +158,7 @@ fn the_documents_of_a_prefix_follow_the_messages_it_holds() void {
     // didOpen there is no document, between it and the didClose there is one.
     // And the text is the last change the prefix carried.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     session_into(&script);
     string whole = strbuf.view(&script);
     i64 opened = find(whole, "didOpen");
@@ -183,11 +183,11 @@ fn documents_are(string script, string want, u64 count, string what) void {
     lsp_env.pipe_ends in_ends = lsp_env.open_pipe();
     lsp_env.pipe_ends out_ends = lsp_env.open_pipe();
     lsp_env.feed(in_ends, script);
-    server.server mut srv = server.create(in_ends.read_fd, out_ends.write_fd);
-    server.run(&srv);
-    lsp_env.check_u64(documents_count(&srv), count, what);
-    lsp_env.check(document_text(&srv), want, what);
-    server.free(&srv);
+    server.server mut* own srv = server.make(in_ends.read_fd, out_ends.write_fd);
+    server.run(srv);
+    lsp_env.check_u64(documents_count(srv), count, what);
+    lsp_env.check(document_text(srv), want, what);
+    server.drop_made(move(srv));
     assert(io.close(in_ends.read_fd));
     assert(io.close(out_ends.write_fd));
     string own answers = lsp_env.drain(out_ends);
@@ -218,11 +218,11 @@ fn a_session_without_exit_ends_at_the_stream() void {
     // and then died without sending `exit`. The status is the one an orderly
     // exit would have answered, since the shutdown is what it turns on.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     session_into(&script);
     u64 whole_len = script.len;
     strbuf.str_buf mut last = strbuf.create();
-    defer strbuf.free(&last);
+    defer del(last.data);
     frame_into(&last, "{\"jsonrpc\":\"2.0\",\"method\":\"exit\",\"params\":null}");
     strbuf.truncate(&script, whole_len - last.len);
     i32 mut status = -1;
@@ -236,7 +236,7 @@ fn a_session_without_exit_ends_at_the_stream() void {
 
 fn a_prefix_of_a_hostile_stream_is_answered_and_read_on() void {
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     hostile_into(&script);
     string whole = strbuf.view(&script);
     i32 mut status = -1;
@@ -261,12 +261,12 @@ fn every_answer_of_a_hostile_stream_is_a_message() void {
     // Whatever the server answers is a JSON-RPC message: the bodies of a
     // hostile stream must not make it write a document a client cannot read.
     strbuf.str_buf mut script = strbuf.create();
-    defer strbuf.free(&script);
+    defer del(script.data);
     hostile_into(&script);
     i32 mut status = -1;
     string own all = answers_of(strbuf.view(&script), &status);
-    json.doc mut d = json.create();
-    defer json.free(&d);
+    json.doc mut* own d = json.make();
+    defer json.drop_made(move(d));
     u64 mut at = 0;
     u64 mut seen = 0;
     while (at < all.len) {
@@ -278,13 +278,13 @@ fn every_answer_of_a_hostile_stream_is_a_message() void {
         u64 mut len = 0;
         assert(parse_len(all[at..end], &len));
         string body = all[end + 4..end + 4 + len];
-        assert(json.parse(&d, body));
-        u32 root = json.root(&d);
-        assert(json.kind_of(&d, root) == json.value_kind.k_object);
-        lsp_env.check(json.text_of(&d, json.member_of(&d, root, "jsonrpc")), "2.0",
+        assert(json.parse(d, body));
+        u32 root = json.root(d);
+        assert(json.kind_of(d, root) == json.value_kind.k_object);
+        lsp_env.check(json.text_of(d, json.member_of(d, root, "jsonrpc")), "2.0",
                       "the version of an answer");
         // Every answer carries an id, and every one but the last an error.
-        assert(json.member_of(&d, root, "id") != 0);
+        assert(json.member_of(d, root, "id") != 0);
         seen += 1;
         at = end + 4 + len;
     }

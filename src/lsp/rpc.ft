@@ -97,13 +97,35 @@ fn create(i32 in_fd, i32 out_fd) conn {
 }
 
 // Clears buffers and error state. The read size and body limit stay unchanged.
+// drop holds the releases. The conn keeps its descriptors, its read size and its body limit.
 fn free(conn mut* c) void {
-    strbuf.free(&c->in_buf);
-    strbuf.free(&c->out_buf);
-    c->consumed = 0;
-    c->eof = false;
-    c->failed = false;
+    conn kept = move(*c);
+    c->in_fd = kept.in_fd;
+    c->out_fd = kept.out_fd;
+    c->chunk = kept.chunk;
+    c->max_content = kept.max_content;
     c->error_msg = "";
+    drop(move(kept));
+}
+
+// Frees a conn that the caller moves in: the two buffers.
+fn drop(conn mut c) void {
+    del(c.in_buf.data);
+    del(c.out_buf.data);
+}
+
+// A conn of create in an allocation of its own, for a function that lends the conn to calls.
+fn make(i32 in_fd, i32 out_fd) conn mut* own {
+    conn mut* own c = new(conn);
+    *c = create(in_fd, out_fd);
+    return c;
+}
+
+// Ends a conn of make that the caller moves in.
+fn drop_made(conn mut* own p) void {
+    conn kept = move(*p);
+    del(p);
+    drop(move(kept));
 }
 
 // The bytes one read asks for.
