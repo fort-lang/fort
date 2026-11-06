@@ -44,6 +44,20 @@ struct selector {
     bool imports;
 }
 
+// Frees a selector that the caller moves in: the message, then the entries.
+fn selector_drop(selector mut s) void {
+    strbuf.drop(move(s.msg));
+    del(s.entries);
+}
+
+// Ends a selector in an allocation of its own that the caller moves in, for a function that lends
+// it to calls.
+fn selector_drop_made(selector mut* own p) void {
+    selector kept = move(*p);
+    del(p);
+    selector_drop(move(kept));
+}
+
 fn reserve(selector mut* s) void {
     if (s->len < s->entries.len) {
         return;
@@ -1446,24 +1460,24 @@ fn select_imports(selector mut* s, ast.node mut* module) void {
 /// declaration and statement forms. The caller stops before it constructs a
 /// module namespace when this reports an error.
 fn select_module(session.session mut* sess, ast.node mut* module) bool {
-    selector mut s = selector{sess, module, {}, 0, strbuf.create(), true, true};
-    defer del(s.entries);
-    defer del(s.msg.data);
+    selector mut* own s = new(selector);
+    defer selector_drop_made(move(s));
+    *s = selector{sess, module, {}, 0, strbuf.create(), true, true};
     clear_selection(module);
-    select_imports(&s, module);
-    if (!s.ok) {
+    select_imports(s, module);
+    if (!s->ok) {
         return false;
     }
-    s.imports = false;
+    s->imports = false;
     u64 mut i = 0;
     while (i < ast.ast_len(module)) {
-        add_constant(&s, ast.ast_child_mut(module, i));
+        add_constant(s, ast.ast_child_mut(module, i));
         i += 1;
     }
     i = 0;
     while (i < ast.ast_len(module)) {
-        select_tree(&s, ast.ast_child_mut(module, i));
+        select_tree(s, ast.ast_child_mut(module, i));
         i += 1;
     }
-    return s.ok;
+    return s->ok;
 }

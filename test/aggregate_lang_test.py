@@ -11,8 +11,7 @@ the test green. A site that is not in the list, a count that grows and a listed 
 report gives each turn the test red: a change that ends a site removes it from the list.
 
 The aggregate sites: fail/ownership/083 keeps 2, because a `del` there moves the lines that its
-golden pins. Seven tests of std containers call the std free under test before the end of the
-local, and the end waits for a drop in std. The sites of part 2 wait for their own migration.
+golden pins. The sites of part 2 wait for their own migration.
 """
 
 import argparse
@@ -34,12 +33,6 @@ import run_tests  # noqa: E402
 EXPECTED = {
     "aggregate": {
         ("fail/ownership/083_use_after_a_del_of_another_place.ft", "t.arr[0].a"): 2,
-        ("run/stdlib/023_strbuf_create.ft", "b.data"): 1,
-        ("run/stdlib/039_vec_int_create.ft", "v.items"): 1,
-        ("run/stdlib/040_vec_int_push_pop.ft", "v.items"): 1,
-        ("run/stdlib/043_strmap_create_free.ft", "m.entries"): 1,
-        ("run/stdlib/049_strmap_keys_borrowed.ft", "m.entries"): 1,
-        ("run/stdlib/114_strbuf_cap.ft", "b.data"): 2,
     },
     "leak": {
         ("programs/binary_tree.ft", "(*out)->left"): 1,

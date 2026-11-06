@@ -326,6 +326,23 @@ fn gen_args_free(gen_args mut* a) void {
     a->count = 0;
 }
 
+// Frees an argument list that the caller moves in.
+fn gen_args_drop(gen_args mut a) void {
+    strbuf.drop(move(a.text));
+}
+
+// An empty argument list in an allocation of its own, for a function that lends the list to calls.
+fn gen_args_make() gen_args mut* own {
+    return new(gen_args);
+}
+
+// Ends an argument list of gen_args_make that the caller moves in.
+fn gen_args_drop_made(gen_args mut* own p) void {
+    gen_args kept = move(*p);
+    del(p);
+    gen_args_drop(move(kept));
+}
+
 // Appends `<ty> <val>`. The _ext form inserts the parameter attribute, as in `i8 zeroext 10`. An
 // empty `attr` means no attribute. bootstrap0/src/gen.h uses NULL for this case.
 fn gen_args_add_ext(gen_args mut* a, gen_val v, string attr) void {
@@ -397,20 +414,20 @@ fn gen_free(emitter mut* g) void {
 // Frees an emitter that the caller moves in: each buffer and list, then the pool, then the
 // scratch buffer. No part of it reads the session or the checker that the emitter points to.
 fn drop(emitter mut g) void {
-    del(g.named.data);
-    del(g.globals.data);
-    del(g.funcs.data);
-    del(g.out.data);
-    del(g.allocas.data);
-    del(g.body.data);
-    del(g.fail.data);
+    strbuf.drop(move(g.named));
+    strbuf.drop(move(g.globals));
+    strbuf.drop(move(g.funcs));
+    strbuf.drop(move(g.out));
+    strbuf.drop(move(g.allocas));
+    strbuf.drop(move(g.body));
+    strbuf.drop(move(g.fail));
     del(g.files.items);
     del(g.strs.items);
     del(g.enums.items);
     del(g.externs.items);
     del(g.declared.items);
     containers.pool_drop(move(g.pool));
-    del(g.scratch.data);
+    strbuf.drop(move(g.scratch));
 }
 
 // An emitter over `s` in the mode `opts`, in an allocation of its own: the emitter must stay at
@@ -1566,38 +1583,41 @@ fn gen_main(emitter mut* g, ast.sym* main_sym) void {
     // call. A release at the exit moved the program break of driver_lifetime_emitter_test.ft
     // under glibc 2.43, with no byte kept.
     {
-        gen_args mut init_args = gen_args_init();
-        defer del(init_args.text.data);
-        gen_args_add(&init_args, gen_literal(g, "i32", "%argc"));
-        gen_args_add(&init_args, gen_literal(g, "ptr", "%argv"));
-        gen_call_rt(g, runtime_sig.rt_entry.rt_args_init, &init_args);
+        gen_args mut* own init_args = gen_args_make();
+        defer gen_args_drop_made(move(init_args));
+        gen_args_add(init_args, gen_literal(g, "i32", "%argc"));
+        gen_args_add(init_args, gen_literal(g, "ptr", "%argv"));
+        gen_call_rt(g, runtime_sig.rt_entry.rt_args_init, init_args);
     }
     // The hidden result pointer carries `sret`, as it does at every aggregate call.
     {
-        gen_args mut args_args = gen_args_init();
-        defer del(args_args.text.data);
-        gen_args_add_ext(&args_args, span, "sret(%fort.span)");
-        gen_call_rt(g, runtime_sig.rt_entry.rt_args, &args_args);
+        gen_args mut* own args_args = gen_args_make();
+        defer gen_args_drop_made(move(args_args));
+        gen_args_add_ext(args_args, span, "sret(%fort.span)");
+        gen_call_rt(g, runtime_sig.rt_entry.rt_args, args_args);
     }
     // The program's `main` takes the span at `%args` when it declares the parameter. The span is
     // the caller-made copy of an aggregate argument, so the callee uses it in place.
     gen_val mut status = gen_val{};
     {
-        gen_args mut main_args = gen_args_init();
-        defer del(main_args.text.data);
-        // made after main_args, because prover.prove_uses takes each call as a change of `s`
-        signature mut s = signature_of(g, main_sym->ty, null);
-        defer del(s.params);
-        if (s.params.len == 1) {
-            gen_args_add_ext(&main_args, span, s.params[0].attr);
+        gen_args mut* own main_args = gen_args_make();
+        defer gen_args_drop_made(move(main_args));
+        // made after main_args, because prover.prove_uses takes each call as a change of `s`, and
+        // in a block of its own, so that its `del` comes before the drop of main_args
+        {
+            signature mut s = signature_of(g, main_sym->ty, null);
+            defer del(s.params);
+            if (s.params.len == 1) {
+                gen_args_add_ext(main_args, span, s.params[0].attr);
+            }
+            gen_val callee = gen_literal(g, "ptr", gen_symbol_ref(g, main_sym));
+            status = gen_call_sig(g, &s, callee, false, main_args);
         }
-        gen_val callee = gen_literal(g, "ptr", gen_symbol_ref(g, main_sym));
-        status = gen_call_sig(g, &s, callee, false, &main_args);
     }
     {
-        gen_args mut flush_args = gen_args_init();
-        defer del(flush_args.text.data);
-        gen_call_rt(g, runtime_sig.rt_entry.rt_flush_all, &flush_args);
+        gen_args mut* own flush_args = gen_args_make();
+        defer gen_args_drop_made(move(flush_args));
+        gen_call_rt(g, runtime_sig.rt_entry.rt_flush_all, flush_args);
     }
     gen_val masked = gen_binary(g, "and", status, gen_const_unsigned(g, "i32", STATUS_MASK));
     strbuf.append(&g->body, "  ret i32 ");

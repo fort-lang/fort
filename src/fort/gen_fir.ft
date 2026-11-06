@@ -110,19 +110,10 @@ fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
     string name = fn_node->sym->name;
     strbuf.str_buf mut text = strbuf.create();
     defer del(text.data);
-    fir.func mut f = fir.func{};
-    defer {
-        // A path that moves `f` to emit_fir leaves it empty here.
-        fir.func_free(&f);
-        // The leak rule reads no callee, so each owner takes a `del` after the call.
-        del(f.locals.items);
-        del(f.projs.items);
-        del(f.ops.items);
-        del(f.arms.items);
-        del(f.blocks.items);
-    }
+    fir.func mut* own f = fir.func_make();
+    defer fir.func_drop_made(move(f));
     fir_lower.report mut why = fir_lower.report{};
-    if (!fir_lower.lower_function(fp->ck, fn_node, &f, &why)) {
+    if (!fir_lower.lower_function(fp->ck, fn_node, f, &why)) {
         if (why.entry.len > 0) {
             strbuf.append(&text, "the runtime `std.rt` has no entry `");
             strbuf.append(&text, why.entry);
@@ -144,7 +135,7 @@ fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
         return false;
     }
     fir.check_kind mut missing = fir.check_kind.chk_overflow;
-    if (!fir_verify.runtime_holds(&f, &fp->rt, &missing)) {
+    if (!fir_verify.runtime_holds(f, &fp->rt, &missing)) {
         strbuf.append(&text, "the runtime `std.rt` has no entry `");
         strbuf.append(&text, fir.check_entry(missing));
         strbuf.append(&text, "` with the parameters that `");
@@ -153,7 +144,7 @@ fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
         gen.gen_error(g, fn_node->name_loc, strbuf.view(&text));
         return false;
     }
-    return emit_fir(g, fp, move(f));
+    return emit_fir(g, fp, move(*f));
 }
 
 /// Writes the FIR function `f`, which it takes: check_fir, then the translator. `f` is the only
@@ -161,16 +152,10 @@ fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
 /// (spec/fir.md 5.1), after the lines of the functions before it. False when check_fir reports an
 /// error of the emptiness pass, which writes no text.
 fn emit_fir(gen.emitter mut* g, fir_path mut* fp, fir.func f) bool {
-    fir.module mut m = fir.module_new();
-    defer {
-        fir.module_free(&m);
-        // The leak rule reads no callee, so each owner takes a `del` after the call.
-        del(m.funcs.items);
-        del(m.globals.items);
-        del(m.externs.items);
-    }
-    fir.module_add_function(&m, move(f));
-    return emit_module(g, fp, &m);
+    fir.module mut* own m = fir.module_make();
+    defer fir.module_drop_made(move(m));
+    fir.module_add_function(m, move(f));
+    return emit_module(g, fp, m);
 }
 
 // Checks and writes the one function of `m`, for emit_fir. The caller keeps `m`, so it is no local

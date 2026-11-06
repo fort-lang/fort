@@ -56,6 +56,20 @@ struct section {
     bool collecting;
 }
 
+// Frees a section that the caller moves in: the prefix, then the imports.
+fn section_drop(section mut sec) void {
+    strbuf.drop(move(sec.prefix));
+    del(sec.imports.items);
+}
+
+// Ends a section in an allocation of its own that the caller moves in, for a function that lends
+// it to calls.
+fn section_drop_made(section mut* own p) void {
+    section kept = move(*p);
+    del(p);
+    section_drop(move(kept));
+}
+
 // ---- the declaration list ----------------------------------------------------------
 
 fn push_decl(decl_list mut* v, ast.node* decl) void {
@@ -743,34 +757,35 @@ fn write_section(check.checker* ck, modules.module* m, strbuf.str_buf mut* out) 
     defer del(decls.items);
     collect_list(m->ast, &decls);
     sort_decls(&decls);
-    section mut sec = section{};
-    sec.ck = ck;
-    sec.m = m;
-    defer del(sec.imports.items);
-    defer del(sec.prefix.data);
-    choose_prefix(&decls, &sec.prefix);
-    add_source_imports(&sec);
-    // the collection pass: each module that a type or a value names
-    sec.collecting = true;
+    // The buffer comes before the section: the drop of the section is a call, and a `del` of the
+    // buffer after it would end a local that the call can change.
     strbuf.str_buf mut scratch = strbuf.create();
     defer del(scratch.data);
-    write_decls(&sec, &decls, &scratch);
-    sort_paths(&sec.imports);
-    sec.collecting = false;
+    section mut* own sec = new(section);
+    defer section_drop_made(move(sec));
+    sec->ck = ck;
+    sec->m = m;
+    choose_prefix(&decls, &sec->prefix);
+    add_source_imports(sec);
+    // the collection pass: each module that a type or a value names
+    sec->collecting = true;
+    write_decls(sec, &decls, &scratch);
+    sort_paths(&sec->imports);
+    sec->collecting = false;
     strbuf.append(out, modules.INTERFACE_SECTION);
     strbuf.append(out, m->path);
     strbuf.push(out, '\n');
     u64 mut i = 0;
-    while (i < sec.imports.len) {
+    while (i < sec->imports.len) {
         strbuf.append(out, "import ");
-        strbuf.append(out, containers.str_at(&sec.imports, i));
+        strbuf.append(out, containers.str_at(&sec->imports, i));
         strbuf.append(out, " as ");
-        strbuf.append(out, strbuf.view(&sec.prefix));
+        strbuf.append(out, strbuf.view(&sec->prefix));
         strbuf.append_u64(out, i);
         strbuf.append(out, ";\n");
         i += 1;
     }
-    write_decls(&sec, &decls, out);
+    write_decls(sec, &decls, out);
 }
 
 // Runs write_decl on each declaration of `decls`. The caller keeps `decls`, so it is no local owner

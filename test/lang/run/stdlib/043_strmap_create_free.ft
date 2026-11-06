@@ -6,29 +6,45 @@
 //| true 16 1 false
 //| 0 0 0 true
 //| 0 0 0 true
+//| true 1 16
 import std.strmap;
 
 // A map comes into being empty and allocates nothing until the first put
 // (stdlib.md 2.8); free releases the table and leaves str_map{} however often
 // it is called. A map with no table must answer every lookup rather than
 // index a span of no entries.
+
+// Ends a map in an allocation of `new`: the value moves out, the allocation goes, and strmap.drop
+// frees the table. The calls under test take the map by pointer, so the map lives in an
+// allocation: no call changes its pointer.
+fn drop_made(strmap.str_map mut* own p) void {
+    strmap.str_map kept = move(*p);
+    del(p);
+    strmap.drop(move(kept));
+}
+
 fn main() i32 {
-    strmap.str_map mut m = strmap.create();
-    defer strmap.free(&m);
-    println(strmap.count(&m), " ", m.live, " ", m.used, " ", m.entries.ptr == null);
+    strmap.str_map mut* own m = new(strmap.str_map);
+    defer drop_made(move(m));
+    println(strmap.count(m), " ", m->live, " ", m->used, " ", m->entries.ptr == null);
 
     // Every lookup on the empty map is answered without a table.
     i64 mut got = -7;
-    println(strmap.get(&m, "absent", &got), " ", m.entries.len);
-    println(strmap.has(&m, "absent"), " ", strmap.remove(&m, "absent"));
+    println(strmap.get(m, "absent", &got), " ", m->entries.len);
+    println(strmap.has(m, "absent"), " ", strmap.remove(m, "absent"));
 
     // The first put allocates the floor capacity of 16.
-    println(strmap.put(&m, "one", 1), " ", m.entries.len, " ", strmap.count(&m), " ",
-            m.entries.ptr == null);
+    println(strmap.put(m, "one", 1), " ", m->entries.len, " ", strmap.count(m), " ",
+            m->entries.ptr == null);
 
-    strmap.free(&m);
-    println(strmap.count(&m), " ", m.live, " ", m.used, " ", m.entries.ptr == null);
-    strmap.free(&m);
-    println(strmap.count(&m), " ", m.live, " ", m.used, " ", m.entries.ptr == null);
+    strmap.free(m);
+    println(strmap.count(m), " ", m->live, " ", m->used, " ", m->entries.ptr == null);
+    strmap.free(m);
+    println(strmap.count(m), " ", m->live, " ", m->used, " ", m->entries.ptr == null);
+
+    // A map that ends with its table: drop_made gives strmap.drop a live value.
+    strmap.str_map mut* own live = new(strmap.str_map);
+    defer drop_made(move(live));
+    println(strmap.put(live, "kept", 7), " ", strmap.count(live), " ", live->entries.len);
     return 0;
 }

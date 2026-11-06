@@ -535,6 +535,20 @@ struct lexer {
     u64 line_base;       // tokens `out` held when the current line began
 }
 
+// Frees a lexer that the caller moves in: the message, then the bytes of the string literal.
+fn drop(lexer mut lx) void {
+    strbuf.drop(move(lx.msg));
+    strbuf.drop(move(lx.buf));
+}
+
+// Ends a lexer in an allocation of its own that the caller moves in, for a function that lends
+// it to calls.
+fn drop_made(lexer mut* own p) void {
+    lexer kept = move(*p);
+    del(p);
+    drop(move(kept));
+}
+
 // The byte `ahead` bytes after the next one, or -1 past the end.
 fn peek_at(lexer* lx, u64 ahead) i64 {
     u64 at = lx->pos + ahead;
@@ -1244,13 +1258,13 @@ fn lex_all(lexer mut* lx) bool {
 /// After an error, lexing resumes at the next line and omits tokens from the failed line.
 /// The lexer starts the shared diagnostic budget for the file.
 fn lex_file(session.session mut* sess, string file, string source, tok_vec mut* out) bool {
-    lexer mut lx = lexer{sess,         file, source, 0, 1, 1, out, strbuf.create(),
+    lexer mut* own lx = new(lexer);
+    defer drop_made(move(lx));
+    *lx = lexer{sess,         file, source, 0, 1, 1, out, strbuf.create(),
                          strbuf.create(), out->len};
-    defer del(lx.buf.data);
-    defer del(lx.msg.data);
     // The parser uses the remainder of the lexer's diagnostic budget.
     diag.begin_file(session.diags(sess));
-    return lex_all(&lx);
+    return lex_all(lx);
 }
 
 // ---- the token dump (--tokens) --------------------------------------------

@@ -1379,36 +1379,23 @@ fn no_transfer(fir.func* f, u32 b, fir_flow.bits mut* set) void {
 
 // V12: the emptied temporaries, joined by union from empty sets, because V12 holds on any path.
 fn v12_moves(walk mut* w, fir.pred_table* pt, effects* e) bool {
-    fir_flow.dataflow mut d = fir_flow.dataflow_new(fir.local_count(w->f),
-                                                    fir_flow.join_kind.join_union, no_transfer);
-    defer {
-        fir_flow.dataflow_free(&d);
-        // The leak rule reads no callee, so each owner takes a `del` after the call.
-        del(d.entry.words);
-        del(d.init.words);
-        del(d.ins);
-        del(d.outs);
-    }
-    return test_flow(w, pt, e, RULE_V12, &d, V12_MOVED);
+    fir_flow.dataflow mut* own d = fir_flow.dataflow_make(fir.local_count(w->f),
+                                                          fir_flow.join_kind.join_union,
+                                                          no_transfer);
+    defer fir_flow.dataflow_drop_made(move(d));
+    return test_flow(w, pt, e, RULE_V12, d, V12_MOVED);
 }
 
 // V13: the assigned temporaries, joined by intersection. `bb0` starts empty and every other
 // block full, so a block that no edge reaches keeps the rule. The dataflow follows every edge,
 // the edge that V9 prunes on a constant switch included.
 fn v13_assignments(walk mut* w, fir.pred_table* pt, effects* e) bool {
-    fir_flow.dataflow mut d = fir_flow.dataflow_new(fir.local_count(w->f),
-                                                    fir_flow.join_kind.join_intersect,
-                                                    no_transfer);
-    defer {
-        fir_flow.dataflow_free(&d);
-        // The leak rule reads no callee, so each owner takes a `del` after the call.
-        del(d.entry.words);
-        del(d.init.words);
-        del(d.ins);
-        del(d.outs);
-    }
-    fir_flow.bits_fill(&d.init);
-    return test_flow(w, pt, e, RULE_V13, &d, V13_UNASSIGNED);
+    fir_flow.dataflow mut* own d = fir_flow.dataflow_make(fir.local_count(w->f),
+                                                          fir_flow.join_kind.join_intersect,
+                                                          no_transfer);
+    defer fir_flow.dataflow_drop_made(move(d));
+    fir_flow.bits_fill(&d->init);
+    return test_flow(w, pt, e, RULE_V13, d, V13_UNASSIGNED);
 }
 
 // ---- the rules in order --------------------------------------------------------------------

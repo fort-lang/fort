@@ -257,21 +257,6 @@ fn equality_lends_both_operands() void {
     assert(check_env.type_text(e, o.ty) == "bool");
 }
 
-// A parameter scope in an allocation of its own: open_params lends it to the checker.
-fn params_make() scope.scope mut* own {
-    return new(scope.scope);
-}
-
-// Ends a parameter scope of params_make that the caller moves in, as check_env.close_params ends
-// one: the checker forgets the scope, the value moves out before the `del` of the allocation, and
-// scope.drop frees it.
-fn params_drop_made(check_env.env mut* e, scope.scope mut* own p) void {
-    e->ck.scope = null;
-    scope.scope kept = move(*p);
-    del(p);
-    scope.drop(move(kept));
-}
-
 // ---- the arms of the conditional ---------------------------------------------------
 
 // The arms of `?:` lend, so two owning lvalue arms yield a view and the
@@ -281,11 +266,11 @@ fn the_arms_of_a_conditional_lend() void {
     defer check_env.drop_made(move(e));
     assert(open_probe2(e, "fn probe(bool go) void {\n    borrow(go ? mine : theirs);\n}\n",
         "fn borrow(cell mut* p) void {\n    return;\n}\n"));
-    scope.scope mut* own params = params_make();
+    scope.scope mut* own params = scope.make(scope.scope_kind.s_block, null);
     check_env.open_params(e, params, "probe");
     check.expr o = check_env.probe_expr(e,
         check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_ternary, ""));
-    params_drop_made(e, move(params));
+    check_env.params_drop_made(e, move(params));
     assert(check_env.errors(e) == 0);
     assert(check_env.type_text(e, o.ty) == "cell mut*");
 }
@@ -298,11 +283,11 @@ fn two_owning_rvalue_arms_yield_an_owning_rvalue() void {
     defer check_env.drop_made(move(e));
     assert(open_probe2(e, "fn probe(bool go) void {\n    keep(go ? new(cell) : null);\n}\n",
         "fn keep(cell mut* own p) void {\n    del(p);\n}\n"));
-    scope.scope mut* own params = params_make();
+    scope.scope mut* own params = scope.make(scope.scope_kind.s_block, null);
     check_env.open_params(e, params, "probe");
     check.expr o = check_env.probe_expr(e,
         check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_ternary, ""));
-    params_drop_made(e, move(params));
+    check_env.params_drop_made(e, move(params));
     assert(check_env.type_text(e, o.ty) == "cell mut* own");
     assert(!o.lvalue);
 }
@@ -314,11 +299,11 @@ fn an_owning_rvalue_arm_beside_a_lending_one_would_leak() void {
     defer check_env.drop_made(move(e));
     assert(open_probe2(e, "fn probe(bool go) void {\n    borrow(go ? theirs : new(cell));\n}\n",
         "fn borrow(cell mut* p) void {\n    return;\n}\n"));
-    scope.scope mut* own params = params_make();
+    scope.scope mut* own params = scope.make(scope.scope_kind.s_block, null);
     check_env.open_params(e, params, "probe");
     check_env.probe_expr(e,
         check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_ternary, ""));
-    params_drop_made(e, move(params));
+    check_env.params_drop_made(e, move(params));
     assert(check_env.said(e, "owning temporary would leak: the other arm does not own"));
 }
 
@@ -331,11 +316,11 @@ fn an_owning_aggregate_arm_is_a_transfer_and_needs_move() void {
     check_env.env mut* own e = check_env.make();
     defer check_env.drop_made(move(e));
     assert(open_probe(e, "fn probe(bool go) void {\n    hh = go ? hh : hh;\n}\n"));
-    scope.scope mut* own params = params_make();
+    scope.scope mut* own params = scope.make(scope.scope_kind.s_block, null);
     check_env.open_params(e, params, "probe");
     check_env.probe_expr(e,
         check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_ternary, ""));
-    params_drop_made(e, move(params));
+    check_env.params_drop_made(e, move(params));
     assert(check_env.said(e, "copying an owning value requires 'move'"));
 }
 
@@ -346,11 +331,11 @@ fn two_moved_aggregate_arms_yield_an_owning_rvalue() void {
     check_env.env mut* own e = check_env.make();
     defer check_env.drop_made(move(e));
     assert(open_probe(e, "fn probe(bool go) void {\n    hh = go ? move(hh) : move(hh);\n}\n"));
-    scope.scope mut* own params = params_make();
+    scope.scope mut* own params = scope.make(scope.scope_kind.s_block, null);
     check_env.open_params(e, params, "probe");
     check.expr o = check_env.probe_expr(e,
         check_env.node_find(check_env.body_expr(e, "probe", 0), ast.ast_kind.k_ternary, ""));
-    params_drop_made(e, move(params));
+    check_env.params_drop_made(e, move(params));
     assert(check_env.errors(e) == 0);
     assert(check_env.type_text(e, o.ty) == "holder");
     assert(!o.lvalue);
@@ -371,12 +356,12 @@ fn returning_an_own_parameter_outright_is_an_implicit_move() void {
     // `move`, and only when it names a local or a parameter outright. The
     // emitter empties the operand after reading it, which is what lets a
     // `defer del(p)` written above see the zero value.
-    scope.scope mut* own params = params_make();
+    scope.scope mut* own params = scope.make(scope.scope_kind.s_block, null);
     check_env.open_params(e, params, "take");
     ast.node mut* ret = check_env.return_in(e, "take");
     check.expr mut out = check.expr{};
     check.check_return_value(&e->ck, ret, check_env.result_type(e, "take"), &out);
-    params_drop_made(e, move(params));
+    check_env.params_drop_made(e, move(params));
     assert(check_env.errors(e) == 0);
     assert(check_env.type_text(e, out.ty) == "cell mut* own");
     assert(check_env.has_ann(ret, check.ANN_MOVE));

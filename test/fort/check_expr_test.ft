@@ -7,7 +7,6 @@
 import fort.ast;
 import fort.check;
 import check_env;
-import fort.containers;
 import fort.prim;
 import std.str;
 import std.strbuf;
@@ -946,29 +945,6 @@ fn one_owner(check_env.env mut* e) types.node* {
     return types.type_ptr(&e->ck.types, word, true, false);
 }
 
-// A memo in an allocation of its own: first_hidden takes it by pointer.
-fn memo_make() check.place_memo mut* own {
-    return new(check.place_memo);
-}
-
-// Frees a memo that the caller moves in: each owner that check.memo_free frees, and the pool of
-// the keys through its drop.
-fn memo_drop(check.place_memo mut m) void {
-    del(m.held.entries);
-    containers.pool_drop(move(m.keys));
-    del(m.text.data);
-    del(m.frames);
-    del(m.entered);
-}
-
-// Ends a memo of memo_make that the caller moves in: the value moves out before the `del` of the
-// allocation, and memo_drop frees it.
-fn memo_drop_made(check.place_memo mut* own p) void {
-    check.place_memo kept = move(*p);
-    del(p);
-    memo_drop(move(kept));
-}
-
 fn the_memo_keeps_one_key_for_each_kind_of_part_and_not_for_each_owner(check_env.env mut* e) void {
     string own decls = nested("s", 6, 128, "u64* own", "");
     defer del(decls);
@@ -977,15 +953,15 @@ fn the_memo_keeps_one_key_for_each_kind_of_part_and_not_for_each_owner(check_env
     types.node* flat = types.type_array(&e->ck.types, one_owner(e), 4398046511104);
     // A flat array over the nesting: the array, the run of its owners over each of the six
     // structs, and the one owner. A walk of each owner would read 128 to the power 6 of them.
-    check.place_memo mut* own m = memo_make();
-    defer memo_drop_made(move(m));
+    check.place_memo mut* own m = check.memo_make(false);
+    defer check.memo_drop_made(move(m));
     check.pointer_place mut h = check.pointer_place{};
     assert(!check.first_hidden(m, flat, 1, 0, nest, &h));
     assert(strmap.count(&m->held) == 8);
     // The nesting over the flat array: each struct at a byte that is 0 modulo the element size of
     // the array, and the one owner.
-    check.place_memo mut* own back = memo_make();
-    defer memo_drop_made(move(back));
+    check.place_memo mut* own back = check.memo_make(false);
+    defer check.memo_drop_made(move(back));
     assert(!check.first_hidden(back, nest, 1, 0, flat, &h));
     assert(strmap.count(&back->held) == 7);
 }
@@ -998,8 +974,8 @@ fn the_memo_keeps_no_key_for_a_run_with_a_hidden_owner(check_env.env mut* e) voi
     // Fifteen owners of the flat array are held, and the sixteenth is past the end of `s2`. The
     // memo keeps the runs that hold each owner and none of the runs that lead to the sixteenth.
     types.node* flat = types.type_array(&e->ck.types, one_owner(e), 17);
-    check.place_memo mut* own m = memo_make();
-    defer memo_drop_made(move(m));
+    check.place_memo mut* own m = check.memo_make(false);
+    defer check.memo_drop_made(move(m));
     check.pointer_place mut h = check.pointer_place{};
     assert(check.first_hidden(m, flat, 1, 0, nest, &h));
     assert(h.at == 128);

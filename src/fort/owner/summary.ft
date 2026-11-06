@@ -231,11 +231,11 @@ fn free(graph mut* g) void {
 // Frees a graph that the caller moves in: the pool of the texts, the index, then each vector.
 fn drop(graph mut g) void {
     containers.pool_drop(move(g.texts));
-    del(g.index.entries);
+    strmap.drop(move(g.index));
     del(g.nodes.items);
     del(g.calls.items);
-    del(g.targets.items);
-    del(g.members.items);
+    vec.int_drop(move(g.targets));
+    vec.int_drop(move(g.members));
     del(g.components.items);
     del(g.arena.items);
     del(g.found.items);
@@ -434,6 +434,24 @@ struct walk {
     u64 visits;
 }
 
+// Frees a walk that the caller moves in: the three vectors of the numbers, then the three stacks.
+fn walk_drop(walk mut w) void {
+    del(w.number);
+    del(w.low);
+    del(w.on_stack);
+    vec.int_drop(move(w.stack));
+    vec.int_drop(move(w.frames));
+    vec.int_drop(move(w.next_call));
+}
+
+// Ends a walk in an allocation of its own that the caller moves in, for a function that lends
+// it to calls.
+fn walk_drop_made(walk mut* own p) void {
+    walk kept = move(*p);
+    del(p);
+    walk_drop(move(kept));
+}
+
 // Visits node `v`: gives it the next number and puts it on the stack and in a new frame.
 fn visit(walk mut* w, u64 v) void {
     w->visits += 1;
@@ -471,19 +489,12 @@ fn order(graph mut* g) void {
     g->members.len = 0;
     g->components.len = 0;
     u64 n = g->nodes.len;
-    walk mut w = walk{};
-    defer {
-        del(w.number);
-        del(w.low);
-        del(w.on_stack);
-        del(w.stack.items);
-        del(w.frames.items);
-        del(w.next_call.items);
-    }
-    w.number = new(u64, n);
-    w.low = new(u64, n);
-    w.on_stack = new(bool, n);
-    visit_all(g, &w);
+    walk mut* own w = new(walk);
+    defer walk_drop_made(move(w));
+    w->number = new(u64, n);
+    w->low = new(u64, n);
+    w->on_stack = new(bool, n);
+    visit_all(g, w);
 }
 
 // The walk of order from each node of `g` that `w` has not numbered. The caller keeps `w`, so it is
@@ -750,7 +761,7 @@ fn free_table(table mut* t) void {
 fn table_drop(table mut t) void {
     containers.pool_drop(move(t.texts));
     del(t.symbols.items);
-    del(t.ends.items);
+    vec.int_drop(move(t.ends));
     del(t.lines.items);
 }
 

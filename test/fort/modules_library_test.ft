@@ -522,27 +522,13 @@ fn two_used_libraries_each_own_their_paths(library_env.env mut* e) void {
     assert(sa != null && ga != null && sa->file != ga->file);
 }
 
-// A set in an allocation of its own, for a round of the release probe. The round lends the set
-// to calls, and no call changes the `own` pointer.
-fn set_make() modules.module_set mut* own {
-    return new(modules.module_set);
-}
-
-// Ends a set of set_make that the caller moves in: the value moves out before the `del` of the
-// allocation, and modules.drop frees it.
-fn set_drop_made(modules.module_set mut* own p) void {
-    modules.module_set kept = move(*p);
-    del(p);
-    modules.drop(move(kept));
-}
-
 // The release probe of the used libraries: rounds that each use two libraries in a fresh set and
 // a fresh session and end both through their drops, the round of the early sample, the late rounds
 // that it is held against, the distance in bytes that fails it, and the sections of each interface
 // file. The probe holds the live view of support/heap.ft and takes the smallest distance over the
 // late rounds. A round that keeps one library keeps its record, its tokens and its section map.
 //
-// Each round ends its set through set_drop_made and its session through session.drop_made. A
+// Each round ends its set through modules.drop_made and its session through session.drop_made. A
 // deletion of each of the seven releases of a used library in modules.drop, of
 // `del(set.used.items)`, of the three releases of diag.sources_drop, of the drop of the pool of the
 // set, of the drop of the source store in session.drop and of the drop in session.drop_made turns
@@ -588,13 +574,13 @@ fn two_used_libraries_are_released_with_the_set() void {
     u64 mut round = 0;
     while (round < USED_ROUNDS) {
         session.session mut* own s = session.make();
-        modules.module_set mut* own set = set_make();
+        modules.module_set mut* own set = modules.make();
         assert(modules.use_library(s, set, "shapes", "shapes.flib/interface.ft",
                                    strbuf.view(&shapes)));
         assert(modules.use_library(s, set, "forms", "forms.flib/interface.ft",
                                    strbuf.view(&forms)));
         assert(set->used.len == 2);
-        set_drop_made(move(set));
+        modules.drop_made(move(set));
         session.drop_made(move(s));
         if (round == USED_EARLY) {
             early = heap.live_view();

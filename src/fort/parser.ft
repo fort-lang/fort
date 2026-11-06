@@ -86,6 +86,19 @@ struct parser {
     bool interface;
 }
 
+// Frees a parser that the caller moves in: the message.
+fn drop(parser mut p) void {
+    strbuf.drop(move(p.msg));
+}
+
+// Ends a parser in an allocation of its own that the caller moves in, for a function that lends
+// it to calls.
+fn drop_made(parser mut* own p) void {
+    parser kept = move(*p);
+    del(p);
+    drop(move(kept));
+}
+
 // The state a speculative parse restores when it rewinds.
 struct spec_state {
     u64 pos;
@@ -2740,31 +2753,32 @@ fn parse_module(session.session mut* sess, string file, lexer.tok_vec* toks,
     if (ntoks == 0 || lexer.tokvec_at(toks, ntoks - 1).kind != lexer.tok_kind.eof) {
         panic("parser.parse_module: the token vector does not end in end of file");
     }
-    parser mut p = parser{sess, file, toks, ntoks, 0, ar, 0, 0, false, 0,
+    parser mut* own p = new(parser);
+    defer drop_made(move(p));
+    *p = parser{sess, file, toks, ntoks, 0, ar, 0, 0, false, 0,
                           diag.loc_make(file, 0, 0), strbuf.create(), 0, 0, false};
-    defer del(p.msg.data);
 
     ast.node mut* mod = ast.ast_new(ar, ast.ast_kind.k_module, diag.loc_make(file, 1, 1));
     // Both loops are recovery points, so one error removes one subtree.
     while (true) {
-        if (at(&p, lexer.tok_kind.kw_import)) {
-            parse_decl_into(&p, mod, true);
-        } else if (at(&p, lexer.tok_kind.dollar_if)) {
-            if (!parse_module_compile_if_into(&p, mod, true)) {
+        if (at(p, lexer.tok_kind.kw_import)) {
+            parse_decl_into(p, mod, true);
+        } else if (at(p, lexer.tok_kind.dollar_if)) {
+            if (!parse_module_compile_if_into(p, mod, true)) {
                 break;
             }
         } else {
             break;
         }
     }
-    while (!at(&p, lexer.tok_kind.eof)) {
-        if (at(&p, lexer.tok_kind.dollar_if)) {
-            parse_module_compile_if_into(&p, mod, false);
+    while (!at(p, lexer.tok_kind.eof)) {
+        if (at(p, lexer.tok_kind.dollar_if)) {
+            parse_module_compile_if_into(p, mod, false);
         } else {
-            parse_decl_into(&p, mod, false);
+            parse_decl_into(p, mod, false);
         }
     }
-    return finish(&p, mod);
+    return finish(p, mod);
 }
 
 // interface_import = "import" import_path "as" identifier ";": the one import form of an
@@ -2815,26 +2829,27 @@ fn parse_interface(session.session mut* sess, string file, lexer.tok_vec* toks,
     if (ntoks == 0 || lexer.tokvec_at(toks, ntoks - 1).kind != lexer.tok_kind.eof) {
         panic("parser.parse_interface: the token vector does not end in end of file");
     }
-    parser mut p = parser{sess, file, toks, ntoks, 0, ar, 0, 0, false, 0,
+    parser mut* own p = new(parser);
+    defer drop_made(move(p));
+    *p = parser{sess, file, toks, ntoks, 0, ar, 0, 0, false, 0,
                           diag.loc_make(file, 0, 0), strbuf.create(), 0, 0, true};
-    defer del(p.msg.data);
     diag.loc mut start = diag.loc_make(file, 1, 1);
     if (ntoks > 0) {
-        start = here(&p);
+        start = here(p);
     }
     ast.node mut* mod = ast.ast_new(ar, ast.ast_kind.k_module, start);
-    while (at(&p, lexer.tok_kind.kw_import)) {
-        u64 begin = p.pos;
-        ast.node mut* imp = parse_interface_import(&p);
+    while (at(p, lexer.tok_kind.kw_import)) {
+        u64 begin = p->pos;
+        ast.node mut* imp = parse_interface_import(p);
         if (imp != null) {
             ast.ast_push(mod, imp);
         }
-        if (p.failed) {
-            recover(&p, mod, begin, imp == null, RECOVER_DECL);
+        if (p->failed) {
+            recover(p, mod, begin, imp == null, RECOVER_DECL);
         }
     }
-    while (!at(&p, lexer.tok_kind.eof)) {
-        parse_decl_into(&p, mod, false);
+    while (!at(p, lexer.tok_kind.eof)) {
+        parse_decl_into(p, mod, false);
     }
-    return finish(&p, mod);
+    return finish(p, mod);
 }

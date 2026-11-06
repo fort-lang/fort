@@ -880,21 +880,6 @@ fn a_body_with_an_error_node_never_reports_missing_return() void {
     assert(check_env.reports(e) == 1);
 }
 
-// A parameter scope in an allocation of its own: open_params lends it to the checker.
-fn params_make() scope.scope mut* own {
-    return new(scope.scope);
-}
-
-// Ends a parameter scope of params_make that the caller moves in, as check_env.close_params ends
-// one: the checker forgets the scope, the value moves out before the `del` of the allocation, and
-// scope.drop frees it.
-fn params_drop_made(check_env.env mut* e, scope.scope mut* own p) void {
-    e->ck.scope = null;
-    scope.scope kept = move(*p);
-    del(p);
-    scope.drop(move(kept));
-}
-
 // ---- direct checker probes ---------------------------------------------------------
 
 fn an_immutable_binding_of_an_own_type_may_be_emptied_but_not_assigned() void {
@@ -913,12 +898,12 @@ fn an_immutable_binding_of_an_own_type_may_be_emptied_but_not_assigned() void {
     assert(check_env.open_module(e, strbuf.view(&sb)));
     // The parameter scope check_function_body opens around a body, so that
     // the name in it resolves to the parameter.
-    scope.scope mut* own params = params_make();
+    scope.scope mut* own params = scope.make(scope.scope_kind.s_block, null);
     check_env.open_params(e, params, "probe");
     ast.node mut* id = check_env.node_in_main(e, ast.ast_kind.k_ident, "p");
     assert(id != null);
     check.expr got = check_env.probe_expr(e, id);
-    params_drop_made(e, move(params));
+    check_env.params_drop_made(e, move(params));
     assert(check_env.errors(e) == 0);
     assert(got.lvalue);
     // The binding is immutable and its own storage is still emptiable.
