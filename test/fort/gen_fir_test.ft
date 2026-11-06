@@ -23,18 +23,13 @@ import std.strbuf;
 // With the empty runtime, the lowering refuses a function with a print (spec/fir.md 9.8), and
 // rule V7 refuses a function whose check needs a runtime entry. Each is a compile error.
 
-// Opens `e` over the source `lines`, each ended by its newline, with the runtime of lower_env when
-// `runtime` is set and an empty one otherwise, and emits the whole program in the default mode.
-// Gives what gen_program gives: false after a diagnostic.
+// Writes the source `lines`, each ended by its newline, into the sandbox of `e`, with the runtime
+// of lower_env when `runtime` is set and an empty one otherwise, and emits the whole program in the
+// mode that `e` was made with (gen_env.make or gen_env.make_with). Gives what gen_program gives:
+// false after a diagnostic.
 fn emit(gen_env.env mut* e, string@ lines, bool runtime) bool {
-    return emit_with(e, lines, runtime, gen.gen_options{});
-}
-
-// The same in the mode of `opts`.
-fn emit_with(gen_env.env mut* e, string@ lines, bool runtime, gen.gen_options opts) bool {
-    gen_env.open_with(e, opts);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
     {
         string@ range_values = lines;
         u64 mut range_index = 0;
@@ -63,7 +58,7 @@ string NO_OVERFLOW = " has no entry `fail_overflow` with the parameters that `ad
 // The definition of `main.<name>` in `text`, from its `define` line to its `}` line.
 fn definition(string text, string name) string {
     strbuf.str_buf mut head = strbuf.create();
-    defer strbuf.free(&head);
+    defer del(head.data);
     strbuf.append(&head, "@\"main.");
     strbuf.append(&head, name);
     strbuf.append(&head, "\"(");
@@ -125,31 +120,31 @@ string[7] FIR_HELPER = {
 // program fails, and no other path writes the function (spec/fir.md 9.8). `id` stands as the
 // translator writes it.
 fn a_print_with_no_runtime_function_is_an_error_and_writes_no_text() void {
-    gen_env.env mut e = gen_env.env{};
-    assert(!emit(&e, PATHS[..], false));
-    defer gen_env.close(&e);
-    assert(gen_env.said(&e, NO_PRINT));
-    assert(gen_env.errors(&e) == 1);
-    assert(e.g.failed);
-    string got = gen_env.funcs(&e);
-    gen_env.expect_text(definition(got, "id"), gen_env.join_lines(&e, FIR_ID[..]));
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(!emit(e, PATHS[..], false));
+    assert(gen_env.said(e, NO_PRINT));
+    assert(gen_env.errors(e) == 1);
+    assert(e->g.failed);
+    string got = gen_env.funcs(e);
+    gen_env.expect_text(definition(got, "id"), gen_env.join_lines(e, FIR_ID[..]));
     assert(str.find(got, "main.helper") < 0);
 }
 
 // With the runtime of lower_env in the closure, the lowering supports every function of PATHS
 // and the translator writes each, the functions of the runtime among them.
 fn with_the_runtime_every_function_is_written() void {
-    gen_env.env mut e = gen_env.env{};
-    assert(emit(&e, PATHS[..], true));
-    defer gen_env.close(&e);
-    assert(gen_env.errors(&e) == 0);
-    string got = gen_env.funcs(&e);
-    gen_env.expect_text(definition(got, "id"), gen_env.join_lines(&e, FIR_ID[..]));
-    gen_env.expect_text(definition(got, "helper"), gen_env.join_lines(&e, FIR_HELPER[..]));
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(emit(e, PATHS[..], true));
+    assert(gen_env.errors(e) == 0);
+    string got = gen_env.funcs(e);
+    gen_env.expect_text(definition(got, "id"), gen_env.join_lines(e, FIR_ID[..]));
+    gen_env.expect_text(definition(got, "helper"), gen_env.join_lines(e, FIR_HELPER[..]));
     assert(str.find(got, "@\"std.rt.fail_overflow\"(") >= 0);
-    assert(e.g.lowered == e.g.functions);
-    assert(e.g.functions > 3);
-    gen_env.expect_blocks(&e, gen_env.module_text(&e));
+    assert(e->g.lowered == e->g.functions);
+    assert(e->g.functions > 3);
+    gen_env.expect_blocks(e, gen_env.module_text(e));
 }
 
 // A function with an overflow check.
@@ -166,28 +161,28 @@ string[6] ADD = {
 // supports the function, but rule V7 would refuse its FIR, so it is a compile error at the name of
 // the function that names the entry, and no text.
 fn a_check_with_no_runtime_entry_is_an_error() void {
-    gen_env.env mut e = gen_env.env{};
-    assert(!emit(&e, ADD[..], false));
-    defer gen_env.close(&e);
-    assert(gen_env.said(&e, NO_OVERFLOW));
-    assert(gen_env.said(&e, "the runtime `std.rt` has no entry"));
-    assert(gen_env.errors(&e) == 1);
-    assert(str.find(gen_env.funcs(&e), "main.add") < 0);
-    assert(e.g.functions == 2);
-    assert(e.g.lowered == 1);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(!emit(e, ADD[..], false));
+    assert(gen_env.said(e, NO_OVERFLOW));
+    assert(gen_env.said(e, "the runtime `std.rt` has no entry"));
+    assert(gen_env.errors(e) == 1);
+    assert(str.find(gen_env.funcs(e), "main.add") < 0);
+    assert(e->g.functions == 2);
+    assert(e->g.lowered == 1);
 }
 
 // Under --release the build-mode pass removes the overflow check of `add`, so the module calls
 // no `fail_overflow`, and the empty runtime is enough: no error, and both functions are written.
 // An entry is needed only by the checks that the pass of the mode keeps.
 fn a_check_that_the_mode_removes_needs_no_runtime_entry() void {
-    gen_env.env mut e = gen_env.env{};
-    assert(emit_with(&e, ADD[..], false, gen.gen_options{true, false, ""}));
-    defer gen_env.close(&e);
-    assert(gen_env.errors(&e) == 0);
-    assert(e.g.functions == 2);
-    assert(e.g.lowered == 2);
-    string add = definition(gen_env.funcs(&e), "add");
+    gen_env.env mut* own e = gen_env.make_with(gen.gen_options{true, false, ""});
+    defer gen_env.drop_made(move(e));
+    assert(emit(e, ADD[..], false));
+    assert(gen_env.errors(e) == 0);
+    assert(e->g.functions == 2);
+    assert(e->g.lowered == 2);
+    string add = definition(gen_env.funcs(e), "add");
     assert(str.find(add, "  %t2 = add i32 %t0, %t1\n") >= 0);
     assert(str.find(add, "fail_overflow") < 0);
 }
@@ -210,38 +205,38 @@ string[9] INDEX_SHIFT = {
 // `fail_bounds`, and removes the shift check of `sh`, so `sh` needs no `fail_shift`.
 // `--no-bounds-check` removes the bounds check and keeps the overflow check of ADD.
 fn each_mode_excuses_only_the_kinds_that_it_removes() void {
-    gen_env.env mut r = gen_env.env{};
-    assert(!emit_with(&r, INDEX_SHIFT[..], false, gen.gen_options{true, false, ""}));
-    defer gen_env.close(&r);
-    assert(gen_env.said(&r, " has no entry `fail_bounds` with the parameters that `at` needs"));
-    assert(gen_env.errors(&r) == 1);
-    string released = gen_env.funcs(&r);
+    gen_env.env mut* own r = gen_env.make_with(gen.gen_options{true, false, ""});
+    defer gen_env.drop_made(move(r));
+    assert(!emit(r, INDEX_SHIFT[..], false));
+    assert(gen_env.said(r, " has no entry `fail_bounds` with the parameters that `at` needs"));
+    assert(gen_env.errors(r) == 1);
+    string released = gen_env.funcs(r);
     assert(str.find(released, "main.at\"") < 0);
     assert(str.find(definition(released, "sh"), "fail_shift") < 0);
-    gen_env.env mut n = gen_env.env{};
-    assert(emit_with(&n, INDEX_SHIFT[..], false, gen.gen_options{false, true, ""}) == false);
-    defer gen_env.close(&n);
-    assert(gen_env.said(&n, " has no entry `fail_shift` with the parameters that `sh` needs"));
-    assert(gen_env.errors(&n) == 1);
-    string unbounded = gen_env.funcs(&n);
+    gen_env.env mut* own n = gen_env.make_with(gen.gen_options{false, true, ""});
+    defer gen_env.drop_made(move(n));
+    assert(emit(n, INDEX_SHIFT[..], false) == false);
+    assert(gen_env.said(n, " has no entry `fail_shift` with the parameters that `sh` needs"));
+    assert(gen_env.errors(n) == 1);
+    string unbounded = gen_env.funcs(n);
     assert(str.find(definition(unbounded, "at"), "fail_bounds") < 0);
     assert(str.find(unbounded, "main.sh\"") < 0);
-    gen_env.env mut a = gen_env.env{};
-    assert(!emit_with(&a, ADD[..], false, gen.gen_options{false, true, ""}));
-    defer gen_env.close(&a);
-    assert(gen_env.said(&a, NO_OVERFLOW));
+    gen_env.env mut* own a = gen_env.make_with(gen.gen_options{false, true, ""});
+    defer gen_env.drop_made(move(a));
+    assert(!emit(a, ADD[..], false));
+    assert(gen_env.said(a, NO_OVERFLOW));
 }
 
 // Under both modes the pass removes both checks, so the empty runtime is enough. A pass that
 // kept a check would leave it to the verifier after the pass, which excuses no kind and so stops
 // the build with a panic of rule V7.
 fn both_modes_need_no_entry_for_an_index_or_a_shift() void {
-    gen_env.env mut e = gen_env.env{};
-    assert(emit_with(&e, INDEX_SHIFT[..], false, gen.gen_options{true, true, ""}));
-    defer gen_env.close(&e);
-    assert(gen_env.errors(&e) == 0);
-    assert(e.g.lowered == 3);
-    string text = gen_env.funcs(&e);
+    gen_env.env mut* own e = gen_env.make_with(gen.gen_options{true, true, ""});
+    defer gen_env.drop_made(move(e));
+    assert(emit(e, INDEX_SHIFT[..], false));
+    assert(gen_env.errors(e) == 0);
+    assert(e->g.lowered == 3);
+    string text = gen_env.funcs(e);
     assert(str.find(text, "fail_bounds") < 0);
     assert(str.find(text, "fail_shift") < 0);
 }
@@ -291,15 +286,15 @@ string[10] ENTRIES = {
 };
 
 fn a_fail_with_no_runtime_entry_is_an_error_and_an_overwrite_check_needs_none() void {
-    gen_env.env mut e = gen_env.env{};
-    assert(!emit(&e, ENTRIES[..], false));
-    defer gen_env.close(&e);
-    assert(e.g.functions == 3);
-    assert(e.g.lowered == 2);
-    assert(gen_env.errors(&e) == 1);
-    assert(gen_env.said(&e, "has no entry `panic` with the parameters that `stop` needs"));
-    assert(!gen_env.said(&e, "fail_overwrite"));
-    string text = gen_env.funcs(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(!emit(e, ENTRIES[..], false));
+    assert(e->g.functions == 3);
+    assert(e->g.lowered == 2);
+    assert(gen_env.errors(e) == 1);
+    assert(gen_env.said(e, "has no entry `panic` with the parameters that `stop` needs"));
+    assert(!gen_env.said(e, "fail_overwrite"));
+    string text = gen_env.funcs(e);
     assert(str.find(text, "main.stop") < 0);
     assert(str.find(definition(text, "drop"), "store ptr null") >= 0);
     assert(str.find(text, "fail_overwrite") < 0);
@@ -327,11 +322,11 @@ string[13] LITERALS = {
 // destination with `llvm.memset`, the padding included, and stores the named field alone. A
 // positional literal stores each field and writes no memset.
 fn a_designated_literal_zeroes_its_padding() void {
-    gen_env.env mut e = gen_env.env{};
-    assert(emit(&e, LITERALS[..], false));
-    defer gen_env.close(&e);
-    assert(e.g.lowered == 3);
-    string text = gen_env.funcs(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(emit(e, LITERALS[..], false));
+    assert(e->g.lowered == 3);
+    string text = gen_env.funcs(e);
     string named = definition(text, "named");
     string memset = "call void @llvm.memset.p0.i64(ptr align 8 %ret.sret, i8 0, i64 16, i1 false)";
     i64 zeroed = str.find(named, memset);
@@ -341,7 +336,7 @@ fn a_designated_literal_zeroes_its_padding() void {
     string listed = definition(text, "listed");
     assert(str.find(listed, "@llvm.memset") < 0);
     assert(str.find(listed, "store i8 0, ptr ") >= 0);
-    gen_env.expect_blocks(&e, gen_env.module_text(&e));
+    gen_env.expect_blocks(e, gen_env.module_text(e));
 }
 
 // ---- the counts --------------------------------------------------------------------------------
@@ -350,47 +345,47 @@ fn a_designated_literal_zeroes_its_padding() void {
 // those that the translator wrote. PATHS with `main` has three definitions, and the lowering
 // refuses one in the empty runtime.
 fn the_counts_are_the_definitions_and_those_that_the_translator_wrote() void {
-    gen_env.env mut e = gen_env.env{};
-    assert(!emit(&e, PATHS[..], false));
-    defer gen_env.close(&e);
-    assert(e.g.functions == 3);
-    assert(e.g.lowered == 2);
-    assert(str.find(gen_env.module_text(&e), "define dso_local i32 @main(") >= 0);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(!emit(e, PATHS[..], false));
+    assert(e->g.functions == 3);
+    assert(e->g.lowered == 2);
+    assert(str.find(gen_env.module_text(e), "define dso_local i32 @main(") >= 0);
 }
 
 // A function with no body is no definition, and neither is an `extern fn`: a module of `main`
 // alone has one definition, which the translator writes.
 fn a_declaration_without_a_body_is_not_counted() void {
-    gen_env.env mut e = gen_env.env{};
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[4] declared = {
         "extern fn abs(i32 x) i32;\n",
         "fn main() i32 {\n",
         "    return 0;\n",
         "}\n",
     };
-    assert(emit(&e, declared[..], false));
-    defer gen_env.close(&e);
-    assert(e.g.functions == 1);
-    assert(e.g.lowered == 1);
+    assert(emit(e, declared[..], false));
+    assert(e->g.functions == 1);
+    assert(e->g.lowered == 1);
 }
 
 // gen_free resets the counts and the failure of a refused program with the rest of the state
 // (D20.5), so that a reused emitter counts from 0 and writes the next program. PATHS fails in the
 // empty runtime, and the reused emitter then writes `main`.
 fn the_counts_start_at_zero() void {
-    gen_env.env mut e = gen_env.env{};
-    assert(!emit(&e, PATHS[..], false));
-    defer gen_env.close(&e);
-    assert(e.g.functions > 0);
-    assert(e.g.failed);
-    gen.gen_free(&e.g);
-    assert(e.g.functions == 0);
-    assert(e.g.lowered == 0);
-    assert(!e.g.failed);
-    gen.gen_init(&e.g, &e.c.m.s, gen.gen_options{});
-    gen_env.emit_function(&e, "main");
-    assert(!e.g.failed);
-    assert(str.find(gen_env.funcs(&e), "define dso_local i32 @\"main.main\"() #0 {\n") >= 0);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(!emit(e, PATHS[..], false));
+    assert(e->g.functions > 0);
+    assert(e->g.failed);
+    gen.gen_free(&e->g);
+    assert(e->g.functions == 0);
+    assert(e->g.lowered == 0);
+    assert(!e->g.failed);
+    gen.gen_init(&e->g, &e->c.m.s, gen.gen_options{});
+    gen_env.emit_function(e, "main");
+    assert(!e->g.failed);
+    assert(str.find(gen_env.funcs(e), "define dso_local i32 @\"main.main\"() #0 {\n") >= 0);
 }
 
 // ---- the declarations --------------------------------------------------------------------------
@@ -439,12 +434,12 @@ string[2] NESTED_DECLARATIONS = {
 // order of the text, so the inner call comes first.
 fn a_nested_call_declares_the_inner_function_first() void {
     strbuf.str_buf mut lines = strbuf.create();
-    defer strbuf.free(&lines);
-    gen_env.env mut e = gen_env.env{};
-    assert(emit(&e, NESTED[..], false));
-    defer gen_env.close(&e);
-    string text = gen_env.module_text(&e);
-    string want = gen_env.join_lines(&e, NESTED_DECLARATIONS[..]);
+    defer del(lines.data);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(emit(e, NESTED[..], false));
+    string text = gen_env.module_text(e);
+    string want = gen_env.join_lines(e, NESTED_DECLARATIONS[..]);
     gen_env.expect_text(declarations(text, &lines), want);
     string body = definition(text, "nested");
     i64 inner = str.find(body, "call i32 @putchar(i32 65) #3");
@@ -493,35 +488,34 @@ string[4] MIXED_DECLARATIONS = {
 // invalid redefinition.
 fn two_modules_that_declare_one_c_function_write_one_declare() void {
     strbuf.str_buf mut lines = strbuf.create();
-    defer strbuf.free(&lines);
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    defer del(lines.data);
     strbuf.str_buf mut helper = strbuf.create();
-    defer strbuf.free(&helper);
+    defer del(helper.data);
+    strbuf.str_buf mut src = strbuf.create();
+    defer del(src.data);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     strbuf.append(&helper, "extern fn abs(i32 x) i32;\n");
     strbuf.append(&helper, "fn one(i32 x) i32 {\n    return abs(x);\n}\n");
-    check_env.add(&e.c, "helper.ft", strbuf.view(&helper));
-    strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    check_env.add(&e->c, "helper.ft", strbuf.view(&helper));
     strbuf.append(&src, "import helper;\nextern fn abs(i32 x) i32;\n");
     strbuf.append(&src, "fn main() i32 {\n    return helper.one(abs(0));\n}\n");
-    assert(gen_env.open_module(&e, strbuf.view(&src)));
-    assert(gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
-    string text = gen_env.module_text(&e);
+    assert(gen_env.open_module(e, strbuf.view(&src)));
+    assert(gen_fir.gen_program(&e->g, &e->c.ck, &e->c.m.set));
+    string text = gen_env.module_text(e);
     gen_env.expect_text(declarations(text, &lines), "declare i32 @abs(i32) nobuiltin\n");
     assert(str.find(definition(text, "main"), "call i32 @abs(i32 0) #3") >= 0);
-    gen_env.expect_blocks(&e, text);
+    gen_env.expect_blocks(e, text);
 }
 
 fn the_declarations_follow_the_text_of_a_mixed_module() void {
     strbuf.str_buf mut lines = strbuf.create();
-    defer strbuf.free(&lines);
-    gen_env.env mut e = gen_env.env{};
-    assert(emit(&e, MIXED[..], true));
-    defer gen_env.close(&e);
-    assert(e.g.lowered == e.g.functions);
-    string text = gen_env.module_text(&e);
+    defer del(lines.data);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(emit(e, MIXED[..], true));
+    assert(e->g.lowered == e->g.functions);
+    string text = gen_env.module_text(e);
     string body = definition(text, "counted");
     i64 first = str.find(body, "call i32 @abs(");
     i64 after = str.find(body, "call i32 @getchar()");
@@ -529,9 +523,9 @@ fn the_declarations_follow_the_text_of_a_mixed_module() void {
     assert(first >= 0 && after > first && last > after);
     assert(str.find(body, "%result") >= 0);
     assert(str.find(definition(text, "shown"), "call void @\"std.rt.print_i64\"(") >= 0);
-    string want = gen_env.join_lines(&e, MIXED_DECLARATIONS[..]);
+    string want = gen_env.join_lines(e, MIXED_DECLARATIONS[..]);
     gen_env.expect_text(declarations(text, &lines), want);
-    gen_env.expect_blocks(&e, text);
+    gen_env.expect_blocks(e, text);
 }
 
 fn main() i32 {

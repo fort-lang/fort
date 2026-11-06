@@ -24,21 +24,21 @@ fn decl_at(u64 i) u64 {
 // of its own. Pointer equality is identity inside a table and says nothing
 // across two.
 fn three_tables_intern_three_nodes() void {
-    types.table mut a = types.table{};
-    defer types.type_table_free(&a);
-    types.table mut b = types.table{};
-    defer types.type_table_free(&b);
-    types.table mut c = types.table{};
-    defer types.type_table_free(&c);
-    types.node* pa = types.type_ptr(&a, types.type_prim(&a, prim.prim_kind.prim_i32), false, true);
-    types.node* pb = types.type_ptr(&b, types.type_prim(&b, prim.prim_kind.prim_i32), false, true);
-    types.node* pc = types.type_ptr(&c, types.type_prim(&c, prim.prim_kind.prim_i32), false, true);
+    types.table mut* own a = types.table_make();
+    defer types.table_drop_made(move(a));
+    types.table mut* own b = types.table_make();
+    defer types.table_drop_made(move(b));
+    types.table mut* own c = types.table_make();
+    defer types.table_drop_made(move(c));
+    types.node* pa = types.type_ptr(a, types.type_prim(a, prim.prim_kind.prim_i32), false, true);
+    types.node* pb = types.type_ptr(b, types.type_prim(b, prim.prim_kind.prim_i32), false, true);
+    types.node* pc = types.type_ptr(c, types.type_prim(c, prim.prim_kind.prim_i32), false, true);
     assert(pa != pb);
     assert(pb != pc);
     assert(pa != pc);
     // Each table still interns for itself.
-    assert(pa == types.type_ptr(&a, types.type_prim(&a, prim.prim_kind.prim_i32), false, true));
-    assert(pb == types.type_ptr(&b, types.type_prim(&b, prim.prim_kind.prim_i32), false, true));
+    assert(pa == types.type_ptr(a, types.type_prim(a, prim.prim_kind.prim_i32), false, true));
+    assert(pb == types.type_ptr(b, types.type_prim(b, prim.prim_kind.prim_i32), false, true));
     // The nodes are structurally equal all the same: identity is structural
     // for a pointer type. So the two answer `type_equal` across the tables
     // even though they are two nodes.
@@ -49,18 +49,18 @@ fn three_tables_intern_three_nodes() void {
 // A struct laid out in one table says nothing about the struct of the same
 // name in another: its identity is its declaration.
 fn a_layout_in_one_table_leaves_the_other_alone() void {
-    types.table mut a = types.table{};
-    defer types.type_table_free(&a);
-    types.table mut b = types.table{};
-    defer types.type_table_free(&b);
-    types.node* sa = types.type_struct(&a, "point", decl_at(0));
-    types.node* sb = types.type_struct(&b, "point", decl_at(0));
+    types.table mut* own a = types.table_make();
+    defer types.table_drop_made(move(a));
+    types.table mut* own b = types.table_make();
+    defer types.table_drop_made(move(b));
+    types.node* sa = types.type_struct(a, "point", decl_at(0));
+    types.node* sb = types.type_struct(b, "point", decl_at(0));
     // Two nodes, and equal all the same: identity is the declaration, which is
     // the same one here, and not the node.
     assert(sa != sb);
     assert(types.type_equal(sa, sb));
-    types.node*[2] mut fields = {types.type_prim(&a, prim.prim_kind.prim_i32),
-                                 types.type_prim(&a, prim.prim_kind.prim_i32)};
+    types.node*[2] mut fields = {types.type_prim(a, prim.prim_kind.prim_i32),
+                                 types.type_prim(a, prim.prim_kind.prim_i32)};
     u64[2] mut offsets = {};
     assert(types.type_layout_begin(sa));
     assert(types.type_layout_struct(sa, fields[..], offsets[..]));
@@ -69,7 +69,7 @@ fn a_layout_in_one_table_leaves_the_other_alone() void {
     assert(types.type_layout_state(sb) == types.layout_state.l_unresolved);
     assert(types.type_sizeof(sa) == 8);
     // Its own unresolved state permits an independent layout.
-    types.node*[1] mut other_fields = {types.type_prim(&b, prim.prim_kind.prim_i64)};
+    types.node*[1] mut other_fields = {types.type_prim(b, prim.prim_kind.prim_i64)};
     u64[1] mut other_offsets = {};
     assert(types.type_layout_begin(sb));
     assert(types.type_layout_struct(sb, other_fields[..], other_offsets[..]));
@@ -80,24 +80,22 @@ fn a_layout_in_one_table_leaves_the_other_alone() void {
 // Two whole test environments live at once and neither sees the other's
 // names: the environment is a value like any other.
 fn two_environments_share_nothing() void {
-    types_env.env mut a = types_env.env{};
-    types_env.init(&a);
-    defer types_env.free(&a);
-    types_env.env mut b = types_env.env{};
-    types_env.init(&b);
-    defer types_env.free(&b);
-    assert(types_env.type_of(&a, "node mut* own mut@ own") !=
-           types_env.type_of(&b, "node mut* own mut@ own"));
-    assert(types_env.spell(&a, "node mut* own mut@ own") ==
-           types_env.spell(&b, "node mut* own mut@ own"));
+    types_env.env mut* own a = types_env.make();
+    defer types_env.drop_made(move(a));
+    types_env.env mut* own b = types_env.make();
+    defer types_env.drop_made(move(b));
+    assert(types_env.type_of(a, "node mut* own mut@ own") !=
+           types_env.type_of(b, "node mut* own mut@ own"));
+    assert(types_env.spell(a, "node mut* own mut@ own") ==
+           types_env.spell(b, "node mut* own mut@ own"));
     // A struct built in one is unknown to the other's lookup.
-    types_env.make_struct(&a, "only_here");
-    assert(types_env.lookup(&a, "only_here") != null);
-    assert(types_env.lookup(&b, "only_here") == null);
+    types_env.make_struct(a, "only_here");
+    assert(types_env.lookup(a, "only_here") != null);
+    assert(types_env.lookup(b, "only_here") == null);
     // Their `vec` types are both owning aggregates, each from its own layout.
-    assert(types.type_is_owning_aggregate(a.vec));
-    assert(types.type_is_owning_aggregate(b.vec));
-    assert(a.vec != b.vec);
+    assert(types.type_is_owning_aggregate(a->vec));
+    assert(types.type_is_owning_aggregate(b->vec));
+    assert(a->vec != b->vec);
 }
 
 // ---- a table filled and freed again and again -----------------------------------
@@ -111,19 +109,19 @@ fn two_environments_share_nothing() void {
 fn a_thousand_tables_do_not_grow_the_heap() void {
     u64 mut n = 0;
     while (n < 1000) {
-        types.table mut tt = types.table{};
-        types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
-        types.node* p = types.type_ptr(&tt, i32t, true, true);
+        types.table mut* own tt = types.table_make();
+        types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
+        types.node* p = types.type_ptr(tt, i32t, true, true);
         types.node*[2] mut params = {i32t, p};
-        types.node* f = types.type_fn(&tt, types.type_void(&tt), params[..], false);
-        assert(f == types.type_fn(&tt, types.type_void(&tt), params[..], false));
-        types.node* s = types.type_struct(&tt, "point", decl_at(1));
+        types.node* f = types.type_fn(tt, types.type_void(tt), params[..], false);
+        assert(f == types.type_fn(tt, types.type_void(tt), params[..], false));
+        types.node* s = types.type_struct(tt, "point", decl_at(1));
         types.node*[2] mut fields = {i32t, i32t};
         u64[2] mut offsets = {};
         assert(types.type_layout_begin(s));
         assert(types.type_layout_struct(s, fields[..], offsets[..]));
         assert(types.type_sizeof(s) == 8);
-        types.type_table_free(&tt);
+        types.table_drop_made(move(tt));
         n += 1;
     }
 }
@@ -131,24 +129,24 @@ fn a_thousand_tables_do_not_grow_the_heap() void {
 // The same table, filled and freed a thousand times, is a table that starts
 // again each time. Freeing it leaves an empty table that is usable.
 fn one_table_reused_a_thousand_times_starts_again() void {
-    types.table mut tt = types.table{};
-    defer types.type_table_free(&tt);
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
     types.node* mut first = null;
     u64 mut n = 0;
     while (n < 1000) {
-        types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
-        types.node* span = types.type_span(&tt, i32t, true, true);
-        assert(span == types.type_span(&tt, i32t, true, true));
+        types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
+        types.node* span = types.type_span(tt, i32t, true, true);
+        assert(span == types.type_span(tt, i32t, true, true));
         if (n == 0) {
             first = span;
         }
-        types.type_table_free(&tt);
+        types.type_table_free(tt);
         n += 1;
     }
     // After the last free the table is empty and interning begins again.
-    types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
-    assert(types.type_span(&tt, i32t, true, true) ==
-           types.type_span(&tt, i32t, true, true));
+    types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
+    assert(types.type_span(tt, i32t, true, true) ==
+           types.type_span(tt, i32t, true, true));
     assert(first != null);
 }
 
@@ -157,11 +155,10 @@ fn one_table_reused_a_thousand_times_starts_again() void {
 fn a_thousand_environments_do_not_grow_the_heap() void {
     u64 mut n = 0;
     while (n < 200) {
-        types_env.env mut e = types_env.env{};
-        types_env.init(&e);
-        assert(types_env.spell(&e, "node mut* own mut@ own") == "node mut* own mut@ own");
-        assert(types.type_sizeof(e.vec) == 24);
-        types_env.free(&e);
+        types_env.env mut* own e = types_env.make();
+        assert(types_env.spell(e, "node mut* own mut@ own") == "node mut* own mut@ own");
+        assert(types.type_sizeof(e->vec) == 24);
+        types_env.drop_made(move(e));
         n += 1;
     }
 }
@@ -169,26 +166,27 @@ fn a_thousand_environments_do_not_grow_the_heap() void {
 // Freeing a table twice frees once: the second call walks an empty vector, as
 // `del` on an emptied span does.
 fn freeing_twice_is_a_no_op() void {
-    types.table mut tt = types.table{};
-    types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
+    types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
     assert(types.type_sizeof(i32t) == 4);
-    types.type_table_free(&tt);
-    types.type_table_free(&tt);
-    types.type_table_free(&tt);
+    types.type_table_free(tt);
+    types.type_table_free(tt);
+    types.type_table_free(tt);
     // The table remains usable after these calls.
-    assert(types.type_sizeof(types.type_prim(&tt, prim.prim_kind.prim_i64)) == 8);
-    types.type_table_free(&tt);
+    assert(types.type_sizeof(types.type_prim(tt, prim.prim_kind.prim_i64)) == 8);
 }
 
-// `table{}` is an empty table, ready for use without an init function.
+// `table{}` is an empty table, ready for use without an init function. types.table_make
+// allocates that value and does nothing more.
 fn the_zero_table_is_empty() void {
-    types.table mut tt = types.table{};
-    defer types.type_table_free(&tt);
-    assert(tt.count == 0);
-    assert(tt.void_type == null);
-    types.node* v = types.type_void(&tt);
-    assert(tt.count == 1);
-    assert(tt.void_type == v);
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
+    assert(tt->count == 0);
+    assert(tt->void_type == null);
+    types.node* v = types.type_void(tt);
+    assert(tt->count == 1);
+    assert(tt->void_type == v);
 }
 
 fn main() i32 {

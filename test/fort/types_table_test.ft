@@ -61,16 +61,16 @@ fn a_node_survives_every_growth_of_the_table(types.table mut* tt) void {
 // A nominal type is found by its declaration however many nodes stand before
 // it, which is the scan the table does over its whole vector.
 fn a_nominal_type_is_found_after_a_growth() void {
-    types.table mut tt = types.table{};
-    defer types.type_table_free(&tt);
-    types.node* s = types.type_struct(&tt, "early", decl_at(0));
-    types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
+    types.node* s = types.type_struct(tt, "early", decl_at(0));
+    types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
     u64 mut n = 0;
     while (n < 100) {
-        assert(types.type_array(&tt, i32t, n + 1) != null);
+        assert(types.type_array(tt, i32t, n + 1) != null);
         n += 1;
     }
-    assert(types.type_struct(&tt, "early", decl_at(0)) == s);
+    assert(types.type_struct(tt, "early", decl_at(0)) == s);
     // It still lays out, so the layout block travelled with the node.
     types.node*[1] mut fields = {i32t};
     u64[1] mut offsets = {};
@@ -86,19 +86,19 @@ fn a_nominal_type_is_found_after_a_growth() void {
 fn a_grown_table_frees_everything_it_made() void {
     u64 mut round = 0;
     while (round < 20) {
-        types.table mut tt = types.table{};
-        types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
+        types.table mut* own tt = types.table_make();
+        types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
         types.node*[3] mut params = {i32t, i32t, i32t};
         u64 mut n = 0;
         while (n < 50) {
-            assert(types.type_array(&tt, i32t, n + 1) != null);
+            assert(types.type_array(tt, i32t, n + 1) != null);
             // A function type on every round, so the parameter lists are
             // freed with the nodes as well.
-            assert(types.type_fn(&tt, types.type_array(&tt, i32t, n + 1), params[..],
+            assert(types.type_fn(tt, types.type_array(tt, i32t, n + 1), params[..],
                                  false) != null);
             n += 1;
         }
-        types.type_table_free(&tt);
+        types.table_drop_made(move(tt));
         round += 1;
     }
 }
@@ -122,7 +122,12 @@ fn a_grown_table_frees_everything_it_made() void {
 // probe read before then did not see the deletion of `del(t->layout)`.
 // `del(t->layout->fields)` has no witness here: the struct of the round has no
 // field. The compiler refuses a deletion of `del(t)` on the node itself
-// (D17.11).
+// (D17.11). The releases stand in types.table_drop now, and each round ends
+// through types.table_drop_made, which reaches them. A deletion of
+// `del(t->params)`, `del(t->layout)`, `del(tt.nodes)`, `del(tt.index)` or of
+// the call of table_drop in table_drop_made turns the probe red under glibc
+// 2.39 and 2.43 and on the Darwin target. The compiler refuses a deletion of
+// `del(p)` in table_drop_made (D17.20).
 u64 LEAK_ROUNDS = 200;
 u64 LEAK_EARLY = 100;
 u64 LEAK_TYPES = 200;
@@ -151,22 +156,22 @@ fn the_blocks_a_node_owns_are_released_with_it() void {
     u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < LEAK_ROUNDS) {
-        types.table mut tt = types.table{};
-        types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
+        types.table mut* own tt = types.table_make();
+        types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
         types.node*[8] mut params = {i32t, i32t, i32t, i32t, i32t, i32t, i32t, i32t};
-        types.node* f = types.type_fn(&tt, types.type_void(&tt), params[..], false);
-        types.node* s = types.type_struct(&tt, "probe", decl_at(2));
+        types.node* f = types.type_fn(tt, types.type_void(tt), params[..], false);
+        types.node* s = types.type_struct(tt, "probe", decl_at(2));
         // Past the first capacity of the node vector, so the block
         // `del(tt->nodes)` gives back is one the allocator had to grow for.
         // It also allocates one parameter list per function type.
         u64 mut n = 0;
         while (n < LEAK_TYPES) {
-            types.node* elem = types.type_array(&tt, i32t, n + 1);
+            types.node* elem = types.type_array(tt, i32t, n + 1);
             assert(elem != null);
-            assert(types.type_fn(&tt, elem, params[..], false) != null);
+            assert(types.type_fn(tt, elem, params[..], false) != null);
             n += 1;
         }
-        types.type_table_free(&tt);
+        types.table_drop_made(move(tt));
         u64 mut slot = 3;
         if (round == LEAK_EARLY) {
             slot = 0;

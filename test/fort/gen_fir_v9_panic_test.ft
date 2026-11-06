@@ -44,32 +44,30 @@ fn emit_first(gen.emitter mut* g, gen_fir.fir_path mut* fp, fir.module mut* m) v
 }
 
 fn main() i32 {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
+    strbuf.str_buf mut report = strbuf.create();
+    defer del(report.data);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     for (string line : V9_TEXT) {
         strbuf.append(&text, line);
     }
-    fir.module mut m = fir_parse.parse_module(&e.c.m.s, "t.fir", strbuf.view(&text),
-                                              fir_env.prelude(&e));
-    defer fir.module_free(&m);
-    assert(fir_env.errors(&e) == 0);
-    assert(fir.module_function_count(&m) == 1);
-    fir_verify.runtime rt = fir_verify.runtime_of(&e.c.ck);
-    strbuf.str_buf mut report = strbuf.create();
-    defer strbuf.free(&report);
-    assert(!fir_verify.verify_report(fir.module_function_at(&m, 0), &rt, &report));
+    fir.module mut* own m = fir.module_make();
+    defer fir.module_drop_made(move(m));
+    fir_parse.parse_into(&e->c.m.s, "t.fir", strbuf.view(&text), fir_env.prelude(e), m);
+    assert(fir_env.errors(e) == 0);
+    assert(fir.module_function_count(m) == 1);
+    fir_verify.runtime rt = fir_verify.runtime_of(&e->c.ck);
+    assert(!fir_verify.verify_report(fir.module_function_at(m, 0), &rt, &report));
     assert(strbuf.view(&report) ==
            "fir.verify: V9 a path from bb0 reaches unreachable: main.f bb2 statement 0 (s0)");
     println("the function keeps the other rules");
-    gen.emitter mut g = gen.emitter{};
-    gen.gen_init(&g, &e.c.m.s, gen.gen_options{});
-    defer gen.gen_free(&g);
-    g.ck = &e.c.ck;
-    g.module = check_env.module_at(&e.c, "main");
-    gen_fir.fir_path mut fp = gen_fir.fir_path{.ck = &e.c.ck, .rt = rt};
-    emit_first(&g, &fp, &m);
+    gen.emitter mut* own g = gen.make(&e->c.m.s, gen.gen_options{});
+    defer gen.drop_made(move(g));
+    g->ck = &e->c.ck;
+    g->module = check_env.module_at(&e->c, "main");
+    gen_fir.fir_path mut fp = gen_fir.fir_path{.ck = &e->c.ck, .rt = rt};
+    emit_first(g, &fp, m);
     return 0;
 }

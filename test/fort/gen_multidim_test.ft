@@ -29,11 +29,10 @@ string J = "    i32 mut j = 2;";
 // ---- the index of each dimension -----------------------------------------------------
 
 fn each_dimension_is_indexed_and_checked_on_its_own() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[4] mut lines = {GRID, I, J, "    i32 mut a = m[i][j];"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // The outer index is checked against 2 and the inner one against 3, in the
     // block the first check falls into. Then the outer GEP strides over a whole
     // row, and the inner one, whose base is the row's address and whose type
@@ -55,15 +54,14 @@ fn each_dimension_is_indexed_and_checked_on_its_own() void {
         "  %t7 = getelementptr inbounds [3 x i32], ptr %t6, i64 0, i64 %t4\n",
         "  %t8 = load i32, ptr %t7, align 4\n",
     };
-    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
+    gen_env.expect_in(gen_env.main_text(e), gen_env.join_lines(e, want[..]));
 }
 
 fn the_second_check_fails_to_its_own_block() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[4] mut lines = {GRID, I, J, "    i32 mut a = m[i][j];"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // Each dimension has a failure block of its own. Each
     // diagnostic names its checked length and `[` column.
     // The outer column is 18, and the inner column is 21.
@@ -76,15 +74,14 @@ fn the_second_check_fails_to_its_own_block() void {
         "  call void @\"std.rt.fail_bounds\"(i64 %t4, i64 3, ptr @.file.0, i32 5, i32 21)\n",
         "  unreachable\n",
     };
-    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
+    gen_env.expect_in(gen_env.main_text(e), gen_env.join_lines(e, want[..]));
 }
 
 fn a_literal_index_is_checked_at_each_rank_too() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[2] mut lines = {GRID, "    i32 mut a = m[1][2];"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // The emitter writes a comparison for every index, including a literal.
     // It folds nothing, and LLVM removes the two comparisons below. What
     // changes with the rank is the type of the GEP and the length compared.
@@ -104,32 +101,30 @@ fn a_literal_index_is_checked_at_each_rank_too() void {
         "  %t6 = load i32, ptr %t5, align 4\n",
         "  store i32 %t6, ptr %a.1, align 4\n",
     };
-    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
+    gen_env.expect_in(gen_env.main_text(e), gen_env.join_lines(e, want[..]));
 }
 
 // ---- the copy ------------------------------------------------------------------------
 
 fn a_whole_nested_array_copies_every_byte() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[2] mut lines = {GRID, "    i32[2][3] mut b = m;"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // an aggregate lands in its destination through one memcpy of
     // the whole type, which is 24 bytes here, six elements of four.
     gen_env.expect_in(
-        gen_env.main_text(&e),
-        gen_env.join2(&e, "  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %b.1, ptr align 4 ",
+        gen_env.main_text(e),
+        gen_env.join2(e, "  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %b.1, ptr align 4 ",
                       "%m.0, i64 24, i1 false)\n"));
-    assert(types.type_sizeof(gen_env.type_of(&e, "b")) == 24);
+    assert(types.type_sizeof(gen_env.type_of(e, "b")) == 24);
 }
 
 fn one_row_copies_the_row_alone() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[2] mut lines = {GRID, "    i32[3] mut r = m[1];"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // The row is 12 bytes and the copy is of the row, not of the array it came
     // out of.
     string[8] want = {
@@ -142,19 +137,18 @@ fn one_row_copies_the_row_alone() void {
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %r.1, ptr align 4 %t2, ",
         "i64 12, i1 false)\n",
     };
-    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
-    assert(types.type_sizeof(gen_env.type_of(&e, "r")) == 12);
+    gen_env.expect_in(gen_env.main_text(e), gen_env.join_lines(e, want[..]));
+    assert(types.type_sizeof(gen_env.type_of(e, "r")) == 12);
 }
 
 // ---- a span whose element is an array --------------------------------------------------
 
 fn a_span_of_arrays_strides_by_the_row() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[4] mut lines = {"    i32[3] mut@ own g = new(i32[3], 2);", "    defer del(g);", I,
                            "    i32 mut a = g[i][0];"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // The deferred `del` runs at the `return`, after the store of the result, so no owner holds
     // an allocation at the end of the body (D17.20) and the code below is unchanged.
     // The length comes from the header, and the check reads it once more as the
@@ -187,7 +181,7 @@ fn a_span_of_arrays_strides_by_the_row() void {
         "  store i32 %t18, ptr %a.2, align 4\n",
         "  store i32 0, ptr %result, align 4\n",
     };
-    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
+    gen_env.expect_in(gen_env.main_text(e), gen_env.join_lines(e, want[..]));
 }
 
 fn the_element_type_of_that_span_is_the_row(gen_env.env mut* e) void {
@@ -206,13 +200,12 @@ fn the_element_type_of_that_span_is_the_row(gen_env.env mut* e) void {
 // ---- the array of spans and the span of spans ----------------------------------------
 
 fn an_array_of_spans_strides_by_the_header() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[3] mut lines = {"    i32[3] mut a = {1, 2, 3};",
                            "    i32 mut@[2] mut rows = {a[0..3], a[1..3]};",
                            "    i32 mut b = rows[1][0];"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // The outer index walks an `[2 x %fort.span]`, so it strides by the 16
     // bytes of one header. The inner one reads the length and the
     // pointer out of the header it reached.
@@ -238,18 +231,17 @@ fn an_array_of_spans_strides_by_the_header() void {
         "  %t35 = load ptr, ptr %t34, align 8\n",
         "  %t36 = getelementptr inbounds i32, ptr %t35, i64 %t25\n",
     };
-    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
+    gen_env.expect_in(gen_env.main_text(e), gen_env.join_lines(e, want[..]));
 }
 
 fn a_span_of_spans_strides_by_the_header_too() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[4] mut lines = {"    i32[3] mut a = {1, 2, 3};",
                            "    i32 mut@[2] mut rows = {a[0..3], a[1..3]};",
                            "    i32 mut@ mut@ view = rows[0..2];",
                            "    i32 mut c = view[1][0];"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // The element of the outer span is itself a `%fort.span`. The element GEP
     // names that type and strides by 16 bytes.
     string[29] want = {
@@ -283,20 +275,19 @@ fn a_span_of_spans_strides_by_the_header_too() void {
         "  %t53 = getelementptr inbounds %fort.span, ptr %t52, i32 0, i32 0\n",
         "  %t54 = load ptr, ptr %t53, align 8\n",
     };
-    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
+    gen_env.expect_in(gen_env.main_text(e), gen_env.join_lines(e, want[..]));
 }
 
 // ---- aggregate results --------------------------------------------------------------
 
 fn a_nested_array_result_arrives_through_the_sret_pointer() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     strbuf.append(&src, "fn same(i32[2][3] m) i32[2][3] {\n    return m;\n}\n");
     strbuf.append(&src, "fn main() i32 {\n    return 0;\n}\n");
-    assert(gen_env.open_module(&e, strbuf.view(&src)));
+    assert(gen_env.open_module(e, strbuf.view(&src)));
     // an aggregate result of any size leaves through the `sret`
     // pointer and the function returns `void`. Every other sret assertion in
     // the repository names a 16-byte struct. This one is 24 bytes, and the
@@ -308,9 +299,9 @@ fn a_nested_array_result_arrives_through_the_sret_pointer() void {
         " i1 false)\n",
         "  ret void\n}\n",
     };
-    string got = gen_env.emit_function(&e, "same");
-    gen_env.expect_text(got, gen_env.join_lines(&e, want[0..5]));
-    gen_env.expect_blocks(&e, got);
+    string got = gen_env.emit_function(e, "same");
+    gen_env.expect_text(got, gen_env.join_lines(e, want[0..5]));
+    gen_env.expect_blocks(e, got);
 }
 
 fn main() i32 {
