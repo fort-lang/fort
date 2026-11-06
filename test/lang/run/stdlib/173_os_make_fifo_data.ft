@@ -1,0 +1,68 @@
+//! run
+//! stdout:
+//| a reader opens the FIFO without a writer: true
+//| file_mode of the reader: a FIFO: true
+//| a writer opens while the reader is open: true
+//| the bytes go through: 5 5 hello
+//| the reader sees the end after the writer closes: 0
+//| remove_file removes the FIFO: true, nothing there: true
+//| make_fifo with each permission bit but S_ISUID and S_ISGID: true 1777 or less: true
+//| a writer with no reader: -1 ENXIO: true
+import std.io;
+import std.libc;
+import std.os;
+import std.sys;
+
+// A FIFO that os.make_fifo makes moves bytes from a writer to a reader (stdlib.md 2.14). A
+// reader that os.open_nonblocking opens does not wait for a writer, and a writer with O_NONBLOCK
+// then opens too. The reader reads the bytes that the writer wrote, and 0 at the end after the
+// writer closes. remove_file removes the FIFO. A mode with each bit of PERMISSION_BITS but
+// SET_ID_BITS is no error, also in a directory whose group is no group of the process. A writer
+// with O_NONBLOCK and no reader gives ENXIO, 6 on both targets.
+
+u32 S_IFMT = 0o170000;
+u32 S_IFIFO = 0o010000;
+i32 ENXIO = 6;
+i32 O_NONBLOCK_LINUX = 0o4000;
+i32 O_NONBLOCK_DARWIN = 0x4;
+
+// O_NONBLOCK of open(2) on this target.
+fn nonblocking() i32 {
+    $if ($cfg(target_os) == "linux") {
+        return O_NONBLOCK_LINUX;
+    } else {
+        return O_NONBLOCK_DARWIN;
+    }
+}
+
+fn main() i32 {
+    os.make_dir("t-data", 0o700);
+    os.make_fifo("t-data/pipe", 0o600);
+    i32 reader = os.open_nonblocking("t-data/pipe");
+    println("a reader opens the FIFO without a writer: ", reader >= 0);
+    u32 mut mode = 0;
+    println("file_mode of the reader: a FIFO: ",
+            os.file_mode(reader, &mode) && (mode & S_IFMT) == S_IFIFO);
+    i32 writer = io.open("t-data/pipe", libc.O_WRONLY | nonblocking(), 0);
+    println("a writer opens while the reader is open: ", writer >= 0);
+    i64 wrote = io.write(writer, cast("hello", u8@));
+    u8[8] mut got = {};
+    i64 read = io.read(reader, got[..]);
+    println("the bytes go through: ", wrote, " ", read, " ", cast(got[0..5], string));
+    io.close(writer);
+    println("the reader sees the end after the writer closes: ", io.read(reader, got[..]));
+    io.close(reader);
+    bool removed = os.remove_file("t-data/pipe");
+    println("remove_file removes the FIFO: ", removed, ", nothing there: ",
+            !os.can_access("t-data/pipe", 0));
+    u32 saved = os.set_umask(0);
+    bool all = os.make_fifo("t-data/all", os.PERMISSION_BITS & ~os.SET_ID_BITS);
+    os.set_umask(saved);
+    os.path_mode("t-data/all", &mode);
+    println("make_fifo with each permission bit but S_ISUID and S_ISGID: ", all,
+            " 1777 or less: ", (mode & S_IFMT) == S_IFIFO && (mode & ~(S_IFMT | 0o1777)) == 0);
+    os.make_fifo("t-data/alone", 0o600);
+    i32 lonely = io.open("t-data/alone", libc.O_WRONLY | nonblocking(), 0);
+    println("a writer with no reader: ", lonely, " ENXIO: ", sys.errno() == ENXIO);
+    return 0;
+}

@@ -62,9 +62,7 @@ fn out_is_empty() bool {
 }
 
 fn make_dir(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(libc.mkdir(c_path.ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    assert(os.make_dir(path, 0o700) || sys.errno() == libc.EEXIST);
 }
 
 fn write_file(string path, string text) void {
@@ -82,15 +80,11 @@ fn write_script(string path, string@ lines) void {
         i += 1;
     }
     write_file(path, strbuf.view(&b));
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(libc.chmod(c_path.ptr, 0o755) == 0);
+    assert(os.set_mode(path, 0o755));
 }
 
 fn exists(string path) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    return libc.access(c_path.ptr, 0) == 0;
+    return os.can_access(path, 0);
 }
 
 // The bytes of the file `path`, or the empty string when it cannot be read.
@@ -103,23 +97,15 @@ fn contents(string path) string own {
 
 // Removes the file `path` when it exists.
 fn remove(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    libc.unlink(c_path.ptr);
+    os.remove_file(path);
 }
 
 fn set_env(string name, string value) void {
-    char mut@ own key = str.to_cstr(name);
-    defer del(key);
-    char mut@ own text = str.to_cstr(value);
-    defer del(text);
-    assert(libc.setenv(key.ptr, text.ptr, 1) == 0);
+    assert(sys.set_env(name, value));
 }
 
 fn unset_env(string name) void {
-    char mut@ own key = str.to_cstr(name);
-    defer del(key);
-    assert(libc.unsetenv(key.ptr) == 0);
+    assert(sys.unset_env(name));
 }
 
 // Whether the directory `path` holds no entry but `.` and `..`.
@@ -632,11 +618,7 @@ fn a_summaries_that_is_a_link_is_exit_two() void {
     write_file("elsewhere/one", "1");
     write_file("elsewhere/two", "2");
     make_dir("linked.flib");
-    char mut@ own c_target = str.to_cstr("../elsewhere");
-    defer del(c_target);
-    char mut@ own c_link = str.to_cstr("linked.flib/summaries");
-    defer del(c_link);
-    assert(libc.symlink(c_target.ptr, c_link.ptr) == 0);
+    assert(os.make_symlink("../elsewhere", "linked.flib/summaries"));
     string[2] args = {"-o", "linked.flib"};
     assert(build(args[..]) == EXIT_USAGE);
     string message = "fort: error: cannot write 'linked.flib/summaries': ";

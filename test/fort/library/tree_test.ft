@@ -10,8 +10,10 @@
 import fort.library.tree;
 import modules_env;
 import std.libc;
+import std.os;
 import std.str;
 import std.strbuf;
+import std.sys;
 
 // ---- segments ----------------------------------------------------------------------
 
@@ -106,11 +108,7 @@ fn a_name_that_is_no_segment_and_another_file_are_no_module() void {
 fn link(modules_env.env* e, string target, string rel) void {
     string own path = modules_env.in_sandbox(e, rel);
     defer del(path);
-    char mut@ own c_target = str.to_cstr(target);
-    defer del(c_target);
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(libc.symlink(c_target.ptr, c_path.ptr) == 0);
+    assert(os.make_symlink(target, path));
 }
 
 fn the_walk_follows_no_symbolic_link() void {
@@ -193,15 +191,13 @@ fn a_directory_below_the_root_that_cannot_be_read_fails_the_walk() void {
     modules_env.add(e, "lib/geom/closed/b.ft", "i32 B = 1;\n");
     string own closed = modules_env.in_sandbox(e, "lib/geom/closed");
     defer del(closed);
-    char mut@ own c_closed = str.to_cstr(closed);
-    defer del(c_closed);
-    assert(libc.chmod(c_closed.ptr, 0) == 0);
+    assert(os.set_mode(closed, 0));
     tree.tree mut* own t = tree.make();
     defer tree.drop_made(move(t));
     i32 mut failure = 0;
     bool walked = walk(e, "geom", "lib/geom", t, &failure);
     // put the mode back so that the harness can remove the sandbox
-    assert(libc.chmod(c_closed.ptr, 0o700) == 0);
+    assert(os.set_mode(closed, 0o700));
     if (failure == 0) {
         // a process that reads every directory, such as root, reads this one too
         assert(walked && tree.count(t) == 2);
@@ -276,12 +272,10 @@ fn a_file_without_read_permission_is_no_directory() void {
     modules_env.add(e, "lib/locked.ft", "i32 A = 1;\n");
     string own file = modules_env.in_sandbox(e, "lib/locked.ft");
     defer del(file);
-    char mut@ own c_file = str.to_cstr(file);
-    defer del(c_file);
-    assert(libc.chmod(c_file.ptr, 0) == 0);
+    assert(os.set_mode(file, 0));
     bool directory = tree.is_directory(file);
     u8 kind = tree.kind_of(file, libc.DT_UNKNOWN);
-    assert(libc.chmod(c_file.ptr, 0o600) == 0);
+    assert(os.set_mode(file, 0o600));
     assert(!directory && kind == libc.DT_REG);
 }
 
@@ -292,7 +286,7 @@ fn an_old_errno_does_not_fail_the_walk() void {
     defer modules_env.drop_made(move(e));
     modules_env.add(e, "lib/geom/a.ft", "i32 A = 1;\n");
     modules_env.add(e, "lib/geom/sub/b.ft", "i32 B = 1;\n");
-    *libc.errno_slot() = libc.EACCES;
+    sys.set_errno(libc.EACCES);
     tree.tree mut* own t = tree.make();
     defer tree.drop_made(move(t));
     i32 mut failure = 0;

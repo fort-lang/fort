@@ -41,11 +41,12 @@ fn open(string path, i32 flags, i32 mode) i32 {
     return libc.open(c_path.ptr, flags, mode);
 }
 
-/// Flushes the runtime buffer for fd, then closes fd.
+/// Flushes the runtime buffer for fd, then closes fd. The buffer forgets the type of the file, so
+/// a file that a later open gives the same number gets the state of its own type.
 /// Returns false when close(2) fails. The descriptor is invalid after either result.
 fn close(i32 fd) bool {
     // Flush before close removes the descriptor.
-    rt.flush(fd);
+    rt.reset_buffer(fd);
     return libc.close(fd) == 0;
 }
 
@@ -191,4 +192,31 @@ fn pipe(i32 mut* read_end, i32 mut* write_end) bool {
     *read_end = fds[0];
     *write_end = fds[1];
     return true;
+}
+
+/// Gives a new descriptor of the file that `fd` names with dup(2), the lowest descriptor that is
+/// free. The two descriptors share the position and the status flags of the file. Returns the
+/// new descriptor, or -1 and sets sys.errno() when dup fails: EBADF when `fd` is not open, and
+/// EMFILE when no descriptor is free.
+fn dup(i32 fd) i32 {
+    return libc.dup(fd);
+}
+
+/// Makes `new_fd` name the file that `old_fd` names with dup2(2), and returns `new_fd`. The
+/// function first flushes the runtime buffers of `old_fd` and of `new_fd`: the bytes that the
+/// print family wrote to `old_fd` before come before the bytes written to `new_fd` after, and the
+/// bytes of `new_fd` go to the file that it named before, which dup2 closes. Then the buffer of
+/// `new_fd` takes the state of its new file: line buffered for a terminal, else not. When both
+/// descriptors name one file, the bytes of `old_fd` come first, whatever order the program wrote
+/// them in, so a caller that needs an order calls io.flush between the writes. When
+/// `new_fd` is `old_fd` and is open, nothing changes. Returns -1 and sets sys.errno() when dup2
+/// fails: EBADF when `old_fd` is not open or `new_fd` is negative.
+fn dup2(i32 old_fd, i32 new_fd) i32 {
+    rt.flush(old_fd);
+    rt.flush(new_fd);
+    i32 result = libc.dup2(old_fd, new_fd);
+    // The flush above emptied the buffer, so this only makes the buffer read the type of the
+    // file again at the next output; it keeps errno.
+    rt.reset_buffer(new_fd);
+    return result;
 }

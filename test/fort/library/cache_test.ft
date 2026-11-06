@@ -15,6 +15,7 @@ import fort.library.cache;
 import fort.owner.summary;
 import std.io;
 import std.libc;
+import std.os;
 import std.str;
 import std.strbuf;
 import std.sys;
@@ -29,9 +30,7 @@ fn same(string got, string want) bool {
 }
 
 fn make_dir(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(libc.mkdir(c_path.ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    assert(os.make_dir(path, 0o700) || sys.errno() == libc.EEXIST);
 }
 
 fn write_file(string path, string text) void {
@@ -39,29 +38,19 @@ fn write_file(string path, string text) void {
 }
 
 fn remove(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    libc.unlink(c_path.ptr);
+    os.remove_file(path);
 }
 
 fn link(string target, string path) void {
-    char mut@ own c_target = str.to_cstr(target);
-    defer del(c_target);
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(libc.symlink(c_target.ptr, c_path.ptr) == 0);
+    assert(os.make_symlink(target, path));
 }
 
 fn exists(string path) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    return libc.access(c_path.ptr, 0) == 0;
+    return os.can_access(path, 0);
 }
 
 fn set_mode(string path, u32 mode) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(libc.chmod(c_path.ptr, mode) == 0);
+    assert(os.set_mode(path, mode));
 }
 
 fn contents(string path) string own {
@@ -91,11 +80,11 @@ fn make_temp(strbuf.str_buf mut* out) string {
         strbuf.append(out, "/tmp");
     }
     strbuf.append(out, "/fort-cache-XXXXXX");
-    char mut@ own tmpl = str.to_cstr(strbuf.view(out));
-    defer del(tmpl);
-    assert(libc.mkdtemp(&tmpl[0]) != null);
+    strbuf.str_buf mut made = strbuf.create();
+    defer del(made.data);
+    assert(os.make_temp_dir(strbuf.view(out), &made));
     strbuf.clear(out);
-    strbuf.append(out, str.from_cstr(&tmpl[0]));
+    strbuf.append(out, strbuf.view(&made));
     return strbuf.view(out);
 }
 
@@ -408,10 +397,7 @@ fn an_entry_that_breaks_a_rule_is_corrupt() void {
     assert(found("rules", strbuf.view(&key), true) == cache.outcome.o_corrupt);
     assert(store_library("rules", SOURCE_ONE, "", &key));
     remove(entry_file("rules", strbuf.view(&key), "summaries/ownership", &b));
-    char mut@ own c_summaries = str.to_cstr(entry_file("rules", strbuf.view(&key), "summaries",
-                                                       &b));
-    defer del(c_summaries);
-    assert(libc.rmdir(c_summaries.ptr) == 0);
+    assert(os.remove_dir(entry_file("rules", strbuf.view(&key), "summaries", &b)));
     assert(found("rules", strbuf.view(&key), true) == cache.outcome.o_corrupt);
     // a part of a manifest, as a write that stopped can leave none
     assert(store_library("rules", SOURCE_ONE, "", &key));
@@ -557,10 +543,7 @@ fn a_store_replaces_a_corrupt_entry() void {
     // a store that fails leaves no manifest, so the entry stays a miss and never a wrong hit
     remove(entry_file("repair", strbuf.view(&key), "summaries/ownership", &b));
     remove(entry_file("repair", strbuf.view(&key), "summaries", &b));
-    char mut@ own c_summaries = str.to_cstr(entry_file("repair", strbuf.view(&key), "summaries",
-                                                       &b));
-    defer del(c_summaries);
-    libc.rmdir(c_summaries.ptr);
+    os.remove_dir(entry_file("repair", strbuf.view(&key), "summaries", &b));
     make_dir("elsewhere");
     link("../../../elsewhere", entry_file("repair", strbuf.view(&key), "summaries", &b));
     assert(!store_library("repair", SOURCE_ONE, "", &key));

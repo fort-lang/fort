@@ -5,7 +5,6 @@
 // that is no link is read and removed after its entries.
 import std.libc;
 import std.os;
-import std.str;
 import std.strbuf;
 import std.sys;
 
@@ -47,22 +46,19 @@ fn name_end(string all, u64 at) u64 {
 
 // Whether `path` is a symbolic link: readlink(2) succeeds on a link alone.
 fn is_link(string path) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    char[1] mut buf = {};
-    return libc.readlink(c_path.ptr, &buf[0], 1) >= 0;
+    strbuf.str_buf mut target = strbuf.create();
+    defer strbuf.free(&target);
+    return os.read_link(path, &target);
 }
 
 /// Removes `path` and, when it is a directory, each entry below it first. An absent path is no
 /// error; a path that cannot be removed stops the suite.
 fn remove_tree(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    if (libc.unlink(c_path.ptr) == 0 || sys.errno() == libc.ENOENT) {
+    if (os.remove_file(path) || sys.errno() == libc.ENOENT) {
         return;
     }
     // a directory: its entries go first
-    libc.chmod(c_path.ptr, 0o700);
+    os.set_mode(path, 0o700);
     strbuf.str_buf mut names = strbuf.create();
     defer strbuf.free(&names);
     assert(list(path, &names));
@@ -75,7 +71,7 @@ fn remove_tree(string path) void {
         remove_tree(join(&b, path, all[at..end]));
         at = end + 1;
     }
-    assert(libc.rmdir(c_path.ptr) == 0);
+    assert(os.remove_dir(path));
 }
 
 /// Removes the cache directory `.fort-cache` of the working directory and of each directory in
@@ -96,9 +92,7 @@ fn remove_caches() void {
         string name = all[at..end];
         if (!is_link(name)) {
             string sub = join(&b, name, ".fort-cache");
-            char mut@ own c_sub = str.to_cstr(sub);
-            defer del(c_sub);
-            if (libc.access(c_sub.ptr, 0) == 0) {
+            if (os.can_access(sub, 0)) {
                 remove_tree(sub);
             }
         }

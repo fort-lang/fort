@@ -2284,16 +2284,28 @@ Sections:
   that is **interactive** is line-buffered as well: a newline written through it flushes the whole
   buffer, not only the bytes up to that newline, which is C's rule (C11 7.21.3p7) and makes a
   terminal show each `println` as the program runs. Interactive means `isatty` of the descriptor,
-  and the runtime asks once, when it creates that descriptor's buffer, so that no `print` carries a
-  system call of its own; every buffered descriptor is decided that way and not stdout alone, since
-  `fprint(fd, ...)` on any descriptor has the same policy. The runtime exports `std.rt.flush(i32
-  fd)` and `std.rt.flush_all()`; `io.close` and `io.flush` call the former, which is how a library
-  call flushes a buffer the runtime owns.
+  and the runtime asks once, when it creates that descriptor's buffer or at the first output after
+  a reset of the buffer, and at no other time, so that no `print` carries a system call of its
+  own: a change of the file of a descriptor through a call of C is not seen until a reset. Every
+  buffered descriptor is decided that way and not stdout alone, since `fprint(fd, ...)` on any
+  descriptor has the same policy. The runtime exports `std.rt.flush(i32 fd)` and
+  `std.rt.flush_all()`; `io.flush` calls the former, which is how a library call flushes a buffer
+  the runtime owns. `std.rt.reset_buffer(i32 fd)` flushes the buffer of `fd` and resets
+  it: the buffer asks `isatty` again at the next output to `fd`. `io.close` calls it before
+  close(2), because a later open can give the number to a file of another type. `io.dup2` gives
+  a descriptor another file, so it flushes the buffers of both descriptors and then calls it for
+  the new one. So a descriptor that names a terminal after a close and an open, or after a dup2,
+  is line-buffered, and one that names a regular file is not (`stdlib.md` 2.4).
 - history: Amended 2026-09-11 (T-083): buffering was unconditional, so a program on a terminal
   showed nothing until it exited and its `print` output arrived after its `eprint` output whatever
   the order in the source. Amended 2026-09-11 (T-088): the two names were the C runtime's
   `fort_rt_flush` and `fort_rt_flush_all`; the behaviour is unchanged and only the runtime moved
   (D13.1 as amended).
+  Amended 2026-11-06: a buffer kept the answer of `isatty` for the file that its descriptor named
+  first, so after `io.dup2`, or after `io.close` and an open that got the same number, a regular
+  file was line-buffered or a terminal was not (read in `std/rt.ft`). The coordinator ruled on
+  2026-11-06 that `io.dup2` resets the state of the buffer of its new descriptor, and that
+  `io.close` resets the buffer of the descriptor that it closes.
 
 ### D11.6 Process start
 - owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime).

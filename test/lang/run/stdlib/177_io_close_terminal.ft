@@ -1,0 +1,109 @@
+//! run
+//! stdout:
+//| a pseudo terminal opens: true
+//| a file that gets the number of a closed terminal descriptor: true, not line buffered: true
+//| the file holds the line after the flush: true
+//| stdout that gets the number back on a terminal is line buffered: x then y
+import std.io;
+import std.libc;
+import std.str;
+import std.strbuf;
+
+// io.close resets the runtime buffer of its descriptor (stdlib.md 2.4, D11.5), so a file that a
+// later open gives the same number gets the buffer state of its own type. A descriptor of a
+// pseudo terminal gets a line-buffered buffer at its first output; after io.close, a regular
+// file that io.open_write gives the same number keeps a printed line in the buffer until a
+// flush. The reverse holds for stdout, a pipe here: after io.close(1), the terminal that
+// io.open gives the number 1 is line-buffered, so println reaches it before a line that io.write
+// writes after it. Without the reset, each buffer keeps the state of its first file.
+
+// posix_openpt(3), grantpt(3), unlockpt(3) and ptsname(3), which std.libc does not declare, and
+// O_NOCTTY of open(2) on each target.
+extern fn posix_openpt(i32 flags) i32;
+extern fn grantpt(i32 fd) i32;
+extern fn unlockpt(i32 fd) i32;
+extern fn ptsname(i32 fd) char*;
+$if ($cfg(target_os) == "linux") {
+    i32 O_NOCTTY = 0o400;
+} else {
+    i32 O_NOCTTY = 0x20000;
+}
+
+// Opens the subordinate side of the pseudo terminal whose main side is `main_fd`.
+fn open_terminal(i32 main_fd) i32 {
+    if (grantpt(main_fd) != 0 || unlockpt(main_fd) != 0) {
+        return -1;
+    }
+    char* name = ptsname(main_fd);
+    if (name == null) {
+        return -1;
+    }
+    return io.open(str.from_cstr(name), libc.O_RDWR | O_NOCTTY, 0);
+}
+
+// Reads from `main_fd` into `out` until it holds `lines` newlines. The terminal gives a CR
+// before each newline, and the function drops it.
+fn read_lines(i32 main_fd, u64 lines, strbuf.str_buf mut* out) void {
+    u64 mut seen = 0;
+    u8[64] mut room = {};
+    while (seen < lines) {
+        i64 n = io.read(main_fd, room[..]);
+        if (n <= 0) {
+            return;
+        }
+        u64 mut i = 0;
+        while (i < cast(n, u64)) {
+            u8 c = room[i];
+            if (c == cast('\n', u8)) {
+                seen += 1;
+            }
+            if (c != cast('\r', u8)) {
+                strbuf.push(out, cast(c, char));
+            }
+            i += 1;
+        }
+    }
+}
+
+fn main() i32 {
+    i32 main_fd = posix_openpt(libc.O_RDWR | O_NOCTTY);
+    i32 terminal = open_terminal(main_fd);
+    println("a pseudo terminal opens: ", main_fd >= 0 && terminal >= 0);
+    io.flush(io.STDOUT);
+    strbuf.str_buf mut held = strbuf.create();
+    defer del(held.data);
+    strbuf.str_buf mut got = strbuf.create();
+    defer del(got.data);
+
+    // A second descriptor of the terminal stays open, so the terminal keeps an open side and
+    // its main side reads on after the close.
+    i32 kept = io.dup(terminal);
+    fprint(terminal, "on the terminal\n");
+    read_lines(main_fd, 1, &got);
+    io.close(terminal);
+    i32 file = io.open_write("t-close.txt");
+    fprint(file, "line\n");
+    io.read_file("t-close.txt", &held);
+    println("a file that gets the number of a closed terminal descriptor: ", file == terminal,
+            ", not line buffered: ", strbuf.view(&held) == "");
+    io.close(file);
+    strbuf.clear(&held);
+    io.read_file("t-close.txt", &held);
+    println("the file holds the line after the flush: ", strbuf.view(&held) == "line\n");
+
+    i32 saved = io.dup(io.STDOUT);
+    io.close(io.STDOUT);
+    char* name = ptsname(main_fd);
+    i32 again = io.open(str.from_cstr(name), libc.O_RDWR | O_NOCTTY, 0);
+    println("x");
+    io.write(again, cast("y\n", u8@));
+    io.dup2(saved, io.STDOUT);
+    io.close(saved);
+    strbuf.clear(&got);
+    read_lines(main_fd, 2, &got);
+    println("stdout that gets the number back on a terminal is line buffered: ",
+            again == io.STDOUT && strbuf.view(&got) == "x\ny\n" ? "x then y" : "y then x");
+    io.close(kept);
+    io.close(main_fd);
+    return 0;
+}

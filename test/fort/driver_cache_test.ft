@@ -59,9 +59,7 @@ fn out_is(string text) bool {
 }
 
 fn make_dir(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(libc.mkdir(c_path.ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    assert(os.make_dir(path, 0o700) || sys.errno() == libc.EEXIST);
 }
 
 fn write_file(string path, string text) void {
@@ -82,15 +80,11 @@ fn write_lines(string path, string@ lines) void {
 
 fn write_script(string path, string@ lines) void {
     write_lines(path, lines);
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(libc.chmod(c_path.ptr, 0o755) == 0);
+    assert(os.set_mode(path, 0o755));
 }
 
 fn exists(string path) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    return libc.access(c_path.ptr, 0) == 0;
+    return os.can_access(path, 0);
 }
 
 fn contents(string path) string own {
@@ -101,17 +95,11 @@ fn contents(string path) string own {
 }
 
 fn remove(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    libc.unlink(c_path.ptr);
+    os.remove_file(path);
 }
 
 fn set_env(string name, string value) void {
-    char mut@ own key = str.to_cstr(name);
-    defer del(key);
-    char mut@ own text = str.to_cstr(value);
-    defer del(text);
-    assert(libc.setenv(key.ptr, text.ptr, 1) == 0);
+    assert(sys.set_env(name, value));
 }
 
 // The number of entries of the directory `path` but `.` and `..`, or 0 when it cannot be read.
@@ -546,9 +534,7 @@ fn the_archiver_runs_with_zero_dates() void {
     strbuf.str_buf mut value = strbuf.create();
     defer del(value.data);
     assert(sys.env("ZERO_AR_DATE", &value) && strbuf.view(&value) == "0");
-    char mut@ own name = str.to_cstr("ZERO_AR_DATE");
-    defer del(name);
-    assert(libc.unsetenv(name.ptr) == 0);
+    assert(sys.unset_env("ZERO_AR_DATE"));
 }
 
 fn a_corrupt_entry_is_a_miss_that_the_build_repairs() void {
@@ -878,12 +864,8 @@ fn the_suite_removes_no_cache_through_a_link() void {
     make_dir("deep/outside");
     make_dir("deep/outside/.fort-cache");
     write_file("deep/outside/.fort-cache/kept", "k\n");
-    char mut@ own target = str.to_cstr("deep/outside");
-    defer del(target);
-    char mut@ own name = str.to_cstr("linked_root");
-    defer del(name);
     remove("linked_root");
-    assert(libc.symlink(target.ptr, name.ptr) == 0);
+    assert(os.make_symlink("deep/outside", "linked_root"));
     make_dir("plain_root");
     make_dir("plain_root/.fort-cache");
     sandbox_tree.remove_caches();
@@ -892,20 +874,13 @@ fn the_suite_removes_no_cache_through_a_link() void {
     remove("linked_root");
 }
 
-// umask(2), whose mode_t is a u32 on Linux and a u16 on darwin (D9.8).
-$if ($cfg(target_os) == "linux") {
-    extern fn umask(u32 mask) u32;
-} else {
-    extern fn umask(u16 mask) u16;
-}
-
 // The permission bits of the file `path`.
 fn permissions(string path) u32 {
     i32 fd = os.open_nonblocking(path);
     assert(fd >= 0);
     u32 mut mode = 0;
     assert(os.file_mode(fd, &mode));
-    libc.close(fd);
+    io.close(fd);
     return mode & 0o777;
 }
 
@@ -914,7 +889,7 @@ fn temp_name(string path, strbuf.str_buf mut* out) string {
     strbuf.clear(out);
     strbuf.append(out, path);
     strbuf.append(out, ".tmp.");
-    strbuf.append_i64(out, cast(libc.getpid(), i64));
+    strbuf.append_i64(out, cast(sys.pid(), i64));
     return strbuf.view(out);
 }
 
@@ -925,14 +900,14 @@ fn the_object_output_is_replaced_with_the_mode_of_the_umask() void {
     string[8] mut all = {};
     object_args("moded.o", all[..]);
     // a new output gets 0666 less the umask, as a compiler gives it, after a miss and a hit
-    umask(0);
+    os.set_umask(0);
     assert(fort(all[..]) == EXIT_OK);
     u32 open_mode = permissions("moded.o");
-    umask(0o077);
+    os.set_umask(0o077);
     remove("moded.o");
     assert(fort(all[..]) == EXIT_OK);
     u32 closed_mode = permissions("moded.o");
-    umask(0o022);
+    os.set_umask(0o022);
     assert(open_mode == 0o666);
     assert(closed_mode == 0o600);
     string own good = contents("moded.o");
@@ -948,14 +923,10 @@ fn the_object_output_is_replaced_with_the_mode_of_the_umask() void {
     string own in_place = contents("moded.o");
     defer del(in_place);
     assert(same(in_place, good));
-    char mut@ own c_temp = str.to_cstr(temp_name("moded.o", &b));
-    defer del(c_temp);
-    assert(libc.rmdir(c_temp.ptr) == 0);
+    assert(os.remove_dir(temp_name("moded.o", &b)));
     // a stale file of this pid at the temporary name goes, and a link there is not followed
     write_file("victim", "victim\n");
-    char mut@ own victim = str.to_cstr("victim");
-    defer del(victim);
-    assert(libc.symlink(victim.ptr, c_temp.ptr) == 0);
+    assert(os.make_symlink("victim", temp_name("moded.o", &b)));
     write_file("moded.o", "old\n");
     assert(fort(all[..]) == EXIT_OK);
     string own after = contents("moded.o");
@@ -967,17 +938,8 @@ fn the_object_output_is_replaced_with_the_mode_of_the_umask() void {
     assert(!exists(temp_name("moded.o", &b)));
 }
 
-// mkfifo(3), whose mode_t is a u32 on Linux and a u16 on darwin (D9.8).
-$if ($cfg(target_os) == "linux") {
-    extern fn mkfifo(char* path, u32 mode) i32;
-} else {
-    extern fn mkfifo(char* path, u16 mode) i32;
-}
-
 fn set_mode(string path, u32 mode) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(libc.chmod(c_path.ptr, mode) == 0);
+    assert(os.set_mode(path, mode));
 }
 
 // The type bits of the file that `path` names, after each link, or 0 when there is none.
@@ -1003,12 +965,8 @@ fn the_object_output_follows_its_type_as_a_compiler_does() void {
     defer del(good);
     // a link to a regular file is replaced by the new file, and its target keeps its bytes
     write_file("target.o", "old\n");
-    char mut@ own target = str.to_cstr("target.o");
-    defer del(target);
-    char mut@ own linked = str.to_cstr("linked.o");
-    defer del(linked);
     remove("linked.o");
-    assert(libc.symlink(target.ptr, linked.ptr) == 0);
+    assert(os.make_symlink("target.o", "linked.o"));
     object_args("linked.o", all[..]);
     assert(fort(all[..]) == EXIT_OK);
     string own kept = contents("target.o");
@@ -1017,8 +975,9 @@ fn the_object_output_follows_its_type_as_a_compiler_does() void {
     string own replaced = contents("linked.o");
     defer del(replaced);
     assert(same(replaced, good));
-    char[8] mut buf = {};
-    assert(libc.readlink(linked.ptr, &buf[0], 8) < 0);
+    strbuf.str_buf mut target = strbuf.create();
+    defer strbuf.free(&target);
+    assert(!os.read_link("linked.o", &target));
     // a writable file in a directory that the process cannot write is written in place
     make_dir("locked");
     write_file("locked/out.o", "old\n");
@@ -1035,10 +994,8 @@ fn the_object_output_follows_its_type_as_a_compiler_does() void {
     defer del(locked);
     assert(same(locked, good));
     // a FIFO that the process cannot read is written in place, to its reader, and stays a FIFO
-    char mut@ own fifo = str.to_cstr("pipe.o");
-    defer del(fifo);
     remove("pipe.o");
-    assert(mkfifo(fifo.ptr, 0o600) == 0);
+    assert(os.make_fifo("pipe.o", 0o600));
     i32 reader = os.open_nonblocking("pipe.o");
     assert(reader >= 0);
     set_mode("pipe.o", 0o200);
@@ -1047,7 +1004,7 @@ fn the_object_output_follows_its_type_as_a_compiler_does() void {
     strbuf.str_buf mut got = strbuf.create();
     defer strbuf.free(&got);
     bool read = io.read_all(reader, &got);
-    libc.close(reader);
+    io.close(reader);
     assert(status == EXIT_OK);
     assert(read);
     assert(same(strbuf.view(&got), good));

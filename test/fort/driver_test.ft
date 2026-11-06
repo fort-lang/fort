@@ -91,7 +91,7 @@ fn write_file(string path, string text) void {
 // is `std` of this test's own working directory. What the driver needs there
 // is a file that parses, not a runtime: nothing these tests build is ever run.
 fn write_runtime() void {
-    assert(libc.mkdir("std".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    assert(os.make_dir("std", 0o700) || sys.errno() == libc.EEXIST);
     write_file("std/rt.ft", "// The empty runtime of a driver test.\n");
 }
 
@@ -874,9 +874,7 @@ fn the_current_directory_is_not_a_search_root() void {
 }
 
 fn make_directory(string path) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    return libc.mkdir(c_path.ptr, 0o700) == 0;
+    return os.make_dir(path, 0o700);
 }
 
 // ---- the standard library directory ---------------------------------------------
@@ -978,17 +976,11 @@ fn an_empty_std_dir_option_resolves_no_std_import() void {
 // that each arm of the search is forced rather than observed.
 
 fn set_env(string name, string value) void {
-    char mut@ own c_name = str.to_cstr(name);
-    defer del(c_name);
-    char mut@ own c_value = str.to_cstr(value);
-    defer del(c_value);
-    assert(libc.setenv(c_name.ptr, c_value.ptr, 1) == 0);
+    assert(sys.set_env(name, value));
 }
 
 fn unset_env(string name) void {
-    char mut@ own c_name = str.to_cstr(name);
-    defer del(c_name);
-    assert(libc.unsetenv(c_name.ptr) == 0);
+    assert(sys.unset_env(name));
 }
 
 // ---- re-entrancy ----------------------------------------------------------------
@@ -1349,7 +1341,7 @@ fn fir_stats_counts_the_functions_that_the_translator_wrote() void {
     defer del(refused);
     assert(refused == "");
     assert(!file_exists("fir_mixed.ll"));
-    assert(libc.mkdir("std_prints".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    assert(os.make_dir("std_prints", 0o700) || sys.errno() == libc.EEXIST);
     write_lines("std_prints/rt.ft", PRINT_RUNTIME[..]);
     string[8] mut printed = {"fort", "--std-dir", "std_prints", "--fir-stats", "-S",
                              "fir_mixed.ft", "-o", "fir_mixed.ll"};
@@ -1426,7 +1418,7 @@ fn a_check_with_no_runtime_entry_is_a_compile_error() void {
     // An entry of the name of the check with other parameters, as an old --std-dir may hold,
     // fits no check either (fir_verify.entry_fits): `main` is the same compile error and nothing
     // panics, while the entry itself is a function that the translator writes.
-    assert(libc.mkdir("std_old".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    assert(os.make_dir("std_old", 0o700) || sys.errno() == libc.EEXIST);
     write_lines("std_old/rt.ft", OLD_RUNTIME[..]);
     remove_file("fir_add.ll");
     string[8] mut old = {"fort", "--std-dir", "std_old", "--fir-stats", "-S", "fir_add.ft", "-o",
@@ -1583,16 +1575,12 @@ string[2] FIR_V7_LINES = {
 // Writes the lines of `lines` to `path`, each ended by a newline.
 // Removes the file `path` when it is there, so that a later test sees whether a run wrote it.
 fn remove_file(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    libc.unlink(c_path.ptr);
+    os.remove_file(path);
 }
 
 // Whether the file `path` is there.
 fn file_exists(string path) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    return libc.access(c_path.ptr, 0) == 0;
+    return os.can_access(path, 0);
 }
 
 fn write_lines(string path, string@ lines) void {
@@ -2263,7 +2251,7 @@ string[2] SPAN_ERRORS = {
 // refuses a check whose entry the runtime lacks (fir.md 10), and no use of a function that is not
 // lowered is an error.
 fn the_use_error_is_the_same_in_each_mode() void {
-    assert(libc.mkdir("std_span".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    assert(os.make_dir("std_span", 0o700) || sys.errno() == libc.EEXIST);
     write_lines("std_span/rt.ft", SPAN_RUNTIME[..]);
     write_lines("span_site.ft", SPAN_SITE[..]);
     string[5] mut alone = {"fort", "--std-dir", "std_span", "--check", "span_site.ft"};
@@ -2422,7 +2410,7 @@ string[5] FIR_INDEX = {
 // writes for `a[i]` calls `std.rt.fail_bounds` in the default mode and under --release, which
 // keeps bounds checks (D10.6), and does not under --no-bounds-check.
 fn no_bounds_check_reaches_the_build_mode_pass() void {
-    assert(libc.mkdir("std_bounds".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    assert(os.make_dir("std_bounds", 0o700) || sys.errno() == libc.EEXIST);
     write_lines("std_bounds/rt.ft", BOUNDS_RUNTIME[..]);
     write_lines("fir_index.ft", FIR_INDEX[..]);
     string[9] mut argv = {"fort", "--std-dir", "std_bounds", "--fir-stats", "-S", "-S",
@@ -2646,7 +2634,7 @@ string FIR_CHECK_RUNTIME =
     "fn fail_overflow(char* file, u32 line, u32 col) noreturn {\n    while (true) {\n    }\n}\n";
 
 fn write_check_runtime() void {
-    assert(libc.mkdir("std_checks".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    assert(os.make_dir("std_checks", 0o700) || sys.errno() == libc.EEXIST);
     write_file("std_checks/rt.ft", FIR_CHECK_RUNTIME);
 }
 

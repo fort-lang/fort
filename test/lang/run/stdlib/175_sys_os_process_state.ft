@@ -1,0 +1,55 @@
+//! run
+//! stdout:
+//| a child does not see a variable after unset_env: done 0
+//| a child sees a variable after set_env: done 0
+//| io.open_write under the umask 277: 400
+//| make_fifo under the umask 277: 400
+//| make_dir under the umask 277: 500
+//| a child gets the umask: done 0
+import std.io;
+import std.os;
+import std.sys;
+
+// unset_env and set_umask change the state of the process, and a child that sys.run starts gets
+// that state (stdlib.md 2.1, 2.14). A variable that unset_env removed is not in the environment
+// of the child. The umask applies to each call that makes a file: io.open_write gives 0o666 less
+// the mask, make_fifo and make_dir their mode less the mask. A child gets the umask of its parent.
+
+// The word of a result and the exit status of the wait status.
+fn show(string what, sys.run_result r, i32 status) void {
+    println(what, r == sys.run_result.rr_done ? "done " : "other ", (status >> 8) & 255);
+}
+
+// The permission bits of `path` in octal.
+fn bits(string path) u32 {
+    u32 mut mode = 0;
+    os.path_mode(path, &mode);
+    u32 p = mode & os.PERMISSION_BITS;
+    return ((p >> 6) & 7) * 100 + ((p >> 3) & 7) * 10 + (p & 7);
+}
+
+fn main() i32 {
+    i32 mut status = 77;
+    sys.set_env("FORT_T_STATE", "set");
+    sys.unset_env("FORT_T_STATE");
+    string[3] unset = {"sh", "-c", "test -z \"${FORT_T_STATE+x}\""};
+    show("a child does not see a variable after unset_env: ",
+         sys.run(unset[..], unset[..0], &status), status);
+    sys.set_env("FORT_T_STATE", "again");
+    string[3] again = {"sh", "-c", "test \"$FORT_T_STATE\" = again"};
+    show("a child sees a variable after set_env: ", sys.run(again[..], again[..0], &status),
+         status);
+
+    u32 saved = os.set_umask(0o277);
+    io.write_file("t-state-file", cast("x", u8@));
+    println("io.open_write under the umask 277: ", bits("t-state-file"));
+    os.make_fifo("t-state-fifo", 0o666);
+    println("make_fifo under the umask 277: ", bits("t-state-fifo"));
+    os.make_dir("t-state-dir", 0o777);
+    println("make_dir under the umask 277: ", bits("t-state-dir"));
+    string[3] mask = {"sh", "-c", "test \"$(umask)\" = 0277"};
+    show("a child gets the umask: ", sys.run(mask[..], mask[..0], &status), status);
+    os.set_umask(saved);
+    os.set_mode("t-state-dir", 0o700);
+    return 0;
+}

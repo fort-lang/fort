@@ -67,9 +67,7 @@ fn out_is_empty() bool {
 }
 
 fn make_dir(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(libc.mkdir(c_path.ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    assert(os.make_dir(path, 0o700) || sys.errno() == libc.EEXIST);
 }
 
 fn write_file(string path, string text) void {
@@ -90,15 +88,11 @@ fn write_lines(string path, string@ lines) void {
 
 fn write_script(string path, string@ lines) void {
     write_lines(path, lines);
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(libc.chmod(c_path.ptr, 0o755) == 0);
+    assert(os.set_mode(path, 0o755));
 }
 
 fn exists(string path) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    return libc.access(c_path.ptr, 0) == 0;
+    return os.can_access(path, 0);
 }
 
 fn contents(string path) string own {
@@ -109,17 +103,11 @@ fn contents(string path) string own {
 }
 
 fn remove(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    libc.unlink(c_path.ptr);
+    os.remove_file(path);
 }
 
 fn set_env(string name, string value) void {
-    char mut@ own key = str.to_cstr(name);
-    defer del(key);
-    char mut@ own text = str.to_cstr(value);
-    defer del(text);
-    assert(libc.setenv(key.ptr, text.ptr, 1) == 0);
+    assert(sys.set_env(name, value));
 }
 
 // Whether the directory `path` holds no entry but `.` and `..`.
@@ -609,16 +597,12 @@ fn an_artifact_of_another_format_version_is_corrupt() void {
     assert(use_ir(uses[..]) == EXIT_USAGE);
     assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
     build_std(NO_MORE[..0]);
-    char mut@ own c_ownership = str.to_cstr("std.flib/summaries/ownership");
-    defer del(c_ownership);
-    assert(libc.unlink(c_ownership.ptr) == 0);
+    assert(os.remove_file("std.flib/summaries/ownership"));
     assert(use_ir(uses[..]) == EXIT_USAGE);
     assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
     build_std(NO_MORE[..0]);
-    assert(libc.unlink(c_ownership.ptr) == 0);
-    char mut@ own c_summaries = str.to_cstr("std.flib/summaries");
-    defer del(c_summaries);
-    assert(libc.rmdir(c_summaries.ptr) == 0);
+    assert(os.remove_file("std.flib/summaries/ownership"));
+    assert(os.remove_dir("std.flib/summaries"));
     assert(use_ir(uses[..]) == EXIT_USAGE);
     assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
     build_std(NO_MORE[..0]);
@@ -1391,12 +1375,10 @@ fn the_used_libraries_are_read_before_the_entry_file() void {
 fn a_manifest_that_cannot_be_read_is_exit_two() void {
     build_std(NO_MORE[..0]);
     write_file("main.ft", MAIN);
-    char mut@ own c_path = str.to_cstr("std.flib/manifest");
-    defer del(c_path);
-    assert(libc.chmod(c_path.ptr, 0) == 0);
+    assert(os.set_mode("std.flib/manifest", 0));
     string[4] args = {"--use", "std=std.flib", "-S", "main.ft"};
     i32 status = use_run(args[..]);
-    assert(libc.chmod(c_path.ptr, 0o644) == 0);
+    assert(os.set_mode("std.flib/manifest", 0o644));
     assert(status == EXIT_USAGE);
     assert(err_is("fort: error: cannot read library 'std.flib': Permission denied\n"));
 }

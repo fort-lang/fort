@@ -1,0 +1,40 @@
+//! run
+//! stdout:
+//| unset_env of a set variable: true, it is gone: true
+//| unset_env of an absent variable: true
+//| unset_env of an empty name: false EINVAL: true
+//| unset_env of a name with '=': false EINVAL: true, the variable stays: true
+//| a NUL ends the name: true, it is gone: true
+import std.strbuf;
+import std.sys;
+
+// sys.unset_env removes a variable of the environment with unsetenv(3) (stdlib.md 2.1). An
+// absent name is no failure. An empty name and a name with '=' give EINVAL on both targets, and
+// the variable whose name is the part before the '=' stays. A NUL ends the name.
+
+// EINVAL, the same value on both targets.
+i32 EINVAL = 22;
+
+fn main() i32 {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    sys.set_env("FORT_T_UNSET", "one");
+    bool removed = sys.unset_env("FORT_T_UNSET");
+    println("unset_env of a set variable: ", removed, ", it is gone: ",
+            !sys.env("FORT_T_UNSET", &b));
+    println("unset_env of an absent variable: ", sys.unset_env("FORT_T_UNSET"));
+    sys.set_errno(0);
+    println("unset_env of an empty name: ", sys.unset_env(""), " EINVAL: ",
+            sys.errno() == EINVAL);
+    sys.set_env("FORT_T_KEEP", "two");
+    sys.set_errno(0);
+    bool with_equals = sys.unset_env("FORT_T_KEEP=two");
+    bool invalid = sys.errno() == EINVAL;
+    println("unset_env of a name with '=': ", with_equals, " EINVAL: ", invalid,
+            ", the variable stays: ", sys.env("FORT_T_KEEP", &b));
+    sys.set_env("FORT_T_CUT", "three");
+    bool cut = sys.unset_env("FORT_T_CUT\0junk");
+    strbuf.clear(&b);
+    println("a NUL ends the name: ", cut, ", it is gone: ", !sys.env("FORT_T_CUT", &b));
+    return 0;
+}

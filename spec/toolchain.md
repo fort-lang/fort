@@ -1117,7 +1117,7 @@ fn assert_fail(char* text, char* file, u32 line, u32 col) noreturn;
 // digits that round-trip in that type (D18); `print_f32` and `print_f64` are the
 // two float entry points of D18.1 and D18.4, and an `f32` is never widened to an
 // `f64` first, because the digits depend on the type.
-// `flush` writes out one buffer (`io.close` and `io.flush` call it); `flush_all`
+// `flush` writes out one buffer (`io.flush` and `io.dup2` call it); `flush_all`
 // writes out every buffer, at exit and before every failure. A buffer whose
 // descriptor is a terminal is written out at every newline too (D11.5, 5.3).
 fn print_i64(i32 fd, i64 v) void;
@@ -1151,9 +1151,9 @@ fn exit(i32 status) noreturn;
 that names them, so they are not entry points and this list stays complete. The module's buffers,
 its helpers and everything else it needs are its own and are exported like any module's (D9.6),
 which makes them implementation details a program must not use (`stdlib.md` 1.1); `sys` and `io`
-import it for `exit`, `args`, `flush` and `flush_all` (`stdlib.md` 3) and the rest of the library
-leaves it alone. `errno` is not its business either: `sys.errno()` reaches libc's
-`__errno_location` directly.
+import it for `exit`, `args`, `flush`, `flush_all` and `reset_buffer` (`stdlib.md` 3) and the
+rest of the library leaves it alone. `errno` is not its business either: `sys.errno()` reaches
+libc's `__errno_location` directly.
 
 The two float printers stood in a module of their own, `std.rt_float`, until T-132. They stood
 apart because a compiler that builds the runtime must accept floats to compile them and the C
@@ -1215,12 +1215,13 @@ Mac arm64 raises SIGTRAP with no message.
 | 2     | `eprint`, `eprintln`                 | unbuffered; every call writes immediately        |
 | other | `fprint(fd, ...)`, `fprintln`        | one buffer per descriptor, same policy as 1      |
 
-A buffered descriptor is flushed when its buffer is full, at exit, and before any runtime error.
-It is *interactive* when `isatty` says so, which the runtime asks once, when it creates that
-descriptor's buffer, and never again, so that no `print` carries a system call of its own; a
-descriptor that is interactive is flushed at a newline as well, the whole buffer and not only the
-bytes up to the newline. That is C's rule (C11 7.21.3p7) and the reason a reader cares is the
-order it fixes: on a terminal each `println` appears as the program runs, and `print` and
+A buffered descriptor is flushed when its buffer is full, at exit, and before any runtime error. It
+is *interactive* when `isatty` says so, which the runtime asks once, when it creates that
+descriptor's buffer, and once more at the first output after `io.close` or `io.dup2` resets the
+buffer with `std.rt.reset_buffer`, and at no other time, so that no `print` carries a system call of
+its own; a descriptor that is interactive is flushed at a newline as well, the whole buffer and not
+only the bytes up to the newline. That is C's rule (C11 7.21.3p7) and the reason a reader cares is
+the order it fixes: on a terminal each `println` appears as the program runs, and `print` and
 `eprint` output interleave in the order the program wrote them, where before this rule a program
 printing one line to each showed the `eprint` line alone until it exited. On a pipe or a file
 nothing changes: `print` output waits for a flush, so redirecting a program still yields the same

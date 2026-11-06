@@ -635,25 +635,19 @@ string ARCHIVE_TEXT = "!<arch>\nmember\x00\x01\xFF";
 string MANIFEST_TEXT = "fort-manifest 1\nlibrary std\n";
 
 fn make_dir(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(libc.mkdir(c_path.ptr, 0o700) == 0);
+    assert(os.make_dir(path, 0o700));
 }
 
 fn exists(string path) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    return libc.access(c_path.ptr, 0) == 0;
+    return os.can_access(path, 0);
 }
 
 fn is_dir(string path) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    void mut* own d = libc.opendir(c_path.ptr);
-    if (d == null) {
+    i32 fd = io.open(path, libc.O_RDONLY | libc.O_DIRECTORY, 0);
+    if (fd < 0) {
         return false;
     }
-    libc.closedir(move(d));
+    io.close(fd);
     return true;
 }
 
@@ -724,7 +718,7 @@ fn temp_name(string dir, string name, strbuf.str_buf mut* out) string {
     strbuf.push(out, '/');
     strbuf.append(out, name);
     strbuf.append(out, ".tmp.");
-    strbuf.append_i64(out, cast(libc.getpid(), i64));
+    strbuf.append_i64(out, cast(sys.pid(), i64));
     return strbuf.view(out);
 }
 
@@ -810,10 +804,10 @@ fn summaries_loses_each_file_and_each_empty_directory() void {
 // A fresh directory under /tmp, a string the caller owns. The shared folder of the VM, where the
 // harness runs a test, keeps no permission bits, so a case that needs them runs there.
 fn make_temp() string own {
-    char mut@ own tmpl = str.to_cstr("/tmp/fort-artifact-XXXXXX");
-    defer del(tmpl);
-    assert(libc.mkdtemp(&tmpl[0]) != null);
-    return str.dup(str.from_cstr(&tmpl[0]));
+    strbuf.str_buf mut made = strbuf.create();
+    defer del(made.data);
+    assert(os.make_temp_dir("/tmp/fort-artifact-XXXXXX", &made));
+    return strbuf.take(&made);
 }
 
 // `<dir>/<rel>`, a string the caller owns.
@@ -828,10 +822,8 @@ fn under(string dir, string rel) string own {
 
 // Removes the file or the empty directory `path`.
 fn remove(string path) void {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    if (libc.unlink(c_path.ptr) != 0) {
-        libc.rmdir(c_path.ptr);
+    if (!os.remove_file(path)) {
+        os.remove_dir(path);
     }
 }
 
@@ -847,15 +839,13 @@ fn a_file_that_cannot_be_removed_gives_the_error_of_unlink() void {
     make_dir(dir);
     make_dir(summaries);
     assert(io.write_file(file, cast("f", u8@)));
-    char mut@ own c_path = str.to_cstr(summaries);
-    defer del(c_path);
     // a directory that its owner cannot write keeps its entries
-    assert(libc.chmod(c_path.ptr, 0o555) == 0);
+    assert(os.set_mode(summaries, 0o555));
     strbuf.str_buf mut failed = strbuf.create();
     defer del(failed.data);
     i32 mut error = 0;
     bool written = write_to(dir, &failed, &error);
-    assert(libc.chmod(c_path.ptr, 0o700) == 0);
+    assert(os.set_mode(summaries, 0o700));
     if (!written) {
         assert(same(strbuf.view(&failed), file));
         // the AT_REMOVEDIR form of unlinkat(2) gives ENOTDIR for a file on darwin, so the error is
@@ -879,24 +869,21 @@ fn a_file_that_cannot_be_removed_gives_the_error_of_unlink() void {
 
 // Makes the symbolic link `path` to `target`.
 fn link(string target, string path) void {
-    char mut@ own c_target = str.to_cstr(target);
-    defer del(c_target);
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    assert(libc.symlink(c_target.ptr, c_path.ptr) == 0);
+    assert(os.make_symlink(target, path));
 }
 
 // Whether `path` is a symbolic link: readlink(2) succeeds on a link alone.
 fn is_link(string path) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    char[8] mut buf = {};
-    return libc.readlink(c_path.ptr, &buf[0], 8) >= 0;
+    strbuf.str_buf mut target = strbuf.create();
+    defer del(target.data);
+    return os.read_link(path, &target);
 }
 
-// The text of the errno value `error`.
-fn reason(i32 error) string {
-    return str.from_cstr(libc.strerror(error));
+// The text of the errno value `error`, in `out`.
+fn reason(i32 error, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    os.error_text(error, out);
+    return strbuf.view(out);
 }
 
 // The text of ELOOP, which open(2) with O_NOFOLLOW gives for a symbolic link. Its number differs
@@ -916,7 +903,9 @@ fn a_summaries_that_links_to_a_directory_is_refused() void {
     i32 mut error = 0;
     assert(!write_to("linked.flib", &failed, &error));
     assert(same(strbuf.view(&failed), "linked.flib/summaries"));
-    assert(same(reason(error), LOOP_TEXT));
+    strbuf.str_buf mut text = strbuf.create();
+    defer del(text.data);
+    assert(same(reason(error, &text), LOOP_TEXT));
     // nothing outside the artifact goes, and the link stays
     assert(holds("outside_dir/keep", "k"));
     assert(is_dir("outside_dir/sub"));
@@ -936,7 +925,9 @@ fn a_summaries_that_links_to_a_file_is_refused() void {
     i32 mut error = 0;
     assert(!write_to("filelink.flib", &failed, &error));
     assert(same(strbuf.view(&failed), "filelink.flib/summaries"));
-    assert(same(reason(error), LOOP_TEXT));
+    strbuf.str_buf mut text = strbuf.create();
+    defer del(text.data);
+    assert(same(reason(error, &text), LOOP_TEXT));
     assert(holds("outside_file", "o"));
     assert(is_link("filelink.flib/summaries"));
     assert(!exists("filelink.flib/manifest"));
@@ -958,9 +949,7 @@ fn a_link_in_summaries_goes_and_its_target_stays() void {
     link("../../target_file", "inner.flib/summaries/to_file");
     // a file that its owner cannot write goes too: removal reads the mode of the directory
     assert(io.write_file("inner.flib/summaries/fixed", cast("x", u8@)));
-    char mut@ own c_fixed = str.to_cstr("inner.flib/summaries/fixed");
-    defer del(c_fixed);
-    assert(libc.chmod(c_fixed.ptr, 0o444) == 0);
+    assert(os.set_mode("inner.flib/summaries/fixed", 0o444));
     strbuf.str_buf mut failed = strbuf.create();
     defer del(failed.data);
     i32 mut error = 0;
@@ -1138,16 +1127,14 @@ fn a_summary_file_that_cannot_be_written_is_the_failed_path() void {
     defer del(sums);
     make_dir(dir);
     make_dir(sums);
-    char mut@ own c_sums = str.to_cstr(sums);
-    defer del(c_sums);
     // an empty summaries/ that its owner cannot write: the writer empties it, and then the
     // temporary file of the summary file cannot be made
-    assert(libc.chmod(c_sums.ptr, 0o555) == 0);
+    assert(os.set_mode(sums, 0o555));
     strbuf.str_buf mut failed = strbuf.create();
     defer del(failed.data);
     i32 mut error = 0;
     bool written = write_to(dir, &failed, &error);
-    assert(libc.chmod(c_sums.ptr, 0o700) == 0);
+    assert(os.set_mode(sums, 0o700));
     string own iface = under(root, "ro.flib/interface.ft");
     defer del(iface);
     string own archive = under(root, "ro.flib/lib.a");

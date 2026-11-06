@@ -1,0 +1,76 @@
+//! run
+//! stdout:
+//| make_fifo: true, a FIFO: true, mode 640: true
+//| make_fifo less the umask: true, mode 600: true
+//| make_fifo over an entry: false EEXIST: true
+//| make_fifo into a missing directory: false ENOENT: true
+//| make_fifo with a bit outside PERMISSION_BITS: false EINVAL: true, nothing there: true
+//| make_fifo with the type bits of a directory: false EINVAL: true, nothing there: true
+//| a NUL ends the path: true true
+//| make_fifo with S_ISGID: false EINVAL: true, nothing there: true
+//| make_fifo with S_ISUID: false EINVAL: true, nothing there: true
+//| errno stays after a success: true
+import std.libc;
+import std.os;
+import std.sys;
+
+// os.make_fifo makes a FIFO with mkfifo(3) and the permission bits less the umask (stdlib.md
+// 2.14). An entry at the path gives EEXIST, and a missing directory ENOENT. A mode with a bit
+// outside PERMISSION_BITS or with S_ISUID or S_ISGID makes nothing and gives EINVAL on both
+// targets, and a success keeps errno. path_mode reads the
+// type without an open, so the FIFO needs no writer.
+
+u32 S_IFMT = 0o170000;
+u32 S_IFIFO = 0o010000;
+
+// Whether `path` is a FIFO whose permission bits are `bits`.
+fn is_fifo(string path, u32 bits) bool {
+    u32 mut mode = 0;
+    return os.path_mode(path, &mode) && (mode & S_IFMT) == S_IFIFO &&
+           (mode & os.PERMISSION_BITS) == bits;
+}
+
+fn main() i32 {
+    u32 saved = os.set_umask(0);
+    os.make_dir("t-fifo", 0o700);
+    bool made = os.make_fifo("t-fifo/a", 0o640);
+    u32 mut mode = 0;
+    os.path_mode("t-fifo/a", &mode);
+    println("make_fifo: ", made, ", a FIFO: ", (mode & S_IFMT) == S_IFIFO, ", mode 640: ",
+            (mode & os.PERMISSION_BITS) == 0o640);
+    os.set_umask(0o077);
+    bool masked = os.make_fifo("t-fifo/b", 0o666);
+    println("make_fifo less the umask: ", masked, ", mode 600: ", is_fifo("t-fifo/b", 0o600));
+    os.set_umask(saved);
+    sys.set_errno(0);
+    println("make_fifo over an entry: ", os.make_fifo("t-fifo/a", 0o600), " EEXIST: ",
+            sys.errno() == libc.EEXIST);
+    println("make_fifo into a missing directory: ", os.make_fifo("t-none/a", 0o600),
+            " ENOENT: ", sys.errno() == libc.ENOENT);
+    sys.set_errno(0);
+    bool high = os.make_fifo("t-fifo/c", 0o10600);
+    bool invalid = sys.errno() == libc.EINVAL;
+    println("make_fifo with a bit outside PERMISSION_BITS: ", high, " EINVAL: ", invalid,
+            ", nothing there: ", !os.can_access("t-fifo/c", 0));
+    sys.set_errno(0);
+    bool typed = os.make_fifo("t-fifo/d", 0o040600);
+    bool mut refused = sys.errno() == libc.EINVAL;
+    println("make_fifo with the type bits of a directory: ", typed, " EINVAL: ", refused,
+            ", nothing there: ", !os.can_access("t-fifo/d", 0));
+    bool cut = os.make_fifo("t-fifo/e\0junk", 0o600);
+    println("a NUL ends the path: ", cut, " ", is_fifo("t-fifo/e", 0o600));
+    sys.set_errno(0);
+    bool gid = os.make_fifo("t-fifo/g", 0o2600);
+    refused = sys.errno() == libc.EINVAL;
+    println("make_fifo with S_ISGID: ", gid, " EINVAL: ", refused, ", nothing there: ",
+            !os.can_access("t-fifo/g", 0));
+    sys.set_errno(0);
+    bool uid = os.make_fifo("t-fifo/u", 0o4600);
+    refused = sys.errno() == libc.EINVAL;
+    println("make_fifo with S_ISUID: ", uid, " EINVAL: ", refused, ", nothing there: ",
+            !os.can_access("t-fifo/u", 0));
+    sys.set_errno(77);
+    os.make_fifo("t-fifo/kept", 0o600);
+    println("errno stays after a success: ", sys.errno() == 77);
+    return 0;
+}

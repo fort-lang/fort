@@ -1,0 +1,60 @@
+//! run
+//! stdout:
+//| set_umask gives the mask before it: true
+//| make_dir under the umask 077: 700
+//| make_dir under the umask 0: 777
+//| bits outside UMASK_BITS do not count: 777
+//| errno stays: true
+//| the first mask comes back: true
+//| a mask with bits outside UMASK_BITS comes back without them: true
+import std.io;
+import std.libc;
+import std.os;
+import std.strbuf;
+import std.sys;
+
+// os.set_umask sets the file mode creation mask with umask(2) and gives the mask before it
+// (stdlib.md 2.14). make_dir gives its mode less the mask. The bits of a mask outside
+// UMASK_BITS do not count on both targets, so the mask that comes back holds only those bits.
+// umask does not fail and does not change errno. A mask that a direct umask(2) set with bits
+// outside UMASK_BITS, as a parent process can set it, comes back without them: Darwin keeps
+// 0o7022, and Linux keeps 0o022.
+
+// The permission bits of the directory that make_dir makes at `path` with the mode 0o777, in
+// octal.
+fn made_bits(string path, strbuf.str_buf mut* b) string {
+    strbuf.clear(b);
+    os.make_dir(path, 0o777);
+    u32 mut mode = 0;
+    os.path_mode(path, &mode);
+    u32 p = mode & os.PERMISSION_BITS;
+    strbuf.append_i64(b, cast((p >> 6) & 7, i64));
+    strbuf.append_i64(b, cast((p >> 3) & 7, i64));
+    strbuf.append_i64(b, cast(p & 7, i64));
+    return strbuf.view(b);
+}
+
+fn main() i32 {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    u32 first = os.set_umask(0o077);
+    println("set_umask gives the mask before it: ", os.set_umask(0o077) == 0o077);
+    println("make_dir under the umask 077: ", made_bits("t-umask-a", &b));
+    os.set_umask(0);
+    println("make_dir under the umask 0: ", made_bits("t-umask-b", &b));
+    os.set_umask(0o7777 | 0x10000);
+    println("bits outside UMASK_BITS do not count: ", os.set_umask(0) == 0o777 ? "777" : "other");
+    sys.set_errno(77);
+    os.set_umask(0o022);
+    println("errno stays: ", sys.errno() == 77);
+    os.set_umask(first);
+    println("the first mask comes back: ", os.set_umask(first) == first);
+    $if ($cfg(target_os) == "linux") {
+        libc.umask(0o7022);
+    } else {
+        libc.umask(cast(0o7022, u16));
+    }
+    println("a mask with bits outside UMASK_BITS comes back without them: ",
+            os.set_umask(first) == 0o022);
+    return 0;
+}
