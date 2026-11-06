@@ -102,53 +102,53 @@ fn write_runtime() void {
 fn every_flag_sets_its_own_option() void {
     string[8] mut argv = {"fort", "-S", "-c", "--release", "--no-bounds-check", "--check",
                           "entry.ft", ""};
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    assert(driver.parse(&opts, argv[0..7]) == driver.PARSE_OK);
-    assert(opts.emit_ir);
-    assert(opts.compile_only);
-    assert(opts.release);
-    assert(opts.no_bounds_check);
-    assert(opts.check);
-    assert(opts.have_entry);
-    assert(opts.entry == "entry.ft");
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    assert(driver.parse(opts, argv[0..7]) == driver.PARSE_OK);
+    assert(opts->emit_ir);
+    assert(opts->compile_only);
+    assert(opts->release);
+    assert(opts->no_bounds_check);
+    assert(opts->check);
+    assert(opts->have_entry);
+    assert(opts->entry == "entry.ft");
     // Nothing the command line did not name is set.
-    assert(!opts.json);
-    assert(!opts.index);
-    assert(!opts.tokens);
-    assert(!opts.ast);
-    assert(!opts.fir);
-    assert(opts.fir_after.len == 0);
-    assert(!opts.fir_report);
-    assert(!opts.fir_stats);
+    assert(!opts->json);
+    assert(!opts->index);
+    assert(!opts->tokens);
+    assert(!opts->ast);
+    assert(!opts->fir);
+    assert(opts->fir_after.len == 0);
+    assert(!opts->fir_report);
+    assert(!opts->fir_stats);
 }
 
 // --index implies --check and --json, so it is the whole command line an
 // editor gives the compiler.
 fn index_implies_check_and_json() void {
     string[3] mut argv = {"fort", "--index", "entry.ft"};
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    assert(driver.parse(&opts, argv[0..3]) == driver.PARSE_OK);
-    assert(opts.index);
-    assert(opts.check);
-    assert(opts.json);
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    assert(driver.parse(opts, argv[0..3]) == driver.PARSE_OK);
+    assert(opts->index);
+    assert(opts->check);
+    assert(opts->json);
 }
 
 // --tokens and --ast imply nothing: each stops the run at one pass.
 fn the_two_dumps_imply_nothing() void {
     string[3] mut tokens = {"fort", "--tokens", "entry.ft"};
-    driver.options mut a = driver.options_create();
-    defer driver.options_free(&a);
-    assert(driver.parse(&a, tokens[0..3]) == driver.PARSE_OK);
-    assert(a.tokens);
-    assert(!a.check && !a.json && !a.ast);
+    driver.options mut* own a = driver.options_make();
+    defer driver.options_drop_made(move(a));
+    assert(driver.parse(a, tokens[0..3]) == driver.PARSE_OK);
+    assert(a->tokens);
+    assert(!a->check && !a->json && !a->ast);
     string[3] mut ast = {"fort", "--ast", "entry.ft"};
-    driver.options mut b = driver.options_create();
-    defer driver.options_free(&b);
-    assert(driver.parse(&b, ast[0..3]) == driver.PARSE_OK);
-    assert(b.ast);
-    assert(!b.check && !b.json && !b.tokens);
+    driver.options mut* own b = driver.options_make();
+    defer driver.options_drop_made(move(b));
+    assert(driver.parse(b, ast[0..3]) == driver.PARSE_OK);
+    assert(b->ast);
+    assert(!b->check && !b->json && !b->tokens);
 }
 
 // ---- the options that take a value -----------------------------
@@ -157,15 +157,15 @@ fn the_two_dumps_imply_nothing() void {
 fn the_last_value_of_a_single_option_wins() void {
     string[11] mut argv = {"fort", "-o", "first", "-o", "second", "--cc", "gcc", "--target",
                            "aarch64-linux-gnu", "--std-dir", "lib"};
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
     string[12] mut full = {"fort", "-o", "first", "-o", "second", "--cc", "gcc", "--target",
                            "aarch64-linux-gnu", "--std-dir", "lib", "entry.ft"};
-    assert(driver.parse(&opts, full[0..12]) == driver.PARSE_OK);
-    assert(opts.output == "second");
-    assert(opts.cc == "gcc");
-    assert(opts.target == "aarch64-linux-gnu");
-    assert(opts.std_dir == "lib");
+    assert(driver.parse(opts, full[0..12]) == driver.PARSE_OK);
+    assert(opts->output == "second");
+    assert(opts->cc == "gcc");
+    assert(opts->target == "aarch64-linux-gnu");
+    assert(opts->std_dir == "lib");
     assert(argv.len == 11);
 }
 
@@ -173,18 +173,32 @@ fn the_last_value_of_a_single_option_wins() void {
 fn the_repeatable_options_keep_their_order() void {
     string[10] mut argv = {"fort", "-I", "first", "-I", "second", "-lm", "-lc", "-Xcc", "-g",
                            "entry.ft"};
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    assert(driver.parse(&opts, argv[0..10]) == driver.PARSE_OK);
-    assert(opts.includes.len == 2);
-    assert(containers.str_at(&opts.includes, 0) == "first");
-    assert(containers.str_at(&opts.includes, 1) == "second");
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    assert(driver.parse(opts, argv[0..10]) == driver.PARSE_OK);
+    assert(opts->includes.len == 2);
+    assert(containers.str_at(&opts->includes, 0) == "first");
+    assert(containers.str_at(&opts->includes, 1) == "second");
     // A `-l<lib>` is one argument: the library is part of the option.
-    assert(opts.libs.len == 2);
-    assert(containers.str_at(&opts.libs, 0) == "-lm");
-    assert(containers.str_at(&opts.libs, 1) == "-lc");
-    assert(opts.cc_args.len == 1);
-    assert(containers.str_at(&opts.cc_args, 0) == "-g");
+    assert(opts->libs.len == 2);
+    assert(containers.str_at(&opts->libs, 0) == "-lm");
+    assert(containers.str_at(&opts->libs, 1) == "-lc");
+    assert(opts->cc_args.len == 1);
+    assert(containers.str_at(&opts->cc_args, 0) == "-g");
+}
+
+// options_free moves the options into options_drop, which holds each release of the lists once.
+// The move leaves the zero value: no list holds an element or a slot. A free that moves nothing
+// leaves the lists of the parse, and its deletion gives no site, because the pass reads no callee.
+fn freed_options_hold_no_list() void {
+    string[5] argv = {"fort", "-I", "first", "-lm", "entry.ft"};
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    assert(driver.parse(opts, argv[0..5]) == driver.PARSE_OK);
+    assert(opts->includes.len == 1 && opts->libs.len == 1);
+    driver.options_free(opts);
+    assert(opts->includes.len == 0 && opts->includes.items.len == 0);
+    assert(opts->libs.len == 0 && opts->libs.items.len == 0);
 }
 
 // The triple the module header of a target carries: the LLVM spelling of the
@@ -216,15 +230,15 @@ fn header_line(strbuf.str_buf mut* b, string target) string {
 // The driver defaults: clang, because nothing else reads LLVM IR, and the
 // target of the standard library this compiler was built with (D14.1).
 fn the_defaults_are_clang_and_the_built_target() void {
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    assert(opts.cc == "clang");
-    assert(opts.target == os.TARGET);
-    assert(!opts.have_entry);
-    assert(!opts.have_output);
-    assert(opts.output.len == 0);
-    assert(!opts.have_std_dir);
-    assert(opts.std_dir.len == 0);
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    assert(opts->cc == "clang");
+    assert(opts->target == os.TARGET);
+    assert(!opts->have_entry);
+    assert(!opts->have_output);
+    assert(opts->output.len == 0);
+    assert(!opts->have_std_dir);
+    assert(opts->std_dir.len == 0);
 }
 
 // `-o ""` names an output of no characters. It is an output the command line
@@ -235,11 +249,11 @@ fn the_defaults_are_clang_and_the_built_target() void {
 // prevent that case.
 fn an_empty_output_option_is_an_output_that_was_named() void {
     string[4] mut argv = {"fort", "-o", "", "entry.ft"};
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    assert(driver.parse(&opts, argv[0..4]) == driver.PARSE_OK);
-    assert(opts.have_output);
-    assert(opts.output.len == 0);
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    assert(driver.parse(opts, argv[0..4]) == driver.PARSE_OK);
+    assert(opts->have_output);
+    assert(opts->output.len == 0);
     // The whole run answers the same way. --cc is given the empty name and
     // fails, where the default would have made `a.out` and exited 0.
     write_file("named.ft", "fn main() i32 {\n    return 0;\n}\n");
@@ -252,11 +266,11 @@ fn an_empty_output_option_is_an_output_that_was_named() void {
 // an option spelling included.
 fn a_valued_option_takes_the_next_argument_whatever_it_is() void {
     string[4] mut argv = {"fort", "-o", "--release", "entry.ft"};
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    assert(driver.parse(&opts, argv[0..4]) == driver.PARSE_OK);
-    assert(opts.output == "--release");
-    assert(!opts.release);
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    assert(driver.parse(opts, argv[0..4]) == driver.PARSE_OK);
+    assert(opts->output == "--release");
+    assert(!opts->release);
 }
 
 // ---- the usage errors ------------------------------------------
@@ -451,11 +465,11 @@ fn a_clean_program_is_emitted_and_handed_to_the_cc() void {
     assert(run(emit[0..5]) == EXIT_OK);
     assert(captured_err_is_empty());
     strbuf.str_buf mut module = strbuf.create();
-    defer strbuf.free(&module);
+    defer del(module.data);
     assert(io.read_file("clean.ll", &module));
     string text = strbuf.view(&module);
     strbuf.str_buf mut header = strbuf.create();
-    defer strbuf.free(&header);
+    defer del(header.data);
     assert(str.starts_with(text, header_line(&header, os.TARGET)));
     assert(str.find(text, "define dso_local i32 @\"clean.main\"() #0 {\n") >= 0);
     assert(str.find(text, "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {\n") >= 0);
@@ -480,7 +494,7 @@ fn a_clean_program_is_emitted_and_handed_to_the_cc() void {
 // Whether a file named `-` stands in the working directory.
 fn a_dash_file_exists() bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     return io.read_file("-", &b);
 }
 
@@ -492,7 +506,7 @@ fn dash_output_under_s_is_stdout() void {
     string[5] mut to_file = {"fort", "-S", "dash.ft", "-o", "dash.ll"};
     assert(run(to_file[0..5]) == EXIT_OK);
     strbuf.str_buf mut module = strbuf.create();
-    defer strbuf.free(&module);
+    defer del(module.data);
     assert(io.read_file("dash.ll", &module));
     assert(strbuf.view(&module).len > 0);
     string[5] mut to_stdout = {"fort", "-S", "dash.ft", "-o", "-"};
@@ -520,9 +534,9 @@ fn dash_output_under_s_is_stdout() void {
 
 // Whether `args` parse to PARSE_OK, in options of their own.
 fn parses(string@ args) bool {
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    return driver.parse(&opts, args) == driver.PARSE_OK;
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    return driver.parse(opts, args) == driver.PARSE_OK;
 }
 
 // A link writes an executable, so `-o -` without -S or -c is a usage error before the front end
@@ -560,7 +574,7 @@ fn dash_output_needs_s_or_c() void {
 
 fn target_error_is(string message) bool {
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     strbuf.append(&want, "fort: error: ");
     strbuf.append(&want, message);
     strbuf.append(&want, "\nusage: fort [options] entry.ft\n");
@@ -574,7 +588,7 @@ fn target_error_is(string message) bool {
 fn target_errors_stop_before_output() void {
     string foreign = other_target();
     strbuf.str_buf mut message = strbuf.create();
-    defer strbuf.free(&message);
+    defer del(message.data);
     string[7] mut unsupported = {"fort", "-S", "--target", "x86_64-linux-musl",
                                  "-o", "unsupported.ll", "missing.ft"};
     assert(run(unsupported[0..7]) == EXIT_USAGE);
@@ -602,7 +616,7 @@ fn target_errors_stop_before_output() void {
     strbuf.append(&message, "' compiler");
     assert(target_error_is(strbuf.view(&message)));
     strbuf.str_buf mut file = strbuf.create();
-    defer strbuf.free(&file);
+    defer del(file.data);
     assert(!io.read_file("unsupported.ll", &file));
     assert(!io.read_file("no-root.ll", &file));
     assert(!io.read_file("foreign.o", &file));
@@ -632,11 +646,11 @@ fn cross_ir_uses_the_selected_triple() void {
                           "--std-dir", "std", "-o", "cross-form.ll", "cross-form.ft"};
     assert(run(full[0..10]) == EXIT_OK);
     strbuf.str_buf mut module = strbuf.create();
-    defer strbuf.free(&module);
+    defer del(module.data);
     assert(io.read_file("cross-form.ll", &module));
     string text = strbuf.view(&module);
     strbuf.str_buf mut header = strbuf.create();
-    defer strbuf.free(&header);
+    defer del(header.data);
     assert(str.starts_with(text, header_line(&header, other_target())));
     assert(str.find(text, "target datalayout") < 0);
 }
@@ -653,7 +667,7 @@ fn cfg_pairs_are_checked_and_the_target_keys_are_the_compilers() void {
     assert(run(reserved[0..5]) == EXIT_USAGE);
     assert(err_has("cannot override compiler configuration key 'target_os'"));
     strbuf.str_buf mut source = strbuf.create();
-    defer strbuf.free(&source);
+    defer del(source.data);
     strbuf.append(&source, "string WANT_OS = $cfg(want_os);\n");
     strbuf.append(&source, "string WANT_ARCH = $cfg(want_arch);\n");
     strbuf.append(&source, "string WANT_ABI = $cfg(want_abi);\n");
@@ -680,7 +694,7 @@ fn a_conditional_import_follows_the_target() void {
     write_file("target/darwin_dep.ft",
                "fn selected_value() i32 { return 0; }\nfn darwin_only() i32 { return 0; }\n");
     strbuf.str_buf mut source = strbuf.create();
-    defer strbuf.free(&source);
+    defer del(source.data);
     strbuf.append(&source, "$if ($cfg(target_os) == \"linux\") {\n");
     strbuf.append(&source, "    import linux_dep as chosen;\n} else {\n");
     strbuf.append(&source, "    import darwin_dep as chosen;\n}\n");
@@ -701,13 +715,13 @@ fn a_conditional_import_follows_the_target() void {
                              "std", "-I", "target", "-o", "target-mac.ll", "target/main.ft"};
     assert(run(mac_ir[0..11]) == EXIT_OK);
     strbuf.str_buf mut module = strbuf.create();
-    defer strbuf.free(&module);
+    defer del(module.data);
     assert(io.read_file("target-linux.ll", &module));
     string linux_text = strbuf.view(&module);
     assert(str.find(linux_text, "linux_only") >= 0);
     assert(str.find(linux_text, "darwin_only") < 0);
     strbuf.str_buf mut mac_module = strbuf.create();
-    defer strbuf.free(&mac_module);
+    defer del(mac_module.data);
     assert(io.read_file("target-mac.ll", &mac_module));
     string mac_text = strbuf.view(&mac_module);
     assert(str.find(mac_text, "darwin_only") >= 0);
@@ -721,7 +735,7 @@ fn the_default_output_follows_the_mode() void {
     string[3] mut emit = {"fort", "-S", "named.ft"};
     assert(run(emit[0..3]) == EXIT_OK);
     strbuf.str_buf mut module = strbuf.create();
-    defer strbuf.free(&module);
+    defer del(module.data);
     assert(io.read_file("named.ll", &module));
     assert(driver.entry_base("dir/sub/prog.ft") == "prog");
     assert(driver.entry_base("prog.ft") == "prog");
@@ -882,24 +896,24 @@ fn make_directory(string path) bool {
 // `std` in the directory containing the binary, or `std` alone when the
 // program name has no directory part.
 fn std_beside_the_binary_is_the_last_resort() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    assert(driver.std_dir_beside(&p, "/usr/local/bin/fort") == "/usr/local/bin/std");
-    assert(driver.std_dir_beside(&p, "fort") == "std");
-    assert(driver.std_dir_beside(&p, "./fort") == "./std");
-    assert(driver.std_dir_beside(&p, "/fort") == "/std");
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    assert(driver.std_dir_beside(p, "/usr/local/bin/fort") == "/usr/local/bin/std");
+    assert(driver.std_dir_beside(p, "fort") == "std");
+    assert(driver.std_dir_beside(p, "./fort") == "./std");
+    assert(driver.std_dir_beside(p, "/fort") == "/std");
 }
 
 // --std-dir wins over the environment, which wins over the binary's own
 // directory.
 fn the_std_dir_option_wins_over_the_environment() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
     string[4] mut argv = {"fort", "--std-dir", "chosen", "entry.ft"};
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    assert(driver.parse(&opts, argv[0..4]) == driver.PARSE_OK);
-    assert(driver.std_dir(&p, &opts, "/usr/bin/fort") == "chosen");
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    assert(driver.parse(opts, argv[0..4]) == driver.PARSE_OK);
+    assert(driver.std_dir(p, opts, "/usr/bin/fort") == "chosen");
 }
 
 // Without --std-dir the directory is $FORT_STD_DIR when it names one, and
@@ -908,26 +922,26 @@ fn the_std_dir_option_wins_over_the_environment() void {
 // that branches on the ambient variable asserts whichever half the
 // environment presents and covers neither on any one run.
 fn the_environment_is_read_when_the_option_is_absent() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
     set_env("FORT_STD_DIR", "/from/the/environment");
-    assert(driver.std_dir(&p, &opts, "/usr/bin/fort") == "/from/the/environment");
+    assert(driver.std_dir(p, opts, "/usr/bin/fort") == "/from/the/environment");
 }
 
 // An empty value names no directory, so it counts as unset. The search then
 // uses `std` beside the binary that std.os.exe_path names.
 fn an_empty_std_dir_variable_counts_as_unset() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
     set_env("FORT_STD_DIR", "");
-    assert(str.ends_with(driver.std_dir(&p, &opts, "/usr/bin/fort"), "/std"));
+    assert(str.ends_with(driver.std_dir(p, opts, "/usr/bin/fort"), "/std"));
     // An absent variable gives the same result.
     unset_env("FORT_STD_DIR");
-    assert(str.ends_with(driver.std_dir(&p, &opts, "/usr/bin/fort"), "/std"));
+    assert(str.ends_with(driver.std_dir(p, opts, "/usr/bin/fort"), "/std"));
 }
 
 // An empty --std-dir is a directory that was named, not an option left out.
@@ -936,16 +950,16 @@ fn an_empty_std_dir_variable_counts_as_unset() void {
 // instead made stage2 fall back to the environment and resolve, under that
 // command line, imports bootstrap-0 refuses.
 fn an_empty_std_dir_option_counts_as_named() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
     set_env("FORT_STD_DIR", "/from/the/environment");
     string[4] mut argv = {"fort", "--std-dir", "", "entry.ft"};
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    assert(driver.parse(&opts, argv[0..4]) == driver.PARSE_OK);
-    assert(opts.have_std_dir);
-    assert(opts.std_dir.len == 0);
-    assert(driver.std_dir(&p, &opts, "/usr/bin/fort").len == 0);
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    assert(driver.parse(opts, argv[0..4]) == driver.PARSE_OK);
+    assert(opts->have_std_dir);
+    assert(opts->std_dir.len == 0);
+    assert(driver.std_dir(p, opts, "/usr/bin/fort").len == 0);
     unset_env("FORT_STD_DIR");
 }
 
@@ -1025,7 +1039,7 @@ fn a_hundred_runs_answer_alike() void {
     // 100 runs.
     assert(capture.line_count(err) == 6);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     strbuf.append(&want, "again.ft:1:1: error: module 'nothere' not found\n");
     strbuf.append(&want, "    import nothere;\n    ^~~~~~~~~~~~~~~\n");
     strbuf.append(&want, "again.ft:1:1: note: looked for nothere.ft\n");
@@ -1039,30 +1053,30 @@ fn a_hundred_runs_answer_alike() void {
 // name of the pass; each of the two names of spec/fir.md 11 parses.
 fn fir_and_fir_after_parse() void {
     string[3] mut plain = {"fort", "--fir", "entry.ft"};
-    driver.options mut a = driver.options_create();
-    defer driver.options_free(&a);
-    assert(driver.parse(&a, plain[0..3]) == driver.PARSE_OK);
-    assert(a.fir);
-    assert(a.fir_after.len == 0);
-    assert(!a.check && !a.json && !a.index && !a.tokens && !a.ast && !a.emit_ir);
+    driver.options mut* own a = driver.options_make();
+    defer driver.options_drop_made(move(a));
+    assert(driver.parse(a, plain[0..3]) == driver.PARSE_OK);
+    assert(a->fir);
+    assert(a->fir_after.len == 0);
+    assert(!a->check && !a->json && !a->index && !a->tokens && !a->ast && !a->emit_ir);
     string[2] mut names = {"--fir-after=lower", "--fir-after=build-mode"};
     string[2] mut passes = {"lower", "build-mode"};
     u64 mut i = 0;
     while (i < 2) {
         string[3] mut argv = {"fort", names[i], "entry.ft"};
-        driver.options mut b = driver.options_create();
-        assert(driver.parse(&b, argv[0..3]) == driver.PARSE_OK);
-        assert(b.fir);
-        assert(b.fir_after == passes[i]);
-        driver.options_free(&b);
+        driver.options mut* own b = driver.options_make();
+        assert(driver.parse(b, argv[0..3]) == driver.PARSE_OK);
+        assert(b->fir);
+        assert(b->fir_after == passes[i]);
+        driver.options_drop_made(move(b));
         i += 1;
     }
     // The last --fir-after wins, as the last -o does.
     string[4] mut twice = {"fort", "--fir-after=build-mode", "--fir-after=lower", "entry.ft"};
-    driver.options mut c = driver.options_create();
-    defer driver.options_free(&c);
-    assert(driver.parse(&c, twice[0..4]) == driver.PARSE_OK);
-    assert(c.fir_after == "lower");
+    driver.options mut* own c = driver.options_make();
+    defer driver.options_drop_made(move(c));
+    assert(driver.parse(c, twice[0..4]) == driver.PARSE_OK);
+    assert(c->fir_after == "lower");
 }
 
 // A name that spec/fir.md 11 does not give is a usage error, and so is the empty name. The
@@ -1133,12 +1147,12 @@ fn fir_of_a_clean_program_exits_zero() void {
     string own out = captured_out();
     defer del(out);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     strbuf.append(&want, FIR_CLEAN_MAIN);
     strbuf.append(&want, FIR_CLEAN_BODY);
     assert(out == strbuf.view(&want));
     strbuf.str_buf mut file = strbuf.create();
-    defer strbuf.free(&file);
+    defer del(file.data);
     assert(!io.read_file("fir_clean.out", &file));
     // The build-mode pass of the default mode finds nothing to change in this program.
     string[3] mut after = {"fort", "--fir-after=build-mode", "fir_clean.ft"};
@@ -1212,7 +1226,7 @@ string[23] FIR_CALLS_TEXT = {
 // runs the verifier on each function, and prints them (spec/fir.md 9.4).
 fn fir_lowers_places_and_calls() void {
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
     for (string line : FIR_CALLS) {
         strbuf.append(&src, line);
         strbuf.push(&src, '\n');
@@ -1224,7 +1238,7 @@ fn fir_lowers_places_and_calls() void {
     string own out = captured_out();
     defer del(out);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     for (string line : FIR_CALLS_TEXT) {
         strbuf.append(&want, line);
         strbuf.push(&want, '\n');
@@ -1247,7 +1261,7 @@ fn fir_reports_a_function_that_it_does_not_lower() void {
     string own out = captured_out();
     defer del(out);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     strbuf.append(&want, "// not supported: int at 2:13\n\n");
     strbuf.append(&want, "fn fir_mixed.main() -> i32 {\n    let _0: i32;\n\n    bb0: {\n");
     strbuf.append(&want, "        _0 = const i32 0 #5:12 s1;\n        return #5:5 s1;\n    }\n}\n");
@@ -1271,15 +1285,15 @@ fn fir_of_a_program_with_a_type_error_exits_one() void {
 // as --fir-after does, so a mode that does not combine with --fir does not combine with it.
 fn fir_stats_and_fir_verify_report_parse() void {
     string[3] mut stats = {"fort", "--fir-stats", "entry.ft"};
-    driver.options mut a = driver.options_create();
-    defer driver.options_free(&a);
-    assert(driver.parse(&a, stats[0..3]) == driver.PARSE_OK);
-    assert(a.fir_stats && !a.fir && !a.fir_report && !a.emit_ir && !a.check);
+    driver.options mut* own a = driver.options_make();
+    defer driver.options_drop_made(move(a));
+    assert(driver.parse(a, stats[0..3]) == driver.PARSE_OK);
+    assert(a->fir_stats && !a->fir && !a->fir_report && !a->emit_ir && !a->check);
     string[3] mut report = {"fort", "--fir-verify-report", "entry.ft"};
-    driver.options mut b = driver.options_create();
-    defer driver.options_free(&b);
-    assert(driver.parse(&b, report[0..3]) == driver.PARSE_OK);
-    assert(b.fir && b.fir_report && !b.fir_stats && !b.check && b.fir_after.len == 0);
+    driver.options mut* own b = driver.options_make();
+    defer driver.options_drop_made(move(b));
+    assert(driver.parse(b, report[0..3]) == driver.PARSE_OK);
+    assert(b->fir && b->fir_report && !b->fir_stats && !b->check && b->fir_after.len == 0);
     string fir_message = "--fir does not combine with --tokens, --ast, --check, --json or --index";
     string[5] others = {"--check", "--tokens", "--ast", "--index", "--json"};
     for (string other : others) {
@@ -1309,7 +1323,7 @@ fn fir_stats_combines_only_with_a_build() void {
         string own err = captured_err();
         defer del(err);
         strbuf.str_buf mut want = strbuf.create();
-        defer strbuf.free(&want);
+        defer del(want.data);
         strbuf.append(&want, "fort: error: ");
         strbuf.append(&want, message);
         strbuf.append(&want, "\nusage: fort [options] entry.ft\n");
@@ -1317,10 +1331,10 @@ fn fir_stats_combines_only_with_a_build() void {
     }
     string[7] mut build = {"fort", "-S", "-c", "--release", "--no-bounds-check", "--fir-stats",
                            "entry.ft"};
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    assert(driver.parse(&opts, build[0..7]) == driver.PARSE_OK);
-    assert(opts.fir_stats && opts.emit_ir && opts.compile_only && opts.release);
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    assert(driver.parse(opts, build[0..7]) == driver.PARSE_OK);
+    assert(opts->fir_stats && opts->emit_ir && opts->compile_only && opts->release);
 }
 
 // A build writes each function through FIR (spec/fir.md 3). --fir-stats adds `lowered N of M` to
@@ -1486,7 +1500,7 @@ fn expect_other_signature(string dir, string@ runtime, string entry, string at, 
                           string f) void {
     assert(make_directory(dir) || sys.errno() == libc.EEXIST);
     strbuf.str_buf mut path = strbuf.create();
-    defer strbuf.free(&path);
+    defer del(path.data);
     strbuf.append(&path, dir);
     strbuf.append(&path, "/rt.ft");
     write_lines(strbuf.view(&path), runtime);
@@ -1495,7 +1509,7 @@ fn expect_other_signature(string dir, string@ runtime, string entry, string at, 
                           "fir_params.ll"};
     assert(run(argv[0..8]) == EXIT_COMPILE_ERROR);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     strbuf.append(&want, at);
     strbuf.append(&want, ": error: the runtime `std.rt` has no entry `");
     strbuf.append(&want, name);
@@ -1585,7 +1599,7 @@ fn file_exists(string path) bool {
 
 fn write_lines(string path, string@ lines) void {
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
     {
         string@ range_values = lines;
         u64 mut range_index = 0;
@@ -1609,7 +1623,7 @@ fn fir_verify_report_writes_one_line_for_each_function() void {
     string own out = captured_out();
     defer del(out);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     for (string line : FIR_V7_LINES) {
         strbuf.append(&want, line);
     }
@@ -1970,7 +1984,7 @@ fn listed(string@ want) bool {
     string own out = captured_out();
     defer del(out);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
     u64 mut k = 0;
     while (k < want.len) {
         strbuf.append(&text, want[k]);
@@ -2347,23 +2361,22 @@ fn first_function(fir.module mut* m) fir.func mut* {
 // violation of a function at the location it is given: here V9, on a function built by hand.
 // A function that keeps every rule writes nothing, after the build-mode pass of each mode too.
 fn fir_verify_report_holds_a_function_built_by_hand() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
+    strbuf.str_buf mut out = strbuf.create();
+    defer del(out.data);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     for (string line : FIR_V9_TEXT) {
         strbuf.append(&text, line);
     }
-    fir.module mut m = fir_parse.parse_module(&e.c.m.s, "t.fir", strbuf.view(&text),
-                                              fir_env.prelude(&e));
-    defer fir.module_free(&m);
-    assert(fir_env.errors(&e) == 0);
-    fir_verify.runtime rt = fir_verify.runtime_of(&e.c.ck);
-    strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
+    fir.module mut* own m = fir.module_make();
+    defer fir.module_drop_made(move(m));
+    fir_parse.parse_into(&e->c.m.s, "t.fir", strbuf.view(&text), fir_env.prelude(e), m);
+    assert(fir_env.errors(e) == 0);
+    fir_verify.runtime rt = fir_verify.runtime_of(&e->c.ck);
     diag.loc at = diag.loc{"v9.ft", 1, 4, 1, 5};
-    driver.report_function(first_function(&m), &rt, at, false, false, &out);
+    driver.report_function(first_function(m), &rt, at, false, false, &out);
     assert(str.starts_with(strbuf.view(&out), "v9.ft:1:4: fir.verify: V9 a path from bb0 "));
     assert(str.ends_with(strbuf.view(&out), "unreachable: main.f bb2 statement 0 (s0)\n"));
     assert(capture.line_count(strbuf.view(&out)) == 1);
@@ -2380,12 +2393,12 @@ fn fir_verify_report_holds_a_function_built_by_hand() void {
         }
     }
     strbuf.append(&text, "        _0 = const i32 1 #3:16 s2;\n        return #3:9 s2;\n    }\n}\n");
-    fir.module mut good = fir_parse.parse_module(&e.c.m.s, "t.fir", strbuf.view(&text),
-                                                 fir_env.prelude(&e));
-    defer fir.module_free(&good);
+    fir.module mut* own good = fir.module_make();
+    defer fir.module_drop_made(move(good));
+    fir_parse.parse_into(&e->c.m.s, "t.fir", strbuf.view(&text), fir_env.prelude(e), good);
     bool[2] modes = {false, true};
     for (bool mode : modes) {
-        driver.report_function(first_function(&good), &rt, at, mode, mode, &out);
+        driver.report_function(first_function(good), &rt, at, mode, mode, &out);
         assert(strbuf.view(&out) == "");
     }
 }
@@ -2460,11 +2473,11 @@ fn fir_verify_report_names_a_check_with_no_runtime_entry() void {
 // --fir-test sets its own flag, and the `.fir` file is the entry.
 fn fir_test_parses_as_a_flag() void {
     string[3] mut argv = {"fort", "--fir-test", "t.fir"};
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    assert(driver.parse(&opts, argv[0..3]) == driver.PARSE_OK);
-    assert(opts.fir_test && !opts.fir && !opts.check);
-    assert(opts.entry == "t.fir");
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    assert(driver.parse(opts, argv[0..3]) == driver.PARSE_OK);
+    assert(opts->fir_test && !opts->fir && !opts->check);
+    assert(opts->entry == "t.fir");
 }
 
 // --fir-test reads a file that no other mode reads, so it combines with no other mode.
@@ -2488,7 +2501,7 @@ fn fir_test_combines_with_no_other_mode() void {
 // of the corpus does not read the text as a directive of this test.
 fn write_fir_test(string pass, string field, string item) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, "\x2F/! pass: ");
     strbuf.append(&b, pass);
     strbuf.append(&b, "\n\x2F/! prelude:\n\x2F/| struct pair {\n\x2F/|     ");
@@ -2523,7 +2536,7 @@ fn fir_test_of_the_pass_none_writes_the_module() void {
     string own out = captured_out();
     defer del(out);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     for (string line : FIR_TEST_OUT) {
         strbuf.append(&want, line);
         strbuf.push(&want, '\n');
@@ -2541,7 +2554,7 @@ fn fir_test_of_the_pass_verify_writes_a_function_that_keeps_the_rules() void {
     string own out = captured_out();
     defer del(out);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     for (string line : FIR_TEST_OUT) {
         strbuf.append(&want, line);
         strbuf.push(&want, '\n');
@@ -2566,10 +2579,10 @@ fn append_crlf(string text, strbuf.str_buf mut* out) void {
 fn fir_test_reads_crlf_line_ends() void {
     write_fir_test("none", "i32", "_0 = copy _1.0 #3:4;");
     strbuf.str_buf mut lf = strbuf.create();
-    defer strbuf.free(&lf);
+    defer del(lf.data);
     assert(io.read_file("t.fir", &lf));
     strbuf.str_buf mut crlf = strbuf.create();
-    defer strbuf.free(&crlf);
+    defer del(crlf.data);
     append_crlf(strbuf.view(&lf), &crlf);
     write_file("t.fir", strbuf.view(&crlf));
     string[3] mut argv = {"fort", "--fir-test", "t.fir"};
@@ -2695,7 +2708,7 @@ fn fir_after_build_mode_runs_the_pass_of_the_mode() void {
     assert(run(modes[0..6]) == EXIT_OK);
     assert(captured_err_is_empty());
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     for (string line : FIR_ADD_RELEASE) {
         strbuf.append(&want, line);
         strbuf.push(&want, '\n');
@@ -2708,7 +2721,7 @@ fn fir_after_build_mode_runs_the_pass_of_the_mode() void {
 // A `.fir` test with an overflow check and the passes that its `pass:` directives name, in order.
 fn write_passes_test(string@ passes) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     {
         string@ range_values = passes;
         u64 mut range_index = 0;
@@ -2786,6 +2799,7 @@ fn main() i32 {
     println("flags ok");
     the_last_value_of_a_single_option_wins();
     the_repeatable_options_keep_their_order();
+    freed_options_hold_no_list();
     the_defaults_are_clang_and_the_built_target();
     a_valued_option_takes_the_next_argument_whatever_it_is();
     an_empty_output_option_is_an_output_that_was_named();

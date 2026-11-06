@@ -48,7 +48,7 @@ fn check(string@ lines, summary.graph mut* calls) i32 {
     make_dir("std");
     write_file("std/rt.ft", "// the empty runtime of a driver test\n");
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
     u64 mut i = 0;
     while (i < lines.len) {
         strbuf.append(&src, lines[i]);
@@ -57,23 +57,23 @@ fn check(string@ lines, summary.graph mut* calls) i32 {
     }
     write_file("main.ft", strbuf.view(&src));
     string[5] args = {"fort", "--check", "--std-dir", "std", "main.ft"};
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    assert(driver.parse(&opts, args[..]) == driver.PARSE_OK);
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    assert(driver.parse(opts, args[..]) == driver.PARSE_OK);
     i32 saved_err = capture.begin(io.STDERR, "err.txt");
-    session.session mut s = session.create();
-    defer session.free(&s);
-    driver.configure(&s, &opts);
-    diag.set_text(session.diags(&s), true);
-    session.show_sources(&s);
-    driver.analysis mut an = driver.analysis_create(&s);
-    defer driver.analysis_free(&an);
+    session.session mut* own s = session.make();
+    defer session.drop_made(move(s));
+    driver.configure(s, opts);
+    diag.set_text(session.diags(s), true);
+    session.show_sources(s);
+    driver.analysis mut* own an = driver.analysis_make(s);
+    defer driver.analysis_drop_made(move(an));
     i32 mut status = 2;
-    bool loaded = driver.load_closure(&s, &opts, "fort", &an);
-    an.ck.require_main = false;
-    bool checked = check_stmt.check_program(&an.ck, &an.set);
-    if (loaded && checked && session.error_count(&s) == 0) {
-        status = driver.overwrite_entry(&s, &an, &opts, calls);
+    bool loaded = driver.load_closure(s, opts, "fort", an);
+    an->ck.require_main = false;
+    bool checked = check_stmt.check_program(&an->ck, &an->set);
+    if (loaded && checked && session.error_count(s) == 0) {
+        status = driver.overwrite_entry(s, an, opts, calls);
     }
     capture.end(io.STDERR, saved_err);
     return status;
@@ -135,31 +135,31 @@ fn node_at(summary.graph* g, u64 n) summary.node {
 }
 
 fn the_check_adds_each_proved_function_and_solves_the_graph() void {
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    assert(check(PROGRAM[..], &g) == driver.EXIT_OK);
-    assert(summary.node_count(&g) == 5);
-    assert(same(summary.node_symbol(&g, 0), "main.base"));
-    assert(same(summary.node_symbol(&g, 4), "main.take"));
-    // the graph is solved: its components stand, callees first, each with one round
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    assert(check(PROGRAM[..], g) == driver.EXIT_OK);
+    assert(summary.node_count(g) == 5);
+    assert(same(summary.node_symbol(g, 0), "main.base"));
+    assert(same(summary.node_symbol(g, 4), "main.take"));
+    // the graph is solved: its components stand, callees first, each with one round
     string want = "main.base | *main.even main.odd | main.top | main.take";
-    assert(same(components_of(&g, &b), want));
+    assert(same(components_of(g, &b), want));
     u64 mut c = 0;
-    while (c < summary.component_count(&g)) {
-        assert(summary.component_at(&g, c).rounds == 1);
+    while (c < summary.component_count(g)) {
+        assert(summary.component_at(g, c).rounds == 1);
         c += 1;
     }
     // each node has the work of its proof
-    assert(node_at(&g, 4).work > 0);
-    assert(node_at(&g, 0).work == 0);
-    assert(node_at(&g, 4).params == 1);
+    assert(node_at(g, 4).work > 0);
+    assert(node_at(g, 0).work == 0);
+    assert(node_at(g, 4).params == 1);
     // V1 gives no line
-    summary.table mut t = summary.table{};
-    defer summary.free_table(&t);
-    summary.collect(&g, &t);
-    assert(summary.entry_count(&t) == 0);
+    summary.table mut* own t = summary.table_make();
+    defer summary.table_drop_made(move(t));
+    summary.collect(g, t);
+    assert(summary.entry_count(t) == 0);
 }
 
 // `fill` stores into an `own` reference that the pass cannot prove empty; `fine` calls nothing.
@@ -173,15 +173,15 @@ string[6] ERROR = {
 };
 
 fn a_function_with_an_error_is_no_node_and_nothing_is_solved() void {
-    summary.graph mut g = summary.graph{};
-    defer summary.free(&g);
-    assert(check(ERROR[..], &g) == driver.EXIT_COMPILE_ERROR);
+    summary.graph mut* own g = summary.make();
+    defer summary.drop_made(move(g));
+    assert(check(ERROR[..], g) == driver.EXIT_COMPILE_ERROR);
     string own err = capture.text("err.txt");
     defer del(err);
     assert(str.find(err, "overwriting owned value") >= 0);
-    assert(summary.node_count(&g) == 1);
-    assert(same(summary.node_symbol(&g, 0), "main.fine"));
-    assert(summary.component_count(&g) == 0);
+    assert(summary.node_count(g) == 1);
+    assert(same(summary.node_symbol(g, 0), "main.fine"));
+    assert(summary.component_count(g) == 0);
 }
 
 fn main() i32 {

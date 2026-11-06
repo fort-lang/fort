@@ -23,18 +23,15 @@ fn at(u32 line) diag.loc {
     return diag.loc_make("a.ft", line, 1);
 }
 
-// A module namespace with no bindings, as a zeroed module gets one.
-fn module_scope() scope.scope {
-    scope.scope mut s = scope.scope{};
-    scope.init(&s, scope.scope_kind.s_module, null);
-    return s;
+// A module namespace with no bindings, as a zeroed module gets one, in an allocation of its own:
+// a test lends it to calls, and scope.drop_made ends it.
+fn module_scope() scope.scope mut* own {
+    return scope.make(scope.scope_kind.s_module, null);
 }
 
-// A block scope inside `parent`.
-fn block_scope(scope.scope mut* parent) scope.scope {
-    scope.scope mut s = scope.scope{};
-    scope.init(&s, scope.scope_kind.s_block, parent);
-    return s;
+// A block scope inside `parent`, in an allocation of its own, as module_scope.
+fn block_scope(scope.scope mut* parent) scope.scope mut* own {
+    return scope.make(scope.scope_kind.s_block, parent);
 }
 
 // ---- what a binding carries -----------------------------------------------------
@@ -42,12 +39,12 @@ fn block_scope(scope.scope mut* parent) scope.scope {
 // declare returns the binding it made, carrying every field it was given and
 // the two import fields empty.
 fn a_binding_carries_what_it_was_declared_with() void {
-    ast.arena mut ar = ast.arena{};
-    defer ast.ast_arena_free(&ar);
-    ast.node mut* decl = ast.ast_new(&ar, ast.ast_kind.k_fn_decl, at(7));
-    scope.scope mut s = module_scope();
-    defer scope.free(&s);
-    carries_add(scope.declare(&s, "add", scope.bind_kind.b_fn, at(7), decl), decl);
+    ast.arena mut* own ar = ast.arena_make();
+    defer ast.arena_drop_made(move(ar));
+    ast.node mut* decl = ast.ast_new(ar, ast.ast_kind.k_fn_decl, at(7));
+    scope.scope mut* own s = module_scope();
+    defer scope.drop_made(move(s));
+    carries_add(scope.declare(s, "add", scope.bind_kind.b_fn, at(7), decl), decl);
 }
 
 // Asserts that `b` is the function `add` of line 7 with the declaration `decl`, and that its two
@@ -67,9 +64,9 @@ fn carries_add(scope.binding* b, ast.node mut* decl) void {
 // Makes a `scope.scope`, runs `body` on it, and releases it. `body` reads the value through a
 // pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
 fn run(fn (scope.scope mut*) void body) void {
-    scope.scope mut s = module_scope();
-    defer scope.free(&s);
-    body(&s);
+    scope.scope mut* own s = module_scope();
+    defer scope.drop_made(move(s));
+    body(s);
 }
 
 // The two import fields are the caller's to fill. The loader writes the
@@ -92,43 +89,43 @@ fn the_import_fields_are_written_through_the_binding(scope.scope mut* s) void {
 
 // A fresh scope holds nothing and finds nothing.
 fn a_fresh_scope_is_empty() void {
-    scope.scope mut s = module_scope();
-    defer scope.free(&s);
-    assert(scope.count(&s) == 0);
-    assert(scope.find(&s, "add") == null);
-    assert(scope.lookup(&s, "add") == null);
-    assert(scope.find_in_blocks(&s, "add") == null);
+    scope.scope mut* own s = module_scope();
+    defer scope.drop_made(move(s));
+    assert(scope.count(s) == 0);
+    assert(scope.find(s, "add") == null);
+    assert(scope.lookup(s, "add") == null);
+    assert(scope.find_in_blocks(s, "add") == null);
 }
 
 // The bindings are handed back in declaration order. And a binding declared
 // before a growth of the vector is still itself afterwards: the scope owns
 // each binding separately, so nothing moves.
 fn the_bindings_keep_their_order_across_a_growth() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
     containers.str_vec mut names = containers.str_create();
-    defer containers.str_free(&names);
-    fill_names(&p, &names, 200);
-    scope.scope mut s = module_scope();
-    defer scope.free(&s);
-    scope.binding* first = scope.declare(&s, containers.str_at(&names, 0),
+    defer del(names.items);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    fill_names(p, &names, 200);
+    scope.scope mut* own s = module_scope();
+    defer scope.drop_made(move(s));
+    scope.binding* first = scope.declare(s, containers.str_at(&names, 0),
                                          scope.bind_kind.b_var, at(1), null);
     u64 mut i = 1;
     while (i < 200) {
-        assert(scope.declare(&s, containers.str_at(&names, i), scope.bind_kind.b_var,
+        assert(scope.declare(s, containers.str_at(&names, i), scope.bind_kind.b_var,
                              at(cast(i, u32)), null) != null);
         i += 1;
     }
-    assert(scope.count(&s) == 200);
+    assert(scope.count(s) == 200);
     // A binding declared before the growths is still itself: the scope owns
     // each one separately, so nothing moves.
-    assert(scope.at(&s, 0) == first);
-    assert(scope.find(&s, containers.str_at(&names, 0)) == first);
+    assert(scope.at(s, 0) == first);
+    assert(scope.find(s, containers.str_at(&names, 0)) == first);
     // Every name declared is found, and the position of each is its order.
     i = 0;
     while (i < 200) {
-        assert(name_at(&s, i) == containers.str_at(&names, i));
-        assert(scope.find(&s, containers.str_at(&names, i)) == scope.at(&s, i));
+        assert(name_at(s, i) == containers.str_at(&names, i));
+        assert(scope.find(s, containers.str_at(&names, i)) == scope.at(s, i));
         i += 1;
     }
 }
@@ -144,7 +141,7 @@ fn name_at(scope.scope* s, u64 i) string {
 // scope that borrows the name.
 fn make_name(containers.pool mut* p, u64 i) string {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.push(&b, 'n');
     strbuf.append_u64(&b, i);
     return containers.pool_intern(p, strbuf.view(&b));
@@ -179,14 +176,14 @@ fn any_two_entries_of_one_namespace_collide(scope.scope mut* s) void {
 // A collision in one scope is none in another: a block may declare the name
 // its module declares, which is the shadowing the rule allows.
 fn two_scopes_do_not_collide() void {
-    scope.scope mut m = module_scope();
-    defer scope.free(&m);
-    scope.scope mut b = block_scope(&m);
-    defer scope.free(&b);
-    assert(scope.declare(&m, "x", scope.bind_kind.b_var, at(1), null) != null);
-    assert(scope.declare(&b, "x", scope.bind_kind.b_local, at(2), null) != null);
-    assert(scope.count(&m) == 1);
-    assert(scope.count(&b) == 1);
+    scope.scope mut* own m = module_scope();
+    defer scope.drop_made(move(m));
+    scope.scope mut* own b = block_scope(m);
+    defer scope.drop_made(move(b));
+    assert(scope.declare(m, "x", scope.bind_kind.b_var, at(1), null) != null);
+    assert(scope.declare(b, "x", scope.bind_kind.b_local, at(2), null) != null);
+    assert(scope.count(m) == 1);
+    assert(scope.count(b) == 1);
 }
 
 // ---- lookup ---------------------------------------------------------------------
@@ -194,45 +191,45 @@ fn two_scopes_do_not_collide() void {
 // find answers for one scope alone. Lookup walks outward and the innermost
 // binding wins.
 fn lookup_walks_outward_and_the_innermost_wins() void {
-    scope.scope mut m = module_scope();
-    defer scope.free(&m);
-    scope.declare(&m, "g", scope.bind_kind.b_var, at(1), null);
-    scope.declare(&m, "x", scope.bind_kind.b_var, at(2), null);
-    scope.scope mut outer = block_scope(&m);
-    defer scope.free(&outer);
-    scope.declare(&outer, "x", scope.bind_kind.b_local, at(3), null);
-    scope.scope mut inner = block_scope(&outer);
-    defer scope.free(&inner);
-    scope.declare(&inner, "y", scope.bind_kind.b_local, at(4), null);
+    scope.scope mut* own m = module_scope();
+    defer scope.drop_made(move(m));
+    scope.declare(m, "g", scope.bind_kind.b_var, at(1), null);
+    scope.declare(m, "x", scope.bind_kind.b_var, at(2), null);
+    scope.scope mut* own outer = block_scope(m);
+    defer scope.drop_made(move(outer));
+    scope.declare(outer, "x", scope.bind_kind.b_local, at(3), null);
+    scope.scope mut* own inner = block_scope(outer);
+    defer scope.drop_made(move(inner));
+    scope.declare(inner, "y", scope.bind_kind.b_local, at(4), null);
 
-    assert(scope.find(&inner, "g") == null);
-    assert(scope.lookup(&inner, "g") == scope.find(&m, "g"));
+    assert(scope.find(inner, "g") == null);
+    assert(scope.lookup(inner, "g") == scope.find(m, "g"));
     // The module's `x` is shadowed by the block's.
-    assert(scope.lookup(&inner, "x") == scope.find(&outer, "x"));
-    assert(scope.lookup(&outer, "x") == scope.find(&outer, "x"));
-    assert(scope.lookup(&m, "x") == scope.find(&m, "x"));
-    assert(scope.lookup(&inner, "nothing") == null);
+    assert(scope.lookup(inner, "x") == scope.find(outer, "x"));
+    assert(scope.lookup(outer, "x") == scope.find(outer, "x"));
+    assert(scope.lookup(m, "x") == scope.find(m, "x"));
+    assert(scope.lookup(inner, "nothing") == null);
 }
 
 // find_in_blocks stops before the module namespace: a local may shadow a
 // module-level name but never an enclosing local or parameter.
 fn find_in_blocks_stops_at_the_module_namespace() void {
-    scope.scope mut m = module_scope();
-    defer scope.free(&m);
-    scope.declare(&m, "g", scope.bind_kind.b_var, at(1), null);
-    scope.scope mut body = block_scope(&m);
-    defer scope.free(&body);
-    scope.declare(&body, "p", scope.bind_kind.b_param, at(2), null);
-    scope.scope mut inner = block_scope(&body);
-    defer scope.free(&inner);
+    scope.scope mut* own m = module_scope();
+    defer scope.drop_made(move(m));
+    scope.declare(m, "g", scope.bind_kind.b_var, at(1), null);
+    scope.scope mut* own body = block_scope(m);
+    defer scope.drop_made(move(body));
+    scope.declare(body, "p", scope.bind_kind.b_param, at(2), null);
+    scope.scope mut* own inner = block_scope(body);
+    defer scope.drop_made(move(inner));
 
     // The module-level name is invisible here, so a local may take it.
-    assert(scope.find_in_blocks(&inner, "g") == null);
-    assert(scope.lookup(&inner, "g") != null);
+    assert(scope.find_in_blocks(inner, "g") == null);
+    assert(scope.lookup(inner, "g") != null);
     // The enclosing parameter is visible, so a local may not.
-    assert(scope.find_in_blocks(&inner, "p") == scope.find(&body, "p"));
+    assert(scope.find_in_blocks(inner, "p") == scope.find(body, "p"));
     // A module namespace searched on its own is searched not at all.
-    assert(scope.find_in_blocks(&m, "g") == null);
+    assert(scope.find_in_blocks(m, "g") == null);
 }
 
 // ---- the kinds ------------------------------------------------------------------
@@ -240,19 +237,19 @@ fn find_in_blocks_stops_at_the_module_namespace() void {
 // Five declaration kinds are importable. Import bindings, local kinds, and
 // the absent kind are not importable because fort does not re-export them.
 fn only_the_declarations_are_importable() void {
-    scope.scope mut s = module_scope();
-    defer scope.free(&s);
-    assert(is_declaration_of(&s, "a", scope.bind_kind.b_fn));
-    assert(is_declaration_of(&s, "b", scope.bind_kind.b_extern_fn));
-    assert(is_declaration_of(&s, "c", scope.bind_kind.b_struct));
-    assert(is_declaration_of(&s, "d", scope.bind_kind.b_enum));
-    assert(is_declaration_of(&s, "e", scope.bind_kind.b_var));
-    assert(!is_declaration_of(&s, "f", scope.bind_kind.b_none));
-    assert(!is_declaration_of(&s, "g", scope.bind_kind.b_module));
-    assert(!is_declaration_of(&s, "h", scope.bind_kind.b_symbol));
-    assert(!is_declaration_of(&s, "i", scope.bind_kind.b_local));
-    assert(!is_declaration_of(&s, "j", scope.bind_kind.b_param));
-    assert(scope.count(&s) == 10);
+    scope.scope mut* own s = module_scope();
+    defer scope.drop_made(move(s));
+    assert(is_declaration_of(s, "a", scope.bind_kind.b_fn));
+    assert(is_declaration_of(s, "b", scope.bind_kind.b_extern_fn));
+    assert(is_declaration_of(s, "c", scope.bind_kind.b_struct));
+    assert(is_declaration_of(s, "d", scope.bind_kind.b_enum));
+    assert(is_declaration_of(s, "e", scope.bind_kind.b_var));
+    assert(!is_declaration_of(s, "f", scope.bind_kind.b_none));
+    assert(!is_declaration_of(s, "g", scope.bind_kind.b_module));
+    assert(!is_declaration_of(s, "h", scope.bind_kind.b_symbol));
+    assert(!is_declaration_of(s, "i", scope.bind_kind.b_local));
+    assert(!is_declaration_of(s, "j", scope.bind_kind.b_param));
+    assert(scope.count(s) == 10);
 }
 
 fn is_declaration_of(scope.scope mut* s, string name, scope.bind_kind kind) bool {
@@ -289,9 +286,9 @@ fn every_universe_name_is_one_and_nothing_else_is() void {
     assert(!scope.is_universe("de"));
     assert(!scope.is_universe(""));
     assert(!scope.is_universe("main"));
-    scope.scope mut s = module_scope();
-    defer scope.free(&s);
-    scope.declare(&s, "print", scope.bind_kind.b_fn, at(1), null);
+    scope.scope mut* own s = module_scope();
+    defer scope.drop_made(move(s));
+    scope.declare(s, "print", scope.bind_kind.b_fn, at(1), null);
     assert(scope.is_universe("print"));
 }
 
@@ -299,17 +296,17 @@ fn every_universe_name_is_one_and_nothing_else_is() void {
 
 // free empties the scope and leaves it usable. A second free is a no-op.
 fn free_empties_the_scope_and_leaves_it_usable() void {
-    scope.scope mut s = module_scope();
-    defer scope.free(&s);
-    scope.declare(&s, "a", scope.bind_kind.b_fn, at(1), null);
-    scope.declare(&s, "b", scope.bind_kind.b_fn, at(2), null);
-    scope.free(&s);
-    scope.free(&s);
-    assert(scope.count(&s) == 0);
-    assert(scope.find(&s, "a") == null);
+    scope.scope mut* own s = module_scope();
+    defer scope.drop_made(move(s));
+    scope.declare(s, "a", scope.bind_kind.b_fn, at(1), null);
+    scope.declare(s, "b", scope.bind_kind.b_fn, at(2), null);
+    scope.free(s);
+    scope.free(s);
+    assert(scope.count(s) == 0);
+    assert(scope.find(s, "a") == null);
     // The name is free again, which is what a re-analysis of one file needs.
-    assert(scope.declare(&s, "a", scope.bind_kind.b_struct, at(3), null) != null);
-    assert(scope.count(&s) == 1);
+    assert(scope.declare(s, "a", scope.bind_kind.b_struct, at(3), null) != null);
+    assert(scope.count(s) == 1);
 }
 
 // The scope owns every binding, the vector of bindings and the index, and no
@@ -320,11 +317,12 @@ fn free_empties_the_scope_and_leaves_it_usable() void {
 // the bytes of the blocks that the allocator does not hold as free. Two
 // hundred identical rounds fill and free one scope.
 //
-// scope.free makes three releases. At d2f5b2b6 a deletion of `del(s->items)`
-// moved the live view by 202272 bytes under glibc 2.39 and 2.43. The compiler
-// refuses a deletion of `del(b)` (D17.11).
-// Without `strmap.free(&s->index)`, the stale index outlives the bindings.
-// Then `free_empties_the_scope_and_leaves_it_usable` reports
+// scope.drop makes three releases, and each round reaches them through
+// scope.drop_made. At d2f5b2b6, when scope.free held them, a deletion of
+// `del(s->items)` moved the live view by 202272 bytes under glibc 2.39 and
+// 2.43. The compiler refuses a deletion of `del(b)` (D17.11).
+// At d2f5b2b6, without `strmap.free(&s->index)`, the stale index outlived the
+// bindings, and `free_empties_the_scope_and_leaves_it_usable` reported
 // `index 0 out of range for length 0`.
 u64 LEAK_ROUNDS = 200;
 u64 LEAK_EARLY = 100;
@@ -345,21 +343,21 @@ fn moved(u64 early, u64 late, u64 last) u64 {
 fn everything_a_scope_holds_is_released_with_it() void {
     // The names are made once, outside the rounds, so that the only
     // allocations the rounds make are the scope's own.
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
     containers.str_vec mut names = containers.str_create();
-    defer containers.str_free(&names);
-    fill_names(&p, &names, LEAK_NAMES);
+    defer del(names.items);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    fill_names(p, &names, LEAK_NAMES);
     u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < LEAK_ROUNDS) {
-        scope.scope mut s = module_scope();
+        scope.scope mut* own s = module_scope();
         u64 mut i = 0;
         while (i < LEAK_NAMES) {
-            scope.declare(&s, containers.str_at(&names, i), scope.bind_kind.b_var, at(1), null);
+            scope.declare(s, containers.str_at(&names, i), scope.bind_kind.b_var, at(1), null);
             i += 1;
         }
-        scope.free(&s);
+        scope.drop_made(move(s));
         u64 mut slot = 3;
         if (round == LEAK_EARLY) {
             slot = 0;

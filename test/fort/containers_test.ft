@@ -18,45 +18,46 @@ import std.strbuf;
 
 // A pool that has allocated nothing holds no block and has handed out nothing.
 fn empty_pool_allocates_nothing() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    assert(containers.pool_block_count(&p) == 0);
-    assert(containers.pool_used(&p) == 0);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    assert(containers.pool_block_count(p) == 0);
+    assert(containers.pool_used(p) == 0);
 }
 
 // Freeing an empty pool is a no-op, and so is freeing one twice. `del` empties
 // its operand, so the walk over the block list finds nothing left.
 fn freeing_an_empty_pool_twice_is_a_no_op() void {
-    containers.pool mut p = containers.pool_create();
-    containers.pool_free(&p);
-    containers.pool_free(&p);
-    assert(containers.pool_block_count(&p) == 0);
-    assert(containers.pool_used(&p) == 0);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    containers.pool_free(p);
+    containers.pool_free(p);
+    assert(containers.pool_block_count(p) == 0);
+    assert(containers.pool_used(p) == 0);
 }
 
 // A pool is usable again after it is freed. The block list starts empty and
 // the counters start at zero, so the same value serves a second analysis.
 fn a_freed_pool_is_usable_again() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    string first = containers.pool_intern(&p, "first");
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    string first = containers.pool_intern(p, "first");
     assert(first == "first");
-    assert(containers.pool_block_count(&p) == 1);
-    containers.pool_free(&p);
-    assert(containers.pool_block_count(&p) == 0);
-    assert(containers.pool_used(&p) == 0);
-    string second = containers.pool_intern(&p, "second");
+    assert(containers.pool_block_count(p) == 1);
+    containers.pool_free(p);
+    assert(containers.pool_block_count(p) == 0);
+    assert(containers.pool_used(p) == 0);
+    string second = containers.pool_intern(p, "second");
     assert(second == "second");
-    assert(containers.pool_block_count(&p) == 1);
-    assert(containers.pool_used(&p) == 6);
+    assert(containers.pool_block_count(p) == 1);
+    assert(containers.pool_used(p) == 6);
 }
 
 // Makes a `containers.pool`, runs `body` on it, and releases it. `body` reads the value through a
 // pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
 fn run(fn (containers.pool mut*) void body) void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    body(&p);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    body(p);
 }
 
 // An interned string has the bytes and the length of its source.
@@ -71,14 +72,14 @@ fn interning_copies_the_bytes(containers.pool mut* p) void {
 // The source can die after the copy. The interned view stays readable, which
 // lets a diagnostic outlive the module set that reported it.
 fn an_interned_string_outlives_its_source() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
     string mut kept = "";
     {
         strbuf.str_buf mut b = strbuf.create();
-        defer strbuf.free(&b);
+        defer del(b.data);
         strbuf.append(&b, "one.ft");
-        kept = containers.pool_intern(&p, strbuf.view(&b));
+        kept = containers.pool_intern(p, strbuf.view(&b));
         assert(kept == "one.ft");
     }
     // The buffer and its storage are gone. The copy is not.
@@ -89,41 +90,41 @@ fn an_interned_string_outlives_its_source() void {
 // Interning the empty string yields an empty view and allocates nothing: a
 // zero-length request never starts a block.
 fn interning_the_empty_string_allocates_nothing() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    string empty = containers.pool_intern(&p, "");
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    string empty = containers.pool_intern(p, "");
     assert(empty.len == 0);
     assert(empty == "");
-    assert(containers.pool_block_count(&p) == 0);
-    assert(containers.pool_used(&p) == 0);
+    assert(containers.pool_block_count(p) == 0);
+    assert(containers.pool_used(p) == 0);
 }
 
 // The pool does not deduplicate: two calls with equal input give two views,
 // which the byte count shows.
 fn interning_does_not_deduplicate() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    string a = containers.pool_intern(&p, "name");
-    string b = containers.pool_intern(&p, "name");
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    string a = containers.pool_intern(p, "name");
+    string b = containers.pool_intern(p, "name");
     assert(a == b);
-    assert(containers.pool_used(&p) == 8);
-    assert(containers.pool_block_count(&p) == 1);
+    assert(containers.pool_used(p) == 8);
+    assert(containers.pool_block_count(p) == 1);
 }
 
 // Small requests are packed into one block: a hundred short names cost one
 // block, not a hundred.
 fn small_requests_share_a_block() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
     u64 mut i = 0;
     while (i < 100) {
-        string kept = containers.pool_intern(&p, "abcdefgh");
+        string kept = containers.pool_intern(p, "abcdefgh");
         assert(kept.len == 8);
         assert(kept == "abcdefgh");
         i += 1;
     }
-    assert(containers.pool_used(&p) == 800);
-    assert(containers.pool_block_count(&p) == 1);
+    assert(containers.pool_used(p) == 800);
+    assert(containers.pool_block_count(p) == 1);
 }
 
 // A block holds 4096 bytes. A request that does not fit starts the next block.
@@ -180,12 +181,12 @@ fn pool_bytes_is_zeroed_and_writable(containers.pool mut* p) void {
 
 // A zero-byte request is an empty view and costs nothing.
 fn pool_bytes_of_zero_is_empty() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    u8 mut@ none = containers.pool_bytes(&p, 0);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    u8 mut@ none = containers.pool_bytes(p, 0);
     assert(none.len == 0);
-    assert(containers.pool_block_count(&p) == 0);
-    assert(containers.pool_used(&p) == 0);
+    assert(containers.pool_block_count(p) == 0);
+    assert(containers.pool_used(p) == 0);
 }
 
 // An interned string keeps the bytes of an arbitrary buffer, including one
@@ -207,18 +208,18 @@ fn interning_keeps_embedded_zero_bytes(containers.pool mut* p) void {
 // Interning a thousand names in one pool costs the blocks the byte count
 // implies and no more: storage a session frees in one walk.
 fn a_thousand_names_cost_the_blocks_the_bytes_imply() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
     u64 mut i = 0;
     while (i < 1000) {
-        string kept = containers.pool_intern(&p, "0123456789");
+        string kept = containers.pool_intern(p, "0123456789");
         assert(kept.len == 10);
         i += 1;
     }
-    assert(containers.pool_used(&p) == 10000);
+    assert(containers.pool_used(p) == 10000);
     // 4096 bytes to a block, and a name is never split across two. So each
     // block holds 409 names: three blocks hold 1227, which is enough.
-    assert(containers.pool_block_count(&p) == 3);
+    assert(containers.pool_block_count(p) == 3);
 }
 
 // ---- vector of string --------------------------------------------------------
@@ -226,7 +227,7 @@ fn a_thousand_names_cost_the_blocks_the_bytes_imply() void {
 // A fresh vector holds nothing and owns nothing.
 fn an_empty_vector_allocates_nothing() void {
     containers.str_vec mut v = containers.str_create();
-    defer containers.str_free(&v);
+    defer del(v.items);
     assert(v.len == 0);
     assert(v.items.len == 0);
     assert(containers.str_items(&v).len == 0);
@@ -236,7 +237,7 @@ fn an_empty_vector_allocates_nothing() void {
 // order they went in.
 fn pushing_grows_to_the_minimum_capacity() void {
     containers.str_vec mut v = containers.str_create();
-    defer containers.str_free(&v);
+    defer del(v.items);
     containers.str_push(&v, "a");
     assert(v.len == 1);
     assert(v.items.len == 16);
@@ -250,7 +251,7 @@ fn pushing_grows_to_the_minimum_capacity() void {
 // Capacity doubles, and only when the vector is full.
 fn capacity_doubles_when_the_vector_is_full() void {
     containers.str_vec mut v = containers.str_create();
-    defer containers.str_free(&v);
+    defer del(v.items);
     u64 mut i = 0;
     while (i < 16) {
         containers.str_push(&v, "x");
@@ -269,7 +270,7 @@ fn capacity_doubles_when_the_vector_is_full() void {
 // is still readable, and in its place.
 fn growth_keeps_every_element() void {
     containers.str_vec mut v = containers.str_create();
-    defer containers.str_free(&v);
+    defer del(v.items);
     containers.str_push(&v, "zero");
     containers.str_push(&v, "one");
     u64 mut i = 0;
@@ -288,7 +289,7 @@ fn growth_keeps_every_element() void {
 // vector already has changes nothing.
 fn reserve_takes_room_without_adding_elements() void {
     containers.str_vec mut v = containers.str_create();
-    defer containers.str_free(&v);
+    defer del(v.items);
     containers.str_reserve(&v, 3);
     assert(v.len == 0);
     assert(v.items.len == 16);
@@ -302,7 +303,7 @@ fn reserve_takes_room_without_adding_elements() void {
 // str_set replaces an element in place and leaves its neighbours alone.
 fn set_replaces_one_element() void {
     containers.str_vec mut v = containers.str_create();
-    defer containers.str_free(&v);
+    defer del(v.items);
     containers.str_push(&v, "a");
     containers.str_push(&v, "b");
     containers.str_push(&v, "c");
@@ -317,7 +318,7 @@ fn set_replaces_one_element() void {
 // a pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
 fn run_vec(fn (containers.str_vec mut*) void body) void {
     containers.str_vec mut v = containers.str_create();
-    defer containers.str_free(&v);
+    defer del(v.items);
     body(&v);
 }
 
@@ -340,7 +341,7 @@ fn items_covers_the_live_elements(containers.str_vec mut* v) void {
 // Freeing empties the vector and leaves it usable. Freeing twice is a no-op.
 fn freeing_leaves_the_vector_usable() void {
     containers.str_vec mut v = containers.str_create();
-    defer containers.str_free(&v);
+    defer del(v.items);
     containers.str_push(&v, "a");
     containers.str_free(&v);
     assert(v.len == 0);
@@ -355,12 +356,12 @@ fn freeing_leaves_the_vector_usable() void {
 // The vector borrows its elements: it never frees their bytes, so strings a
 // pool owns survive the vector that held them.
 fn the_vector_borrows_its_elements() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    string kept = containers.pool_intern(&p, "borrowed");
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    string kept = containers.pool_intern(p, "borrowed");
     {
         containers.str_vec mut v = containers.str_create();
-        defer containers.str_free(&v);
+        defer del(v.items);
         containers.str_push(&v, kept);
         assert(containers.str_at(&v, 0) == "borrowed");
     }
@@ -371,18 +372,18 @@ fn the_vector_borrows_its_elements() void {
 // A vector of names interned in one pool: the pair a symbol table is built
 // from, and the shape every module above uses.
 fn a_vector_of_interned_names() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
     containers.str_vec mut names = containers.str_create();
-    defer containers.str_free(&names);
+    defer del(names.items);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
     u64 mut i = 0;
     while (i < 50) {
         strbuf.clear(&b);
         strbuf.append(&b, "name_");
         strbuf.append_u64(&b, i);
-        containers.str_push(&names, containers.pool_intern(&p, strbuf.view(&b)));
+        containers.str_push(&names, containers.pool_intern(p, strbuf.view(&b)));
         i += 1;
     }
     assert(names.len == 50);

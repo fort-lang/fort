@@ -33,11 +33,11 @@ import std.sys;
 // The invocation `opts` would spawn, one argument per line, which is the form
 // bootstrap0/test/driver_test.c compares.
 fn invocation(strbuf.str_buf mut* out, driver.options* opts) string {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
     containers.str_vec mut argv = containers.str_create();
-    defer containers.str_free(&argv);
-    driver.cc_argv(&p, opts, "/tmp/t/main.ll", "prog", &argv);
+    defer del(argv.items);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    driver.cc_argv(p, opts, "/tmp/t/main.ll", "prog", &argv);
     strbuf.clear(out);
     u64 mut i = 0;
     while (i < argv.len) {
@@ -51,10 +51,10 @@ fn invocation(strbuf.str_buf mut* out, driver.options* opts) string {
 // The same for a command line, which is how a case says which options it
 // means without writing an options value out field by field.
 fn invocation_for(strbuf.str_buf mut* out, string@ args) string {
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    assert(driver.parse(&opts, args) == driver.PARSE_OK);
-    return invocation(out, &opts);
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    assert(driver.parse(opts, args) == driver.PARSE_OK);
+    return invocation(out, opts);
 }
 
 fn expect(string got, string want) void {
@@ -97,12 +97,12 @@ fn lines(strbuf.str_buf mut* b, string@ parts) string {
 // path.
 fn the_checked_invocation_is_the_line_of_toolchain_two() void {
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
+    defer del(out.data);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string[2] mut argv = {"fort", "main.ft"};
     strbuf.str_buf mut t = strbuf.create();
-    defer strbuf.free(&t);
+    defer del(t.data);
     string[8] mut want = {
         "clang",
         target_argument(&t),
@@ -121,7 +121,7 @@ fn the_checked_invocation_is_the_line_of_toolchain_two() void {
 // -O2 in place of -O1 under --release.
 fn release_compiles_the_module_with_o2() void {
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
+    defer del(out.data);
     string[3] mut argv = {"fort", "--release", "main.ft"};
     string got = invocation_for(&out, argv[0..3]);
     assert(str.find(got, "\n-O2\n") >= 0);
@@ -131,7 +131,7 @@ fn release_compiles_the_module_with_o2() void {
 // --cc names the program and --target the triple it is given.
 fn the_target_option_becomes_the_target_argument() void {
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
+    defer del(out.data);
     string[6] mut argv = {"fort", "--target", "x86_64-linux-gnu", "--cc", "clang-18", "main.ft"};
     assert(str.starts_with(invocation_for(&out, argv[0..6]),
                            "clang-18\n--target=x86_64-linux-gnu\n"));
@@ -141,13 +141,13 @@ fn the_target_option_becomes_the_target_argument() void {
 // last, verbatim and in command-line order.
 fn libraries_then_cc_arguments_close_the_line() void {
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
+    defer del(out.data);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string[8] mut argv = {"fort", "-lm", "-Xcc", "-fuse-ld=lld", "-lz", "-Xcc", "-static",
                           "main.ft"};
     strbuf.str_buf mut t = strbuf.create();
-    defer strbuf.free(&t);
+    defer del(t.data);
     string[12] mut want = {
         "clang",
         target_argument(&t),
@@ -168,12 +168,12 @@ fn libraries_then_cc_arguments_close_the_line() void {
 // -c stops at the object, so it takes no -l.
 fn compile_only_puts_c_before_o_and_drops_the_link_arguments() void {
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
+    defer del(out.data);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string[6] mut argv = {"fort", "-c", "-lm", "-Xcc", "-static", "main.ft"};
     strbuf.str_buf mut t = strbuf.create();
-    defer strbuf.free(&t);
+    defer del(t.data);
     string[10] mut want = {
         "clang",
         target_argument(&t),
@@ -208,27 +208,27 @@ fn the_entry_base_is_the_last_component_without_its_suffix() void {
 // -S and -c together stop at the IR, so -S decides the suffix. A link names
 // `a.out`.
 fn the_default_output_is_decided_by_the_mode() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    opts.entry = "dir/prog.ft";
-    assert(driver.default_output(&p, &opts) == "a.out");
-    opts.compile_only = true;
-    assert(driver.default_output(&p, &opts) == "prog.o");
-    opts.emit_ir = true;
-    assert(driver.default_output(&p, &opts) == "prog.ll");
-    opts.compile_only = false;
-    assert(driver.default_output(&p, &opts) == "prog.ll");
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    driver.options mut* own opts = driver.options_make();
+    defer driver.options_drop_made(move(opts));
+    opts->entry = "dir/prog.ft";
+    assert(driver.default_output(p, opts) == "a.out");
+    opts->compile_only = true;
+    assert(driver.default_output(p, opts) == "prog.o");
+    opts->emit_ir = true;
+    assert(driver.default_output(p, opts) == "prog.ll");
+    opts->compile_only = false;
+    assert(driver.default_output(p, opts) == "prog.ll");
 }
 
 // `<dir>/<name><suffix>`, with an empty directory or suffix left out.
 fn a_joined_path_leaves_out_what_it_is_not_given() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    assert(driver.join_path(&p, "/std", "rt.ft", "") == "/std/rt.ft");
-    assert(driver.join_path(&p, "", "prog", ".ll") == "prog.ll");
-    assert(driver.join_path(&p, "/tmp/t", "main", ".ll") == "/tmp/t/main.ll");
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
+    assert(driver.join_path(p, "/std", "rt.ft", "") == "/std/rt.ft");
+    assert(driver.join_path(p, "", "prog", ".ll") == "prog.ll");
+    assert(driver.join_path(p, "/tmp/t", "main", ".ll") == "/tmp/t/main.ll");
 }
 
 // ---- the temporary directory ----------------------------------------
@@ -237,22 +237,22 @@ fn a_joined_path_leaves_out_what_it_is_not_given() void {
 // the module in it are gone once the run is over. A file already gone is not
 // an error.
 fn the_temporary_directory_is_made_and_removed() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
+    strbuf.str_buf mut module = strbuf.create();
+    defer del(module.data);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
     string mut parent = "";
     i32 mut failure = 1;
-    string dir = driver.make_temp_dir(&p, &parent, &failure);
+    string dir = driver.make_temp_dir(p, &parent, &failure);
     assert(failure == 0);
     assert(dir.len > 0);
     assert(str.starts_with(dir, parent));
     assert(str.find(dir, "/fort-") >= 0);
     // The six X of the template were replaced, so two runs name two
     // directories.
-    string second = driver.make_temp_dir(&p, &parent, &failure);
+    string second = driver.make_temp_dir(p, &parent, &failure);
     assert(second != dir);
-    strbuf.str_buf mut module = strbuf.create();
-    defer strbuf.free(&module);
-    string ir_path = driver.join_path(&p, dir, "main", ".ll");
+    string ir_path = driver.join_path(p, dir, "main", ".ll");
     assert(io.write_file(ir_path, cast("; empty\n", u8@)));
     assert(io.read_file(ir_path, &module));
     driver.remove_temp_dir(dir, ir_path);
@@ -266,12 +266,14 @@ fn the_temporary_directory_is_made_and_removed() void {
 // failing call left. The driver captures it before another call can overwrite
 // it.
 fn a_temporary_directory_that_cannot_be_made_reports_its_errno() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
+    strbuf.str_buf mut text = strbuf.create();
+    defer del(text.data);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
     string mut parent = "";
     i32 mut failure = 0;
     set_env("TMPDIR", "nosuchdirectory");
-    string dir = driver.make_temp_dir(&p, &parent, &failure);
+    string dir = driver.make_temp_dir(p, &parent, &failure);
     // The parent is a copy in the pool `p`, so it stays the same after the
     // variable goes.
     unset_env("TMPDIR");
@@ -280,20 +282,18 @@ fn a_temporary_directory_that_cannot_be_made_reports_its_errno() void {
     // ENOENT. The value is the system's and is read back through the same
     // call the driver reports with.
     assert(failure != 0);
-    strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
     os.error_text(failure, &text);
     assert(strbuf.view(&text) == "No such file or directory");
 }
 
 // An empty $TMPDIR names no directory, so it counts as unset.
 fn an_empty_tmpdir_falls_back_to_tmp() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
+    containers.pool mut* own p = containers.pool_make();
+    defer containers.pool_drop_made(move(p));
     string mut parent = "";
     i32 mut failure = 0;
     set_env("TMPDIR", "");
-    string dir = driver.make_temp_dir(&p, &parent, &failure);
+    string dir = driver.make_temp_dir(p, &parent, &failure);
     unset_env("TMPDIR");
     assert(parent == "/tmp");
     assert(dir.len > 0);
@@ -359,7 +359,7 @@ fn a_build_writes_its_module_outside_the_working_directory() void {
     defer del(quiet);
     assert(quiet.len == 0);
     strbuf.str_buf mut leftover = strbuf.create();
-    defer strbuf.free(&leftover);
+    defer del(leftover.data);
     assert(!io.read_file("unit.ll", &leftover));
     // -S writes the module to the output instead, so it needs no temporary
     // and the file stands in the working directory.
@@ -389,7 +389,7 @@ fn the_child_receives_the_arguments_cc_argv_built() void {
     assert(run_quiet(whole[0..11]) == driver.EXIT_OK);
     unset_env("TMPDIR");
     strbuf.str_buf mut log = strbuf.create();
-    defer strbuf.free(&log);
+    defer del(log.data);
     assert(io.read_file("cc.log", &log));
     string got = strbuf.view(&log);
     // The first argument is argv[1]: a shell script never sees argv[0]. The
@@ -397,9 +397,9 @@ fn the_child_receives_the_arguments_cc_argv_built() void {
     // run. So the line before it and the lines after it are held whole and the
     // module's own line is held by its ending.
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.str_buf mut t = strbuf.create();
-    defer strbuf.free(&t);
+    defer del(t.data);
     string[6] mut head = {
         target_argument(&t),
         "-O1",
@@ -501,7 +501,7 @@ fn said(string text) bool {
 
 fn captured() string own {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     if (!io.read_file("err.txt", &b)) {
         return str.dup("");
     }

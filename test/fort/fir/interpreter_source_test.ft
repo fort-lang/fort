@@ -631,39 +631,39 @@ string[4] FAILS = {
 // address that starts no live allocation and a load after a release end the run.
 fn heap(run_env.env mut* e) void {
     run_env.check(e, HEAP[..]);
-    fir.module mut m = run_env.parse(e, HEAP_LOWERED[..]);
-    defer fir.module_free(&m);
+    fir.module mut* own m = run_env.parse_made(e, HEAP_LOWERED[..]);
+    defer fir.module_drop_made(move(m));
     u64[1] a1 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "new_and_del", a1[..0]), "return i32 5");
-    run_env.expect_line(run_env.run_in(e, &m, "del_empties", a1[..0]), "return true");
-    run_env.expect_line(run_env.run_in(e, &m, "del_null", a1[..0]), "return true");
-    run_env.expect_line(run_env.run_in(e, &m, "read_after_del", a1[..0]),
+    run_env.expect_line(run_env.run_in(e, m, "new_and_del", a1[..0]), "return i32 5");
+    run_env.expect_line(run_env.run_in(e, m, "del_empties", a1[..0]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "del_null", a1[..0]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "read_after_del", a1[..0]),
                         "fault invalid access at 27:12");
-    run_env.expect_line(run_env.run_in(e, &m, "zero_count", a1[..0]), "return u64 0");
+    run_env.expect_line(run_env.run_in(e, m, "zero_count", a1[..0]), "return u64 0");
     // the compiler has no storage for 2^62 bytes, so `calloc` gives null
     string[2] w2 = {
         "stderr \"39:21: out of memory\\x0A\"",
         "abort",
     };
-    run_env.expect(run_env.run_in(e, &m, "out_of_memory", a1[..0]), w2[..]);
-    run_env.expect_line(run_env.run_in(e, &m, "calloc_overflow", a1[..0]), "return true");
+    run_env.expect(run_env.run_in(e, m, "out_of_memory", a1[..0]), w2[..]);
+    run_env.expect_line(run_env.run_in(e, m, "calloc_overflow", a1[..0]), "return true");
     // No fort source reads the block of `calloc`, because no cast gives a type to a `void*`
     // (D3.14). The FIR text `main.empty_alloc` of fir/shadow_test.ft reads zero bytes of it.
-    run_env.expect_line(run_env.run_in(e, &m, "calloc_zero", a1[..0]), "return true");
-    run_env.expect_line(run_env.run_in(e, &m, "never_reused", a1[..0]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "calloc_zero", a1[..0]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "never_reused", a1[..0]), "return true");
     // the frame of a second call takes a new range, also after the first frame ended
-    run_env.expect_line(run_env.run_in(e, &m, "two_frames", a1[..0]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "two_frames", a1[..0]), "return true");
     // the second `del` frees the released allocation, in the `free` of std.rt
-    run_env.expect_line(run_env.run_in(e, &m, "main.twin", a1[..0]),
+    run_env.expect_line(run_env.run_in(e, m, "main.twin", a1[..0]),
                         "fault invalid release at 116:14");
-    run_env.expect_line(run_env.run_in(e, &m, "main.interior", a1[..0]),
+    run_env.expect_line(run_env.run_in(e, m, "main.interior", a1[..0]),
                         "fault invalid release at 116:14");
     u64[1] a3 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "list_sum", a3[..1]), "return i64 0");
+    run_env.expect_line(run_env.run_in(e, m, "list_sum", a3[..1]), "return i64 0");
     u64[1] a4 = {1};
-    run_env.expect_line(run_env.run_in(e, &m, "list_sum", a4[..1]), "return i64 1");
+    run_env.expect_line(run_env.run_in(e, m, "list_sum", a4[..1]), "return i64 1");
     u64[1] a5 = {3000};
-    run_env.expect_line(run_env.run_in(e, &m, "list_sum", a5[..1]), "return i64 4501500");
+    run_env.expect_line(run_env.run_in(e, m, "list_sum", a5[..1]), "return i64 4501500");
     println("heap ok");
 }
 
@@ -673,66 +673,66 @@ fn heap(run_env.env mut* e) void {
 // The errno that `strtod` and `strtof` set goes to the slot.
 fn externs(run_env.env mut* e) void {
     run_env.check(e, EXTERNS[..]);
-    fir.module mut m = fir.module_new();
-    defer fir.module_free(&m);
+    fir.module mut* own m = fir.module_make();
+    defer fir.module_drop_made(move(m));
     u64[1] a6 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "length", a6[..0]), "return u64 5");
-    run_env.expect_line(run_env.run_in(e, &m, "unterminated", a6[..0]),
+    run_env.expect_line(run_env.run_in(e, m, "length", a6[..0]), "return u64 5");
+    run_env.expect_line(run_env.run_in(e, m, "unterminated", a6[..0]),
                         "fault invalid access at 11:24");
     u64[2] a7 = {1, 0};
-    run_env.expect_line(run_env.run_in(e, &m, "moves", a7[..2]), "return u8 1");
+    run_env.expect_line(run_env.run_in(e, m, "moves", a7[..2]), "return u8 1");
     u64[2] a8 = {1, 1};
-    run_env.expect_line(run_env.run_in(e, &m, "moves", a8[..2]), "return u8 1");
+    run_env.expect_line(run_env.run_in(e, m, "moves", a8[..2]), "return u8 1");
     u64[2] a9 = {1, 2};
-    run_env.expect_line(run_env.run_in(e, &m, "moves", a9[..2]), "return u8 2");
+    run_env.expect_line(run_env.run_in(e, m, "moves", a9[..2]), "return u8 2");
     u64[2] a10 = {1, 3};
-    run_env.expect_line(run_env.run_in(e, &m, "moves", a10[..2]), "return u8 3");
+    run_env.expect_line(run_env.run_in(e, m, "moves", a10[..2]), "return u8 3");
     u64[2] a11 = {0, 0};
-    run_env.expect_line(run_env.run_in(e, &m, "moves", a11[..2]), "return u8 2");
+    run_env.expect_line(run_env.run_in(e, m, "moves", a11[..2]), "return u8 2");
     u64[2] a12 = {0, 1};
-    run_env.expect_line(run_env.run_in(e, &m, "moves", a12[..2]), "return u8 3");
+    run_env.expect_line(run_env.run_in(e, m, "moves", a12[..2]), "return u8 3");
     u64[2] a13 = {0, 2};
-    run_env.expect_line(run_env.run_in(e, &m, "moves", a13[..2]), "return u8 4");
+    run_env.expect_line(run_env.run_in(e, m, "moves", a13[..2]), "return u8 4");
     u64[2] a14 = {0, 3};
-    run_env.expect_line(run_env.run_in(e, &m, "moves", a14[..2]), "return u8 4");
-    run_env.expect_line(run_env.run_in(e, &m, "copies", a6[..0]), "return u8 9");
+    run_env.expect_line(run_env.run_in(e, m, "moves", a14[..2]), "return u8 4");
+    run_env.expect_line(run_env.run_in(e, m, "copies", a6[..0]), "return u8 9");
     u64[1] a15 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "compares", a15[..1]), "return i32 -1");
+    run_env.expect_line(run_env.run_in(e, m, "compares", a15[..1]), "return i32 -1");
     u64[1] a16 = {1};
-    run_env.expect_line(run_env.run_in(e, &m, "compares", a16[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "compares", a16[..1]), "return i32 0");
     u64[1] a17 = {2};
-    run_env.expect_line(run_env.run_in(e, &m, "compares", a17[..1]), "return i32 1");
-    run_env.expect_line(run_env.run_in(e, &m, "same_strings", a6[..0]), "return true");
-    run_env.expect_line(run_env.run_in(e, &m, "errno_slot", a6[..0]), "return i32 5");
+    run_env.expect_line(run_env.run_in(e, m, "compares", a17[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, m, "same_strings", a6[..0]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "errno_slot", a6[..0]), "return i32 5");
     string[2] w18 = {
         "stdout \"1.500e+00\\x0A\"",
         "return i32 9",
     };
-    run_env.expect(run_env.run_in(e, &m, "formats", a6[..0]), w18[..]);
+    run_env.expect(run_env.run_in(e, m, "formats", a6[..0]), w18[..]);
     u64[1] a19 = {0};
     // a short buffer takes size - 1 bytes and the NUL
-    run_env.expect_line(run_env.run_in(e, &m, "formats_short", a19[..1]), "return u8 49");
+    run_env.expect_line(run_env.run_in(e, m, "formats_short", a19[..1]), "return u8 49");
     u64[1] a20 = {1};
-    run_env.expect_line(run_env.run_in(e, &m, "formats_short", a20[..1]), "return u8 46");
+    run_env.expect_line(run_env.run_in(e, m, "formats_short", a20[..1]), "return u8 46");
     u64[1] a21 = {2};
-    run_env.expect_line(run_env.run_in(e, &m, "formats_short", a21[..1]), "return u8 53");
+    run_env.expect_line(run_env.run_in(e, m, "formats_short", a21[..1]), "return u8 53");
     u64[1] a22 = {3};
-    run_env.expect_line(run_env.run_in(e, &m, "formats_short", a22[..1]), "return u8 0");
-    run_env.expect_line(run_env.run_in(e, &m, "formats_other", a6[..0]), "outside snprintf");
-    run_env.expect_line(run_env.run_in(e, &m, "parses", a6[..0]), "return f64 0x4004000000000000");
-    run_env.expect_line(run_env.run_in(e, &m, "parses_single", a6[..0]),
+    run_env.expect_line(run_env.run_in(e, m, "formats_short", a22[..1]), "return u8 0");
+    run_env.expect_line(run_env.run_in(e, m, "formats_other", a6[..0]), "outside snprintf");
+    run_env.expect_line(run_env.run_in(e, m, "parses", a6[..0]), "return f64 0x4004000000000000");
+    run_env.expect_line(run_env.run_in(e, m, "parses_single", a6[..0]),
                         "return f32 0x3FB99999A0000000");
-    run_env.expect_line(run_env.run_in(e, &m, "parses_end", a6[..0]), "outside strtod");
+    run_env.expect_line(run_env.run_in(e, m, "parses_end", a6[..0]), "outside strtod");
     u64[1] a23 = {0};
     // a range error sets errno to ERANGE, 34 on both targets
-    run_env.expect_line(run_env.run_in(e, &m, "range_error", a23[..1]), "return i32 34");
+    run_env.expect_line(run_env.run_in(e, m, "range_error", a23[..1]), "return i32 34");
     u64[1] a24 = {1};
-    run_env.expect_line(run_env.run_in(e, &m, "range_error", a24[..1]), "return i32 34");
+    run_env.expect_line(run_env.run_in(e, m, "range_error", a24[..1]), "return i32 34");
     // a call that sets no errno leaves the errno of the run
-    run_env.expect_line(run_env.run_in(e, &m, "no_error", a6[..0]), "return i32 5");
-    run_env.expect_line(run_env.run_in(e, &m, "reads", a6[..0]), "outside read");
+    run_env.expect_line(run_env.run_in(e, m, "no_error", a6[..0]), "return i32 5");
+    run_env.expect_line(run_env.run_in(e, m, "reads", a6[..0]), "outside read");
     // std.rt reaches no `memset`
-    run_env.expect_line(run_env.run_in(e, &m, "fills", a6[..0]), "outside memset");
+    run_env.expect_line(run_env.run_in(e, m, "fills", a6[..0]), "outside memset");
     println("externs ok");
 }
 
@@ -741,55 +741,55 @@ fn externs(run_env.env mut* e) void {
 // address of a global and a function. A `mut` global keeps its stores within one run.
 fn globals(run_env.env mut* e) void {
     run_env.check(e, GLOBALS[..]);
-    fir.module mut m = fir.module_new();
-    defer fir.module_free(&m);
+    fir.module mut* own m = fir.module_make();
+    defer fir.module_drop_made(move(m));
     u64[1] a25 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "big", a25[..0]), "return i64 -9223372036854775808");
-    run_env.expect_line(run_env.run_in(e, &m, "byte", a25[..0]), "return u8 255");
-    run_env.expect_line(run_env.run_in(e, &m, "half", a25[..0]), "return f64 0x3FE0000000000000");
-    run_env.expect_line(run_env.run_in(e, &m, "tenth", a25[..0]), "return f32 0x3FB99999A0000000");
-    run_env.expect_line(run_env.run_in(e, &m, "yes", a25[..0]), "return true");
-    run_env.expect_line(run_env.run_in(e, &m, "letter", a25[..0]), "return char 122");
-    run_env.expect_line(run_env.run_in(e, &m, "top", a25[..0]), "return i32 7");
+    run_env.expect_line(run_env.run_in(e, m, "big", a25[..0]), "return i64 -9223372036854775808");
+    run_env.expect_line(run_env.run_in(e, m, "byte", a25[..0]), "return u8 255");
+    run_env.expect_line(run_env.run_in(e, m, "half", a25[..0]), "return f64 0x3FE0000000000000");
+    run_env.expect_line(run_env.run_in(e, m, "tenth", a25[..0]), "return f32 0x3FB99999A0000000");
+    run_env.expect_line(run_env.run_in(e, m, "yes", a25[..0]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "letter", a25[..0]), "return char 122");
+    run_env.expect_line(run_env.run_in(e, m, "top", a25[..0]), "return i32 7");
     u64[1] a26 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "greeting", a26[..1]), "return char 104");
+    run_env.expect_line(run_env.run_in(e, m, "greeting", a26[..1]), "return char 104");
     u64[1] a27 = {1};
-    run_env.expect_line(run_env.run_in(e, &m, "greeting", a27[..1]), "return char 105");
+    run_env.expect_line(run_env.run_in(e, m, "greeting", a27[..1]), "return char 105");
     u64[1] a28 = {2};
-    run_env.expect_line(run_env.run_in(e, &m, "greeting", a28[..1]), "return char 32");
+    run_env.expect_line(run_env.run_in(e, m, "greeting", a28[..1]), "return char 32");
     u64[1] a29 = {3};
-    run_env.expect_line(run_env.run_in(e, &m, "greeting", a29[..1]), "return char 116");
+    run_env.expect_line(run_env.run_in(e, m, "greeting", a29[..1]), "return char 116");
     u64[1] a30 = {4};
-    run_env.expect_line(run_env.run_in(e, &m, "greeting", a30[..1]), "return char 104");
+    run_env.expect_line(run_env.run_in(e, m, "greeting", a30[..1]), "return char 104");
     u64[1] a31 = {5};
-    run_env.expect_line(run_env.run_in(e, &m, "greeting", a31[..1]), "return char 101");
+    run_env.expect_line(run_env.run_in(e, m, "greeting", a31[..1]), "return char 101");
     u64[1] a32 = {6};
-    run_env.expect_line(run_env.run_in(e, &m, "greeting", a32[..1]), "return char 114");
+    run_env.expect_line(run_env.run_in(e, m, "greeting", a32[..1]), "return char 114");
     u64[1] a33 = {7};
-    run_env.expect_line(run_env.run_in(e, &m, "greeting", a33[..1]), "return char 101");
+    run_env.expect_line(run_env.run_in(e, m, "greeting", a33[..1]), "return char 101");
     u64[1] a34 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "word_length", a34[..1]), "return u64 3");
+    run_env.expect_line(run_env.run_in(e, m, "word_length", a34[..1]), "return u64 3");
     u64[1] a35 = {1};
-    run_env.expect_line(run_env.run_in(e, &m, "word_length", a35[..1]), "return u64 5");
-    run_env.expect_line(run_env.run_in(e, &m, "origin", a25[..0]), "return i32 26");
-    run_env.expect_line(run_env.run_in(e, &m, "halfway", a25[..0]), "return i32 9");
+    run_env.expect_line(run_env.run_in(e, m, "word_length", a35[..1]), "return u64 5");
+    run_env.expect_line(run_env.run_in(e, m, "origin", a25[..0]), "return i32 26");
+    run_env.expect_line(run_env.run_in(e, m, "halfway", a25[..0]), "return i32 9");
     u64[1] a36 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "box_corner", a36[..1]), "return i32 12");
+    run_env.expect_line(run_env.run_in(e, m, "box_corner", a36[..1]), "return i32 12");
     u64[1] a37 = {1};
-    run_env.expect_line(run_env.run_in(e, &m, "box_corner", a37[..1]), "return i32 34");
-    run_env.expect_line(run_env.run_in(e, &m, "box_name", a25[..0]), "return u64 3");
-    run_env.expect_line(run_env.run_in(e, &m, "box_closed", a25[..0]), "return true");
-    run_env.expect_line(run_env.run_in(e, &m, "same", a25[..0]), "return i64 -9223372036854775808");
-    run_env.expect_line(run_env.run_in(e, &m, "byte_at", a25[..0]), "return u8 255");
+    run_env.expect_line(run_env.run_in(e, m, "box_corner", a37[..1]), "return i32 34");
+    run_env.expect_line(run_env.run_in(e, m, "box_name", a25[..0]), "return u64 3");
+    run_env.expect_line(run_env.run_in(e, m, "box_closed", a25[..0]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "same", a25[..0]), "return i64 -9223372036854775808");
+    run_env.expect_line(run_env.run_in(e, m, "byte_at", a25[..0]), "return u8 255");
     u64[1] a38 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "step", a38[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, m, "step", a38[..1]), "return i32 1");
     u64[1] a39 = {41};
-    run_env.expect_line(run_env.run_in(e, &m, "step", a39[..1]), "return i32 42");
+    run_env.expect_line(run_env.run_in(e, m, "step", a39[..1]), "return i32 42");
     u64[1] a40 = {4294967295};
-    run_env.expect_line(run_env.run_in(e, &m, "step", a40[..1]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "tally_twice", a25[..0]), "return i32 12");
+    run_env.expect_line(run_env.run_in(e, m, "step", a40[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "tally_twice", a25[..0]), "return i32 12");
     // a new run starts from the initializer again
-    run_env.expect_line(run_env.run_in(e, &m, "tally_twice", a25[..0]), "return i32 12");
+    run_env.expect_line(run_env.run_in(e, m, "tally_twice", a25[..0]), "return i32 12");
     println("globals ok");
 }
 
@@ -797,95 +797,95 @@ fn globals(run_env.env mut* e) void {
 // builtin and the `switch` of an enum, with the runtime entry of its kind (D11.4).
 fn checks(run_env.env mut* e) void {
     run_env.check(e, CHECKS[..]);
-    fir.module mut m = fir.module_new();
-    defer fir.module_free(&m);
+    fir.module mut* own m = fir.module_make();
+    defer fir.module_drop_made(move(m));
     u64[1] a41 = {0};
     u64[1] a42 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "index", a42[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, m, "index", a42[..1]), "return i32 1");
     u64[1] a43 = {1};
-    run_env.expect_line(run_env.run_in(e, &m, "index", a43[..1]), "return i32 2");
+    run_env.expect_line(run_env.run_in(e, m, "index", a43[..1]), "return i32 2");
     u64[1] a44 = {2};
-    run_env.expect_line(run_env.run_in(e, &m, "index", a44[..1]), "return i32 3");
+    run_env.expect_line(run_env.run_in(e, m, "index", a44[..1]), "return i32 3");
     u64[1] a45 = {3};
     string[2] w46 = {
         "stderr \"7:13: bounds 3 3\\x0A\"",
         "abort",
     };
-    run_env.expect(run_env.run_in(e, &m, "index", a45[..1]), w46[..]);
+    run_env.expect(run_env.run_in(e, m, "index", a45[..1]), w46[..]);
     u64[1] a47 = {18446744073709551615};
     string[2] w48 = {
         "stderr \"7:13: bounds -1 3\\x0A\"",
         "abort",
     };
-    run_env.expect(run_env.run_in(e, &m, "index", a47[..1]), w48[..]);
+    run_env.expect(run_env.run_in(e, m, "index", a47[..1]), w48[..]);
     u64[2] a49 = {2147483646, 1};
-    run_env.expect_line(run_env.run_in(e, &m, "add", a49[..2]), "return i32 2147483647");
+    run_env.expect_line(run_env.run_in(e, m, "add", a49[..2]), "return i32 2147483647");
     u64[2] a50 = {2147483647, 1};
     string[2] w51 = {
         "stderr \"10:14: overflow\\x0A\"",
         "abort",
     };
-    run_env.expect(run_env.run_in(e, &m, "add", a50[..2]), w51[..]);
+    run_env.expect(run_env.run_in(e, m, "add", a50[..2]), w51[..]);
     u64[2] a52 = {4294967289, 2};
-    run_env.expect_line(run_env.run_in(e, &m, "divide", a52[..2]), "return i32 -3");
+    run_env.expect_line(run_env.run_in(e, m, "divide", a52[..2]), "return i32 -3");
     u64[2] a53 = {1, 0};
     string[2] w54 = {
         "stderr \"13:14: div_zero\\x0A\"",
         "abort",
     };
-    run_env.expect(run_env.run_in(e, &m, "divide", a53[..2]), w54[..]);
+    run_env.expect(run_env.run_in(e, m, "divide", a53[..2]), w54[..]);
     u64[2] a55 = {2147483648, 4294967295};
     string[2] w56 = {
         "stderr \"13:14: div_overflow\\x0A\"",
         "abort",
     };
-    run_env.expect(run_env.run_in(e, &m, "divide", a55[..2]), w56[..]);
+    run_env.expect(run_env.run_in(e, m, "divide", a55[..2]), w56[..]);
     u64[2] a57 = {1, 63};
-    run_env.expect_line(run_env.run_in(e, &m, "shift", a57[..2]),
+    run_env.expect_line(run_env.run_in(e, m, "shift", a57[..2]),
                         "return i64 -9223372036854775808");
     u64[2] a58 = {1, 64};
     string[2] w59 = {
         "stderr \"16:14: shift 64 i64\\x0A\"",
         "abort",
     };
-    run_env.expect(run_env.run_in(e, &m, "shift", a58[..2]), w59[..]);
+    run_env.expect(run_env.run_in(e, m, "shift", a58[..2]), w59[..]);
     u64[1] a60 = {2};
-    run_env.expect_line(run_env.run_in(e, &m, "count", a60[..1]), "return u64 2");
+    run_env.expect_line(run_env.run_in(e, m, "count", a60[..1]), "return u64 2");
     u64[1] a61 = {4294967295};
     string[2] w62 = {
         "stderr \"19:21: alloc_count -1\\x0A\"",
         "abort",
     };
-    run_env.expect(run_env.run_in(e, &m, "count", a61[..1]), w62[..]);
+    run_env.expect(run_env.run_in(e, m, "count", a61[..1]), w62[..]);
     u64[1] a63 = {3};
-    run_env.expect_line(run_env.run_in(e, &m, "span", a63[..1]), "return u64 2");
+    run_env.expect_line(run_env.run_in(e, m, "span", a63[..1]), "return u64 2");
     u64[1] a64 = {4};
     string[2] w65 = {
         "stderr \"26:14: span 1 4 3\\x0A\"",
         "abort",
     };
-    run_env.expect(run_env.run_in(e, &m, "span", a64[..1]), w65[..]);
+    run_env.expect(run_env.run_in(e, m, "span", a64[..1]), w65[..]);
     u64[1] a66 = {1};
-    run_env.expect_line(run_env.run_in(e, &m, "sure", a66[..1]), "return");
+    run_env.expect_line(run_env.run_in(e, m, "sure", a66[..1]), "return");
     u64[1] a67 = {0};
     string[2] w68 = {
         "stderr \"30:5: assert x > 0\\x0A\"",
         "abort",
     };
-    run_env.expect(run_env.run_in(e, &m, "sure", a67[..1]), w68[..]);
+    run_env.expect(run_env.run_in(e, m, "sure", a67[..1]), w68[..]);
     string[2] w69 = {
         "stderr \"33:5: panic gave up\\x0A\"",
         "abort",
     };
-    run_env.expect(run_env.run_in(e, &m, "give_up", a41[..0]), w69[..]);
+    run_env.expect(run_env.run_in(e, m, "give_up", a41[..0]), w69[..]);
     u64[1] a70 = {1};
-    run_env.expect_line(run_env.run_in(e, &m, "name", a70[..1]), "return i32 2");
+    run_env.expect_line(run_env.run_in(e, m, "name", a70[..1]), "return i32 2");
     u64[1] a71 = {5};
     string[2] w72 = {
         "stderr \"36:5: enum 5 mood\\x0A\"",
         "abort",
     };
-    run_env.expect(run_env.run_in(e, &m, "name", a71[..1]), w72[..]);
+    run_env.expect(run_env.run_in(e, m, "name", a71[..1]), w72[..]);
     println("checks ok");
 }
 
@@ -895,122 +895,122 @@ fn checks(run_env.env mut* e) void {
 // loop condition, a field and an element.
 fn bools(run_env.env mut* e) void {
     run_env.check(e, BOOLS[..]);
-    fir.module mut m = fir.module_new();
-    defer fir.module_free(&m);
+    fir.module mut* own m = fir.module_make();
+    defer fir.module_drop_made(move(m));
     u64[1] a73 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "as_int", a73[..1]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "branch", a73[..1]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "negate", a73[..1]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "as_int", a73[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "branch", a73[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "negate", a73[..1]), "return true");
     string[2] w74 = {
         "stderr \"48:5: assert b\\x0A\"",
         "abort",
     };
-    run_env.expect(run_env.run_in(e, &m, "sure", a73[..1]), w74[..]);
+    run_env.expect(run_env.run_in(e, m, "sure", a73[..1]), w74[..]);
     string[2] w75 = {
         "stdout \"false\\x0A\"",
         "return",
     };
-    run_env.expect(run_env.run_in(e, &m, "show", a73[..1]), w75[..]);
-    run_env.expect_line(run_env.run_in(e, &m, "pass", a73[..1]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "loop", a73[..1]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "field", a73[..1]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "element", a73[..1]), "return false");
+    run_env.expect(run_env.run_in(e, m, "show", a73[..1]), w75[..]);
+    run_env.expect_line(run_env.run_in(e, m, "pass", a73[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "loop", a73[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "field", a73[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "element", a73[..1]), "return false");
     u64[1] a76 = {1};
-    run_env.expect_line(run_env.run_in(e, &m, "as_int", a76[..1]), "return i32 1");
-    run_env.expect_line(run_env.run_in(e, &m, "branch", a76[..1]), "return i32 1");
-    run_env.expect_line(run_env.run_in(e, &m, "negate", a76[..1]), "return false");
-    run_env.expect_line(run_env.run_in(e, &m, "sure", a76[..1]), "return");
+    run_env.expect_line(run_env.run_in(e, m, "as_int", a76[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, m, "branch", a76[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, m, "negate", a76[..1]), "return false");
+    run_env.expect_line(run_env.run_in(e, m, "sure", a76[..1]), "return");
     string[2] w77 = {
         "stdout \"true\\x0A\"",
         "return",
     };
-    run_env.expect(run_env.run_in(e, &m, "show", a76[..1]), w77[..]);
-    run_env.expect_line(run_env.run_in(e, &m, "pass", a76[..1]), "return i32 1");
-    run_env.expect_line(run_env.run_in(e, &m, "loop", a76[..1]), "return i32 3");
-    run_env.expect_line(run_env.run_in(e, &m, "field", a76[..1]), "return i32 1");
-    run_env.expect_line(run_env.run_in(e, &m, "element", a76[..1]), "return true");
+    run_env.expect(run_env.run_in(e, m, "show", a76[..1]), w77[..]);
+    run_env.expect_line(run_env.run_in(e, m, "pass", a76[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, m, "loop", a76[..1]), "return i32 3");
+    run_env.expect_line(run_env.run_in(e, m, "field", a76[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, m, "element", a76[..1]), "return true");
     u64[1] a78 = {2};
-    run_env.expect_line(run_env.run_in(e, &m, "as_int", a78[..1]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "branch", a78[..1]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "negate", a78[..1]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "as_int", a78[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "branch", a78[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "negate", a78[..1]), "return true");
     string[2] w79 = {
         "stderr \"48:5: assert b\\x0A\"",
         "abort",
     };
-    run_env.expect(run_env.run_in(e, &m, "sure", a78[..1]), w79[..]);
+    run_env.expect(run_env.run_in(e, m, "sure", a78[..1]), w79[..]);
     string[2] w80 = {
         "stdout \"false\\x0A\"",
         "return",
     };
-    run_env.expect(run_env.run_in(e, &m, "show", a78[..1]), w80[..]);
-    run_env.expect_line(run_env.run_in(e, &m, "pass", a78[..1]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "loop", a78[..1]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "field", a78[..1]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "element", a78[..1]), "return false");
+    run_env.expect(run_env.run_in(e, m, "show", a78[..1]), w80[..]);
+    run_env.expect_line(run_env.run_in(e, m, "pass", a78[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "loop", a78[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "field", a78[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "element", a78[..1]), "return false");
     u64[1] a81 = {3};
-    run_env.expect_line(run_env.run_in(e, &m, "as_int", a81[..1]), "return i32 1");
-    run_env.expect_line(run_env.run_in(e, &m, "branch", a81[..1]), "return i32 1");
-    run_env.expect_line(run_env.run_in(e, &m, "negate", a81[..1]), "return false");
-    run_env.expect_line(run_env.run_in(e, &m, "sure", a81[..1]), "return");
+    run_env.expect_line(run_env.run_in(e, m, "as_int", a81[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, m, "branch", a81[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, m, "negate", a81[..1]), "return false");
+    run_env.expect_line(run_env.run_in(e, m, "sure", a81[..1]), "return");
     string[2] w82 = {
         "stdout \"true\\x0A\"",
         "return",
     };
-    run_env.expect(run_env.run_in(e, &m, "show", a81[..1]), w82[..]);
-    run_env.expect_line(run_env.run_in(e, &m, "pass", a81[..1]), "return i32 1");
-    run_env.expect_line(run_env.run_in(e, &m, "loop", a81[..1]), "return i32 3");
-    run_env.expect_line(run_env.run_in(e, &m, "field", a81[..1]), "return i32 1");
-    run_env.expect_line(run_env.run_in(e, &m, "element", a81[..1]), "return true");
+    run_env.expect(run_env.run_in(e, m, "show", a81[..1]), w82[..]);
+    run_env.expect_line(run_env.run_in(e, m, "pass", a81[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, m, "loop", a81[..1]), "return i32 3");
+    run_env.expect_line(run_env.run_in(e, m, "field", a81[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, m, "element", a81[..1]), "return true");
     u64[1] a83 = {254};
-    run_env.expect_line(run_env.run_in(e, &m, "as_int", a83[..1]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "branch", a83[..1]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "negate", a83[..1]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "as_int", a83[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "branch", a83[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "negate", a83[..1]), "return true");
     string[2] w84 = {
         "stderr \"48:5: assert b\\x0A\"",
         "abort",
     };
-    run_env.expect(run_env.run_in(e, &m, "sure", a83[..1]), w84[..]);
+    run_env.expect(run_env.run_in(e, m, "sure", a83[..1]), w84[..]);
     string[2] w85 = {
         "stdout \"false\\x0A\"",
         "return",
     };
-    run_env.expect(run_env.run_in(e, &m, "show", a83[..1]), w85[..]);
-    run_env.expect_line(run_env.run_in(e, &m, "pass", a83[..1]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "loop", a83[..1]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "field", a83[..1]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "element", a83[..1]), "return false");
+    run_env.expect(run_env.run_in(e, m, "show", a83[..1]), w85[..]);
+    run_env.expect_line(run_env.run_in(e, m, "pass", a83[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "loop", a83[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "field", a83[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "element", a83[..1]), "return false");
     u64[1] a86 = {255};
-    run_env.expect_line(run_env.run_in(e, &m, "as_int", a86[..1]), "return i32 1");
-    run_env.expect_line(run_env.run_in(e, &m, "branch", a86[..1]), "return i32 1");
-    run_env.expect_line(run_env.run_in(e, &m, "negate", a86[..1]), "return false");
-    run_env.expect_line(run_env.run_in(e, &m, "sure", a86[..1]), "return");
+    run_env.expect_line(run_env.run_in(e, m, "as_int", a86[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, m, "branch", a86[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, m, "negate", a86[..1]), "return false");
+    run_env.expect_line(run_env.run_in(e, m, "sure", a86[..1]), "return");
     string[2] w87 = {
         "stdout \"true\\x0A\"",
         "return",
     };
-    run_env.expect(run_env.run_in(e, &m, "show", a86[..1]), w87[..]);
-    run_env.expect_line(run_env.run_in(e, &m, "pass", a86[..1]), "return i32 1");
-    run_env.expect_line(run_env.run_in(e, &m, "loop", a86[..1]), "return i32 3");
-    run_env.expect_line(run_env.run_in(e, &m, "field", a86[..1]), "return i32 1");
-    run_env.expect_line(run_env.run_in(e, &m, "element", a86[..1]), "return true");
+    run_env.expect(run_env.run_in(e, m, "show", a86[..1]), w87[..]);
+    run_env.expect_line(run_env.run_in(e, m, "pass", a86[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, m, "loop", a86[..1]), "return i32 3");
+    run_env.expect_line(run_env.run_in(e, m, "field", a86[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, m, "element", a86[..1]), "return true");
     u64[2] a88 = {3, 3};
-    run_env.expect_line(run_env.run_in(e, &m, "both", a88[..2]), "return true");
-    run_env.expect_line(run_env.run_in(e, &m, "either", a88[..2]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "both", a88[..2]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "either", a88[..2]), "return true");
     u64[2] a89 = {3, 2};
-    run_env.expect_line(run_env.run_in(e, &m, "both", a89[..2]), "return false");
-    run_env.expect_line(run_env.run_in(e, &m, "either", a89[..2]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "both", a89[..2]), "return false");
+    run_env.expect_line(run_env.run_in(e, m, "either", a89[..2]), "return true");
     u64[2] a90 = {2, 3};
-    run_env.expect_line(run_env.run_in(e, &m, "both", a90[..2]), "return false");
-    run_env.expect_line(run_env.run_in(e, &m, "either", a90[..2]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "both", a90[..2]), "return false");
+    run_env.expect_line(run_env.run_in(e, m, "either", a90[..2]), "return true");
     u64[2] a91 = {2, 2};
-    run_env.expect_line(run_env.run_in(e, &m, "both", a91[..2]), "return false");
-    run_env.expect_line(run_env.run_in(e, &m, "either", a91[..2]), "return false");
+    run_env.expect_line(run_env.run_in(e, m, "both", a91[..2]), "return false");
+    run_env.expect_line(run_env.run_in(e, m, "either", a91[..2]), "return false");
     u64[2] a92 = {1, 254};
-    run_env.expect_line(run_env.run_in(e, &m, "both", a92[..2]), "return false");
-    run_env.expect_line(run_env.run_in(e, &m, "either", a92[..2]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "both", a92[..2]), "return false");
+    run_env.expect_line(run_env.run_in(e, m, "either", a92[..2]), "return true");
     u64[2] a93 = {255, 1};
-    run_env.expect_line(run_env.run_in(e, &m, "both", a93[..2]), "return true");
-    run_env.expect_line(run_env.run_in(e, &m, "either", a93[..2]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "both", a93[..2]), "return true");
+    run_env.expect_line(run_env.run_in(e, m, "either", a93[..2]), "return true");
     println("bools ok");
 }
 
@@ -1018,10 +1018,10 @@ fn bools(run_env.env mut* e) void {
 // fault in an argument names the call and not a line of the callee.
 fn arguments(run_env.env mut* e) void {
     run_env.check(e, ARGUMENTS[..]);
-    fir.module mut m = fir.module_new();
-    defer fir.module_free(&m);
+    fir.module mut* own m = fir.module_make();
+    defer fir.module_drop_made(move(m));
     u64[1] a94 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "null_argument", a94[..0]),
+    run_env.expect_line(run_env.run_in(e, m, "null_argument", a94[..0]),
                         "fault null dereference at 6:9");
     println("arguments ok");
 }
@@ -1031,15 +1031,15 @@ fn arguments(run_env.env mut* e) void {
 // completes `r(522931)` in an 8 MiB stack. The lowered `r` has 56 bytes of locals.
 fn depth(run_env.env mut* e) void {
     run_env.check(e, DEPTH[..]);
-    fir.module mut m = fir.module_new();
-    defer fir.module_free(&m);
+    fir.module mut* own m = fir.module_make();
+    defer fir.module_drop_made(move(m));
     u64[1] a95 = {522931};
-    run_env.expect_line(run_env.run_in(e, &m, "r", a95[..1]), "return u64 522931");
+    run_env.expect_line(run_env.run_in(e, m, "r", a95[..1]), "return u64 522931");
     u64[1] a96 = {524287};
-    run_env.expect_line(run_env.run_in(e, &m, "r", a96[..1]), "return u64 524287");
+    run_env.expect_line(run_env.run_in(e, m, "r", a96[..1]), "return u64 524287");
     u64[1] a97 = {524288};
     // 524288 frames of 16 bytes fill 8 MiB, so the frame of r(0) does not fit
-    run_env.expect_line(run_env.run_in(e, &m, "r", a97[..1]),
+    run_env.expect_line(run_env.run_in(e, m, "r", a97[..1]),
                         "fault the stack passes its limit at 5:13");
     println("depth ok");
 }
@@ -1079,16 +1079,15 @@ fn programs(run_env.env mut* e) void {
 }
 
 fn main() i32 {
-    run_env.env mut e = run_env.env{};
-    run_env.open(&e);
-    defer run_env.close(&e);
-    heap(&e);
-    externs(&e);
-    globals(&e);
-    checks(&e);
-    bools(&e);
-    arguments(&e);
-    depth(&e);
-    programs(&e);
+    run_env.env mut* own e = run_env.make();
+    defer run_env.drop_made(move(e));
+    heap(e);
+    externs(e);
+    globals(e);
+    checks(e);
+    bools(e);
+    arguments(e);
+    depth(e);
+    programs(e);
     return 0;
 }

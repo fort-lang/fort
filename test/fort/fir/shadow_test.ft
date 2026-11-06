@@ -27,7 +27,7 @@ import std.strbuf;
 // joined: the lines of a report, a long line in two items.
 fn expect_text(string got, string@ parts) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     for (u64 mut i = 0; i < parts.len; i++) {
         strbuf.append(&b, parts[i]);
     }
@@ -3337,46 +3337,46 @@ string[17] LIST = {
 // the next local and into padding.
 fn overwrite(run_env.env mut* e) void {
     run_env.check(e, PRELUDE[..]);
-    fir.module mut m = run_env.parse(e, OVERWRITE[..]);
-    defer fir.module_free(&m);
+    fir.module mut* own m = run_env.parse_made(e, OVERWRITE[..]);
+    defer fir.module_drop_made(move(m));
     u64[1] a1 = {0};
     // the check continues over a live owner
     string[2] w1 = {
         "event overwrite in main.ow_live at 5:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.ow_live", a1[..0]), w1[..]);
+    run_env.expect(run_env.run_in(e, m, "main.ow_live", a1[..0]), w1[..]);
     u64[1] a2 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "main.ow_vacated", a2[..0]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "main.ow_vacated", a2[..0]), "return i32 0");
     u64[1] a3 = {0};
     // a store of null is a store
     string[2] w3 = {
         "event overwrite in main.ow_null at 3:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.ow_null", a3[..0]), w3[..]);
+    run_env.expect(run_env.run_in(e, m, "main.ow_null", a3[..0]), w3[..]);
     u64[1] a4 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "main.ow_released", a4[..0]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "main.ow_released", a4[..0]), "return i32 0");
     u64[1] a5 = {0};
     // a store of another type over the word
     string[2] w5 = {
         "event overwrite in main.ow_word at 7:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.ow_word", a5[..0]), w5[..]);
+    run_env.expect(run_env.run_in(e, m, "main.ow_word", a5[..0]), w5[..]);
     u64[1] a6 = {0};
     // the first and the last byte of the word
     string[2] w6 = {
         "event overwrite in main.ow_first_byte at 7:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.ow_first_byte", a6[..0]), w6[..]);
+    run_env.expect(run_env.run_in(e, m, "main.ow_first_byte", a6[..0]), w6[..]);
     u64[1] a7 = {0};
     string[2] w7 = {
         "event overwrite in main.ow_last_byte at 7:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.ow_last_byte", a7[..0]), w7[..]);
+    run_env.expect(run_env.run_in(e, m, "main.ow_last_byte", a7[..0]), w7[..]);
     u64[1] a8 = {0};
     // the byte after the word and the byte before it write no slot, so the owner leaks at the
     // return
@@ -3384,13 +3384,13 @@ fn overwrite(run_env.env mut* e) void {
         "event leak in main.ow_next_byte at 9:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.ow_next_byte", a8[..0]), w8[..]);
+    run_env.expect(run_env.run_in(e, m, "main.ow_next_byte", a8[..0]), w8[..]);
     u64[1] a9 = {0};
     string[2] w9 = {
         "event leak in main.ow_byte_before at 9:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.ow_byte_before", a9[..0]), w9[..]);
+    run_env.expect(run_env.run_in(e, m, "main.ow_byte_before", a9[..0]), w9[..]);
     println("overwrite ok");
 }
 
@@ -3399,69 +3399,69 @@ fn overwrite(run_env.env mut* e) void {
 // `_0` passes the owner, so it makes no event.
 fn leak(run_env.env mut* e) void {
     run_env.check(e, PRELUDE[..]);
-    fir.module mut m = run_env.parse(e, LEAK[..]);
-    defer fir.module_free(&m);
+    fir.module mut* own m = run_env.parse_made(e, LEAK[..]);
+    defer fir.module_drop_made(move(m));
     u64[1] a10 = {0};
     string[2] w10 = {
         "event leak in main.leak_dead at 4:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.leak_dead", a10[..0]), w10[..]);
+    run_env.expect(run_env.run_in(e, m, "main.leak_dead", a10[..0]), w10[..]);
     u64[1] a11 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "main.leak_moved_dead", a11[..0]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "main.leak_moved_dead", a11[..0]), "return i32 0");
     u64[1] a12 = {0};
     // the slots of a frame die at its return
     string[2] w12 = {
         "event leak in main.leak_return at 4:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.leak_return", a12[..0]), w12[..]);
+    run_env.expect(run_env.run_in(e, m, "main.leak_return", a12[..0]), w12[..]);
     u64[1] a13 = {0};
     // the value of `_0` counts as an owner at the return of give
-    run_env.expect_line(run_env.run_in(e, &m, "main.take_given", a13[..0]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "main.take_given", a13[..0]), "return i32 0");
     u64[1] a14 = {0};
     string[2] w14 = {
         "event leak in main.drop_given at 4:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.drop_given", a14[..0]), w14[..]);
+    run_env.expect(run_env.run_in(e, m, "main.drop_given", a14[..0]), w14[..]);
     u64[1] a15 = {0};
     // the parameter of take takes the owner
-    run_env.expect_line(run_env.run_in(e, &m, "main.pass_on", a15[..0]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "main.pass_on", a15[..0]), "return i32 0");
     u64[1] a16 = {0};
     // the event stands at the `del`, not in std.rt.free
     string[2] w16 = {
         "event leak in main.del_shallow at 5:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.del_shallow", a16[..0]), w16[..]);
+    run_env.expect(run_env.run_in(e, m, "main.del_shallow", a16[..0]), w16[..]);
     u64[1] a17 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "main.del_deep", a17[..0]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "main.del_deep", a17[..0]), "return i32 0");
     u64[1] a18 = {0};
     // the first and the last element of the span
     string[2] w18 = {
         "event leak in main.del_span at 6:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.del_span", a18[..1]), w18[..]);
+    run_env.expect(run_env.run_in(e, m, "main.del_span", a18[..1]), w18[..]);
     u64[1] a19 = {1};
     string[2] w19 = {
         "event leak in main.del_span at 6:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.del_span", a19[..1]), w19[..]);
+    run_env.expect(run_env.run_in(e, m, "main.del_span", a19[..1]), w19[..]);
     u64[1] a20 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "main.span_moved_out", a20[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "main.span_moved_out", a20[..1]), "return i32 0");
     u64[1] a21 = {1};
-    run_env.expect_line(run_env.run_in(e, &m, "main.span_moved_out", a21[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "main.span_moved_out", a21[..1]), "return i32 0");
     u64[1] a22 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "main.in_struct", a22[..0]), "return i32 3");
+    run_env.expect_line(run_env.run_in(e, m, "main.in_struct", a22[..0]), "return i32 3");
     u64[1] a23 = {0};
     string[2] w23 = {
         "event leak in main.struct_dead at 5:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.struct_dead", a23[..0]), w23[..]);
+    run_env.expect(run_env.run_in(e, m, "main.struct_dead", a23[..0]), w23[..]);
     println("leak ok");
 }
 
@@ -3471,37 +3471,37 @@ fn leak(run_env.env mut* e) void {
 // makes no event (D17.9).
 fn release(run_env.env mut* e) void {
     run_env.check(e, PRELUDE[..]);
-    fir.module mut m = run_env.parse(e, RELEASE[..]);
-    defer fir.module_free(&m);
+    fir.module mut* own m = run_env.parse_made(e, RELEASE[..]);
+    defer fir.module_drop_made(move(m));
     u64[1] a24 = {0};
     // the bits came from a copy of `p`, so the value has the owner tag of `p`
     string[2] w24 = {
         "event double release in main.twice at 9:1 through owner main.twice _1",
         "fault invalid release at 116:14",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.twice", a24[..0]), w24[..]);
+    run_env.expect(run_env.run_in(e, m, "main.twice", a24[..0]), w24[..]);
     u64[1] a25 = {0};
     // an interior pointer, and the last byte of the allocation
     string[2] w25 = {
         "event invalid release in main.inside at 9:1 through owner main.inside _1",
         "fault invalid release at 116:14",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.inside", a25[..0]), w25[..]);
+    run_env.expect(run_env.run_in(e, m, "main.inside", a25[..0]), w25[..]);
     u64[1] a26 = {0};
     string[2] w26 = {
         "event invalid release in main.last_inside at 9:1 through owner main.last_inside _1",
         "fault invalid release at 116:14",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.last_inside", a26[..0]), w26[..]);
+    run_env.expect(run_env.run_in(e, m, "main.last_inside", a26[..0]), w26[..]);
     u64[1] a27 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "main.del_moved", a27[..0]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "main.del_moved", a27[..0]), "return i32 0");
     u64[1] a28 = {0};
     // the address of a local
     string[2] w28 = {
         "event invalid release in main.del_frame at 9:1 through frame main.del_frame _1",
         "fault invalid release at 116:14",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.del_frame", a28[..0]), w28[..]);
+    run_env.expect(run_env.run_in(e, m, "main.del_frame", a28[..0]), w28[..]);
     println("release ok");
 }
 
@@ -3510,41 +3510,41 @@ fn release(run_env.env mut* e) void {
 // it, a span of length 0 and a copy of 0 bytes make no event.
 fn after_release(run_env.env mut* e) void {
     run_env.check(e, PRELUDE[..]);
-    fir.module mut m = run_env.parse(e, AFTER_RELEASE[..]);
-    defer fir.module_free(&m);
+    fir.module mut* own m = run_env.parse_made(e, AFTER_RELEASE[..]);
+    defer fir.module_drop_made(move(m));
     u64[1] a29 = {0};
     // a cast to u64 and back in the function keeps the tag
     string[2] w29 = {
         "event use after release in main.first_byte at 8:1 through owner main.first_byte _1",
         "fault invalid access at 8:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.first_byte", a29[..0]), w29[..]);
+    run_env.expect(run_env.run_in(e, m, "main.first_byte", a29[..0]), w29[..]);
     u64[1] a30 = {0};
     string[2] w30 = {
         "event use after release in main.last_byte at 8:1 through owner main.last_byte _1",
         "fault invalid access at 8:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.last_byte", a30[..0]), w30[..]);
+    run_env.expect(run_env.run_in(e, m, "main.last_byte", a30[..0]), w30[..]);
     u64[1] a31 = {0};
     string[2] w31 = {
         "event use after release in main.last_word at 8:1 through owner main.last_word _1",
         "fault invalid access at 8:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.last_word", a31[..0]), w31[..]);
+    run_env.expect(run_env.run_in(e, m, "main.last_word", a31[..0]), w31[..]);
     u64[1] a32 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "main.past_end", a32[..0]),
+    run_env.expect_line(run_env.run_in(e, m, "main.past_end", a32[..0]),
                         "fault invalid access at 8:1");
     u64[1] a33 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "main.before_start", a33[..0]),
+    run_env.expect_line(run_env.run_in(e, m, "main.before_start", a33[..0]),
                         "fault invalid access at 8:1");
     u64[1] a34 = {0};
     string[2] w34 = {
         "event use after release in main.store_after at 5:1 through owner main.store_after _1",
         "fault invalid access at 5:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.store_after", a34[..0]), w34[..]);
+    run_env.expect(run_env.run_in(e, m, "main.store_after", a34[..0]), w34[..]);
     u64[1] a35 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "main.empty_span", a35[..0]), "return u64 0");
+    run_env.expect_line(run_env.run_in(e, m, "main.empty_span", a35[..0]), "return u64 0");
     println("after release ok");
 }
 
@@ -3553,52 +3553,52 @@ fn after_release(run_env.env mut* e) void {
 // the slot. A null from a constant and a slot that a store filled again make no event.
 fn after_move(run_env.env mut* e) void {
     run_env.check(e, PRELUDE[..]);
-    fir.module mut m = run_env.parse(e, AFTER_MOVE[..]);
-    defer fir.module_free(&m);
+    fir.module mut* own m = run_env.parse_made(e, AFTER_MOVE[..]);
+    defer fir.module_drop_made(move(m));
     u64[1] a36 = {0};
     string[2] w36 = {
         "event use after move in main.read_moved at 4:1 through moved main.read_moved _1",
         "fault null dereference at 4:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.read_moved", a36[..0]), w36[..]);
+    run_env.expect(run_env.run_in(e, m, "main.read_moved", a36[..0]), w36[..]);
     u64[1] a37 = {0};
     string[2] w37 = {
         "event use after move in main.write_moved at 4:1 through moved main.write_moved _1",
         "fault null dereference at 4:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.write_moved", a37[..0]), w37[..]);
+    run_env.expect(run_env.run_in(e, m, "main.write_moved", a37[..0]), w37[..]);
     u64[1] a38 = {0};
     // a copy of the vacated slot keeps its tag
     string[2] w38 = {
         "event use after move in main.copy_moved at 5:1 through moved main.copy_moved _1",
         "fault null dereference at 5:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.copy_moved", a38[..0]), w38[..]);
+    run_env.expect(run_env.run_in(e, m, "main.copy_moved", a38[..0]), w38[..]);
     u64[1] a39 = {0};
     // a `del` vacates too
     string[2] w39 = {
         "event use after move in main.del_then_read at 4:1 through moved main.del_then_read _1",
         "fault null dereference at 4:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.del_then_read", a39[..0]), w39[..]);
+    run_env.expect(run_env.run_in(e, m, "main.del_then_read", a39[..0]), w39[..]);
     u64[1] a40 = {0};
     string[2] w40 = {
         "event use after move in main.peek at 2:1 through moved main.moved_up _1 by a callee",
         "fault null dereference at 2:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.moved_up", a40[..0]), w40[..]);
+    run_env.expect(run_env.run_in(e, m, "main.moved_up", a40[..0]), w40[..]);
     u64[1] a41 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "main.read_null", a41[..0]),
+    run_env.expect_line(run_env.run_in(e, m, "main.read_null", a41[..0]),
                         "fault null dereference at 3:1");
     u64[1] a42 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "main.moved_then_filled", a42[..0]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "main.moved_then_filled", a42[..0]), "return i32 0");
     u64[1] a43 = {0};
     // a slot outside a frame names no local
     string[2] w43 = {
         "event use after move in main.moved_field at 6:1",
         "fault null dereference at 6:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.moved_field", a43[..0]), w43[..]);
+    run_env.expect(run_env.run_in(e, m, "main.moved_field", a43[..0]), w43[..]);
     println("after move ok");
 }
 
@@ -3609,68 +3609,68 @@ fn after_move(run_env.env mut* e) void {
 // and a value that a callee stored outside its own frame is kept.
 fn after_scope(run_env.env mut* e) void {
     run_env.check(e, PRELUDE[..]);
-    fir.module mut m = run_env.parse(e, AFTER_SCOPE[..]);
-    defer fir.module_free(&m);
+    fir.module mut* own m = run_env.parse_made(e, AFTER_SCOPE[..]);
+    defer fir.module_drop_made(move(m));
     u64[1] a44 = {0};
     string[2] w44 = {
         "event use after scope in main.read_dead at 6:1 through frame main.read_dead _1",
         "return i32 5",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.read_dead", a44[..0]), w44[..]);
+    run_env.expect(run_env.run_in(e, m, "main.read_dead", a44[..0]), w44[..]);
     u64[1] a45 = {0};
     // the address is one of the entry before the `live`, so it reaches no live local (D10.7)
     string[2] w45 = {
         "event forged in main.read_revived at 7:1 through frame main.read_revived _1",
         "return i32 5",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.read_revived", a45[..0]), w45[..]);
+    run_env.expect(run_env.run_in(e, m, "main.read_revived", a45[..0]), w45[..]);
     u64[1] a46 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "main.read_neighbour", a46[..0]), "return i32 6");
+    run_env.expect_line(run_env.run_in(e, m, "main.read_neighbour", a46[..0]), "return i32 6");
     u64[1] a47 = {0};
     string[2] w47 = {
         "event use after scope in main.store_dead at 5:1 through frame main.store_dead _1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.store_dead", a47[..0]), w47[..]);
+    run_env.expect(run_env.run_in(e, m, "main.store_dead", a47[..0]), w47[..]);
     u64[1] a48 = {0};
     string[2] w48 = {
         "event use after scope in main.read_returned at 3:1 through frame main.escape _1",
         "fault invalid access at 3:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.read_returned", a48[..0]), w48[..]);
+    run_env.expect(run_env.run_in(e, m, "main.read_returned", a48[..0]), w48[..]);
     u64[1] a49 = {0};
     // x holds 0, so the read gives 0
     string[2] w49 = {
         "event use after scope in main.read_kept at 7:1 through frame main.read_kept _1 kept",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.read_kept", a49[..0]), w49[..]);
+    run_env.expect(run_env.run_in(e, m, "main.read_kept", a49[..0]), w49[..]);
     u64[1] a50 = {0};
     // the copy that F holds is not the value that the callee kept
     string[2] w50 = {
         "event use after scope in main.read_unkept at 6:1 through frame main.read_unkept _1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.read_unkept", a50[..0]), w50[..]);
+    run_env.expect(run_env.run_in(e, m, "main.read_unkept", a50[..0]), w50[..]);
     u64[1] a51 = {0};
     string[2] w51 = {
         "event use after scope in main.round_trip at 7:1 through frame main.round_trip _1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.round_trip", a51[..0]), w51[..]);
+    run_env.expect(run_env.run_in(e, m, "main.round_trip", a51[..0]), w51[..]);
     u64[1] a52 = {0};
     string[2] w52 = {
         "event use after scope in main.round_trip_callee at 7:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.round_trip_callee", a52[..0]), w52[..]);
+    run_env.expect(run_env.run_in(e, m, "main.round_trip_callee", a52[..0]), w52[..]);
     u64[1] a53 = {0};
     // a slice of a local array is a frame tag
     string[2] w53 = {
         "event use after scope in main.slice_dead at 7:1 through frame main.slice_dead _1",
         "return i32 4",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.slice_dead", a53[..0]), w53[..]);
+    run_env.expect(run_env.run_in(e, m, "main.slice_dead", a53[..0]), w53[..]);
     println("after scope ok");
 }
 
@@ -3679,29 +3679,29 @@ fn after_scope(run_env.env mut* e) void {
 // makes no owner.
 fn duplicate(run_env.env mut* e) void {
     run_env.check(e, PRELUDE[..]);
-    fir.module mut m = run_env.parse(e, DUPLICATE[..]);
-    defer fir.module_free(&m);
+    fir.module mut* own m = run_env.parse_made(e, DUPLICATE[..]);
+    defer fir.module_drop_made(move(m));
     u64[1] a54 = {0};
     // the slot of r holds a released allocation at the return, so no leak
     string[2] w54 = {
         "event duplicate owner in main.second_owner at 7:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.second_owner", a54[..0]), w54[..]);
+    run_env.expect(run_env.run_in(e, m, "main.second_owner", a54[..0]), w54[..]);
     u64[1] a55 = {0};
     // the free goes through: p holds a released allocation at the return
     string[2] w55 = {
         "event duplicate owner in main.del_no_owner at 7:1 through owner main.del_no_owner _1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.del_no_owner", a55[..0]), w55[..]);
+    run_env.expect(run_env.run_in(e, m, "main.del_no_owner", a55[..0]), w55[..]);
     u64[1] a56 = {0};
     // q is no owner, so the store of null over p leaves no owner and no leak
     string[2] w56 = {
         "event overwrite in main.one_owner at 7:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.one_owner", a56[..0]), w56[..]);
+    run_env.expect(run_env.run_in(e, m, "main.one_owner", a56[..0]), w56[..]);
     println("duplicate ok");
 }
 
@@ -3711,44 +3711,44 @@ fn duplicate(run_env.env mut* e) void {
 // outside a frame, have no tag. A copy keeps its tag through a callee.
 fn owner_tags(run_env.env mut* e) void {
     run_env.check(e, PRELUDE[..]);
-    fir.module mut m = run_env.parse(e, OWNER_TAGS[..]);
-    defer fir.module_free(&m);
+    fir.module mut* own m = run_env.parse_made(e, OWNER_TAGS[..]);
+    defer fir.module_drop_made(move(m));
     u64[1] a57 = {0};
     string[2] w57 = {
         "event use after release in main.slice_owner at 7:1 through owner main.slice_owner _1",
         "fault invalid access at 7:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.slice_owner", a57[..0]), w57[..]);
+    run_env.expect(run_env.run_in(e, m, "main.slice_owner", a57[..0]), w57[..]);
     u64[1] a58 = {0};
     string[2] w58 = {
         "event use after release in main.addr_through at 5:1 through owner main.addr_through _1",
         "fault invalid access at 5:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.addr_through", a58[..0]), w58[..]);
+    run_env.expect(run_env.run_in(e, m, "main.addr_through", a58[..0]), w58[..]);
     u64[1] a59 = {0};
     string[2] w59 = {
         "event use after release in main.callee_lends at 6:1 through owner main.callee_lends _1",
         "fault invalid access at 6:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.callee_lends", a59[..0]), w59[..]);
+    run_env.expect(run_env.run_in(e, m, "main.callee_lends", a59[..0]), w59[..]);
     u64[1] a60 = {0};
     string[2] w60 = {
         "event use after release in main.callee_lends_global at 7:1",
         "fault invalid access at 7:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.callee_lends_global", a60[..0]), w60[..]);
+    run_env.expect(run_env.run_in(e, m, "main.callee_lends_global", a60[..0]), w60[..]);
     u64[1] a61 = {0};
     string[2] w61 = {
         "event use after release in main.view_passed at 6:1 through owner main.view_passed _1",
         "fault invalid access at 6:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.view_passed", a61[..0]), w61[..]);
+    run_env.expect(run_env.run_in(e, m, "main.view_passed", a61[..0]), w61[..]);
     u64[1] a62 = {0};
     string[2] w62 = {
         "event use after release in main.heap_owner at 7:1",
         "fault invalid access at 7:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.heap_owner", a62[..0]), w62[..]);
+    run_env.expect(run_env.run_in(e, m, "main.heap_owner", a62[..0]), w62[..]);
     println("owner tags ok");
 }
 
@@ -3761,14 +3761,14 @@ fn owner_tags(run_env.env mut* e) void {
 // a store of an aggregate over an owner is an `overwrite`.
 fn flows(run_env.env mut* e) void {
     run_env.check(e, PRELUDE[..]);
-    fir.module mut m = run_env.parse(e, FLOWS[..]);
-    defer fir.module_free(&m);
+    fir.module mut* own m = run_env.parse_made(e, FLOWS[..]);
+    defer fir.module_drop_made(move(m));
     u64[1] a63 = {0};
     string[2] w63 = {
         "event use after scope in main.pass_tag at 8:1 through frame main.pass_tag _1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.pass_tag", a63[..0]), w63[..]);
+    run_env.expect(run_env.run_in(e, m, "main.pass_tag", a63[..0]), w63[..]);
     u64[1] a64 = {0};
     // `oracle_keep` stores a copy in a slot that no item reads, and F reads its own copy, so the
     // tag is not kept
@@ -3776,114 +3776,114 @@ fn flows(run_env.env mut* e) void {
         "event use after scope in main.keep_extern at 7:1 through frame main.keep_extern _1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.keep_extern", a64[..0]), w64[..]);
+    run_env.expect(run_env.run_in(e, m, "main.keep_extern", a64[..0]), w64[..]);
     u64[1] a65 = {0};
     // `memcpy` keeps the tag of the word that it copies
     string[2] w65 = {
         "event use after release in main.memcpy_view at 10:1 through owner main.memcpy_view _1",
         "fault invalid access at 10:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.memcpy_view", a65[..0]), w65[..]);
+    run_env.expect(run_env.run_in(e, m, "main.memcpy_view", a65[..0]), w65[..]);
     u64[1] a66 = {0};
     string[2] w66 = {
         "event use after release in main.holder_copy at 7:1 through owner main.holder_copy _1",
         "fault invalid access at 7:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.holder_copy", a66[..0]), w66[..]);
+    run_env.expect(run_env.run_in(e, m, "main.holder_copy", a66[..0]), w66[..]);
     u64[1] a67 = {0};
     string[2] w67 = {
         "event use after release in main.read_holder at 3:1 through owner main.holder_arg _1",
         "fault invalid access at 3:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.holder_arg", a67[..0]), w67[..]);
+    run_env.expect(run_env.run_in(e, m, "main.holder_arg", a67[..0]), w67[..]);
     u64[1] a68 = {0};
     string[2] w68 = {
         "event use after release in main.holder_result at 7:1 through owner main.holder_result _1",
         "fault invalid access at 7:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.holder_result", a68[..0]), w68[..]);
+    run_env.expect(run_env.run_in(e, m, "main.holder_result", a68[..0]), w68[..]);
     u64[1] a69 = {0};
     string[2] w69 = {
         "event use after scope in main.kept_heap at 9:1 through frame main.kept_heap _1 kept",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.kept_heap", a69[..0]), w69[..]);
+    run_env.expect(run_env.run_in(e, m, "main.kept_heap", a69[..0]), w69[..]);
     u64[1] a70 = {0};
     string[2] w70 = {
         "event use after scope in main.not_kept at 6:1 through frame main.not_kept _1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.not_kept", a70[..0]), w70[..]);
+    run_env.expect(run_env.run_in(e, m, "main.not_kept", a70[..0]), w70[..]);
     u64[1] a71 = {0};
     string[2] w71 = {
         "event use after scope in main.param_escape at 3:1 through frame main.param_address _1",
         "fault invalid access at 3:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.param_escape", a71[..0]), w71[..]);
+    run_env.expect(run_env.run_in(e, m, "main.param_escape", a71[..0]), w71[..]);
     u64[1] a72 = {0};
     // three leaks at one site make one event
     string[2] w72 = {
         "event leak in main.loop_leak at 8:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.loop_leak", a72[..0]), w72[..]);
+    run_env.expect(run_env.run_in(e, m, "main.loop_leak", a72[..0]), w72[..]);
     u64[1] a73 = {0};
     string[3] w73 = {
         "event leak in main.two_leaks at 6:1",
         "event leak in main.two_leaks at 7:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.two_leaks", a73[..0]), w73[..]);
+    run_env.expect(run_env.run_in(e, m, "main.two_leaks", a73[..0]), w73[..]);
     u64[1] a74 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "main.empty_alloc", a74[..0]),
+    run_env.expect_line(run_env.run_in(e, m, "main.empty_alloc", a74[..0]),
                         "fault invalid access at 5:1");
     u64[1] a75 = {0};
     string[2] w75 = {
         "event leak in main.empty_leak at 4:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.empty_leak", a75[..0]), w75[..]);
+    run_env.expect(run_env.run_in(e, m, "main.empty_leak", a75[..0]), w75[..]);
     u64[1] a76 = {0};
     // an extern reads through the tags of its argument
     string[2] w76 = {
         "event use after release in main.strlen_after at 5:1 through owner main.strlen_after _1",
         "fault invalid access at 5:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.strlen_after", a76[..0]), w76[..]);
+    run_env.expect(run_env.run_in(e, m, "main.strlen_after", a76[..0]), w76[..]);
     u64[1] a77 = {0};
     string[2] w77 = {
         "event use after move in main.strlen_moved at 5:1 through moved main.strlen_moved _1",
         "fault null dereference at 5:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.strlen_moved", a77[..0]), w77[..]);
+    run_env.expect(run_env.run_in(e, m, "main.strlen_moved", a77[..0]), w77[..]);
     u64[1] a78 = {0};
     // `memcpy` reads its second argument, and writes its first
     string[2] w78 = {
         "event use after release in main.memcpy_from at 7:1 through owner main.memcpy_from _1",
         "fault invalid access at 7:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.memcpy_from", a78[..0]), w78[..]);
+    run_env.expect(run_env.run_in(e, m, "main.memcpy_from", a78[..0]), w78[..]);
     u64[1] a79 = {0};
     string[2] w79 = {
         "event use after release in main.memcpy_into at 7:1 through owner main.memcpy_into _1",
         "fault invalid access at 7:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.memcpy_into", a79[..0]), w79[..]);
+    run_env.expect(run_env.run_in(e, m, "main.memcpy_into", a79[..0]), w79[..]);
     u64[1] a80 = {0};
     // of two owner tags, a binary rvalue keeps the tag of its first operand
     string[2] w80 = {
         "event use after release in main.two_owners at 10:1 through owner main.two_owners _1",
         "fault invalid access at 10:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.two_owners", a80[..0]), w80[..]);
+    run_env.expect(run_env.run_in(e, m, "main.two_owners", a80[..0]), w80[..]);
     u64[1] a81 = {0};
     // the second argument faults before the extern runs, and the vacated null of the first argument
     // names no access
-    run_env.expect_line(run_env.run_in(e, &m, "main.args_apart", a81[..0]),
+    run_env.expect_line(run_env.run_in(e, m, "main.args_apart", a81[..0]),
                         "fault null dereference at 9:1");
     u64[1] a82 = {0};
     // a `move` of an aggregate leaves no moved tag on a word that held a copied null
-    run_env.expect_line(run_env.run_in(e, &m, "main.copied_null_moved", a82[..0]),
+    run_env.expect_line(run_env.run_in(e, m, "main.copied_null_moved", a82[..0]),
                         "fault null dereference at 8:1");
     u64[1] a83 = {0};
     // a binary rvalue keeps the frame tag of one operand and the owner tag of the other, in either
@@ -3893,101 +3893,101 @@ fn flows(run_env.env mut* e) void {
         " through frame main.ov _1",
         "\nfault invalid access at 9:1\n",
     };
-    expect_text(run_env.run_in(e, &m, "main.ov", a83[..0]), w83[..]);
+    expect_text(run_env.run_in(e, m, "main.ov", a83[..0]), w83[..]);
     u64[1] a84 = {0};
     string[3] w84 = {
         "event use after release in main.vo at 9:1 through owner main.vo _2",
         " through frame main.vo _1",
         "\nfault invalid access at 9:1\n",
     };
-    expect_text(run_env.run_in(e, &m, "main.vo", a84[..0]), w84[..]);
+    expect_text(run_env.run_in(e, m, "main.vo", a84[..0]), w84[..]);
     u64[1] a85 = {0};
     // a store of an owning aggregate
     string[2] w85 = {
         "event overwrite in main.ow_aggregate at 5:1",
         "return i32 2",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.ow_aggregate", a85[..0]), w85[..]);
+    run_env.expect(run_env.run_in(e, m, "main.ow_aggregate", a85[..0]), w85[..]);
     u64[1] a86 = {0};
     // an extern `free` releases the allocation first
     string[2] w86 = {
         "event double release in main.free_twice at 8:1 through owner main.free_twice _1",
         "fault invalid release at 116:14",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.free_twice", a86[..0]), w86[..]);
+    run_env.expect(run_env.run_in(e, m, "main.free_twice", a86[..0]), w86[..]);
     u64[1] a87 = {0};
     // the address of a global has no tag
     string[2] w87 = {
         "event invalid release in main.del_global at 7:1",
         "fault invalid release at 116:14",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.del_global", a87[..0]), w87[..]);
+    run_env.expect(run_env.run_in(e, m, "main.del_global", a87[..0]), w87[..]);
     u64[1] a88 = {0};
     // a lend from an owner field of a local names the local
     string[2] w88 = {
         "event use after release in main.lends_field at 7:1 through owner main.lends_field _1",
         "fault invalid access at 7:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.lends_field", a88[..0]), w88[..]);
+    run_env.expect(run_env.run_in(e, m, "main.lends_field", a88[..0]), w88[..]);
     u64[1] a89 = {0};
     // a lend that a callee of a callee makes becomes the tag when the call of F returns
     string[2] w89 = {
         "event use after release in main.lends_down at 6:1 through owner main.lends_down _1",
         "fault invalid access at 6:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.lends_down", a89[..0]), w89[..]);
+    run_env.expect(run_env.run_in(e, m, "main.lends_down", a89[..0]), w89[..]);
     u64[1] a90 = {0};
     // a lend that the call does not return has no tag
     string[2] w90 = {
         "event use after release in main.lend_kept_back at 7:1",
         "fault invalid access at 7:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.lend_kept_back", a90[..0]), w90[..]);
+    run_env.expect(run_env.run_in(e, m, "main.lend_kept_back", a90[..0]), w90[..]);
     u64[1] a91 = {0};
     string[2] w91 = {
         "event use after scope in main.revive_one at 10:1 through frame main.revive_one _2",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.revive_one", a91[..0]), w91[..]);
+    run_env.expect(run_env.run_in(e, m, "main.revive_one", a91[..0]), w91[..]);
     u64[1] a92 = {0};
     // the first and the last element of an array of owners
     string[2] w92 = {
         "event leak in main.array_owner at 6:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.array_owner", a92[..1]), w92[..]);
+    run_env.expect(run_env.run_in(e, m, "main.array_owner", a92[..1]), w92[..]);
     u64[1] a93 = {1};
     string[2] w93 = {
         "event leak in main.array_owner at 6:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.array_owner", a93[..1]), w93[..]);
+    run_env.expect(run_env.run_in(e, m, "main.array_owner", a93[..1]), w93[..]);
     u64[1] a94 = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "main.array_moved", a94[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "main.array_moved", a94[..1]), "return i32 0");
     u64[1] a95 = {1};
-    run_env.expect_line(run_env.run_in(e, &m, "main.array_moved", a95[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "main.array_moved", a95[..1]), "return i32 0");
     u64[1] a96 = {0};
     // two leaks at one `del` make one event
     string[2] w96 = {
         "event leak in main.del_two at 7:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.del_two", a96[..0]), w96[..]);
+    run_env.expect(run_env.run_in(e, m, "main.del_two", a96[..0]), w96[..]);
     u64[1] a97 = {0};
     string[2] w97 = {
         "event overwrite in main.ow_heap at 6:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.ow_heap", a97[..0]), w97[..]);
+    run_env.expect(run_env.run_in(e, m, "main.ow_heap", a97[..0]), w97[..]);
     u64[1] a98 = {3};
-    run_env.expect_line(run_env.run_in(e, &m, "main.nest", a98[..1]), "return i32 3");
+    run_env.expect_line(run_env.run_in(e, m, "main.nest", a98[..1]), "return i32 3");
     u64[1] a99 = {3};
     // each frame leaks at its `return`, and the run reports the site once
     string[2] w99 = {
         "event leak in main.nest_leak at 10:1",
         "return i32 3",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.nest_leak", a99[..1]), w99[..]);
+    run_env.expect(run_env.run_in(e, m, "main.nest_leak", a99[..1]), w99[..]);
     u64[1] a100 = {0};
     // two arguments of an extern hold one address, and only the later one has a tag: the access
     // takes the tag of the lowest argument that has one
@@ -3995,13 +3995,13 @@ fn flows(run_env.env mut* e) void {
         "event use after release in main.args_owner at 6:1 through owner main.args_owner _1",
         "fault invalid access at 6:1",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.args_owner", a100[..0]), w100[..]);
+    run_env.expect(run_env.run_in(e, m, "main.args_owner", a100[..0]), w100[..]);
     u64[1] a101 = {0};
     string[2] w101 = {
         "event use after scope in main.args_frame at 6:1 through frame main.args_frame _1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.args_frame", a101[..0]), w101[..]);
+    run_env.expect(run_env.run_in(e, m, "main.args_frame", a101[..0]), w101[..]);
     println("flows ok");
 }
 
@@ -4010,178 +4010,178 @@ fn flows(run_env.env mut* e) void {
 // each kind of access through a value that does not derive makes one.
 fn forged(run_env.env mut* e) void {
     run_env.check(e, PRELUDE[..]);
-    fir.module mut m = run_env.parse(e, FORGED[..]);
-    defer fir.module_free(&m);
+    fir.module mut* own m = run_env.parse_made(e, FORGED[..]);
+    defer fir.module_drop_made(move(m));
     u64[1] none = {0};
     // an operation of `y` alone gives no address of `x`
     string[2] f0 = {
         "event forged in main.forged_offset at 8:1 through frame main.forged_offset _1",
         "return u64 7",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.forged_offset", none[..0]), f0[..]);
+    run_env.expect(run_env.run_in(e, m, "main.forged_offset", none[..0]), f0[..]);
     // `&x - &y` derives from `x`, and so does the sum; a comparison carries it too
-    run_env.expect_line(run_env.run_in(e, &m, "main.derived_offset", none[..0]), "return u64 7");
-    run_env.expect_line(run_env.run_in(e, &m, "main.compare_derives", none[..0]), "return u64 7");
+    run_env.expect_line(run_env.run_in(e, m, "main.derived_offset", none[..0]), "return u64 7");
+    run_env.expect_line(run_env.run_in(e, m, "main.compare_derives", none[..0]), "return u64 7");
     // a branch carries no derivation, so bits that branches copy derive from no address
     string[2] f2 = {
         "event forged in main.branch_bits at 17:1",
         "return u64 7",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.branch_bits", none[..0]), f2[..]);
+    run_env.expect(run_env.run_in(e, m, "main.branch_bits", none[..0]), f2[..]);
     // the result of a call derives only from what the callee returns
     string[2] f3 = {
         "event forged in main.call_result at 9:1 through frame main.call_result _1",
         "return u64 7",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.call_result", none[..0]), f3[..]);
-    run_env.expect_line(run_env.run_in(e, &m, "main.call_first", none[..0]), "return u64 7");
+    run_env.expect(run_env.run_in(e, m, "main.call_result", none[..0]), f3[..]);
+    run_env.expect_line(run_env.run_in(e, m, "main.call_first", none[..0]), "return u64 7");
     // a load reads the derivation that the store of its bytes wrote
-    run_env.expect_line(run_env.run_in(e, &m, "main.through_heap", none[..0]), "return u64 7");
+    run_env.expect_line(run_env.run_in(e, m, "main.through_heap", none[..0]), "return u64 7");
     // a load of some bytes of a store derives from it
-    run_env.expect_line(run_env.run_in(e, &m, "main.partial_load", none[..0]), "return u64 7");
+    run_env.expect_line(run_env.run_in(e, m, "main.partial_load", none[..0]), "return u64 7");
     // a store into one byte of a word keeps the derivation of its other bytes
-    run_env.expect_line(run_env.run_in(e, &m, "main.partial_store", none[..0]), "return u64 7");
+    run_env.expect_line(run_env.run_in(e, m, "main.partial_store", none[..0]), "return u64 7");
     // a copy from inside a word: `a` starts at byte 1 of a word, and its first bytes hold half of
     // the address of `x`
-    run_env.expect_line(run_env.run_in(e, &m, "main.copy_partial_word", none[..0]),
+    run_env.expect_line(run_env.run_in(e, m, "main.copy_partial_word", none[..0]),
                         "return u64 7");
     // a `move` carries the derivation of the owner slot that a store of an integer forged
-    run_env.expect_line(run_env.run_in(e, &m, "main.move_derives", none[..0]), "return u64 7");
-    run_env.expect_line(run_env.run_in(e, &m, "main.move_argument", none[..0]), "return u64 7");
+    run_env.expect_line(run_env.run_in(e, m, "main.move_derives", none[..0]), "return u64 7");
+    run_env.expect_line(run_env.run_in(e, m, "main.move_argument", none[..0]), "return u64 7");
     // an aggregate, a copy of it and a field carry the derivation
-    run_env.expect_line(run_env.run_in(e, &m, "main.holder_derives", none[..0]), "return i32 7");
+    run_env.expect_line(run_env.run_in(e, m, "main.holder_derives", none[..0]), "return i32 7");
     // an index carries its derivation to the address of an element
-    run_env.expect_line(run_env.run_in(e, &m, "main.index_derives", none[..0]), "return u8 7");
+    run_env.expect_line(run_env.run_in(e, m, "main.index_derives", none[..0]), "return u8 7");
     string[2] f12 = {
         "event forged in main.index_forged at 8:1 through frame main.index_forged _1",
         "return u8 7",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.index_forged", none[..0]), f12[..]);
+    run_env.expect(run_env.run_in(e, m, "main.index_forged", none[..0]), f12[..]);
     // the bounds of a slice carry their derivation to its pointer, of a pointer and of a span
-    run_env.expect_line(run_env.run_in(e, &m, "main.bound_derives", none[..0]), "return u8 7");
-    run_env.expect_line(run_env.run_in(e, &m, "main.span_bound_derives", none[..0]), "return u8 7");
+    run_env.expect_line(run_env.run_in(e, m, "main.bound_derives", none[..0]), "return u8 7");
+    run_env.expect_line(run_env.run_in(e, m, "main.span_bound_derives", none[..0]), "return u8 7");
     // and to its length
-    run_env.expect_line(run_env.run_in(e, &m, "main.length_derives", none[..0]), "return u64 7");
+    run_env.expect_line(run_env.run_in(e, m, "main.length_derives", none[..0]), "return u64 7");
     // each kind of access: a store, an aggregate read and write, a `move`, a load of a pointer
     string[2] f16 = {
         "event forged in main.store_forged at 8:1 through frame main.store_forged _1",
         "return u64 9",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.store_forged", none[..0]), f16[..]);
+    run_env.expect(run_env.run_in(e, m, "main.store_forged", none[..0]), f16[..]);
     string[2] f17 = {
         "event forged in main.load_aggregate at 9:1 through frame main.load_aggregate _1",
         "return i32 5",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.load_aggregate", none[..0]), f17[..]);
+    run_env.expect(run_env.run_in(e, m, "main.load_aggregate", none[..0]), f17[..]);
     string[2] f18 = {
         "event forged in main.store_aggregate at 10:1 through frame main.store_aggregate _1",
         "return i32 5",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.store_aggregate", none[..0]), f18[..]);
+    run_env.expect(run_env.run_in(e, m, "main.store_aggregate", none[..0]), f18[..]);
     string[2] f19 = {
         "event forged in main.move_forged at 9:1 through frame main.move_forged _1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.move_forged", none[..0]), f19[..]);
+    run_env.expect(run_env.run_in(e, m, "main.move_forged", none[..0]), f19[..]);
     string[2] f20 = {
         "event forged in main.chain_forged at 8:1 through frame main.chain_forged _1",
         "return i32 6",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.chain_forged", none[..0]), f20[..]);
+    run_env.expect(run_env.run_in(e, m, "main.chain_forged", none[..0]), f20[..]);
     // an access of two locals must derive from both, also with a local of 0 bytes between them
-    run_env.expect_line(run_env.run_in(e, &m, "main.two_locals", none[..0]), "return u64 4");
+    run_env.expect_line(run_env.run_in(e, m, "main.two_locals", none[..0]), "return u64 4");
     string[2] f22 = {
         "event forged in main.two_locals_forged at 8:1 through frame main.two_locals_forged _1",
         "return u64 4",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.two_locals_forged", none[..0]), f22[..]);
+    run_env.expect(run_env.run_in(e, m, "main.two_locals_forged", none[..0]), f22[..]);
     // a value that derives from more than DERIVATION_IDS entries derives from each
-    run_env.expect_line(run_env.run_in(e, &m, "main.too_many", none[..0]), "return u64 9");
+    run_env.expect_line(run_env.run_in(e, m, "main.too_many", none[..0]), "return u64 9");
     // a callee that reaches a local of its caller; its cast removes the frame tag
     string[2] f24 = {
         "event forged in main.read_next at 5:1",
         "return u64 7",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.callee_forged", none[..0]), f24[..]);
+    run_env.expect(run_env.run_in(e, m, "main.callee_forged", none[..0]), f24[..]);
     // after a `forged` event the run reports no event, here the `overwrite` of the store
     string[2] f25 = {
         "event forged in main.after_forged at 9:1 through frame main.after_forged _1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.after_forged", none[..0]), f25[..]);
+    run_env.expect(run_env.run_in(e, m, "main.after_forged", none[..0]), f25[..]);
     // a byte past a local is a byte of the next local, and padding counts with the local before it
     string[2] f26 = {
         "event forged in main.forged_neighbour at 7:1 through frame main.forged_neighbour _1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.forged_neighbour", none[..0]), f26[..]);
+    run_env.expect(run_env.run_in(e, m, "main.forged_neighbour", none[..0]), f26[..]);
     string[2] f27 = {
         "event forged in main.forged_padding at 7:1 through frame main.forged_padding _1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.forged_padding", none[..0]), f27[..]);
+    run_env.expect(run_env.run_in(e, m, "main.forged_padding", none[..0]), f27[..]);
     // the index of a place, a parameter and a result go through no value
-    run_env.expect_line(run_env.run_in(e, &m, "main.index_named", none[..0]), "return u64 6");
-    run_env.expect_line(run_env.run_in(e, &m, "main.argument_named", none[..0]), "return u64 4");
+    run_env.expect_line(run_env.run_in(e, m, "main.index_named", none[..0]), "return u64 6");
+    run_env.expect_line(run_env.run_in(e, m, "main.argument_named", none[..0]), "return u64 4");
     // the last statement of `store_last` stores through a value, and its `_0` goes by name
-    run_env.expect_line(run_env.run_in(e, &m, "main.result_named", none[..0]), "return u64 14");
+    run_env.expect_line(run_env.run_in(e, m, "main.result_named", none[..0]), "return u64 14");
     // an extern accesses a local through its argument, and its result derives from its arguments
     string[2] f30 = {
         "event forged in main.memcpy_forged at 11:1 through frame main.memcpy_forged _1",
         "return u64 9",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.memcpy_forged", none[..0]), f30[..]);
-    run_env.expect_line(run_env.run_in(e, &m, "main.memcpy_result", none[..0]), "return u64 9");
+    run_env.expect(run_env.run_in(e, m, "main.memcpy_forged", none[..0]), f30[..]);
+    run_env.expect_line(run_env.run_in(e, m, "main.memcpy_result", none[..0]), "return u64 9");
     // two arguments that hold one address give the access the derivation of each
-    run_env.expect_line(run_env.run_in(e, &m, "main.args_join", none[..0]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "main.args_join", none[..0]), "return i32 0");
     // an address of the new entry of a local reaches it
-    run_env.expect_line(run_env.run_in(e, &m, "main.entry_new", none[..0]), "return i32 5");
+    run_env.expect_line(run_env.run_in(e, m, "main.entry_new", none[..0]), "return i32 5");
     // a copy that ends inside a word keeps the derivation of the bytes after it
-    run_env.expect_line(run_env.run_in(e, &m, "main.copy_word_end", none[..0]), "return u64 7");
+    run_env.expect_line(run_env.run_in(e, m, "main.copy_word_end", none[..0]), "return u64 7");
     // the zero bytes of a `move` derive from no address
     string[2] f34 = {
         "event forged in main.moved_zero at 14:1 through frame main.moved_zero _1",
         "return u64 7",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.moved_zero", none[..0]), f34[..]);
+    run_env.expect(run_env.run_in(e, m, "main.moved_zero", none[..0]), f34[..]);
     // `&a[8]` is an address of `a` that its index carries from `x`, or no address of `x`
-    run_env.expect_line(run_env.run_in(e, &m, "main.fixed_index_derives", none[..0]),
+    run_env.expect_line(run_env.run_in(e, m, "main.fixed_index_derives", none[..0]),
                         "return u8 7");
     string[2] f35 = {
         "event forged in main.fixed_index_forged at 6:1 through frame main.fixed_index_forged _2",
         "return u8 7",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.fixed_index_forged", none[..0]), f35[..]);
+    run_env.expect(run_env.run_in(e, m, "main.fixed_index_forged", none[..0]), f35[..]);
     // the `dead` of `t` ends no derivation of `hi`, which shares a word with it
-    run_env.expect_line(run_env.run_in(e, &m, "main.dead_neighbour", none[..0]), "return u64 7");
+    run_env.expect_line(run_env.run_in(e, m, "main.dead_neighbour", none[..0]), "return u64 7");
     // `&` and a slice of a place through a value derive from that value
-    run_env.expect_line(run_env.run_in(e, &m, "main.addr_through", none[..0]), "return i32 6");
+    run_env.expect_line(run_env.run_in(e, m, "main.addr_through", none[..0]), "return i32 6");
     string[2] f36 = {
         "event forged in main.addr_through_forged at 9:1 through frame main.addr_through_forged _1",
         "return i32 6",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.addr_through_forged", none[..0]), f36[..]);
-    run_env.expect_line(run_env.run_in(e, &m, "main.slice_through", none[..0]), "return u64 4");
+    run_env.expect(run_env.run_in(e, m, "main.addr_through_forged", none[..0]), f36[..]);
+    run_env.expect_line(run_env.run_in(e, m, "main.slice_through", none[..0]), "return u64 4");
     // an address and a slice of a global derive from the index and the bounds alone: they go
     // through no value, but an access through them does
     string[2] f37 = {
         "event forged in main.global_address at 14:1",
         "return u64 7",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.global_address", none[..0]), f37[..]);
+    run_env.expect(run_env.run_in(e, m, "main.global_address", none[..0]), f37[..]);
     string[2] f38 = {
         "event forged in main.global_slice at 15:1",
         "return u64 7",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.global_slice", none[..0]), f38[..]);
+    run_env.expect(run_env.run_in(e, m, "main.global_slice", none[..0]), f38[..]);
     // a `del` writes each byte of its place: here the length word is `b`
     string[2] f39 = {
         "event forged in main.del_place_forged at 5:1 through frame main.del_place_forged _1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.del_place_forged", none[..0]), f39[..]);
+    run_env.expect(run_env.run_in(e, m, "main.del_place_forged", none[..0]), f39[..]);
     // the result of `alloc` derives from its count, also in its owner slot
-    run_env.expect_line(run_env.run_in(e, &m, "main.alloc_count", none[..0]), "return u64 7");
+    run_env.expect_line(run_env.run_in(e, m, "main.alloc_count", none[..0]), "return u64 7");
     println("forged ok");
 }
 
@@ -4190,15 +4190,15 @@ fn forged(run_env.env mut* e) void {
 // does not. Verified FIR has no such statement (rule V6).
 fn unverified(run_env.env mut* e) void {
     run_env.check(e, PRELUDE[..]);
-    fir.module mut m = run_env.parse_unverified(e, UNVERIFIED[..]);
-    defer fir.module_free(&m);
+    fir.module mut* own m = run_env.parse_unverified_made(e, UNVERIFIED[..]);
+    defer fir.module_drop_made(move(m));
     u64[1] none = {0};
     string[2] w100 = {
         "event leak in main.drop_result at 3:1",
         "return i32 0",
     };
-    run_env.expect(run_env.run_in(e, &m, "main.drop_result", none[..0]), w100[..]);
-    run_env.expect_line(run_env.run_in(e, &m, "main.keep_result", none[..0]), "return i32 0");
+    run_env.expect(run_env.run_in(e, m, "main.drop_result", none[..0]), w100[..]);
+    run_env.expect_line(run_env.run_in(e, m, "main.keep_result", none[..0]), "return i32 0");
     println("unverified ok");
 }
 
@@ -4319,11 +4319,11 @@ fn programs(run_env.env mut* e) void {
 fn off(run_env.env mut* e) void {
     e->events = false;
     run_env.check(e, PRELUDE[..]);
-    fir.module mut m = run_env.parse(e, LEAK[..]);
-    defer fir.module_free(&m);
+    fir.module mut* own m = run_env.parse_made(e, LEAK[..]);
+    defer fir.module_drop_made(move(m));
     u64[1] none = {0};
-    run_env.expect_line(run_env.run_in(e, &m, "main.leak_dead", none[..0]), "return i32 0");
-    run_env.expect_line(run_env.run_in(e, &m, "main.del_shallow", none[..0]),
+    run_env.expect_line(run_env.run_in(e, m, "main.leak_dead", none[..0]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, m, "main.del_shallow", none[..0]),
                         "return i32 0");
     string[1] argv = {"p"};
     run_env.expect_line(run_env.run_program(e, CYCLE[..], argv[..]), "exit 0");
@@ -4332,23 +4332,22 @@ fn off(run_env.env mut* e) void {
 }
 
 fn main() i32 {
-    run_env.env mut e = run_env.env{};
-    run_env.open(&e);
-    defer run_env.close(&e);
-    e.events = true;
-    overwrite(&e);
-    leak(&e);
-    release(&e);
-    after_release(&e);
-    after_move(&e);
-    after_scope(&e);
-    duplicate(&e);
-    owner_tags(&e);
-    flows(&e);
-    forged(&e);
-    unverified(&e);
-    source(&e);
-    programs(&e);
-    off(&e);
+    run_env.env mut* own e = run_env.make();
+    defer run_env.drop_made(move(e));
+    e->events = true;
+    overwrite(e);
+    leak(e);
+    release(e);
+    after_release(e);
+    after_move(e);
+    after_scope(e);
+    duplicate(e);
+    owner_tags(e);
+    flows(e);
+    forged(e);
+    unverified(e);
+    source(e);
+    programs(e);
+    off(e);
     return 0;
 }
