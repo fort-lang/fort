@@ -191,6 +191,56 @@ fn parse_i64(string s, i64 mut* out) bool {
     return true;
 }
 
+/// Reads the longest prefix of s that strtod(3) reads as a double, as the C library reads it, and
+/// writes the value to *out: decimal and hexadecimal forms, `inf` and `nan`, after leading white
+/// space. A prefix that strtod cannot read gives 0. Returns true and leaves sys.errno() unchanged
+/// when the value is in range. Returns false with ERANGE in sys.errno() when it is not; *out then
+/// holds the value that strtod gives, an infinity or a value near 0. A NUL in s ends the text.
+fn parse_f64(string s, f64 mut* out) bool {
+    char mut@ own text = to_cstr(s);
+    defer del(text);
+    i32 mut* slot = libc.errno_slot();
+    i32 saved = *slot;
+    *slot = 0;
+    *out = libc.strtod(&text[0], null);
+    if (*slot != 0) {
+        return false;
+    }
+    *slot = saved;
+    return true;
+}
+
+/// parse_f64 for a float, with strtof(3).
+fn parse_f32(string s, f32 mut* out) bool {
+    char mut@ own text = to_cstr(s);
+    defer del(text);
+    i32 mut* slot = libc.errno_slot();
+    i32 saved = *slot;
+    *slot = 0;
+    *out = libc.strtof(&text[0], null);
+    if (*slot != 0) {
+        return false;
+    }
+    *slot = saved;
+    return true;
+}
+
+// The format of format_f64: an exponent form with the precision from an argument.
+string FLOAT_FORMAT = "%.*e";
+
+/// Writes v in the exponent form `%.*e` of snprintf(3), with `precision` digits after the point,
+/// as the C library writes it: at most buf.len - 1 bytes of the text into buf, then a NUL. An
+/// empty buf gets no byte. Returns the length of the whole text, which is buf.len or more when the
+/// text did not fit, or a value below 0 when snprintf fails. A precision below 0 gives 6 digits.
+fn format_f64(u8 mut@ buf, i32 precision, f64 v) i32 {
+    if (buf.len == 0) {
+        char[1] mut none = {};
+        return libc.snprintf_float(&none[0], 0, &FLOAT_FORMAT[0], precision, v);
+    }
+    char mut@ text = cast(buf, char mut@);
+    return libc.snprintf_float(&text[0], text.len, &FLOAT_FORMAT[0], precision, v);
+}
+
 /// Parses digits for a base from 2 through 36.
 /// Returns false for empty input, invalid digits, invalid bases, or overflow.
 /// A failure leaves *out unchanged. The function accepts no sign, prefix, or separator.

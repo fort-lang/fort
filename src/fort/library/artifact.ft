@@ -60,9 +60,6 @@ u32 DIR_MODE = 0o777;
 // The mode of a file that the writer makes, as io.open_write gives it. The umask applies too.
 i32 FILE_MODE = 0o644;
 
-// The buffer that readlink(2) writes when the writer asks whether an entry is a symbolic link.
-u64 LINK_PROBE_CAP = 1;
-
 // ---- hashes ------------------------------------------------------------------------
 
 /// Appends `value` as a manifest value. The bytes 0x21 to 0x7E stay as they are, except `\`.
@@ -366,9 +363,7 @@ fn join(strbuf.str_buf mut* out, string dir, string name) string {
 /// `*error` when mkdir(2) fails for another reason, or when `path` names no directory. A symbolic
 /// link to a directory names a directory.
 fn make_dir(string path, i32 mut* error) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    if (libc.mkdir(c_path.ptr, DIR_MODE) == 0) {
+    if (os.make_dir(path, DIR_MODE)) {
         return true;
     }
     i32 failure = sys.errno();
@@ -376,22 +371,20 @@ fn make_dir(string path, i32 mut* error) bool {
         *error = failure;
         return false;
     }
-    // Something stands at the path: it must be a directory.
-    void mut* own d = libc.opendir(c_path.ptr);
-    if (d == null) {
+    // Something stands at the path: it must open as a directory, with the flags of opendir(3).
+    i32 fd = io.open(path, libc.O_RDONLY | libc.O_DIRECTORY | os.O_NONBLOCK, 0);
+    if (fd < 0) {
         *error = sys.errno();
         return false;
     }
-    libc.closedir(move(d));
+    io.close(fd);
     return true;
 }
 
 // Removes `path`. Returns false with the errno value in `*error` when unlink(2) fails for a
 // reason other than a missing file.
 fn remove_file(string path, i32 mut* error) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    if (libc.unlink(c_path.ptr) == 0 || sys.errno() == libc.ENOENT) {
+    if (os.remove_file(path) || sys.errno() == libc.ENOENT) {
         return true;
     }
     *error = sys.errno();
@@ -400,10 +393,9 @@ fn remove_file(string path, i32 mut* error) bool {
 
 // Whether `path` is a symbolic link: readlink(2) succeeds on a link alone.
 fn is_link(string path) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    char[LINK_PROBE_CAP] mut buf = {};
-    return libc.readlink(c_path.ptr, &buf[0], LINK_PROBE_CAP) >= 0;
+    strbuf.str_buf mut target = strbuf.create();
+    defer del(target.data);
+    return os.read_link(path, &target);
 }
 
 // Makes the directory `path` when it does not exist and removes each entry in it, so a file of an
@@ -413,14 +405,12 @@ fn is_link(string path) bool {
 // replaces the directory during the removals does not redirect them. Returns false with the path
 // that failed in `*failed` and the errno value in `*error`.
 fn make_empty_dir(string path, strbuf.str_buf mut* failed, i32 mut* error) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    if (libc.mkdir(c_path.ptr, DIR_MODE) != 0 && sys.errno() != libc.EEXIST) {
+    if (!os.make_dir(path, DIR_MODE) && sys.errno() != libc.EEXIST) {
         *error = sys.errno();
         strbuf.append(failed, path);
         return false;
     }
-    i32 fd = libc.open(c_path.ptr, libc.O_RDONLY | libc.O_DIRECTORY | libc.O_NOFOLLOW, 0);
+    i32 fd = io.open(path, libc.O_RDONLY | libc.O_DIRECTORY | libc.O_NOFOLLOW, 0);
     if (fd < 0) {
         *error = sys.errno();
         // Linux gives ENOTDIR for a link when O_DIRECTORY is set, darwin ELOOP; a link is ELOOP
@@ -430,71 +420,46 @@ fn make_empty_dir(string path, strbuf.str_buf mut* failed, i32 mut* error) bool 
         strbuf.append(failed, path);
         return false;
     }
-    // closedir(3) closes `fd` as well
-    void mut* own stream = libc.fdopendir(fd);
-    if (stream == null) {
-        *error = sys.errno();
-        libc.close(fd);
-        strbuf.append(failed, path);
-        return false;
-    }
-    // The names are copied out before any removal, each ended by a NUL, because a removal while
-    // readdir(3) walks the directory can make it skip an entry. errno is 0 before each readdir(3),
-    // so it is 0 after the last one at the end and the error number after an error.
+    // The names are copied out before any removal, because a removal while readdir(3) walks the
+    // directory can make it skip an entry. os.list_dir_fd reads the directory that `fd` names, so
+    // a link that replaces it does not redirect the walk.
     strbuf.str_buf mut names = strbuf.create();
     defer del(names.data);
-    *libc.errno_slot() = 0;
-    libc.dirent* mut e = libc.readdir(stream);
-    while (e != null) {
-        string name = str.from_cstr(&e->name[0]);
-        if (name != "." && name != "..") {
-            strbuf.append(&names, name);
-            strbuf.push(&names, '\0');
-        }
-        *libc.errno_slot() = 0;
-        e = libc.readdir(stream);
-    }
-    i32 failure = sys.errno();
-    if (failure != 0) {
-        libc.closedir(move(stream));
-        *error = failure;
+    if (!os.list_dir_fd(fd, &names)) {
+        *error = sys.errno();
+        io.close(fd);
         strbuf.append(failed, path);
         return false;
     }
     bool removed = remove_names(fd, strbuf.view(&names), path, failed, error);
-    libc.closedir(move(stream));
+    io.close(fd);
     return removed;
 }
 
-// Removes each entry of the directory `path`, open as `fd`, whose name `all` holds with a NUL after
-// each name, for make_empty_dir. Returns false with the path that failed in `*failed` and the errno
-// value in `*error`. The caller keeps the buffer of `all`, so it is no local owner here.
-fn remove_names(i32 fd, string all, string path, strbuf.str_buf mut* failed, i32 mut* error)
+// Removes each entry of the directory `path`, open as `fd`, that `listed` holds as os.list_dir_fd
+// gave it, for make_empty_dir. Returns false with the path that failed in `*failed` and the errno
+// value in `*error`. The caller keeps the buffer of `listed`, so it is no local owner here.
+fn remove_names(i32 fd, string listed, string path, strbuf.str_buf mut* failed, i32 mut* error)
     bool {
     u64 mut at = 0;
-    while (at < all.len) {
-        u64 mut end = at;
-        while (all[end] != '\0') {
-            end += 1;
-        }
-        char mut@ own c_name = str.to_cstr(all[at..end]);
-        defer del(c_name);
+    os.dir_entry mut entry = {};
+    while (os.next_entry(listed, &at, &entry)) {
+        string name = entry.name;
         // unlinkat(2) removes a file or a link itself; it refuses a directory, which
         // AT_REMOVEDIR removes when it is empty
-        if (libc.unlinkat(fd, c_name.ptr, 0) != 0) {
+        if (!os.remove_at(fd, name, false)) {
             i32 unlinked = sys.errno();
-            if (libc.unlinkat(fd, c_name.ptr, libc.AT_REMOVEDIR) != 0) {
+            if (!os.remove_at(fd, name, true)) {
                 *error = sys.errno();
                 if (*error == libc.ENOTDIR) {
                     *error = unlinked;
                 }
                 strbuf.append(failed, path);
                 strbuf.push(failed, '/');
-                strbuf.append(failed, all[at..end]);
+                strbuf.append(failed, name);
                 return false;
             }
         }
-        at = end + 1;
     }
     return true;
 }
@@ -519,19 +484,17 @@ fn replace_with_mode(string dir, string name, u8@ data, i32 mode, bool mut* made
     defer del(b.data);
     strbuf.append(&b, name);
     strbuf.append(&b, TEMP_INFIX);
-    strbuf.append_i64(&b, cast(libc.getpid(), i64));
+    strbuf.append_i64(&b, cast(sys.pid(), i64));
     strbuf.str_buf mut temp_buf = strbuf.create();
     defer del(temp_buf.data);
     string temp = join(&temp_buf, dir, strbuf.view(&b));
     strbuf.str_buf mut final_buf = strbuf.create();
     defer del(final_buf.data);
     string final_path = join(&final_buf, dir, name);
-    char mut@ own c_temp = str.to_cstr(temp);
-    defer del(c_temp);
     // A file or a link that an earlier run with this pid left goes first; unlink(2) does not
     // follow a link. O_EXCL then refuses an entry that stays or that a race puts there.
-    libc.unlink(c_temp.ptr);
-    i32 fd = libc.open(c_temp.ptr, libc.O_WRONLY | libc.O_CREAT | libc.O_EXCL, mode);
+    os.remove_file(temp);
+    i32 fd = io.open(temp, libc.O_WRONLY | libc.O_CREAT | libc.O_EXCL, mode);
     if (fd < 0) {
         *error = sys.errno();
         return false;
@@ -548,14 +511,12 @@ fn replace_with_mode(string dir, string name, u8@ data, i32 mode, bool mut* made
     }
     if (!ok) {
         *error = failure;
-        libc.unlink(c_temp.ptr);
+        os.remove_file(temp);
         return false;
     }
-    char mut@ own c_final = str.to_cstr(final_path);
-    defer del(c_final);
-    if (libc.rename(c_temp.ptr, c_final.ptr) != 0) {
+    if (!os.rename(temp, final_path)) {
         *error = sys.errno();
-        libc.unlink(c_temp.ptr);
+        os.remove_file(temp);
         return false;
     }
     return true;
@@ -952,7 +913,7 @@ fn read_entry(string dir, string name, strbuf.str_buf mut* out, i32 mut* error) 
         *error = sys.errno();
         return verdict.v_unreadable;
     }
-    defer libc.close(fd);
+    defer io.close(fd);
     u32 mut mode = 0;
     if (!os.file_mode(fd, &mode)) {
         *error = sys.errno();
@@ -1050,14 +1011,12 @@ fn declares_each(string text, summary.table* t) bool {
 /// link, a summary file that is no text form of the library, and a summary of a function that
 /// `interface.ft` declares with no bodiless `fn` declaration.
 fn read(string dir, contents mut* c, i32 mut* error) verdict {
-    char mut@ own c_dir = str.to_cstr(dir);
-    defer del(c_dir);
-    i32 fd = libc.open(c_dir.ptr, libc.O_RDONLY | libc.O_DIRECTORY, 0);
+    i32 fd = io.open(dir, libc.O_RDONLY | libc.O_DIRECTORY, 0);
     if (fd < 0) {
         *error = sys.errno();
         return verdict.v_unreadable;
     }
-    libc.close(fd);
+    io.close(fd);
     verdict mut found = read_entry(dir, MANIFEST_FILE, &c->text, error);
     if (found != verdict.v_valid) {
         return found;
@@ -1073,9 +1032,8 @@ fn read(string dir, contents mut* c, i32 mut* error) verdict {
     }
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
-    char mut@ own c_summaries = str.to_cstr(join(&b, dir, SUMMARIES_DIR));
-    defer del(c_summaries);
-    i32 sd = libc.open(c_summaries.ptr, libc.O_RDONLY | libc.O_DIRECTORY | libc.O_NOFOLLOW, 0);
+    string summaries_dir = join(&b, dir, SUMMARIES_DIR);
+    i32 sd = io.open(summaries_dir, libc.O_RDONLY | libc.O_DIRECTORY | libc.O_NOFOLLOW, 0);
     if (sd < 0) {
         i32 failure = sys.errno();
         // no entry, an entry that is no directory, and a link (ELOOP on darwin, ENOTDIR on Linux)
@@ -1085,7 +1043,7 @@ fn read(string dir, contents mut* c, i32 mut* error) verdict {
         *error = failure;
         return verdict.v_unreadable;
     }
-    libc.close(sd);
+    io.close(sd);
     found = read_entry(join(&b, dir, SUMMARIES_DIR), OWNERSHIP_FILE, &c->summaries, error);
     if (found != verdict.v_valid) {
         return found;
@@ -1116,14 +1074,12 @@ fn read(string dir, contents mut* c, i32 mut* error) verdict {
 /// equals its `object` line, v_corrupt when a rule does not hold, and v_unreadable with the
 /// errno value in `*error` when the system refuses to open `dir` or to read a file of it.
 fn read_object(string dir, contents mut* c, i32 mut* error) verdict {
-    char mut@ own c_dir = str.to_cstr(dir);
-    defer del(c_dir);
-    i32 fd = libc.open(c_dir.ptr, libc.O_RDONLY | libc.O_DIRECTORY, 0);
+    i32 fd = io.open(dir, libc.O_RDONLY | libc.O_DIRECTORY, 0);
     if (fd < 0) {
         *error = sys.errno();
         return verdict.v_unreadable;
     }
-    libc.close(fd);
+    io.close(fd);
     verdict mut found = read_entry(dir, MANIFEST_FILE, &c->text, error);
     if (found != verdict.v_valid) {
         return found;

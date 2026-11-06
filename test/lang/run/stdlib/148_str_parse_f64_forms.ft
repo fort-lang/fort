@@ -1,0 +1,105 @@
+//! run
+//! stdout:
+//| [0] in range, value as expected
+//| [-0] in range, value as expected, negative zero
+//| [+1] in range, value as expected
+//| [1.] in range, value as expected
+//| [.5] in range, value as expected
+//| [1e3] in range, value as expected
+//| [1E3] in range, value as expected
+//| [1e+3] in range, value as expected
+//| [1e-3] in range, value as expected
+//| [ \t\n42] in range, value as expected
+//| [42abc] in range, value as expected
+//| [1e] in range, value as expected
+//| [1e+] in range, value as expected
+//| [0x10] in range, value as expected
+//| [0X1.8p1] in range, value as expected
+//| [0x.8] in range, value as expected
+//| [-0x1p-2] in range, value as expected
+//| [inf] in range, value as expected
+//| [-Infinity] in range, value as expected
+//| [] in range, value as expected
+//| [-] in range, value as expected
+//| [abc] in range, value as expected
+//| [.] in range, value as expected
+//| [1.5 2.5] in range, value as expected
+//| [1.7976931348623157e308] in range, value as expected
+//| [2.2250738585072014e-308] in range, value as expected
+//| [1e309] out of range, value as expected
+//| [-1e309] out of range, value as expected
+//| [1e-400] out of range, value as expected
+//| [12 with a NUL after it] in range, value as expected
+//| [nan] in range, not a number
+import std.libc;
+import std.math;
+import std.str;
+import std.sys;
+
+// str.parse_f64 reads the longest prefix that strtod(3) reads (stdlib.md 2.5). The test holds
+// each form that the C standard names for strtod: a sign, a decimal form with and without digits
+// before or after the point, an exponent with a sign and a bare `e`, which strtod leaves unread,
+// a hexadecimal form with a binary exponent, `inf`, `infinity` and `nan` in each case, white
+// space before the number, a text after it, and a text with no number, which gives 0. The
+// largest and the smallest normal double are in range; a value past the largest gives an
+// infinity, and a value below the smallest subnormal gives 0, each with ERANGE. A NUL in the
+// string ends the text that C reads.
+
+// Parses `s`, and prints whether the value is in range and whether it is `want`.
+fn check(string s, f64 want, bool in_range) void {
+    check_as(s, s, want, in_range);
+}
+
+// check for a text that holds a byte that the output cannot show, with `label` in its place.
+fn check_as(string label, string s, f64 want, bool in_range) void {
+    f64 mut v = 1234.5;
+    sys.set_errno(0);
+    bool got = str.parse_f64(s, &v);
+    bool range_ok = got == in_range && (got || sys.errno() == libc.ERANGE);
+    print("[", label, "] ", got ? "in range" : "out of range");
+    if (!range_ok) {
+        print(", range not as expected");
+    }
+    println(v == want ? ", value as expected" : ", value not as expected");
+}
+
+fn main() i32 {
+    check("0", 0.0, true);
+    f64 mut z = 1.0;
+    str.parse_f64("-0", &z);
+    println("[-0] in range, value as expected", math.f64_bits(z) == 0x8000000000000000
+                                                    ? ", negative zero" : ", positive zero");
+    check("+1", 1.0, true);
+    check("1.", 1.0, true);
+    check(".5", 0.5, true);
+    check("1e3", 1000.0, true);
+    check("1E3", 1000.0, true);
+    check("1e+3", 1000.0, true);
+    check("1e-3", 0.001, true);
+    check_as(" \\t\\n42", " \t\n42", 42.0, true);
+    check("42abc", 42.0, true);
+    check("1e", 1.0, true);
+    check("1e+", 1.0, true);
+    check("0x10", 16.0, true);
+    check("0X1.8p1", 3.0, true);
+    check("0x.8", 0.5, true);
+    check("-0x1p-2", -0.25, true);
+    check("inf", math.f64_inf(), true);
+    check("-Infinity", -math.f64_inf(), true);
+    check("", 0.0, true);
+    check("-", 0.0, true);
+    check("abc", 0.0, true);
+    check(".", 0.0, true);
+    check("1.5 2.5", 1.5, true);
+    check("1.7976931348623157e308", 1.7976931348623157e308, true);
+    check("2.2250738585072014e-308", 2.2250738585072014e-308, true);
+    check("1e309", math.f64_inf(), false);
+    check("-1e309", -math.f64_inf(), false);
+    check("1e-400", 0.0, false);
+    check_as("12 with a NUL after it", "12\x0034", 12.0, true);
+    f64 mut n = 0.0;
+    bool nan_in_range = str.parse_f64("nan", &n);
+    println("[nan] ", nan_in_range ? "in range" : "out of range",
+            math.is_nan(n) ? ", not a number" : "");
+    return 0;
+}

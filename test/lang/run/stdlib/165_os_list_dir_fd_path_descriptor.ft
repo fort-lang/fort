@@ -1,0 +1,58 @@
+//! run
+//! stdout:
+//| list_dir_fd of an O_PATH descriptor: false, EBADF: true, the buffer keeps what it held: true
+//| a descriptor opened to read still lists: true 1
+//! stdout-macos:
+//| Darwin has no O_PATH
+//| a descriptor opened to read still lists: true 1
+// os.list_dir_fd moves its duplicate to the first entry with lseek(2) (stdlib.md 2.14). On Linux
+// an O_PATH descriptor of a directory passes the type check of fstat(2) and the dup(2), and
+// lseek refuses it with EBADF, so list_dir_fd gives false, closes the duplicate and leaves the
+// buffer as it was. Darwin has no O_PATH, so there the test lists through a descriptor opened
+// to read alone.
+import std.io;
+import std.libc;
+import std.os;
+import std.strbuf;
+import std.sys;
+
+// EBADF, the same value on both targets.
+i32 EBADF = 9;
+
+// O_PATH of open(2), Linux x86-64: a descriptor that names a file and reads nothing.
+i32 O_PATH = 0o10000000;
+
+// The count of the entries of `listed`.
+fn count(string listed) u64 {
+    u64 mut n = 0;
+    u64 mut at = 0;
+    os.dir_entry mut entry = {};
+    while (os.next_entry(listed, &at, &entry)) {
+        n += 1;
+    }
+    return n;
+}
+
+fn main() i32 {
+    os.make_dir("t-path", 0o700);
+    io.write_file("t-path/a", cast("a", u8@));
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    $if ($cfg(target_os) == "linux") {
+        i32 fd = io.open("t-path", O_PATH | libc.O_DIRECTORY, 0);
+        strbuf.append(&b, "kept");
+        bool listed = os.list_dir_fd(fd, &b);
+        println("list_dir_fd of an O_PATH descriptor: ", listed, ", EBADF: ",
+                sys.errno() == EBADF, ", the buffer keeps what it held: ",
+                strbuf.view(&b) == "kept");
+        io.close(fd);
+    } else {
+        println("Darwin has no O_PATH");
+    }
+    i32 dir = io.open("t-path", libc.O_RDONLY | libc.O_DIRECTORY, 0);
+    strbuf.clear(&b);
+    bool read = os.list_dir_fd(dir, &b);
+    println("a descriptor opened to read still lists: ", read, " ", count(strbuf.view(&b)));
+    io.close(dir);
+    return 0;
+}

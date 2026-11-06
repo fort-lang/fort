@@ -1,0 +1,92 @@
+//! run
+//! stdout:
+//| target of 1 byte: true 1 true
+//| target of 255 bytes: true 255 true
+//| target of 256 bytes: true 256 true
+//| target of 257 bytes: true 257 true
+//| target of 511 bytes: true 511 true
+//| target of 512 bytes: true 512 true
+//| target of 1000 bytes: true 1000 true
+//| depth 10: true true
+//| depth 20: true true
+//| depth 40: true true
+import std.libc;
+import std.os;
+import std.str;
+import std.strbuf;
+
+// os.read_link and os.current_dir read a path into a buffer of 256 bytes first, and double the
+// buffer while the path does not fit (stdlib.md 2.14). A path of the length of a buffer does not
+// fit, because C then cannot say that it read the whole path. The test reads link targets at
+// each side of 256 and 512 bytes, and the working directory at depths whose paths pass 256 and
+// 512 bytes. Each answer is the whole path, after what the buffer held.
+
+// chdir(2), which std.libc does not declare.
+extern fn chdir(char* path) i32;
+
+fn change_dir(string path) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    return chdir(c_path.ptr) == 0;
+}
+
+// Makes the link `link_path` to a target of `n` bytes, `n` times 'x' with a '/' after each
+// 50 bytes, and checks that read_link gives it back after the prefix "> ".
+fn check_target(u64 n, string link_path) void {
+    strbuf.str_buf mut target = strbuf.create();
+    defer del(target.data);
+    for (u64 mut i = 0; i < n; i++) {
+        strbuf.push(&target, i % 50 == 49 ? '/' : 'x');
+    }
+    char mut@ own c_target = str.to_cstr(strbuf.view(&target));
+    defer del(c_target);
+    char mut@ own c_link = str.to_cstr(link_path);
+    defer del(c_link);
+    libc.symlink(c_target.ptr, c_link.ptr);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    strbuf.append(&b, "> ");
+    bool read = os.read_link(link_path, &b);
+    string got = strbuf.view(&b);
+    println("target of ", n, " byte", n == 1 ? "" : "s", ": ", read, " ", got.len - 2, " ",
+            got[2..] == strbuf.view(&target));
+}
+
+// Goes `levels` directories of 16 bytes each further down, and checks that current_dir gives
+// the path of the start with the new levels after it.
+fn check_depth(string start, u64 depth, u64 levels, strbuf.str_buf mut* below) void {
+    string name = "abcdefghijklmno";
+    for (u64 mut i = 0; i < levels; i++) {
+        os.make_dir(name, 0o700);
+        change_dir(name);
+        strbuf.push(below, '/');
+        strbuf.append(below, name);
+    }
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    strbuf.append(&b, "> ");
+    bool found = os.current_dir(&b);
+    string got = strbuf.view(&b)[2..];
+    string tail = strbuf.view(below);
+    bool whole = str.ends_with(got, tail) && got.len == start.len + tail.len;
+    println("depth ", depth, ": ", found, " ", whole);
+}
+
+fn main() i32 {
+    check_target(1, "t-l1");
+    check_target(255, "t-l255");
+    check_target(256, "t-l256");
+    check_target(257, "t-l257");
+    check_target(511, "t-l511");
+    check_target(512, "t-l512");
+    check_target(1000, "t-l1000");
+    strbuf.str_buf mut start = strbuf.create();
+    defer del(start.data);
+    os.current_dir(&start);
+    strbuf.str_buf mut below = strbuf.create();
+    defer del(below.data);
+    check_depth(strbuf.view(&start), 10, 10, &below);
+    check_depth(strbuf.view(&start), 20, 10, &below);
+    check_depth(strbuf.view(&start), 40, 20, &below);
+    return 0;
+}

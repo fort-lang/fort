@@ -4,6 +4,7 @@
 // The removal follows no symbolic link: unlink(2) removes a link itself, and only a directory
 // that is no link is read and removed after its entries.
 import std.libc;
+import std.os;
 import std.str;
 import std.strbuf;
 import std.sys;
@@ -20,22 +21,17 @@ fn join(strbuf.str_buf mut* out, string dir, string name) string {
 // The names of the entries of the directory `path` but `.` and `..`, each ended by a NUL, in
 // `out`. False when the directory cannot be opened.
 fn list(string path, strbuf.str_buf mut* out) bool {
-    char mut@ own c_path = str.to_cstr(path);
-    defer del(c_path);
-    void mut* own d = libc.opendir(c_path.ptr);
-    if (d == null) {
+    strbuf.str_buf mut listed = strbuf.create();
+    defer del(listed.data);
+    if (!os.list_dir(path, &listed)) {
         return false;
     }
-    libc.dirent* mut e = libc.readdir(d);
-    while (e != null) {
-        string name = str.from_cstr(&e->name[0]);
-        if (name != "." && name != "..") {
-            strbuf.append(out, name);
-            strbuf.push(out, '\0');
-        }
-        e = libc.readdir(d);
+    u64 mut at = 0;
+    os.dir_entry mut entry = {};
+    while (os.next_entry(strbuf.view(&listed), &at, &entry)) {
+        strbuf.append(out, entry.name);
+        strbuf.push(out, '\0');
     }
-    libc.closedir(move(d));
     return true;
 }
 

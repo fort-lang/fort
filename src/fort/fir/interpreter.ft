@@ -30,8 +30,11 @@ import fort.fir_verify;
 import fort.gen;
 import fort.lexer;
 import fort.prim;
-import std.libc;
+import std.io;
+import std.mem;
+import std.str;
 import std.strbuf;
+import std.sys;
 import fort.types;
 
 // ---- the address space ------------------------------------------------------------------------
@@ -442,11 +445,10 @@ fn align_up(u64 v, u64 align) u64 {
 
 // Makes a region of `size` zero bytes at the next free address and returns its base. The return
 // is 0 when the compiler has no storage for the bytes: calloc of the C library refuses them. A
-// span holds the bytes, and `new` aborts where calloc gives null. No span of the block of calloc
-// exists (D6.9), and no cast gives it a type (D3.14). So a region of REGION_PROBE bytes or more
-// asks calloc first, and that block goes at once; a program asks a size that large to see the
-// refusal. A smaller region takes `new` alone: a host with no storage for it stops the compiler
-// at each other `new` as well.
+// span holds the bytes, and `new` aborts where calloc gives null. So a region of REGION_PROBE
+// bytes or more asks mem.can_allocate first, whose block of calloc goes at once; a program asks a
+// size that large to see the refusal. A smaller region takes `new` alone: a host with no storage
+// for it stops the compiler at each other `new` as well.
 fn make_region(machine mut* it, region_kind kind, u64 size, bool readonly) u64 {
     u64 base = align_up(it->next, REGION_ALIGN);
     u64 mut room = size;
@@ -455,13 +457,8 @@ fn make_region(machine mut* it, region_kind kind, u64 size, bool readonly) u64 {
     }
     u8 mut@ own mut bytes = {};
     if (kind != region_kind.rk_code) {
-        if (room >= REGION_PROBE) {
-            void mut* own p = libc.calloc(1, room);
-            bool refused = p == null;
-            libc.free(move(p));
-            if (refused) {
-                return 0;
-            }
+        if (room >= REGION_PROBE && !mem.can_allocate(room)) {
+            return 0;
         }
         bytes = new(u8, room);
     }
@@ -2245,11 +2242,11 @@ fn call_model(machine mut* it, string name, u64@ a, types.node*@ t) u64 {
         if (it->capture) {
             return 0;
         }
-        i32 tty = libc.isatty(cast(widen(a[0], WORD_BITS / 2), i32));
-        if (tty == 0) {
-            store(it, it->errno_slot, I32_SIZE, cast(*libc.errno_slot(), u64));
+        if (io.is_terminal(cast(widen(a[0], WORD_BITS / 2), i32))) {
+            return 1;
         }
-        return wrap(cast(tty, u64), WORD_BITS / 2);
+        store(it, it->errno_slot, I32_SIZE, cast(sys.errno(), u64));
+        return 0;
     }
     if (name == "strlen" && a.len == 1) {
         return cstring_at(it, a[0]).len;
@@ -2300,9 +2297,9 @@ fn write_out(machine mut* it, i32 fd, u64 buf, u64 n) i64 {
     if (n == 0) {
         return 0;
     }
-    i64 written = libc.write(fd, b.ptr, n);
+    i64 written = io.write(fd, b);
     if (written < 0) {
-        store(it, it->errno_slot, I32_SIZE, cast(*libc.errno_slot(), u64));
+        store(it, it->errno_slot, I32_SIZE, cast(sys.errno(), u64));
     }
     return written;
 }
@@ -2335,7 +2332,8 @@ fn compare_bytes(machine mut* it, u64 a, u64 b, u64 n) i32 {
 }
 
 // Whether the arguments of `snprintf` have the one form that `std.rt` gives them: a buffer, its
-// size, the format `%.*e`, an i32 precision and an f64 (std.libc.snprintf_float).
+// size, the format `%.*e`, an i32 precision and an f64 (std.libc.snprintf_float, which
+// str.format_f64 calls).
 fn is_float_format(machine mut* it, u64@ a, types.node*@ t) bool {
     if (t[3]->kind != types.type_kind.k_prim || t[3]->prim != prim.prim_kind.prim_i32
         || t[4]->kind != types.type_kind.k_prim || t[4]->prim != prim.prim_kind.prim_f64) {
@@ -2349,16 +2347,15 @@ fn is_float_format(machine mut* it, u64@ a, types.node*@ t) bool {
 
 // `snprintf(buf, size, "%.*e", precision, v)`, which the C library of the compiler formats.
 fn format_float(machine mut* it, u64@ a) u64 {
-    char mut@ own text = new(char, a[1]);
+    u8 mut@ own text = new(u8, a[1]);
     defer del(text);
-    i32 n = libc.snprintf_float(&text[0], a[1], &FLOAT_FORMAT[0],
-                                cast(widen(a[3], WORD_BITS / 2), i32), f64_of(a[4]));
+    i32 n = str.format_f64(text, cast(widen(a[3], WORD_BITS / 2), i32), f64_of(a[4]));
     if (n >= 0) {
         u64 mut written = cast(n, u64);
         if (written > a[1] - 1) {
             written = a[1] - 1;
         }
-        write_bytes(it, a[0], cast(text[..written + 1], u8@));
+        write_bytes(it, a[0], text[..written + 1]);
     }
     return wrap(cast(n, u64), WORD_BITS / 2);
 }
@@ -2370,26 +2367,21 @@ fn parse_float(machine mut* it, u64 s, bool single) u64 {
     if (has_ended(it)) {
         return 0;
     }
-    char mut@ own text = new(char, b.len + 1);
-    defer del(text);
-    for (u64 mut k = 0; k < b.len; k++) {
-        text[k] = cast(b[k], char);
-    }
-    // the C library sets errno on a range error and leaves it alone otherwise, so the errno of
-    // the compiler goes to the slot of the run only when the call set it
-    i32 mut* slot = libc.errno_slot();
-    i32 saved = *slot;
-    *slot = 0;
+    // the C library sets errno on a range error and leaves it alone otherwise, so the errno goes
+    // to the slot of the run only when the call set it
     u64 mut bits = 0;
+    bool mut in_range = true;
     if (single) {
-        bits = f32_bits(libc.strtof(&text[0], null));
+        f32 mut v = 0.0;
+        in_range = str.parse_f32(cast(b, string), &v);
+        bits = f32_bits(v);
     } else {
-        bits = f64_bits(libc.strtod(&text[0], null));
+        f64 mut v = 0.0;
+        in_range = str.parse_f64(cast(b, string), &v);
+        bits = f64_bits(v);
     }
-    i32 error = *slot;
-    *slot = saved;
-    if (error != 0) {
-        store(it, it->errno_slot, I32_SIZE, cast(error, u64));
+    if (!in_range) {
+        store(it, it->errno_slot, I32_SIZE, cast(sys.errno(), u64));
     }
     return bits;
 }

@@ -263,6 +263,14 @@ fn error_path(string what, string path, string reason) void {
     eprintln("fort: error: ", what, " '", path, "': ", reason);
 }
 
+// error_path with the text of the errno value `code` as the reason.
+fn error_errno(string what, string path, i32 code) void {
+    strbuf.str_buf mut reason = strbuf.create();
+    defer del(reason.data);
+    os.error_text(code, &reason);
+    error_path(what, path, strbuf.view(&reason));
+}
+
 // A usage error, followed by the usage line.
 fn usage_error(string message) void {
     error(message);
@@ -863,7 +871,7 @@ fn tokens_entry(options* opts) i32 {
     defer session.drop_made(move(s));
     string mut source = "";
     if (!session.read_source(s, opts->entry, &source)) {
-        error_path("cannot read", opts->entry, str.from_cstr(libc.strerror(sys.errno())));
+        error_errno("cannot read", opts->entry, sys.errno());
         return EXIT_USAGE;
     }
     // a batch driver writes the text form as it arrives
@@ -895,7 +903,7 @@ fn ast_entry(options* opts) i32 {
     defer session.drop_made(move(s));
     string mut source = "";
     if (!session.read_source(s, opts->entry, &source)) {
-        error_path("cannot read", opts->entry, str.from_cstr(libc.strerror(sys.errno())));
+        error_errno("cannot read", opts->entry, sys.errno());
         return EXIT_USAGE;
     }
     // a batch driver writes the text form as it arrives
@@ -968,9 +976,10 @@ fn std_dir(containers.pool mut* p, options* opts, string program) string {
     if (opts->have_std_dir) {
         return containers.pool_intern(p, opts->std_dir);
     }
-    string mut from_env = "";
-    if (sys.env("FORT_STD_DIR", &from_env) && from_env.len > 0) {
-        return containers.pool_intern(p, from_env);
+    strbuf.str_buf mut from_env = strbuf.create();
+    defer del(from_env.data);
+    if (sys.env("FORT_STD_DIR", &from_env) && strbuf.view(&from_env).len > 0) {
+        return containers.pool_intern(p, strbuf.view(&from_env));
     }
     // else `std` beside the fort binary, read from /proc/self/exe
     string mut running = "";
@@ -998,10 +1007,6 @@ string TMP_DIR_TEMPLATE = "/fort-XXXXXX";
 string IR_SUFFIX = ".ll";
 string OBJECT_SUFFIX = ".o";
 string FT_SUFFIX = ".ft";
-
-// EINTR, the one errno the driver compares against: a signal caught while
-// --cc runs interrupts the wait and not the child (waitpid(2)).
-i32 EINTR = 4;
 
 // The position after the last '/' of `path`, that is the start of its last
 // component.
@@ -1067,25 +1072,26 @@ fn write_stdout(u8@ data) bool {
 // failure in *error_out, captured before anything else can overwrite it.
 fn make_temp_dir(containers.pool mut* p, string mut* parent_out, i32 mut* error_out) string {
     string mut parent = TMP_DIR_DEFAULT;
-    string mut value = "";
-    // An empty value names no directory, so it counts as unset.
-    if (sys.env("TMPDIR", &value) && value.len > 0) {
-        parent = value;
+    strbuf.str_buf mut value = strbuf.create();
+    defer del(value.data);
+    // An empty value names no directory, so it counts as unset. The caller gets the parent
+    // after the buffer goes, so it is interned.
+    if (sys.env("TMPDIR", &value) && strbuf.view(&value).len > 0) {
+        parent = containers.pool_intern(p, strbuf.view(&value));
     }
     *parent_out = parent;
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
     strbuf.append(&b, parent);
     strbuf.append(&b, TMP_DIR_TEMPLATE);
-    // mkdtemp replaces the six X in place, so this is our own
-    char mut@ own tmpl = str.to_cstr(strbuf.view(&b));
-    defer del(tmpl);
+    strbuf.str_buf mut made = strbuf.create();
+    defer del(made.data);
     *error_out = 0;
-    if (libc.mkdtemp(&tmpl[0]) == null) {
+    if (!os.make_temp_dir(strbuf.view(&b), &made)) {
         *error_out = sys.errno();
         return "";
     }
-    return containers.pool_intern(p, str.from_cstr(&tmpl[0]));
+    return containers.pool_intern(p, strbuf.view(&made));
 }
 
 // Removes the temporary directory and the module in it, whether or not --cc
@@ -1094,13 +1100,9 @@ fn make_temp_dir(containers.pool mut* p, string mut* parent_out, i32 mut* error_
 // error.
 fn remove_temp_dir(string dir, string ir_path) void {
     if (ir_path.len > 0) {
-        char mut@ own path = str.to_cstr(ir_path);
-        defer del(path);
-        libc.unlink(&path[0]);
+        os.remove_file(ir_path);
     }
-    char mut@ own d = str.to_cstr(dir);
-    defer del(d);
-    libc.rmdir(&d[0]);
+    os.remove_dir(dir);
 }
 
 // ---- the clang invocation --------------------------------------------------------
@@ -1150,56 +1152,6 @@ fn push_cc_line(containers.pool mut* p, options* opts, string ir_path, string ou
     }
 }
 
-// The bytes of every argument, each NUL-terminated, and a NULL-terminated array
-// of pointers into them: what execvp takes. bootstrap0/src/driver.c pushes the
-// arguments as C strings it already has. A fort `string` is a pointer and a
-// length and is not NUL-terminated, so they are copied here, once, into storage
-// the caller releases.
-struct cc_command {
-    char mut@ own bytes;      // every argument, each followed by its NUL
-    char mut* mut@ own items; // one pointer per argument, then null
-}
-
-fn cc_command_build(containers.str_vec* argv) cc_command {
-    u64 count = argv->len;
-    u64 total = cc_command_size(argv);
-    cc_command c = cc_command{new(char, total), new(char mut*, count + 1)};
-    cc_command_fill(c.bytes, c.items, argv);
-    return c;
-}
-
-// The bytes of every argument of `argv`, each with its NUL.
-fn cc_command_size(containers.str_vec* argv) u64 {
-    u64 mut total = 0;
-    u64 mut i = 0;
-    while (i < argv->len) {
-        total += containers.str_at(argv, i).len + 1;
-        i += 1;
-    }
-    return total;
-}
-
-// Copies the arguments of `argv` into `bytes` and points `items` at them. The result of
-// cc_command_build is no local owner here.
-fn cc_command_fill(char mut@ bytes, char mut* mut@ items, containers.str_vec* argv) void {
-    u64 mut at = 0;
-    u64 mut i = 0;
-    while (i < argv->len) {
-        string arg = containers.str_at(argv, i);
-        items[i] = &bytes[at];
-        u64 mut k = 0;
-        while (k < arg.len) {
-            bytes[at] = arg[k];
-            at += 1;
-            k += 1;
-        }
-        bytes[at] = '\0';
-        at += 1;
-        i += 1;
-    }
-    items[argv->len] = null;
-}
-
 // Reports either `<role> failed with status N` or `<role> failed with signal N`, where `role` is
 // `cc` or `ar`.
 fn error_tool_status(string role, string what, i64 value) void {
@@ -1233,23 +1185,6 @@ fn wait_status(i32 status) i64 {
     return cast((cast(status, u32) >> WAIT_STATUS_SHIFT) & WAIT_STATUS_MASK, i64);
 }
 
-// The errno of a failed execvp, written by the child and read by the parent,
-// four bytes little end first. Nothing else is ever written to that pipe, so
-// a short read means the child reached execvp and a full one means it did
-// not.
-u64 ERRNO_BYTES = 4;
-u64 BYTE_BITS = 8;
-u64 BYTE_MASK = 255;
-
-// F_SETFD and FD_CLOEXEC of fcntl(2): the write end of the pipe closes at
-// execvp, which is what tells the parent the exec succeeded.
-i32 F_SETFD = 2;
-i32 FD_CLOEXEC = 1;
-
-// Defines the status for a child that cannot exec. The parent reads errno from the pipe first, so
-// --cc cannot report this value.
-i32 EXEC_FAILED_STATUS = 127;
-
 // Runs --cc once over the module: it compiles and links in one invocation.
 // Returns EXIT_OK, or EXIT_USAGE after reporting the failure.
 fn run_cc(options* opts, string ir_path, string out_path) i32 {
@@ -1279,84 +1214,21 @@ string ZERO_AR_DATE_VALUE = "1";
 // with status <n>` or `... with signal <n>`.
 fn run_tool(string role, containers.str_vec* argv) i32 {
     string program = containers.str_at(argv, 0);
-    cc_command mut cmd = cc_command_build(argv);
-    defer {
-        del(cmd.bytes);
-        del(cmd.items);
+    string[2] ar_env = {ZERO_AR_DATE, ZERO_AR_DATE_VALUE};
+    string@ mut env = ar_env[..0];
+    if (role == "ar") {
+        // a failure of setenv(3) leaves the environment as it was, and the archive can then hold
+        // a time
+        env = ar_env[..];
     }
-    // taken before the first call, because prover.prove_uses takes each call as a change of `cmd`
-    char* path = &cmd.bytes[0];
-    void* args = cast(&cmd.items[0], void*);
-    // made before fork(2), so the child only calls setenv(3) and execvp(3)
-    char mut@ own env_name = str.to_cstr(ZERO_AR_DATE);
-    defer del(env_name);
-    char mut@ own env_value = str.to_cstr(ZERO_AR_DATE_VALUE);
-    defer del(env_value);
-    i32[2] mut fds = {};
-    if (libc.pipe(&fds[0]) != 0) {
-        error_path("cannot run", program, str.from_cstr(libc.strerror(sys.errno())));
-        return EXIT_USAGE;
-    }
-    if (libc.fcntl(fds[1], F_SETFD, FD_CLOEXEC) != 0) {
-        // The write end has to close at execvp: that is what tells the parent the exec succeeded.
-        // An open write end in --cc or its child keeps the read blocked until the last process
-        // exits. This is only a delay. Report close failure here instead of treating it as a
-        // missing errno.
-        error_path("cannot run", program, str.from_cstr(libc.strerror(sys.errno())));
-        io.close(fds[0]);
-        io.close(fds[1]);
-        return EXIT_USAGE;
-    }
-    i32 child = libc.fork();
-    if (child < 0) {
-        i32 failure = sys.errno();
-        io.close(fds[0]);
-        io.close(fds[1]);
-        error_path("cannot run", program, str.from_cstr(libc.strerror(failure)));
-        return EXIT_USAGE;
-    }
-    if (child == 0) {
-        // The child replaces itself with --cc. Reaching the line after execvp means it failed. The
-        // child sends errno through the pipe. The parent reports it as a posix_spawnp result.
-        io.close(fds[0]);
-        if (role == "ar") {
-            // a failure leaves the environment as it was, and the archive can then hold a time
-            libc.setenv(env_name.ptr, env_value.ptr, 1);
-        }
-        libc.execvp(path, args);
-        u64 e = cast(sys.errno(), u64);
-        u8[4] mut buf = {};
-        u64 mut i = 0;
-        while (i < ERRNO_BYTES) {
-            buf[i] = cast((e >> (i * BYTE_BITS)) & BYTE_MASK, u8);
-            i += 1;
-        }
-        io.write_all(fds[1], buf[0..ERRNO_BYTES]);
-        libc._exit(EXEC_FAILED_STATUS);
-    }
-    io.close(fds[1]);
-    u8[4] mut got = {};
-    i64 read = io.read(fds[0], got[0..ERRNO_BYTES]);
-    io.close(fds[0]);
     i32 mut status = 0;
-    // The child is reaped whatever it did, so no zombie outlives the run. A
-    // signal caught while clang runs interrupts the wait, not the child.
-    i32 mut waited = libc.waitpid(child, &status, 0);
-    while (waited < 0 && sys.errno() == EINTR) {
-        waited = libc.waitpid(child, &status, 0);
-    }
-    if (read == cast(ERRNO_BYTES, i64)) {
-        u64 mut e = 0;
-        u64 mut i = 0;
-        while (i < ERRNO_BYTES) {
-            e |= cast(got[i], u64) << (i * BYTE_BITS);
-            i += 1;
-        }
-        error_path("cannot run", program, str.from_cstr(libc.strerror(cast(e, i32))));
+    sys.run_result ran = sys.run(containers.str_items(argv), env, &status);
+    if (ran == sys.run_result.rr_not_started) {
+        error_errno("cannot run", program, sys.errno());
         return EXIT_USAGE;
     }
-    if (waited < 0) {
-        error_path("cannot wait for", program, str.from_cstr(libc.strerror(sys.errno())));
+    if (ran == sys.run_result.rr_not_waited) {
+        error_errno("cannot wait for", program, sys.errno());
         return EXIT_USAGE;
     }
     if (wait_signaled(status)) {
@@ -1429,7 +1301,7 @@ fn hash_identity(libraries mut* libs) bool {
         if (strbuf.view(&exe).len == 0) {
             error("internal error: the system gives no path of the compiler executable");
         } else {
-            error_path("cannot read", strbuf.view(&exe), str.from_cstr(libc.strerror(sys.errno())));
+            error_errno("cannot read", strbuf.view(&exe), sys.errno());
         }
         return false;
     }
@@ -1465,7 +1337,7 @@ fn read_library(options* opts, artifact.manifest* build, libraries mut* libs, u6
     i32 mut failure = 0;
     artifact.verdict found = artifact.read(path, c, &failure);
     if (found == artifact.verdict.v_unreadable) {
-        error_path("cannot read library", path, str.from_cstr(libc.strerror(failure)));
+        error_errno("cannot read library", path, failure);
         return EXIT_USAGE;
     }
     if (found == artifact.verdict.v_corrupt) {
@@ -1709,7 +1581,7 @@ fn front_end(session.session mut* s, options* opts, string program, libraries* l
     // The loader reads each file through the session.
     // This keeps a server buffer consistent across the closure.
     if (!entry_opens(opts->entry)) {
-        error_path("cannot read", opts->entry, str.from_cstr(libc.strerror(sys.errno())));
+        error_errno("cannot read", opts->entry, sys.errno());
         return EXIT_USAGE;
     }
     // --json writes the document and no text line
@@ -1777,7 +1649,7 @@ fn emit_module(session.session mut* s, options* opts, analysis mut* an, string i
         written = io.write_file(ir_path, strbuf.bytes(&g->out));
     }
     if (!written) {
-        error_path("cannot write", ir_path, str.from_cstr(libc.strerror(sys.errno())));
+        error_errno("cannot write", ir_path, sys.errno());
         return EXIT_USAGE;
     }
     if (opts->fir_stats) {
@@ -2421,7 +2293,7 @@ fn fir_test_entry(options* opts, string program) i32 {
     configure(s, opts);
     string mut text = "";
     if (!session.read_source(s, opts->entry, &text)) {
-        error_path("cannot read", opts->entry, str.from_cstr(libc.strerror(sys.errno())));
+        error_errno("cannot read", opts->entry, sys.errno());
         return EXIT_USAGE;
     }
     // The test ends in a block, before the session, and the output in a block of its own, before
@@ -2573,9 +2445,6 @@ fn run_status(interpreter.outcome* o, string target) i32 {
     }
 }
 
-// Ends the process for --fir-run (D11.4).
-extern fn raise(i32 sig) i32;
-
 /// The exit status of the process for the result `status` of run. A result below zero ends the
 /// process by the signal `-status`, as the program of --fir-run ends.
 fn process_status(i32 status) i32 {
@@ -2584,9 +2453,9 @@ fn process_status(i32 status) i32 {
     }
     rt.flush_all();
     if (status != -SIGNAL_ABRT) {
-        raise(-status);
+        sys.raise_signal(-status);
     }
-    libc.abort();
+    sys.abort();
 }
 
 // Runs the front end, then the available build or check passes. --check, --fir and --fir-run
@@ -2675,8 +2544,7 @@ fn compile_entry(options* opts, string program) i32 {
     i32 mut failure = 0;
     string dir = make_temp_dir(p, &parent, &failure);
     if (dir.len == 0) {
-        error_path("cannot create a temporary directory in", parent,
-                   str.from_cstr(libc.strerror(failure)));
+        error_errno("cannot create a temporary directory in", parent, failure);
         return EXIT_USAGE;
     }
     string mut ir_path = join_path(p, dir, entry_base(opts->entry), IR_SUFFIX);
@@ -2719,7 +2587,7 @@ fn copy_archives(options* opts, libraries* libs, containers.pool mut* p, string 
             i32 failure = sys.errno();
             // a part of the file can stand, so the caller removes it
             containers.str_push(paths, path);
-            error_path("cannot write", path, str.from_cstr(libc.strerror(failure)));
+            error_errno("cannot write", path, failure);
             return false;
         }
         containers.str_push(paths, path);
@@ -2790,7 +2658,7 @@ fn make_object(options* opts, cached_unit mut* u, string ir_path, string object_
     if (u->active && u->found == cache.outcome.o_hit) {
         strbuf.append_bytes(object, strbuf.bytes(&u->entry.object));
         if (!opts->compile_only && !io.write_file(object_path, strbuf.bytes(object))) {
-            error_path("cannot write", object_path, str.from_cstr(libc.strerror(sys.errno())));
+            error_errno("cannot write", object_path, sys.errno());
             return EXIT_USAGE;
         }
         return EXIT_OK;
@@ -2800,7 +2668,7 @@ fn make_object(options* opts, cached_unit mut* u, string ir_path, string object_
         return status;
     }
     if (!io.read_file(object_path, object)) {
-        error_path("cannot read", object_path, str.from_cstr(libc.strerror(sys.errno())));
+        error_errno("cannot read", object_path, sys.errno());
         return EXIT_USAGE;
     }
     if (u->active) {
@@ -2846,7 +2714,7 @@ fn build_entry_unit(options* opts, libraries* libs, cached_unit mut* u, i32 buil
             sent = artifact.write_output(out_path, strbuf.bytes(&object), &failure);
         }
         if (!sent) {
-            error_path("cannot write", out_path, str.from_cstr(libc.strerror(failure)));
+            error_errno("cannot write", out_path, failure);
             status = EXIT_USAGE;
         }
     } else if (status == EXIT_OK) {
@@ -3056,7 +2924,7 @@ fn write_artifact(string dir, string interface_text, string summaries_text, stri
     strbuf.str_buf mut archive = strbuf.create();
     defer del(archive.data);
     if (!io.read_file(archive_path, &archive)) {
-        error_path("cannot read", archive_path, str.from_cstr(libc.strerror(sys.errno())));
+        error_errno("cannot read", archive_path, sys.errno());
         return EXIT_USAGE;
     }
     strbuf.str_buf mut interface_hash = strbuf.create();
@@ -3080,7 +2948,7 @@ fn write_artifact(string dir, string interface_text, string summaries_text, stri
     i32 mut failure = 0;
     if (!artifact.write(dir, interface_text, summaries_text, strbuf.bytes(&archive),
                         strbuf.view(&text), &failed, &failure)) {
-        error_path("cannot write", strbuf.view(&failed), str.from_cstr(libc.strerror(failure)));
+        error_errno("cannot write", strbuf.view(&failed), failure);
         return EXIT_USAGE;
     }
     return EXIT_OK;
@@ -3096,7 +2964,7 @@ fn copy_entry(string dir, cached_unit* u) i32 {
     i32 mut failure = 0;
     if (!artifact.write(dir, strbuf.view(&c->interface), strbuf.view(&c->summaries),
                         strbuf.bytes(&c->archive), strbuf.view(&c->text), &failed, &failure)) {
-        error_path("cannot write", strbuf.view(&failed), str.from_cstr(libc.strerror(failure)));
+        error_errno("cannot write", strbuf.view(&failed), failure);
         return EXIT_USAGE;
     }
     return EXIT_OK;
@@ -3127,9 +2995,7 @@ fn remove_library_temp(string dir, string@ files) void {
     u64 mut i = 0;
     while (i < files.len) {
         if (files[i].len > 0) {
-            char mut@ own path = str.to_cstr(files[i]);
-            defer del(path);
-            libc.unlink(&path[0]);
+            os.remove_file(files[i]);
         }
         i += 1;
     }
@@ -3172,8 +3038,7 @@ fn library_entry(options* opts) i32 {
     defer tree.drop_made(move(t));
     i32 mut failure = 0;
     if (!tree.walk(t, opts->lib_name, opts->lib_root, &failure)) {
-        error_path("cannot read library root", opts->lib_root,
-                   str.from_cstr(libc.strerror(failure)));
+        error_errno("cannot read library root", opts->lib_root, failure);
         return EXIT_USAGE;
     }
     if (tree.count(t) == 0) {
@@ -3271,8 +3136,7 @@ fn library_entry(options* opts) i32 {
     string mut parent = TMP_DIR_DEFAULT;
     string dir = make_temp_dir(p, &parent, &failure);
     if (dir.len == 0) {
-        error_path("cannot create a temporary directory in", parent,
-                   str.from_cstr(libc.strerror(failure)));
+        error_errno("cannot create a temporary directory in", parent, failure);
         return EXIT_USAGE;
     }
     string ir_path = join_path(p, dir, opts->lib_name, IR_SUFFIX);

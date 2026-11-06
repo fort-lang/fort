@@ -1,0 +1,65 @@
+//! run
+//! stdout:
+//| [0.1] in range, value as expected
+//| [-2.5] in range, value as expected
+//| [16777216] in range, value as expected
+//| [16777217] in range, value as expected
+//| [3.4028235e38] in range, value as expected
+//| [1.17549435e-38] in range, value as expected
+//| [0x1.fffffep127] in range, value as expected
+//| [ 7xyz] in range, value as expected
+//| [none] in range, value as expected
+//| [-INF] in range, value as expected
+//| [3.5e38] out of range, value as expected
+//| [-3.5e38] out of range, value as expected
+//| [1e-50] out of range, value as expected
+//| [1e39 in f64] in range, value as expected
+//| errno kept after a value in range: true
+import std.libc;
+import std.math;
+import std.str;
+import std.sys;
+
+// str.parse_f32 reads the longest prefix that strtof(3) reads (stdlib.md 2.5). strtof rounds to
+// the nearest float, so 16777217 reads as 16777216, the value with 24 bits. The largest float and
+// the smallest normal float are in range. A value past the largest float gives an infinity, and
+// a value below the smallest subnormal gives 0, each with ERANGE, also where the value is in the
+// range of a double. A value in range leaves errno as it was.
+
+// Parses `s`, and prints whether the value is in range and whether it is `want`.
+fn check(string s, f32 want, bool in_range) void {
+    f32 mut v = 1234.5;
+    sys.set_errno(0);
+    bool got = str.parse_f32(s, &v);
+    bool range_ok = got == in_range && (got || sys.errno() == libc.ERANGE);
+    print("[", s, "] ", got ? "in range" : "out of range");
+    if (!range_ok) {
+        print(", range not as expected");
+    }
+    println(v == want ? ", value as expected" : ", value not as expected");
+}
+
+fn main() i32 {
+    check("0.1", 0.1, true);
+    check("-2.5", -2.5, true);
+    check("16777216", 16777216.0, true);
+    check("16777217", 16777216.0, true);
+    check("3.4028235e38", 3.4028235e38, true);
+    check("1.17549435e-38", 1.17549435e-38, true);
+    check("0x1.fffffep127", 3.4028234663852886e38, true);
+    check(" 7xyz", 7.0, true);
+    check("none", 0.0, true);
+    check("-INF", cast(-math.f64_inf(), f32), true);
+    check("3.5e38", cast(math.f64_inf(), f32), false);
+    check("-3.5e38", cast(-math.f64_inf(), f32), false);
+    check("1e-50", 0.0, false);
+    f64 mut wide = 0.0;
+    bool wide_in_range = str.parse_f64("1e39", &wide);
+    println("[1e39 in f64] ", wide_in_range ? "in range" : "out of range",
+            wide == 1e39 ? ", value as expected" : ", value not as expected");
+    sys.set_errno(9);
+    f32 mut kept = 0.0;
+    str.parse_f32("1.5", &kept);
+    println("errno kept after a value in range: ", sys.errno() == 9);
+    return 0;
+}

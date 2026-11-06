@@ -1,0 +1,70 @@
+//! run
+//! stdout:
+//| first: true true
+//| second: true
+//| first again: true true
+//| 50 texts of unknown values, each one whole: true
+//| errno stays 77: true true true
+import std.os;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+// os.error_text copies the strerror(3) text into the buffer of the caller (stdlib.md 2.14).
+// glibc writes the text of an unknown value into storage that it frees at the next call with
+// another unknown value, and the Darwin C library writes it into one static buffer. So the text
+// of an earlier call must stay whole after later calls: the text of 1000 after the text of
+// -2147483647, and each of 50 texts after the next ones. errno stays as it was after a known
+// value, an unknown one and 0, though the Darwin strerror(3) sets EINVAL for an unknown value.
+// Whether line `i` of `all`, for each `i` below 50, names the value 5000 + i.
+fn each_whole(string all) bool {
+    strbuf.str_buf mut digits = strbuf.create();
+    defer del(digits.data);
+    u64 mut start = 0;
+    for (u64 mut i = 0; i < 50; i++) {
+        u64 mut end = start;
+        while (end < all.len && all[end] != '\n') {
+            end += 1;
+        }
+        strbuf.clear(&digits);
+        strbuf.append_i64(&digits, cast(5000 + i, i64));
+        if (end >= all.len || str.find(all[start..end], strbuf.view(&digits)) < 0) {
+            return false;
+        }
+        start = end + 1;
+    }
+    return true;
+}
+
+fn main() i32 {
+    strbuf.str_buf mut first = strbuf.create();
+    defer del(first.data);
+    os.error_text(1000, &first);
+    string a = strbuf.view(&first);
+    println("first: ", str.find(a, "1000") >= 0, " ", str.find(a, "2147483647") < 0);
+    strbuf.str_buf mut second = strbuf.create();
+    defer del(second.data);
+    os.error_text(-2147483647, &second);
+    println("second: ", str.find(strbuf.view(&second), "2147483647") >= 0);
+    string again = strbuf.view(&first);
+    println("first again: ", str.find(again, "1000") >= 0, " ", str.find(again, "2147483647") < 0);
+
+    // the 50 texts in one buffer, each after the one before and ended by a newline
+    strbuf.str_buf mut texts = strbuf.create();
+    defer del(texts.data);
+    for (u64 mut i = 0; i < 50; i++) {
+        os.error_text(cast(5000 + i, i32), &texts);
+        strbuf.push(&texts, '\n');
+    }
+    bool whole = each_whole(strbuf.view(&texts));
+    println("50 texts of unknown values, each one whole: ", whole);
+    strbuf.clear(&texts);
+    sys.set_errno(77);
+    os.error_text(2, &texts);
+    bool known = sys.errno() == 77;
+    os.error_text(1000, &texts);
+    bool unknown = sys.errno() == 77;
+    os.error_text(0, &texts);
+    println("errno stays 77: ", known, " ", unknown, " ", sys.errno() == 77);
+    return 0;
+}

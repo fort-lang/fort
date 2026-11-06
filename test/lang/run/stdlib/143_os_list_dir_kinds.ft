@@ -1,0 +1,147 @@
+//! run
+//! stdout:
+//| a.ft 8 file
+//| fifo 1 fifo
+//| link 10 symbolic link
+//| sub 4 directory
+//| 4 entries, each name once
+//| 300 entries, each name once
+//| 6 bytes per entry for 300 names of 4 bytes
+//| the buffer keeps what it held: true
+import std.io;
+import std.libc;
+import std.os;
+import std.str;
+import std.strbuf;
+
+// os.list_dir gives the kind of each entry with its name (stdlib.md 2.14): the `libc.DT_` value
+// of a regular file, a directory, a symbolic link and a FIFO, the same on both targets. A link is
+// an entry of its own, whatever its target. A directory of 300 entries gives each name once, and
+// list_dir appends after what the buffer holds. The order of readdir(3) is the order of the file
+// system, so the test looks each name up.
+
+// DT_FIFO, the same value on both targets; std.libc does not define it.
+u8 DT_FIFO = 1;
+
+// mkfifo(3), whose mode_t is a u32 on Linux and a u16 on Mac (D9.8).
+$if ($cfg(target_os) == "linux") {
+    extern fn mkfifo(char* path, u32 mode) i32;
+} else {
+    extern fn mkfifo(char* path, u16 mode) i32;
+}
+
+fn kind_word(u8 kind) string {
+    if (kind == libc.DT_REG) {
+        return "file";
+    }
+    if (kind == libc.DT_DIR) {
+        return "directory";
+    }
+    if (kind == libc.DT_LNK) {
+        return "symbolic link";
+    }
+    if (kind == DT_FIFO) {
+        return "fifo";
+    }
+    return "other";
+}
+
+// The count of the entries of `listed` whose name is `name`.
+fn count_of(string listed, string name) u64 {
+    u64 mut n = 0;
+    u64 mut at = 0;
+    os.dir_entry mut entry = {};
+    while (os.next_entry(listed, &at, &entry)) {
+        if (entry.name == name) {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+// Prints the entry `name` of `listed` with its kind.
+fn show(string listed, string name) void {
+    u64 mut at = 0;
+    os.dir_entry mut entry = {};
+    while (os.next_entry(listed, &at, &entry)) {
+        if (entry.name == name) {
+            println(name, " ", entry.kind, " ", kind_word(entry.kind));
+            return;
+        }
+    }
+    println(name, " absent");
+}
+
+// The count of the entries of `listed`.
+fn total(string listed) u64 {
+    u64 mut n = 0;
+    u64 mut at = 0;
+    os.dir_entry mut entry = {};
+    while (os.next_entry(listed, &at, &entry)) {
+        n += 1;
+    }
+    return n;
+}
+
+// The name of file `i` of the large directory: `f` and three digits, 4 bytes. An entry of
+// list_dir holds a byte of its kind, the name and a NUL: 6 bytes.
+fn file_name(strbuf.str_buf mut* b, u64 i) string {
+    strbuf.clear(b);
+    strbuf.push(b, 'f');
+    strbuf.push(b, cast('0' + cast(i / 100, u8), char));
+    strbuf.push(b, cast('0' + cast(i / 10 % 10, u8), char));
+    strbuf.push(b, cast('0' + cast(i % 10, u8), char));
+    return strbuf.view(b);
+}
+
+fn main() i32 {
+    os.make_dir("t-kinds", 0o700);
+    os.make_dir("t-kinds/sub", 0o700);
+    io.write_file("t-kinds/a.ft", cast("a", u8@));
+    char mut@ own c_fifo = str.to_cstr("t-kinds/fifo");
+    defer del(c_fifo);
+    mkfifo(c_fifo.ptr, 0o600);
+    char mut@ own c_target = str.to_cstr("no/such/target");
+    defer del(c_target);
+    char mut@ own c_link = str.to_cstr("t-kinds/link");
+    defer del(c_link);
+    libc.symlink(c_target.ptr, c_link.ptr);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    os.list_dir("t-kinds", &b);
+    string listed = strbuf.view(&b);
+    show(listed, "a.ft");
+    show(listed, "fifo");
+    show(listed, "link");
+    show(listed, "sub");
+    bool once = count_of(listed, "a.ft") == 1 && count_of(listed, "fifo") == 1
+                && count_of(listed, "link") == 1 && count_of(listed, "sub") == 1;
+    println(total(listed), " entries, each name ", once ? "once" : "not once");
+
+    os.make_dir("t-many", 0o700);
+    strbuf.str_buf mut name = strbuf.create();
+    defer del(name.data);
+    strbuf.str_buf mut path = strbuf.create();
+    defer del(path.data);
+    for (u64 mut i = 0; i < 300; i++) {
+        strbuf.clear(&path);
+        strbuf.append(&path, "t-many/");
+        strbuf.append(&path, file_name(&name, i));
+        io.write_file(strbuf.view(&path), cast("", u8@));
+    }
+    strbuf.clear(&b);
+    os.list_dir("t-many", &b);
+    bool mut each_once = true;
+    for (u64 mut i = 0; i < 300; i++) {
+        if (count_of(strbuf.view(&b), file_name(&name, i)) != 1) {
+            each_once = false;
+        }
+    }
+    println(total(strbuf.view(&b)), " entries, each name ", each_once ? "once" : "not once");
+    println(strbuf.view(&b).len / 300, " bytes per entry for 300 names of 4 bytes");
+    strbuf.clear(&b);
+    strbuf.append(&b, "kept");
+    os.list_dir("t-kinds/sub", &b);
+    println("the buffer keeps what it held: ", strbuf.view(&b) == "kept");
+    return 0;
+}

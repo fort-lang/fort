@@ -1,0 +1,70 @@
+//! run
+//! stdout:
+//| empty value: true true []
+//| a NUL ends the value: true [ab]
+//| a NUL ends the name: true true [x]
+//| replaced: true [second]
+//| a child sees it: second
+//| a name with = refused, the old value stays: false [second]
+//| env appends: true [x=second]
+//| env of a name with =: false [kept], a NUL before the =: true [second]
+//| env of a name that = ends: false [kept]
+import std.io;
+import std.strbuf;
+import std.sys;
+
+// More cases of sys.set_env (stdlib.md 2.1). An empty value is a value, and sys.env finds it.
+// A NUL in a value or in a name ends it, as str.to_cstr gives it to C. A second call replaces
+// the value, and sys.run gives the environment of the process to a child. setenv(3) refuses a
+// name with '=', and the value that was there stays. sys.env appends the value after what the
+// buffer holds. A name with '=' before its first NUL gives false on each target and leaves the
+// buffer as it was, though the Darwin getenv(3) would look up the name before the '='.
+// The value of `name` alone in `b`, or the empty string when `name` is absent.
+fn value_of(string name, strbuf.str_buf mut* b, bool mut* found) string {
+    strbuf.clear(b);
+    *found = sys.env(name, b);
+    return strbuf.view(b);
+}
+
+fn main() i32 {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    bool mut found = false;
+    bool set = sys.set_env("FORT_T_EMPTY", "");
+    string empty = value_of("FORT_T_EMPTY", &b, &found);
+    println("empty value: ", set, " ", found, " [", empty, "]");
+    sys.set_env("FORT_T_CUT", "ab\x00cd");
+    string cut = value_of("FORT_T_CUT", &b, &found);
+    println("a NUL ends the value: ", cut.len == 2, " [", cut, "]");
+    bool cut_name = sys.set_env("FORT_T_NAME\x00IGNORED", "x");
+    string short_name = value_of("FORT_T_NAME", &b, &found);
+    println("a NUL ends the name: ", cut_name, " ", found, " [", short_name, "]");
+    sys.set_env("FORT_T_TWICE", "first");
+    sys.set_env("FORT_T_TWICE", "second");
+    string twice = value_of("FORT_T_TWICE", &b, &found);
+    println("replaced: ", found, " [", twice, "]");
+    print("a child sees it: ");
+    io.flush(io.STDOUT);
+    string[3] argv = {"sh", "-c", "echo \"$FORT_T_TWICE\""};
+    i32 mut status = 0;
+    sys.run(argv[..], argv[..0], &status);
+    bool refused = sys.set_env("FORT_T_TWICE=", "third");
+    string kept = value_of("FORT_T_TWICE", &b, &found);
+    println("a name with = refused, the old value stays: ", refused, " [", kept, "]");
+    strbuf.clear(&b);
+    strbuf.append(&b, "x=");
+    bool appended = sys.env("FORT_T_TWICE", &b);
+    println("env appends: ", appended, " [", strbuf.view(&b), "]");
+    strbuf.clear(&b);
+    strbuf.append(&b, "kept");
+    bool with_eq = sys.env("FORT_T_TWICE=zzz", &b);
+    print("env of a name with =: ", with_eq, " [", strbuf.view(&b), "]");
+    strbuf.clear(&b);
+    bool before_nul = sys.env("FORT_T_TWICE\x00=zzz", &b);
+    println(", a NUL before the =: ", before_nul, " [", strbuf.view(&b), "]");
+    strbuf.clear(&b);
+    strbuf.append(&b, "kept");
+    bool ends_eq = sys.env("FORT_T_TWICE=", &b);
+    println("env of a name that = ends: ", ends_eq, " [", strbuf.view(&b), "]");
+    return 0;
+}

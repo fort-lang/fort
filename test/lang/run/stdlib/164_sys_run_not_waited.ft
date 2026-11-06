@@ -1,0 +1,37 @@
+//! run
+//! stdout:
+//| not waited: true, ECHILD: true, status kept: true
+//| after SIGCHLD goes back to its default: done 3
+// sys.run gives rr_not_waited when waitpid(2) fails (stdlib.md 2.1). A process that sets SIGCHLD
+// to SIG_IGN makes the system reap each child that ends, so waitpid fails with ECHILD and the
+// command ran. *status keeps its value. With SIGCHLD back at SIG_DFL, run waits for the child
+// again.
+import std.sys;
+
+// signal(3), which std.libc does not declare. A handler is a value of C: SIG_DFL is 0 and
+// SIG_IGN is 1 on both targets, so the test gives it as an integer.
+extern fn signal(i32 sig, u64 handler) u64;
+
+// SIGCHLD is 17 on Linux and 20 on Darwin; ECHILD is 10 on both.
+$if ($cfg(target_os) == "linux") {
+    i32 SIGCHLD = 17;
+} else {
+    i32 SIGCHLD = 20;
+}
+i32 ECHILD = 10;
+u64 SIG_DFL = 0;
+u64 SIG_IGN = 1;
+
+fn main() i32 {
+    signal(SIGCHLD, SIG_IGN);
+    string[3] argv = {"sh", "-c", "exit 3"};
+    i32 mut status = 77;
+    sys.run_result r = sys.run(argv[..], argv[..0], &status);
+    println("not waited: ", r == sys.run_result.rr_not_waited, ", ECHILD: ",
+            sys.errno() == ECHILD, ", status kept: ", status == 77);
+    signal(SIGCHLD, SIG_DFL);
+    sys.run_result again = sys.run(argv[..], argv[..0], &status);
+    println("after SIGCHLD goes back to its default: ",
+            again == sys.run_result.rr_done ? "done " : "other ", (status >> 8) & 255);
+    return 0;
+}

@@ -62,7 +62,7 @@ library follows:
   callee `del`s `*out` and then stores an `own` rvalue into it, because the entry value of `*out`
   is unknown to the callee and the overwrite check of D17.11 needs it empty. The `del` frees
   nothing when the caller initialized the slot.
-- **Accessors return views** (D17.3). Functions named `view` or `bytes`, `sys.args`, `sys.env`,
+- **Accessors return views** (D17.3). Functions named `view` or `bytes`, `sys.args`,
   `str.from_cstr` and every sub-span yield values without `own`; `del` on them does not
   compile (D17.9). A view into a container is valid until the next mutating call on that
   container; a view of an owned value is valid until the value is `del`ed or moved away, which
@@ -102,7 +102,7 @@ library follows:
   calls only has its borrowing declaration and a fort function that allocates the buffer:
   `libc.realpath` and `os.real_path` (2.2, 2.14, D17.13).
 - NUL termination. These strings carry a `0` after their last character: literals (D3.7), the
-  elements of `sys.args()` (D8.6), the result of `sys.env`, and the C string at the `.ptr` of a
+  elements of `sys.args()` (D8.6), and the C string at the `.ptr` of a
   `str.to_cstr` result. Owned strings from `str.dup`, `str.concat` and `strbuf.take` do not: a
   `string own` occupies exactly `len` bytes, so that `cast(move(buf), string own)` (D17.12)
   turns an exact-size buffer into one without a second allocation. Sub-strings, `strbuf.view`
@@ -150,7 +150,7 @@ import binding's name for a local even though D7.9 permits it.
 | `std.rt`        | `libc`, `strbuf`                            | the runtime itself (section 3)   |
 | `std.mem`       | `libc`                                      | copy, fill and compare bytes     |
 | `std.str`       | `libc`, `mem`                               | compare, search, classify, parse |
-| `std.sys`       | `libc`, `rt`, `str`                         | exit, args, errno, env           |
+| `std.sys`       | `libc`, `rt`, `str`, `strbuf`               | exit, args, errno, env, run      |
 | `std.strbuf`    | `mem`                                       | growable text and byte buffer    |
 | `std.io`        | `libc`, `rt`, `mem`, `sys`, `str`, `strbuf` | descriptors, whole files, streams|
 | `std.vec`       | none                                        | `int_vec`, the pattern           |
@@ -158,7 +158,7 @@ import binding's name for a local even though D7.9 permits it.
 | `std.math`      | none                                        | float bit casts, abs, min, max   |
 | `std.sort`      | none                                        | a typed span sorted in place     |
 | `std.net`       | `libc`, `str`, `sys`                        | a TCP listener and a connection  |
-| `std.os`        | `libc`, `str`, `strbuf`                     | triple, paths, file mode         |
+| `std.os`        | `libc`, `str`, `strbuf`                     | triple, files, directories      |
 
 `std.digest.sha256` imports nothing and gives the SHA-256 digest of bytes (2.15).
 
@@ -185,8 +185,21 @@ Process-level services.
 fn exit(i32 code) noreturn
 fn args() string@
 fn errno() i32
-fn env(string name, string mut* out) bool
+fn env(string name, strbuf.str_buf mut* out) bool
+fn set_errno(i32 code) void
+fn pid() i32
+fn abort() noreturn
+fn raise_signal(i32 sig) bool
+fn set_env(string name, string value) bool
+
+enum run_result { rr_done, rr_not_started, rr_not_waited }
+fn run(string@ argv, string@ env, i32 mut* status) run_result
 ```
+
+The compiler calls C only through functions of the library that take spans, strings and plain
+values (D9.8). This section, 2.3, 2.4, 2.5 and 2.14 give them. Each one takes each length from
+a span or a string, and each failure gives a result that the caller tests, with the reason in
+`sys.errno()`. None is a boundary function (D9.8), so each module can call it.
 
 - `exit`: flushes every runtime output buffer (D11.5) and terminates the process with status
   `code & 0xFF` (D11.6). Deferred statements of the calling function do not run. Implemented as
@@ -199,21 +212,54 @@ fn env(string name, string mut* out) bool
 - `errno`: the value of C `errno` for the calling thread, read through
   `libc.__errno_location()`. It is meaningful only after a library call has reported failure.
   Ownership: none.
-- `env`: looks up `name` in the process environment. On success `*out` aliases the environment
-  string (NUL-terminated, valid for the life of the process) and the result is `true`; when the
-  variable is absent `*out` is unchanged and the result is `false`. `name` is copied into a
-  NUL-terminated buffer for the call (`str.to_cstr`, `del`ed before returning). Ownership:
-  `*out` is a view of the environment (D17.3); it is never `del`ed.
+- `env`: looks up `name` in the process environment. On success it appends a copy of the value
+  to `*out` after what it holds, and the result is `true`; when the variable is absent `*out` is
+  unchanged and the result is `false`. A `name` that holds `=` before its first NUL gives `false`
+  with `*out` unchanged on each target: no variable name holds `=`, and the C libraries differ
+  there (glibc `getenv` finds no variable, and the Darwin one looks up the name before the `=`).
+  `setenv(3)` can free the storage of a value that it set before, so a view
+  of the environment can end at the next `set_env`; the copy stays. `name` is copied into a
+  NUL-terminated buffer for the call (`str.to_cstr`, `del`ed before returning), and a NUL in
+  `name` limits the lookup to its prefix. Ownership: `*out` belongs to the caller.
+- `set_errno`: sets C `errno` of the calling thread to `code`. Ownership: none.
+- `pid`: the process id, from `getpid(2)`, which does not fail. Ownership: none.
+- `abort`: ends the process with `SIGABRT`, as `abort(3)` does. It flushes no runtime output
+  buffer, and deferred statements do not run. Ownership: none.
+- `raise_signal`: sends the signal `sig` to the calling thread with `raise(3)`. Returns `true`
+  when `raise` accepts the signal, and a signal that ends the process does not return; returns
+  `false` with `EINVAL` for a signal number that the system does not have. Ownership: none.
+- `set_env`: sets the variable `name` of the process environment to `value` with `setenv(3)`,
+  and replaces a value that is there. Returns `false` with the errno of `setenv`: `EINVAL` for an
+  empty name or a name that contains `=`. A NUL in `name` or `value` limits it to its prefix.
+  Ownership: none; `setenv` copies both.
+- `run`: runs the command `argv` in a child process and waits for it. `argv[0]` names the
+  program, which `execvp(3)` looks for in `PATH`. `env` holds pairs of a name and a value, which
+  the child sets with `setenv(3)` before the exec; a pair that `setenv` refuses leaves the
+  environment of the child as it was, and the environment of the caller does not change. The
+  child gets the descriptors of the caller. `run` makes each C string before `fork(2)`, so the
+  child calls only `close(2)`, `setenv`, `execvp`, `write(2)` and `_exit(2)`. A pipe whose write
+  end closes at the exec tells the parent whether the exec succeeded: after a failed exec the
+  child writes its errno to the pipe and ends with status 127.
+  Returns `rr_done` with the wait status of
+  `waitpid(2)` in `*status`: the exit status in its second byte, and a signal that ended the
+  child in its low seven bits. Returns `rr_not_started` when `pipe(2)`, `fcntl(2)`, `fork(2)` or
+  `execvp` fails, with the errno of that call, and with `EINVAL` for an empty `argv` or an odd
+  count of strings in `env`. Returns `rr_not_waited` when `waitpid` fails with an errno other
+  than `EINTR`, which it retries. `run` waits for a child that it started in each case but the
+  last, so no zombie stays. `*status` changes only for `rr_done`. A NUL in a string of `argv` or
+  `env` ends that string. `run` flushes no runtime output buffer, and the child flushes none: a
+  caller whose output must come before the output of the command calls `io.flush` first.
+  Ownership: none; `run` frees the C strings that it makes.
 
 ```fort
+import std.strbuf;
 import std.sys;
 
-fn std_dir() string {
-    string mut dir = "../std";
-    if (!sys.env("FORT_STD_DIR", &dir)) {
-        eprintln("FORT_STD_DIR not set, using ", dir);
+fn std_dir(strbuf.str_buf mut* out) void {
+    if (!sys.env("FORT_STD_DIR", out)) {
+        strbuf.append(out, "../std");
+        eprintln("FORT_STD_DIR not set, using ", strbuf.view(out));
     }
-    return dir;
 }
 ```
 
@@ -289,8 +335,9 @@ extern fn readlink(char* path, char mut* buf, u64 size) i64;
 extern fn realpath(char* path, char mut* resolved) char*;
 
 // <dirent.h>: a directory stream is an allocation of C that closedir frees. `dirent` is the
-// x86-64 glibc layout of `struct dirent` (std/darwin/libc.ft holds the Mac layout); only `kind`
-// and `name` are read. readdir gives null at the end of the stream and on an error.
+// x86-64 glibc layout of `struct dirent` (std/darwin/libc.ft holds the Mac layout, with a
+// `u16 namlen` before `kind` and a `char[1024] name`), and `dirent_head` holds its fields before
+// `name`. readdir gives a `dirent_head*`, or null at the end of the stream and on an error.
 struct dirent {
     u64 ino;
     i64 off;
@@ -298,18 +345,29 @@ struct dirent {
     u8 kind;
     char[256] name;
 }
+struct dirent_head {
+    u64 ino;
+    i64 off;
+    u16 reclen;
+    u8 kind;
+}
 extern fn opendir(char* path) void mut* own;
 extern fn fdopendir(i32 fd) void mut* own;
-extern fn readdir(void mut* dir) dirent*;
+extern fn readdir(void mut* dir) dirent_head*;
 extern fn closedir(void mut* own dir) i32;
 
 // The size of the buffer that realpath(3) writes, the terminating zero included.
 u64 PATH_MAX = 4096;                         // 1024 in std/darwin/libc.ft
 
-// <string.h>, <stdlib.h>, <unistd.h>, <sys/stat.h>, <sys/wait.h>: what the compiler and its
-// tests call. `mode_t` crosses as u32 on both targets: one signature serves both roots.
+// <string.h>, <stdlib.h>, <unistd.h>, <sys/stat.h>, <sys/wait.h>: what the functions of this
+// library that the compiler calls use, and what its tests call. `mode_t` crosses as u32 on both
+// targets: one signature serves both roots. ERANGE, F_SETFD and FD_CLOEXEC have one value on
+// both targets.
 i32 EEXIST = 17;
 i32 R_OK = 4;
+i32 ERANGE = 34;
+i32 F_SETFD = 2;
+i32 FD_CLOEXEC = 1;
 extern fn strerror(i32 code) char*;
 extern fn strtod(char* s, char* mut* end) f64;
 extern fn strtof(char* s, char* mut* end) f32;
@@ -331,12 +389,17 @@ extern fn fork() i32;
 extern fn execvp(char* file, void* argv) i32;
 extern fn waitpid(i32 pid, i32 mut* status, i32 options) i32;
 extern fn _exit(i32 status) noreturn;
+extern fn raise(i32 sig) i32;
 ```
 
-A C library function is declared here and nowhere else (since 2026-09-25): the compiler
-(`realpath`, `access`, `getcwd`, `strerror`, `mkdtemp`, `unlink`, `rmdir`, `fork`, `execvp`,
-`waitpid`, `pipe`, `_exit`), the runtime (`strtod`, `strtof`) and the `test/fort` suites
-(`mkdir`, `chmod`, `symlink`, `dup`, `dup2`, `setenv`, `unsetenv`) import `std.libc` for them.
+A C library function is declared here and nowhere else (since 2026-09-25). The compiler calls
+none of them (D9.8): it calls the functions of `std.os`, `std.io`, `std.sys`, `std.str` and
+`std.mem` that take spans and strings (2.1, 2.3, 2.4, 2.5, 2.14), and those functions call
+`realpath`, `access`, `getcwd`, `strerror`, `mkdtemp`, `mkdir`, `unlink`, `unlinkat`, `rmdir`,
+`rename`, `readlink`, `opendir`, `fdopendir`, `readdir`, `closedir`, `dup`, `getpid`, `raise`,
+`setenv`, `fork`, `execvp`, `waitpid`, `pipe`, `fcntl`, `_exit`, `strtod`, `strtof`,
+`snprintf` and `calloc`. The `test/fort` suites call some of these declarations directly, and
+also `chmod`, `symlink`, `dup2` and `unsetenv`.
 `_NSGetExecutablePath` stays in the Mac `std.os`: it is dyld's, not the C library's.
 
 Semantics are those of the C functions. Each buffer parameter says what C means by it (1.4):
@@ -372,10 +435,14 @@ is what the runtime calls after a runtime error (D11.4). `std.libc` declares no 
 comparator reads each element through a cast from a `void*`, which no cast allows (D3.14), and
 `std.sort` sorts typed spans in fort (2.10). A directory stream of `opendir` and `fdopendir` is an
 allocation of C, so each result says `own`, and `closedir` takes it with `move`; a `del` of it
-frees the memory and leaves the descriptor open. `readdir` gives a typed `dirent*`, a view of
-storage of C that the next `readdir` of the stream can change, or null at the end of the stream
-and on an error. The `i32 mut*` result of `__errno_location` names storage of C that C lets
-the caller write, and its audit row says so (D9.8, D17.13).
+frees the memory and leaves the descriptor open. A record of `readdir` holds `reclen` bytes, and
+its name ends inside them, so a short record does not hold the whole `name` array of a `dirent`.
+`readdir` therefore gives a `dirent_head*`, a view of the fields before the name in storage of C
+that the next `readdir` of the stream can change, or null at the end of the stream and on an
+error (D9.8). `os.list_dir` checks `reclen` against the size of a `dirent`, copies `reclen` bytes
+into a zero local `dirent`, and reads the name there with `str.from_cbuf` (2.14). The
+`i32 mut*` result of `__errno_location` names storage of C that C lets the caller write, and its
+audit row says so (D9.8, D17.13).
 Ownership: `malloc`, `calloc` and `free` carry it in their types, so a
 `calloc` result is released like a `malloc` one and not dropped; every other extern here takes
 and returns views, and the library wraps every ownership-bearing call below.
@@ -412,6 +479,7 @@ Byte-span primitives over `memmove`, `memset` and `memcmp`.
 fn copy(u8 mut@ dst, u8@ src) void
 fn fill(u8 mut@ dst, u8 v) void
 fn equal(u8@ a, u8@ b) bool
+fn can_allocate(u64 size) bool
 ```
 
 - `copy`: copies `src.len` bytes to the start of `dst`; the ranges may overlap (`memmove`
@@ -420,6 +488,10 @@ fn equal(u8@ a, u8@ b) bool
 - `fill`: sets every byte of `dst` to `v`. Ownership: none.
 - `equal`: `true` when the lengths are equal and the bytes match; two empty spans are equal
   whatever their pointers. Ownership: none.
+- `can_allocate`: asks `calloc(3)` for `size` bytes and frees the block at once. Returns `false`
+  with the errno of `calloc` when it gives null. `new` stops the process where `calloc` gives null
+  (D10.2), so a caller that must see the refusal of a large size asks here first, as the
+  interpreter of `--fir-run` does for a region of 1 MiB or more. Ownership: none.
 
 Only `u8` spans are covered: a span cast never changes the element size (D3.14), so other
 element types are copied with a loop, as `std.vec` does, or through `libc.memmove` on `.ptr`
@@ -449,14 +521,18 @@ i32 STDERR = 2;
 
 fn open_read(string path) i32
 fn open_write(string path) i32
+fn open(string path, i32 flags, i32 mode) i32
 fn close(i32 fd) bool
 fn flush(i32 fd) void
 fn read(i32 fd, u8 mut@ buf) i64
+fn write(i32 fd, u8@ buf) i64
 fn write_all(i32 fd, u8@ buf) bool
 fn read_all(i32 fd, strbuf.str_buf mut* out) bool
 fn read_file(string path, strbuf.str_buf mut* out) bool
 fn read_file_bytes(string path, u8 mut@ own mut* out) bool
 fn write_file(string path, u8@ data) bool
+fn is_terminal(i32 fd) bool
+fn pipe(i32 mut* read_end, i32 mut* write_end) bool
 ```
 
 - `open_read`: opens `path` with `O_RDONLY`. Returns the descriptor, or `-1` with the reason in
@@ -465,6 +541,9 @@ fn write_file(string path, u8@ data) bool
   in the types; the caller releases the descriptor with `close`.
 - `open_write`: opens `path` with `O_WRONLY | O_CREAT | O_TRUNC` and mode `0o644`, creating or
   truncating the file. Same result and ownership as `open_read`.
+- `open`: opens `path` with the `open(2)` flags `flags`, for example
+  `libc.O_RDONLY | libc.O_DIRECTORY`. `mode` gives the permission bits, less the umask, of a file
+  that `O_CREAT` makes, and the other flags ignore it. Same result and ownership as `open_read`.
 - `close`: flushes the runtime's buffer for `fd` if one exists (D11.5, via `rt.flush`),
   then calls `close(2)`. Returns `true` when `close(2)` returned 0. The descriptor is invalid
   afterwards in either case. Ownership: none in the types; `close` consumes `fd`.
@@ -474,6 +553,9 @@ fn write_file(string path, u8@ data) bool
   end of file, or `-1` with `sys.errno()` set. `EINTR` is retried inside the call. When
   `buf.len == 0` the result is `0` and no system call is made. Ownership: none; an `own` buffer
   lends (D17.4).
+- `write`: one `write(2)` from `buf`. Returns the number of bytes written (at most `buf.len`), or
+  `-1` with `sys.errno()` set. `EINTR` is retried inside the call. When `buf.len == 0` the result
+  is `0` and no system call is made. Ownership: none.
 - `write_all`: writes every byte of `buf`, looping over partial writes and retrying `EINTR`.
   Returns `false` on the first error; some bytes may have been written. A `string own s` is
   written as `write_all(fd, cast(s[..], u8@))`, a cast of a view (1.3). Ownership: none.
@@ -497,6 +579,13 @@ fn write_file(string path, u8@ data) bool
   `defer del(data);` on the `u8 mut@ own mut data` whose address it passed (1.3).
 - `write_file`: `open_write`, `write_all`, `close`. Returns `true` only when all three succeed.
   Ownership: none.
+- `is_terminal`: `true` when `isatty(3)` says that `fd` names a terminal. Returns `false` with
+  `ENOTTY` for a descriptor of another file and `EBADF` for a descriptor that is not open.
+  Ownership: none.
+- `pipe`: makes a pipe with `pipe(2)`, writes the descriptor of its read end to `*read_end` and
+  of its write end to `*write_end`, and returns `true`. Returns `false` with the errno of `pipe`,
+  for example `EMFILE` when the process has no free descriptor, and changes neither. Ownership:
+  none in the types; the caller closes both descriptors.
 
 ```fort
 import std.io;
@@ -539,6 +628,9 @@ fn from_cstr(char* p) string
 fn from_cbuf(u8@ b) string
 fn parse_i64(string s, i64 mut* out) bool
 fn parse_u64(string s, u64 base, u64 mut* out) bool
+fn parse_f64(string s, f64 mut* out) bool
+fn parse_f32(string s, f32 mut* out) bool
+fn format_f64(u8 mut@ buf, i32 precision, f64 v) i32
 fn digit_value(char ch) i64
 fn is_digit(char ch) bool
 fn is_alpha(char ch) bool
@@ -599,6 +691,19 @@ fn is_hex(char ch) bool
   prefix, no `_` (stripping prefixes and separators is the lexer's job). Returns `false` when
   `s` is empty, `base` is out of range, a character is not a digit below `base`, or the value
   overflows `u64`.
+- `parse_f64`: reads the longest prefix of `s` that `strtod(3)` reads, as the C library reads
+  it: white space first, then a decimal or a hexadecimal form, `inf` or `nan`; the text after the
+  prefix stays unread, and a text with no number gives 0. A NUL in `s` ends the text. Writes the
+  value to `*out` and returns `true` with `sys.errno()` unchanged when the value is in range.
+  Returns `false` with `ERANGE` when it is not; `*out` then holds the value that `strtod` gives,
+  an infinity or a value near 0. Ownership: none; the copy with a NUL for C is freed before the
+  return.
+- `parse_f32`: `parse_f64` for an `f32`, with `strtof(3)`.
+- `format_f64`: writes `v` in the exponent form `%.*e` of `snprintf(3)`, with `precision` digits
+  after the point, as the C library writes it: at most `buf.len - 1` bytes of the text into
+  `buf`, then a NUL. An empty `buf` gets no byte. Returns the length of the whole text, which is
+  `buf.len` or more when the text did not fit, or a value below 0 when `snprintf` fails. A
+  `precision` below 0 gives 6 digits. Ownership: none.
 - `digit_value`: the value of `ch` as a digit in bases up to 36 (`'7'` is 7, `'b'` and `'B'`
   are 11), or `-1`.
 - `is_digit` `0-9`; `is_alpha` `A-Z` and `a-z` (not `_`); `is_alnum` either; `is_space` space,
@@ -1201,7 +1306,10 @@ fn serve_one(u16 port) bool {
 ### 2.14 `std.os`
 
 The per-target facts of the standard library (D13.2). Each target has its own source, and both
-sources declare the same names. `TARGET` is the target triple of the standard root. A compiler
+sources declare the same names, but for one private name each: `PROC_SELF_EXE` on Linux and
+`_NSGetExecutablePath` on Mac. The ctest `std_os_shared` holds the names, the text that both
+sources share, and each item above the shared part whose text is not per target.
+`TARGET` is the target triple of the standard root. A compiler
 built with that root stores it as its built target (D14.1). `exe_path` gives the path of the
 running binary: Linux reads the symbolic link `/proc/self/exe` with `libc.readlink`. Mac calls
 dyld's `_NSGetExecutablePath` and resolves the answer with `real_path` when the file still
@@ -1221,6 +1329,25 @@ fn real_path(string path, strbuf.str_buf mut* out) bool;
 fn open_nonblocking(string path) i32;
 fn file_mode(i32 fd, u32 mut* mode) bool;
 fn path_mode(string path, u32 mut* mode) bool;
+
+fn error_text(i32 code, strbuf.str_buf mut* out) void;
+fn can_access(string path, i32 mode) bool;
+fn make_dir(string path, u32 mode) bool;
+fn remove_file(string path) bool;
+fn remove_dir(string path) bool;
+fn remove_at(i32 dir_fd, string name, bool directory) bool;
+fn rename(string old_path, string new_path) bool;
+fn read_link(string path, strbuf.str_buf mut* out) bool;
+fn current_dir(strbuf.str_buf mut* out) bool;
+fn make_temp_dir(string template, strbuf.str_buf mut* out) bool;
+fn list_dir(string path, strbuf.str_buf mut* out) bool;
+fn list_dir_fd(i32 dir_fd, strbuf.str_buf mut* out) bool;
+
+struct dir_entry {
+    string name;
+    u8 kind;
+}
+fn next_entry(string list, u64 mut* at, dir_entry mut* entry) bool;
 ```
 
 `exe_path` appends the path to `out` and returns true. It returns false and leaves `out`
@@ -1241,6 +1368,50 @@ Darwin arm64. `path_mode` writes the same bits of the file that `path` names, af
 symbolic link, and returns true; it returns false with errno set when `stat(2)` fails. It opens
 nothing, so a FIFO that has no writer and a file that the process cannot read give their mode.
 `std.os` declares `stat` for the reason of `fstat`, with the same buffer.
+
+The functions of the second group are the same on both targets. Each one that takes a path
+copies it into a NUL-terminated buffer with `str.to_cstr`, and frees it before it returns. Each
+one that returns `bool` returns `true` when its C call succeeds, and `false` with the errno of
+that call in `sys.errno()` when the call fails; a function with an `out` buffer then leaves it
+unchanged.
+`error_text` appends the `strerror(3)` text of an errno value to `out`, for example `No such
+file or directory` for `ENOENT`. A value that the system does not have gives a text that names
+the value. glibc frees the storage of such a text at the next call with another unknown value,
+and the Darwin C library writes it into one static buffer, so `error_text` copies the text before
+it returns. errno stays as it was: the Darwin `strerror` sets `EINVAL` for an unknown value, and
+`error_text` puts the old value back, as glibc keeps it.
+`can_access` asks `access(2)` whether the process can reach `path` for `mode`, such
+as `libc.R_OK`. `make_dir` makes a directory with `mkdir(2)` and the permission bits `mode`,
+less the umask; an entry at `path` gives `EEXIST`. `remove_file` removes an entry that is no
+directory with `unlink(2)`, and a symbolic link goes, not its target. `remove_dir` removes an
+empty directory with `rmdir(2)`. `remove_at` removes the entry `name` of the directory that
+`dir_fd` names with `unlinkat(2)`: an empty directory when `directory` is true, and else an entry
+that is no directory. `rename` gives a file a new name with `rename(2)` (2.2).
+`read_link` appends the target of the symbolic link `path` to `out`; a path that is no link
+gives `EINVAL`. `current_dir` appends the absolute path of the working directory with
+`getcwd(3)`; a working directory that was removed gives `ENOENT`. Both read into a buffer of 256
+bytes first and double it while the path does not fit, up to 65536 bytes; a longer path gives
+`ERANGE`. `make_temp_dir` makes a new directory with `mkdtemp(3)` from `template`, whose last six
+bytes are `XXXXXX`, and appends its path to `out`. glibc refuses a template that does not end in
+six X with `EINVAL`, and the Darwin C library takes it.
+`list_dir` appends each entry of the directory `path` but `.` and `..` to `out`, in the order of
+`readdir(3)`: one byte of its kind, a `libc.DT_` value, then its name, then a NUL. A file system
+that does not record kinds gives `libc.DT_UNKNOWN`. For each record it checks `reclen` against
+the sizes of `dirent_head` and `dirent`, copies `reclen` bytes into a zero local `dirent`, and
+reads the name there with `str.from_cbuf` (2.2, D9.8); a record whose size does not fit gives
+`EINVAL`. errno is 0 before each `readdir`, so an error of `readdir` is told from the end of the
+stream. `list_dir_fd` does the same for the directory that the open descriptor `dir_fd` names: it
+reads through a duplicate from `dup(2)` and `fdopendir(3)`, so `dir_fd` stays open, and a
+symbolic link that replaces the directory at its path does not change what it reads. The
+duplicate shares the position of `dir_fd`, so `list_dir_fd` moves it to the first entry with
+`lseek(2)` before the read, and a second call gives each entry again. It reads the type of
+`dir_fd` with `fstat(2)` first: a descriptor of a file of another type gives `ENOTDIR`, and its
+position does not change.
+`next_entry` reads the entry at `*at` of such a list into `*entry`, moves `*at` to the next
+entry and returns `true`; it returns `false` at the end of the list, and for an entry that no NUL
+ends, with `*at` and `*entry` unchanged, so it reads only inside the list. A caller starts with
+`*at` at 0. The name is a view of the list. Ownership: the buffers belong to the caller; the
+name of a `dir_entry` is a view (D17.3).
 
 ### 2.15 `std.digest.sha256`
 

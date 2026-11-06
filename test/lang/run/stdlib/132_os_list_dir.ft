@@ -1,0 +1,94 @@
+//! run
+//! stdout:
+//| true 3
+//| a.ft file
+//| b.txt file
+//| sub directory
+//| next_entry at the end false
+//| false true true
+//| list_dir_fd true 3 true
+//| list_dir_fd of no descriptor false true
+//| list_dir_fd of a file false true
+//| empty true 0
+import std.io;
+import std.libc;
+import std.os;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+// os.list_dir gives the entries of a directory but `.` and `..`, each with its kind, and
+// os.next_entry reads them back (stdlib.md 2.14). The order of readdir(3) is the order of the
+// file system, so the test looks each name up. list_dir_fd reads through a duplicate of the
+// descriptor, so the descriptor stays open. A missing directory gives ENOENT, a descriptor that is
+// not open EBADF, and a descriptor of a file ENOTDIR; each leaves the buffer as it was.
+
+// EBADF, the same value on both targets.
+i32 EBADF = 9;
+
+// The word of a kind.
+fn kind_word(u8 kind) string {
+    if (kind == libc.DT_DIR) {
+        return "directory";
+    }
+    if (kind == libc.DT_REG) {
+        return "file";
+    }
+    return "other";
+}
+
+// Prints the kind of the entry `name` of `listed`, or `absent`.
+fn print_kind(string listed, string name) void {
+    u64 mut at = 0;
+    os.dir_entry mut entry = {};
+    while (os.next_entry(listed, &at, &entry)) {
+        if (entry.name == name) {
+            println(name, " ", kind_word(entry.kind));
+            return;
+        }
+    }
+    println(name, " absent");
+}
+
+// The count of the entries of `listed`.
+fn count(string listed) u64 {
+    u64 mut n = 0;
+    u64 mut at = 0;
+    os.dir_entry mut entry = {};
+    while (os.next_entry(listed, &at, &entry)) {
+        n += 1;
+    }
+    return n;
+}
+
+fn main() i32 {
+    os.make_dir("t-list", 0o700);
+    os.make_dir("t-list/sub", 0o700);
+    io.write_file("t-list/a.ft", cast("a", u8@));
+    io.write_file("t-list/b.txt", cast("b", u8@));
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    bool listed = os.list_dir("t-list", &b);
+    println(listed, " ", count(strbuf.view(&b)));
+    print_kind(strbuf.view(&b), "a.ft");
+    print_kind(strbuf.view(&b), "b.txt");
+    print_kind(strbuf.view(&b), "sub");
+    u64 mut at = strbuf.view(&b).len;
+    os.dir_entry mut entry = {};
+    println("next_entry at the end ", os.next_entry(strbuf.view(&b), &at, &entry));
+    strbuf.clear(&b);
+    strbuf.append(&b, "kept");
+    println(os.list_dir("t-missing", &b), " ", strbuf.view(&b) == "kept", " ",
+            sys.errno() == libc.ENOENT);
+    strbuf.clear(&b);
+    i32 fd = io.open("t-list", libc.O_RDONLY | libc.O_DIRECTORY, 0);
+    bool through_fd = os.list_dir_fd(fd, &b);
+    println("list_dir_fd ", through_fd, " ", count(strbuf.view(&b)), " ", io.close(fd));
+    strbuf.clear(&b);
+    println("list_dir_fd of no descriptor ", os.list_dir_fd(-1, &b), " ", sys.errno() == EBADF);
+    i32 file = io.open("t-list/a.ft", libc.O_RDONLY, 0);
+    println("list_dir_fd of a file ", os.list_dir_fd(file, &b), " ", sys.errno() == libc.ENOTDIR);
+    io.close(file);
+    println("empty ", os.list_dir("t-list/sub", &b), " ", count(strbuf.view(&b)));
+    return 0;
+}

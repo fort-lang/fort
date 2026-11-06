@@ -1,0 +1,54 @@
+//! run
+//! stdout:
+//| done 0 0
+//| done 3 0
+//| done 0 0
+//| done 1 0
+//| not started true
+//| not started true
+//| not started true
+//| done 0 15
+import std.libc;
+import std.sys;
+
+// sys.run runs a command in a child process and waits for it (stdlib.md 2.1). The wait status
+// holds the exit status in its second byte and a signal that ended the child in its low seven
+// bits. The pairs of `env` go to the environment of the child alone. A program that execvp(3)
+// cannot find gives ENOENT, and an empty argv or an odd count of strings in `env` EINVAL.
+
+// The word of a result, then the exit status and the signal of the wait status.
+fn show(sys.run_result r, i32 status) void {
+    if (r == sys.run_result.rr_done) {
+        println("done ", (status >> 8) & 255, " ", status & 127);
+    } else if (r == sys.run_result.rr_not_started) {
+        println("not started");
+    } else {
+        println("not waited");
+    }
+}
+
+fn main() i32 {
+    i32 mut status = 0;
+    string[3] ok = {"sh", "-c", "exit 0"};
+    show(sys.run(ok[..], ok[..0], &status), status);
+    string[3] three = {"sh", "-c", "exit 3"};
+    show(sys.run(three[..], three[..0], &status), status);
+    string[3] check = {"sh", "-c", "test \"$FORT_T_RUN\" = yes"};
+    string[2] env = {"FORT_T_RUN", "yes"};
+    show(sys.run(check[..], env[..], &status), status);
+    // the parent keeps its environment
+    show(sys.run(check[..], check[..0], &status), status);
+    string[1] missing = {"fort-t-no-such-program"};
+    sys.run_result mut r = sys.run(missing[..], missing[..0], &status);
+    println(r == sys.run_result.rr_not_started ? "not started" : "other", " ",
+            sys.errno() == libc.ENOENT);
+    r = sys.run(missing[..0], missing[..0], &status);
+    println(r == sys.run_result.rr_not_started ? "not started" : "other", " ",
+            sys.errno() == libc.EINVAL);
+    r = sys.run(ok[..], env[..1], &status);
+    println(r == sys.run_result.rr_not_started ? "not started" : "other", " ",
+            sys.errno() == libc.EINVAL);
+    string[3] killed = {"sh", "-c", "kill -TERM $$"};
+    show(sys.run(killed[..], killed[..0], &status), status);
+    return 0;
+}

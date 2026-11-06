@@ -14,11 +14,12 @@
 //| 0
 import std.libc;
 import std.str;
+import std.strbuf;
 import std.sys;
 
 // sys.args returns the same string@ that main received (D8.6, D11.6), a view
 // of storage the runtime owns whose elements are NUL-terminated; sys.env
-// looks a variable up and leaves *out alone when it is absent; sys.errno
+// appends a copy of a variable and leaves *out alone when it is absent; sys.errno
 // reports C errno after a failed call (stdlib.md 1.4, 2.1).
 fn main(string@ args) i32 {
     string@ from_sys = sys.args();
@@ -39,15 +40,20 @@ fn main(string@ args) i32 {
     // Two calls describe the same storage, not two copies of it.
     println(sys.args().ptr == from_sys.ptr);
 
-    string mut value = "<unchanged>";
-    println(sys.env("FORT_T027_ABSENT_VARIABLE", &value), " ", value);
+    strbuf.str_buf mut value = strbuf.create();
+    defer del(value.data);
+    strbuf.append(&value, "<unchanged>");
+    println(sys.env("FORT_T027_ABSENT_VARIABLE", &value), " ", strbuf.view(&value));
     // An empty name cannot name a variable either.
-    println(sys.env("", &value), " ", value);
+    println(sys.env("", &value), " ", strbuf.view(&value));
 
     // PATH is set for every process the harness starts.
-    println(sys.env("PATH", &value), " ", value.len > 0);
-    // The result aliases the environment, so C reads it as a string.
-    println(libc.strlen(value.ptr) == value.len);
+    strbuf.clear(&value);
+    println(sys.env("PATH", &value), " ", strbuf.view(&value).len > 0);
+    // The result is a copy, so a later set_env does not change it.
+    u64 before = strbuf.view(&value).len;
+    sys.set_env("PATH", "x");
+    println(strbuf.view(&value).len == before && strbuf.view(&value) != "x");
 
     // errno after a failed call: opening a file that does not exist.
     char mut@ own path = str.to_cstr("no/such/file/for/T027");

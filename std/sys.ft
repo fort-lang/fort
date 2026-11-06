@@ -2,6 +2,7 @@
 import std.libc;
 import std.rt;
 import std.str;
+import std.strbuf;
 
 /// Flushes runtime output and exits with status code & 0xFF.
 /// Deferred statements in the calling function do not run.
@@ -22,16 +23,210 @@ fn errno() i32 {
 }
 
 /// Looks up name in the process environment.
-/// Returns true and writes the NUL-terminated value to *out when name is present.
-/// Returns false and leaves *out unchanged when the variable is absent.
+/// Appends a copy of the value to *out and returns true when name is present. setenv(3) can
+/// free the storage of a value, so the function copies the value before it returns, and a later
+/// set_env does not change the copy.
+/// Returns false and leaves *out unchanged when the variable is absent, and when name holds a
+/// '=', which no variable name holds: getenv(3) of glibc finds no variable for such a name, and
+/// the Darwin C library looks up the name before the '='.
 /// A NUL in name limits the lookup to its prefix.
-fn env(string name, string mut* out) bool {
+fn env(string name, strbuf.str_buf mut* out) bool {
+    for (char ch : name) {
+        if (ch == '\0') {
+            break;
+        }
+        if (ch == '=') {
+            return false;
+        }
+    }
     char mut@ own key = str.to_cstr(name);
     defer del(key);
     char* value = libc.getenv(&key[0]);
     if (value == null) {
         return false;
     }
-    *out = str.from_cstr(value);
+    strbuf.append(out, str.from_cstr(value));
     return true;
+}
+
+/// Sets C errno for the calling thread to `code`.
+fn set_errno(i32 code) void {
+    *libc.errno_slot() = code;
+}
+
+/// Returns the process id of the calling process. getpid(2) does not fail.
+fn pid() i32 {
+    return libc.getpid();
+}
+
+/// Ends the process with the signal SIGABRT, as abort(3) does. It flushes no runtime output, and
+/// deferred statements do not run.
+fn abort() noreturn {
+    libc.abort();
+}
+
+/// Sends the signal `sig` to the calling thread with raise(3). Returns true when raise accepted
+/// the signal; a signal that ends the process does not return. Returns false and sets
+/// sys.errno() for a signal number that the system does not have.
+fn raise_signal(i32 sig) bool {
+    return libc.raise(sig) == 0;
+}
+
+/// Sets the variable `name` of the process environment to `value`, and replaces a value that is
+/// there. Returns false and sets sys.errno() when setenv(3) fails: an empty name or a name that
+/// contains '=' gives EINVAL. A NUL in name or value limits it to its prefix.
+fn set_env(string name, string value) bool {
+    char mut@ own key = str.to_cstr(name);
+    defer del(key);
+    char mut@ own text = str.to_cstr(value);
+    defer del(text);
+    return libc.setenv(&key[0], &text[0], 1) == 0;
+}
+
+/// What run did with a command.
+enum run_result {
+    rr_done,        // the command ran and run waited for it: *status holds its wait status
+    rr_not_started, // the command did not start; sys.errno() holds the reason
+    rr_not_waited,  // the command started, but waitpid(2) failed; sys.errno() holds the reason
+}
+
+// The errno of a failed execvp(3), which the child writes to the pipe and the parent reads, four
+// bytes, the low byte first. Nothing else is written to that pipe, so a short read means that the
+// child reached the exec, and a full one that it did not.
+u64 ERRNO_BYTES = 4;
+u64 BYTE_BITS = 8;
+u64 BYTE_MASK = 255;
+
+// The status of a child that cannot exec. The parent reads the errno from the pipe first, so
+// run does not give this status.
+i32 EXEC_FAILED_STATUS = 127;
+
+// The C form of a list of strings: each string followed by its NUL in `bytes`, and in `items` a
+// pointer to each string and then null, the form of the `argv` of execvp(3).
+struct c_strings {
+    char mut@ own bytes;
+    char mut* mut@ own items;
+}
+
+// The C form of `list`. The caller frees both fields.
+fn c_strings_of(string@ list) c_strings {
+    u64 mut total = 0;
+    for (string s : list) {
+        total += s.len + 1;
+    }
+    c_strings c = c_strings{new(char, total), new(char mut*, list.len + 1)};
+    u64 mut at = 0;
+    u64 mut i = 0;
+    while (i < list.len) {
+        c.items[i] = &c.bytes[at];
+        for (char ch : list[i]) {
+            c.bytes[at] = ch;
+            at += 1;
+        }
+        c.bytes[at] = '\0';
+        at += 1;
+        i += 1;
+    }
+    c.items[list.len] = null;
+    return c;
+}
+
+/// Runs the command `argv` in a child process and waits for it. `argv[0]` names the program,
+/// which execvp(3) looks for in PATH. `env` holds pairs of a name and a value, which the child
+/// sets in its environment with setenv(3) before the exec; a pair that setenv refuses leaves the
+/// environment as it was. The command gets the descriptors of the calling process.
+/// Returns rr_done with the wait status of waitpid(2) in *status. Returns rr_not_started when
+/// pipe(2), fcntl(2), fork(2) or execvp(3) fails, with the errno of that call in sys.errno(), and
+/// with EINVAL for an empty `argv` or an odd count of strings in `env`. Returns rr_not_waited when
+/// waitpid fails with an errno other than EINTR, which it retries. A child that run started is
+/// waited for in each case but the last, so no zombie stays. A NUL in a string of `argv` or `env`
+/// ends that string. run flushes no runtime output buffer: a caller whose output must come before
+/// the output of the command calls io.flush first, and the child flushes nothing either.
+fn run(string@ argv, string@ env, i32 mut* status) run_result {
+    if (argv.len == 0 || env.len % 2 != 0) {
+        set_errno(libc.EINVAL);
+        return run_result.rr_not_started;
+    }
+    // made before fork(2), so the child only calls close(2), setenv(3), execvp(3), write(2) and
+    // _exit(2)
+    c_strings mut args = c_strings_of(argv);
+    defer {
+        del(args.bytes);
+        del(args.items);
+    }
+    c_strings mut vars = c_strings_of(env);
+    defer {
+        del(vars.bytes);
+        del(vars.items);
+    }
+    char* path = args.items[0];
+    void* c_argv = cast(&args.items[0], void*);
+    i32[2] mut fds = {};
+    if (libc.pipe(&fds[0]) != 0) {
+        return run_result.rr_not_started;
+    }
+    // The write end closes at the exec: that tells the parent that the exec succeeded.
+    if (libc.fcntl(fds[1], libc.F_SETFD, libc.FD_CLOEXEC) != 0) {
+        i32 failure = errno();
+        libc.close(fds[0]);
+        libc.close(fds[1]);
+        set_errno(failure);
+        return run_result.rr_not_started;
+    }
+    i32 child = libc.fork();
+    if (child < 0) {
+        i32 failure = errno();
+        libc.close(fds[0]);
+        libc.close(fds[1]);
+        set_errno(failure);
+        return run_result.rr_not_started;
+    }
+    if (child == 0) {
+        // The child: a return from execvp means that it failed, and the child sends its errno
+        // through the pipe.
+        libc.close(fds[0]);
+        u64 mut k = 0;
+        while (k < env.len) {
+            libc.setenv(vars.items[k], vars.items[k + 1], 1);
+            k += 2;
+        }
+        libc.execvp(path, c_argv);
+        u64 e = cast(errno(), u64);
+        u8[4] mut buf = {};
+        u64 mut i = 0;
+        while (i < ERRNO_BYTES) {
+            buf[i] = cast((e >> (i * BYTE_BITS)) & BYTE_MASK, u8);
+            i += 1;
+        }
+        libc.write(fds[1], &buf[0], ERRNO_BYTES);
+        libc._exit(EXEC_FAILED_STATUS);
+    }
+    libc.close(fds[1]);
+    u8[4] mut got = {};
+    i64 mut read = libc.read(fds[0], &got[0], ERRNO_BYTES);
+    while (read < 0 && errno() == libc.EINTR) {
+        read = libc.read(fds[0], &got[0], ERRNO_BYTES);
+    }
+    libc.close(fds[0]);
+    i32 mut wait_status = 0;
+    // A signal that the caller catches while the child runs stops the wait, not the child.
+    i32 mut waited = libc.waitpid(child, &wait_status, 0);
+    while (waited < 0 && errno() == libc.EINTR) {
+        waited = libc.waitpid(child, &wait_status, 0);
+    }
+    if (read == cast(ERRNO_BYTES, i64)) {
+        u64 mut e = 0;
+        u64 mut i = 0;
+        while (i < ERRNO_BYTES) {
+            e |= cast(got[i], u64) << (i * BYTE_BITS);
+            i += 1;
+        }
+        set_errno(cast(e, i32));
+        return run_result.rr_not_started;
+    }
+    if (waited < 0) {
+        return run_result.rr_not_waited;
+    }
+    *status = wait_status;
+    return run_result.rr_done;
 }
