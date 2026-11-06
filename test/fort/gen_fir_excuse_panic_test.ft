@@ -37,27 +37,25 @@ fn check_first(gen.emitter mut* g, fir_verify.runtime* rt, fir.module mut* m) vo
 }
 
 fn main() i32 {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
     strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    defer del(text.data);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     for (string line : TEXT) {
         strbuf.append(&text, line);
     }
-    fir.module mut m = fir_parse.parse_module(&e.c.m.s, "t.fir", strbuf.view(&text),
-                                              fir_env.prelude(&e));
-    defer fir.module_free(&m);
-    assert(fir_env.errors(&e) == 0);
-    fir_verify.runtime mut rt = fir_verify.runtime_of(&e.c.ck);
+    fir.module mut* own m = fir.module_make();
+    defer fir.module_drop_made(move(m));
+    fir_parse.parse_into(&e->c.m.s, "t.fir", strbuf.view(&text), fir_env.prelude(e), m);
+    assert(fir_env.errors(e) == 0);
+    fir_verify.runtime mut rt = fir_verify.runtime_of(&e->c.ck);
     rt.entry[cast(fir.check_kind.chk_overflow, u64)] = null;
     fir_verify.excuse_mode(&rt, true, false);
     fir_verify.violation mut v = fir_verify.violation{};
-    assert(!fir_verify.find_violation(fir.module_function_at(&m, 0), &rt, &v));
+    assert(!fir_verify.find_violation(fir.module_function_at(m, 0), &rt, &v));
     println("the check is excused before the pass");
-    gen.emitter mut g = gen.emitter{};
-    gen.gen_init(&g, &e.c.m.s, gen.gen_options{});
-    defer gen.gen_free(&g);
-    check_first(&g, &rt, &m);
+    gen.emitter mut* own g = gen.make(&e->c.m.s, gen.gen_options{});
+    defer gen.drop_made(move(g));
+    check_first(g, &rt, m);
     return 0;
 }

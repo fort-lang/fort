@@ -47,16 +47,15 @@ fn open_with(env mut* e, gen.gen_options opts) void {
     gen.gen_init(&e->g, &e->c.m.s, opts);
 }
 
-// Releases the emitter, then the checker and the sandbox: every text the
-// emitter interned is its own, and every annotation it read is the checker's.
+// Releases the environment at `e` through drop, which holds each release once, as check_env.close
+// does. The move leaves the zero value.
 fn close(env mut* e) void {
-    gen.gen_free(&e->g);
-    strbuf.free(&e->buf);
-    check_env.close(&e->c);
+    drop(move(*e));
 }
 
-// Releases an environment that the caller moves in, in the order of close. No part of it reads
-// the session that the emitter points to.
+// Releases an environment that the caller moves in: the emitter, the buffer, then the checker and
+// the sandbox. Every text the emitter interned is its own, and every annotation it read is the
+// checker's. No part of it reads the session that the emitter points to.
 fn drop(env mut e) void {
     gen.drop(move(e.g));
     del(e.buf.data);
@@ -64,14 +63,20 @@ fn drop(env mut e) void {
 }
 
 // Opens an environment in an allocation of its own, which does not move: the emitter points
-// into it.
+// into it. The options are those of the default build mode.
 fn make() env mut* own {
+    return make_with(gen.gen_options{});
+}
+
+// The same with the options of `opts`, for a suite that emits in the mode of `--release` or
+// `--no-bounds-check`, or for another target.
+fn make_with(gen.gen_options opts) env mut* own {
     env mut* own e = new(env);
-    open(e);
+    open_with(e, opts);
     return e;
 }
 
-// Ends an environment of make that the caller moves in.
+// Ends an environment of make or make_with that the caller moves in.
 fn drop_made(env mut* own p) void {
     env kept = move(*p);
     del(p);
@@ -454,15 +459,6 @@ fn join_lines(env mut* e, string@ lines) string {
         i += 1;
     }
     return strbuf.view(&e->buf);
-}
-
-// Calls `open_with` with two build-mode flags. A suite can request
-// `--release` or `--no-bounds-check` without constructing the option struct.
-fn gen_options_open(env mut* e, bool release, bool no_bounds_check) void {
-    gen.gen_options mut opts = gen.gen_options{};
-    opts.release = release;
-    opts.no_bounds_check = no_bounds_check;
-    open_with(e, opts);
 }
 
 // open_module over a sandbox whose std/rt.ft holds lower_env.RUNTIME: the runtime entry of each

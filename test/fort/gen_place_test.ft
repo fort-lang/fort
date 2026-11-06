@@ -21,7 +21,7 @@ import std.strbuf;
 // the field assertions are made against. `p` is slot 0 and `q` slot 2.
 fn open_point(gen_env.env mut* e) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, "struct point {\n    i32 x;\n    i32 y;\n}\n");
     strbuf.append(&b, "fn main() i32 {\n");
     strbuf.append(&b, "    point mut p = point{1, 2};\n");
@@ -38,11 +38,10 @@ string IDX = "    i32 mut i = 1;";
 // ---- the index ------------------------------------------------------------------------
 
 fn an_index_into_an_array_is_checked_against_its_written_length() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[3] mut lines = {ARR, IDX, "    i32 mut a = arr[i];"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // the index is extended by its own signedness, so a negative one
     // fails the same unsigned compare, and a fixed array's length is a
     // literal.
@@ -56,20 +55,19 @@ fn an_index_into_an_array_is_checked_against_its_written_length() void {
         "  %t6 = getelementptr inbounds [3 x i32], ptr %arr.0, i64 0, i64 %t4\n",
         "  %t7 = load i32, ptr %t6, align 4\n",
     };
-    string got = gen_env.main_text(&e);
-    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
+    string got = gen_env.main_text(e);
+    gen_env.expect_in(got, gen_env.join_lines(e, want[..]));
     gen_env.expect_in(
-        got, gen_env.join4(&e, "L2:\n",
+        got, gen_env.join4(e, "L2:\n",
                            "  call void @\"std.rt.fail_bounds\"(i64 %t4, i64 3, ptr @.file.0, ",
                            "i32 4, i32 20)\n", "  unreachable\n"));
 }
 
 fn an_index_into_a_span_reads_the_length_out_of_its_header() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[4] mut lines = {ARR, IDX, "    i32 mut@ mut sp = arr[..];", "    i32 mut b = sp[i];"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // a span's elements are reached through its `.ptr`, and its
     // length is the header field the check compares against. The check reads
     // the length once more as the operand it reports.
@@ -89,24 +87,23 @@ fn an_index_into_a_span_reads_the_length_out_of_its_header() void {
         "  %t19 = getelementptr inbounds i32, ptr %t18, i64 %t11\n",
         "  %t20 = load i32, ptr %t19, align 4\n",
     };
-    string got = gen_env.main_text(&e);
-    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
+    string got = gen_env.main_text(e);
+    gen_env.expect_in(got, gen_env.join_lines(e, want[..]));
     gen_env.expect_in(
-        got, gen_env.join2(&e, "  call void @\"std.rt.fail_bounds\"(i64 %t11, i64 %t16, ",
+        got, gen_env.join2(e, "  call void @\"std.rt.fail_bounds\"(i64 %t11, i64 %t16, ",
                            "ptr @.file.0, i32 5, i32 19)\n"));
 }
 
 fn no_bounds_check_removes_the_branch_and_nothing_else() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open_with(&e, gen.gen_options{false, true, ""});
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make_with(gen.gen_options{false, true, ""});
+    defer gen_env.drop_made(move(e));
     string[3] mut lines = {ARR, IDX, "    i32 mut a = arr[i];"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // `--no-bounds-check` removes the index branch, and the element is
     // reached the same way.
-    string got = gen_env.main_text(&e);
+    string got = gen_env.main_text(e);
     gen_env.expect_in(
-        got, gen_env.join4(&e, "  %t3 = load i32, ptr %i.1, align 4\n",
+        got, gen_env.join4(e, "  %t3 = load i32, ptr %i.1, align 4\n",
                            "  %t4 = sext i32 %t3 to i64\n",
                            "  %t5 = getelementptr inbounds [3 x i32], ptr %arr.0, i64 0, i64 %t4\n",
                            "  %t6 = load i32, ptr %t5, align 4\n"));
@@ -117,11 +114,10 @@ fn no_bounds_check_removes_the_branch_and_nothing_else() void {
 // ---- span expressions --------------------------------------------------------------------
 
 fn a_span_of_an_array_checks_both_bounds_in_one_branch() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[3] mut lines = {ARR, IDX, "    i32 mut@ mut sp = arr[..];"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // `0 <= lo <= hi <= len` in one branch, both compares unsigned,
     // and an absent low bound is zero and an absent high one the length.
     string[12] want = {
@@ -138,10 +134,10 @@ fn a_span_of_an_array_checks_both_bounds_in_one_branch() void {
         "  %t9 = getelementptr inbounds %fort.span, ptr %sp.2, i32 0, i32 1\n",
         "  store i64 %t7, ptr %t9, align 8\n",
     };
-    string got = gen_env.main_text(&e);
-    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
+    string got = gen_env.main_text(e);
+    gen_env.expect_in(got, gen_env.join_lines(e, want[..]));
     gen_env.expect_in(
-        got, gen_env.join4(&e, "L2:\n",
+        got, gen_env.join4(e, "L2:\n",
                            "  call void @\"std.rt.fail_span\"(i64 0, i64 3, i64 3, ptr @.file.0, ",
                            "i32 4, i32 26)\n", "  unreachable\n"));
 }
@@ -149,10 +145,9 @@ fn a_span_of_an_array_checks_both_bounds_in_one_branch() void {
 // ---- fields and pseudo fields --------------------------------------------------------------
 
 fn a_field_of_a_value_and_a_field_behind_a_pointer_are_one_shape() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
-    assert(open_point(&e));
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(open_point(e));
     // `p->f` is `(*p).f`, so the pointer is loaded first and the same shape
     // follows.
     string[8] want = {
@@ -165,20 +160,19 @@ fn a_field_of_a_value_and_a_field_behind_a_pointer_are_one_shape() void {
         "  %t6 = load i32, ptr %t5, align 4\n",
         "  store i32 %t6, ptr %d.3, align 4\n",
     };
-    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
+    gen_env.expect_in(gen_env.main_text(e), gen_env.join_lines(e, want[..]));
 }
 
 fn the_pseudo_fields_of_a_span_are_its_header_fields() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[4] mut lines = {ARR, IDX, "    i32 mut@ mut sp = arr[..];", "    u64 mut n = sp.len;"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // `.len` and `.ptr` are the two header fields and not a load of a struct
     // member the user declared.
     gen_env.expect_in(
-        gen_env.main_text(&e),
-        gen_env.join3(&e,
+        gen_env.main_text(e),
+        gen_env.join3(e,
                       "  %t10 = getelementptr inbounds %fort.span, ptr %sp.2, i32 0, i32 1\n",
                       "  %t11 = load i64, ptr %t10, align 8\n",
                       "  store i64 %t11, ptr %n.3, align 8\n"));
@@ -187,15 +181,14 @@ fn the_pseudo_fields_of_a_span_are_its_header_fields() void {
 // ---- the initializers ---------------------------------------------------------------------
 
 fn a_positional_struct_literal_writes_its_members_in_field_order() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
-    assert(open_point(&e));
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(open_point(e));
     // The four walks that count field declarations must agree, so the
     // literal's members land at the indices the named type wrote.
     gen_env.expect_in(
-        gen_env.main_text(&e),
-        gen_env.join4(&e,
+        gen_env.main_text(e),
+        gen_env.join4(e,
                       "  %t0 = getelementptr inbounds %struct.main.point, ptr %p.0, i32 0, i32 0\n",
                       "  store i32 1, ptr %t0, align 4\n",
                       "  %t1 = getelementptr inbounds %struct.main.point, ptr %p.0, i32 0, i32 1\n",
@@ -203,39 +196,37 @@ fn a_positional_struct_literal_writes_its_members_in_field_order() void {
 }
 
 fn a_designated_literal_zeroes_the_place_first() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     strbuf.append(&b, "struct point {\n    i32 x;\n    i32 y;\n}\n");
     strbuf.append(&b, "fn main() i32 {\n    point mut z = point{.y = 5};\n");
     strbuf.append(&b, "    i32[2] mut arr = {};\n    return 0;\n}\n");
-    assert(gen_env.open_src(&e, strbuf.view(&b)));
+    assert(gen_env.open_src(e, strbuf.view(&b)));
     // Omitted fields are zeroed, so the designated form memsets the place
     // before it writes the members it names.
     gen_env.expect_in(
-        gen_env.main_text(&e),
-        gen_env.join3(&e,
+        gen_env.main_text(e),
+        gen_env.join3(e,
                       "  call void @llvm.memset.p0.i64(ptr align 4 %z.0, i8 0, i64 8, i1 false)\n",
                       "  %t0 = getelementptr inbounds %struct.main.point, ptr %z.0, i32 0, i32 1\n",
                       "  store i32 5, ptr %t0, align 4\n"));
     // `{}` is the zero value of the type, whatever the type is.
     gen_env.expect_in(
-        gen_env.main_text(&e),
+        gen_env.main_text(e),
         "  call void @llvm.memset.p0.i64(ptr align 4 %arr.1, i8 0, i64 8, i1 false)\n");
 }
 
 fn an_array_literal_writes_one_element_at_a_time() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[2] mut lines = {ARR, IDX};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // the array shape, with the element index a literal.
     gen_env.expect_in(
-        gen_env.main_text(&e),
-        gen_env.join6(&e,
+        gen_env.main_text(e),
+        gen_env.join6(e,
                       "  %t0 = getelementptr inbounds [3 x i32], ptr %arr.0, i64 0, i64 0\n",
                       "  store i32 1, ptr %t0, align 4\n",
                       "  %t1 = getelementptr inbounds [3 x i32], ptr %arr.0, i64 0, i64 1\n",
@@ -245,15 +236,14 @@ fn an_array_literal_writes_one_element_at_a_time() void {
 }
 
 fn a_string_value_is_its_two_header_fields() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[2] mut lines = {"    string mut s = \"hi\";", IDX};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // The bytes and the length the trailing NUL excludes.
     gen_env.expect_in(
-        gen_env.main_text(&e),
-        gen_env.join4(&e,
+        gen_env.main_text(e),
+        gen_env.join4(e,
                       "  %t0 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 0\n",
                       "  store ptr @.str.0, ptr %t0, align 8\n",
                       "  %t1 = getelementptr inbounds %fort.span, ptr %s.0, i32 0, i32 1\n",
@@ -268,7 +258,7 @@ fn a_string_value_is_its_two_header_fields() void {
 // no owner holds an allocation at the end of the body (D17.20).
 fn open_own(gen_env.env mut* e) bool {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, "fn main() i32 {\n");
     strbuf.append(&b, "    i32 mut* own mut p = new(i32);\n");
     strbuf.append(&b, "    i32 mut@ own mut s = new(i32, 3);\n");
@@ -284,22 +274,20 @@ fn open_own(gen_env.env mut* e) bool {
 }
 
 fn new_of_one_object_is_a_call_whose_result_is_an_ordinary_scalar() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
-    assert(open_own(&e));
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(open_own(e));
     // The runtime zeroes the storage and never returns null, so the module
     // emits no test of the result. The position is the builtin's name.
     gen_env.expect_in(
-        gen_env.main_text(&e),
+        gen_env.main_text(e),
         "  %t0 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, i32 2, i32 26)\n");
 }
 
 fn new_of_a_span_writes_the_header_it_allocated() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
-    assert(open_own(&e));
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(open_own(e));
     // The count is an `i32` even when it is a literal, so it is widened to 64
     // bits and checked. The emptiness pass proves the store into `s`, so every
     // mode writes the header field by field straight into `s`, with no
@@ -316,18 +304,17 @@ fn new_of_a_span_writes_the_header_it_allocated() void {
         "  %t5 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n",
         "  store i64 %t1, ptr %t5, align 8\n",
     };
-    string got = gen_env.main_text(&e);
-    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
+    string got = gen_env.main_text(e);
+    gen_env.expect_in(got, gen_env.join_lines(e, want[..]));
     assert(str.find(got, "icmp ne ptr") < 0);
 }
 
 fn an_unsigned_count_needs_no_branch_at_all() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[3] mut lines = {"    u64 mut m = 3;", "    i32 mut@ own mut s = new(i32, m);",
                            "    del(s);"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // An unsigned count is never negative. So the check is on the signed path
     // alone and the width already agrees, so nothing widens it either (item
     // 9). The store into `s` has no check either, and the `del` that ends the
@@ -340,20 +327,19 @@ fn an_unsigned_count_needs_no_branch_at_all() void {
         "  %t3 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n",
         "  store i64 %t0, ptr %t3, align 8\n",
     };
-    string got = gen_env.main_text(&e);
-    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
+    string got = gen_env.main_text(e);
+    gen_env.expect_in(got, gen_env.join_lines(e, want[..]));
     assert(str.find(got, "icmp slt") < 0);
     assert(str.find(got, "fail_alloc_count") < 0);
     assert(str.find(got, " br ") < 0);
 }
 
 fn a_negative_count_is_checked_and_the_check_survives_release_mode() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open_with(&e, gen.gen_options{true, true, ""});
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make_with(gen.gen_options{true, true, ""});
+    defer gen_env.drop_made(move(e));
     string[3] mut lines = {"    i32 mut n = 3;", "    i32 mut@ own mut s = new(i32, n);",
                            "    del(s);"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // It is not a bounds check, so neither `--release` nor
     // `--no-bounds-check` removes it, and it is reported with the signed
     // value the source wrote. No mode has an overwrite check, so the header
@@ -371,37 +357,35 @@ fn a_negative_count_is_checked_and_the_check_survives_release_mode() void {
         "  %t5 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n",
         "  store i64 %t1, ptr %t5, align 8\n",
     };
-    string got = gen_env.main_text(&e);
-    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
+    string got = gen_env.main_text(e);
+    gen_env.expect_in(got, gen_env.join_lines(e, want[..]));
     gen_env.expect_in(
-        got, gen_env.join4(&e, "L2:\n",
+        got, gen_env.join4(e, "L2:\n",
                            "  call void @\"std.rt.fail_alloc_count\"(i64 %t1, ptr @.file.0, ",
                            "i32 3, i32 26)\n", "  unreachable\n"));
 }
 
 fn del_of_an_lvalue_frees_the_pointer_and_empties_the_storage() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
-    assert(open_own(&e));
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(open_own(e));
     // The emptying is not an assignment and carries no overwrite check, which
     // is what makes `del(v); v = new(...)` pass one.
-    gen_env.expect_in(gen_env.main_text(&e),
-                      gen_env.join4(&e, "  %t6 = load ptr, ptr %p.0, align 8\n",
+    gen_env.expect_in(gen_env.main_text(e),
+                      gen_env.join4(e, "  %t6 = load ptr, ptr %p.0, align 8\n",
                                     "  call void @\"std.rt.free\"(ptr %t6)\n",
                                     "  store ptr null, ptr %p.0, align 8\n",
                                     "  %t7 = getelementptr inbounds %fort.span, ptr %s.1, "));
 }
 
 fn move_of_an_aggregate_goes_through_an_intermediate() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
-    assert(open_own(&e));
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(open_own(e));
     // The destination may be the operand itself and nothing here can tell. The value is read
     // into a place of the emitter's own and the operand is emptied before it is handed on, here
     // straight into `t`, because every mode folds the store that the emptiness pass proves.
-    string got = gen_env.main_text(&e);
+    string got = gen_env.main_text(e);
     gen_env.expect_in(got, "  %tmp0 = alloca %fort.span, align 8\n");
     assert(str.find(got, "%tmp1") < 0);
     string[5] want = {
@@ -411,47 +395,44 @@ fn move_of_an_aggregate_goes_through_an_intermediate() void {
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t.2, ptr align 8 %tmp0, i64 16, ",
         "i1 false)\n",
     };
-    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
+    gen_env.expect_in(got, gen_env.join_lines(e, want[..]));
 }
 
 fn an_arrow_reaches_the_header_the_pointer_points_at() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[3] mut lines = {"    string mut s = \"hi\";", "    string mut* mut q = &s;",
                            "    u64 mut n = q->len;"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // `p->f` is `(*p).f`, so the pointer is loaded and the header field is
     // read where it reaches. The `.len` is that field and not a member the
     // user declared.
     gen_env.expect_in(
-        gen_env.main_text(&e),
-        gen_env.join3(&e, "  %t2 = load ptr, ptr %q.1, align 8\n",
+        gen_env.main_text(e),
+        gen_env.join3(e, "  %t2 = load ptr, ptr %q.1, align 8\n",
                       "  %t3 = getelementptr inbounds %fort.span, ptr %t2, i32 0, i32 1\n",
                       "  %t4 = load i64, ptr %t3, align 8\n"));
 }
 
 fn a_span_of_a_pointer_is_refused_in_main() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[3] mut lines = {ARR, "    i32 mut* mut p = &arr[0];",
                            "    i32 mut@ mut w = p[1..3];"};
     // A pointer has no length, so its span could reach past the object. Only `str.from_cstr` and
     // `rt.args_init` take one (D6.9), and fir_llvm_rvalue_test holds the IR of that span. The
     // emitter writes nothing for a source that does not check.
-    assert(!gen_env.open_lines(&e, lines[..]));
-    assert(gen_env.errors(&e) == 1);
-    assert(gen_env.said(&e, "cannot take a span of i32 mut*: a pointer has no length"));
+    assert(!gen_env.open_lines(e, lines[..]));
+    assert(gen_env.errors(e) == 1);
+    assert(gen_env.said(e, "cannot take a span of i32 mut*: a pointer has no length"));
 }
 
 fn a_written_high_bound_makes_the_length_a_read_of_its_own() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     string[3] mut lines = {ARR, "    i32 mut@ mut sp = arr[..];",
                            "    i32 mut@ mut v = sp[1..3];"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // The length is read after the bounds the source writes, so the check holds against the
     // length the operation sees. With both bounds written it is a load of its own. This is
     // where `sp[1..]` reads it once and uses it as the high bound as well.
@@ -477,22 +458,21 @@ fn a_written_high_bound_makes_the_length_a_read_of_its_own() void {
         "  %t24 = getelementptr inbounds %fort.span, ptr %v.2, i32 0, i32 1\n",
         "  store i64 %t22, ptr %t24, align 8\n",
     };
-    string got = gen_env.main_text(&e);
-    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
+    string got = gen_env.main_text(e);
+    gen_env.expect_in(got, gen_env.join_lines(e, want[..]));
     // The three bounds the failure carries are the low, the high and the
     // length the check compared.
     gen_env.expect_in(
         got,
-        gen_env.join4(&e, "L4:\n",
+        gen_env.join4(e, "L4:\n",
                       "  call void @\"std.rt.fail_span\"(i64 %t10, i64 %t11, i64 %t18, ",
                       "ptr @.file.0, i32 4, i32 24)\n", "  unreachable\n"));
 }
 
 fn del_of_a_span_frees_its_pointer_and_zeroes_its_header() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
-    assert(open_own(&e));
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(open_own(e));
     // The second `del` of the body is the `del(s)` of the span.
     // A span or `string` operand is an aggregate, so its pointer is field 0
     // and the emptying is a 16-byte memset.
@@ -502,29 +482,27 @@ fn del_of_a_span_frees_its_pointer_and_zeroes_its_header() void {
         "  call void @\"std.rt.free\"(ptr %t8)\n",
         "  call void @llvm.memset.p0.i64(ptr align 8 %s.1, i8 0, i64 16, i1 false)\n",
     };
-    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
+    gen_env.expect_in(gen_env.main_text(e), gen_env.join_lines(e, want[..]));
 }
 
 fn del_of_an_rvalue_stores_nothing() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
-    assert(open_own(&e));
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(open_own(e));
     // `del` empties storage, and an `own` rvalue -- here the result of `new`
     // -- designates none, so it is freed and nothing is stored.
     gen_env.expect_in(
-        gen_env.main_text(&e),
-        gen_env.join3(&e,
+        gen_env.main_text(e),
+        gen_env.join3(e,
                       "  %t9 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, ",
                       "i32 7, i32 9)\n",
                       "  call void @\"std.rt.free\"(ptr %t9)\n  %t10 = load ptr"));
 }
 
 fn move_of_a_scalar_reads_the_value_before_it_empties_the_operand() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
-    assert(open_own(&e));
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    assert(open_own(e));
     // The order is the whole of the rule. The value is read into the register the `load` names
     // and the operand is zeroed only afterwards, so `p = move(p)` yields what `p` held. The
     // store into `u` follows with no overwrite check, which no mode keeps.
@@ -533,7 +511,7 @@ fn move_of_a_scalar_reads_the_value_before_it_empties_the_operand() void {
         "  store ptr null, ptr %p.0, align 8\n",
         "  store ptr %t10, ptr %u.3, align 8\n",
     };
-    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
+    gen_env.expect_in(gen_env.main_text(e), gen_env.join_lines(e, want[..]));
 }
 
 fn main() i32 {

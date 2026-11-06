@@ -35,104 +35,100 @@ fn castable(types_env.env mut* e, string dst, string src) bool {
 }
 
 fn a_cast_that_adds_own_at_the_outermost_level() void {
-    types_env.env mut e = types_env.env{};
-    types_env.init(&e);
-    defer types_env.free(&e);
+    types_env.env mut* own e = types_env.make();
+    defer types_env.drop_made(move(e));
     // The first six shapes of test/lang/fail/casts/016_cast_adds_own.ft.
-    assert(adds(&e, "i32* own", "i32*"));
-    assert(adds(&e, "u8@ own", "u8@"));
-    assert(adds(&e, "void* own", "u64"));
-    assert(adds(&e, "u8 mut* own", "void mut*"));
-    assert(adds(&e, "node* own mut@ own", "node* mut@ own"));
-    assert(adds(&e, "string own", "string"));
+    assert(adds(e, "i32* own", "i32*"));
+    assert(adds(e, "u8@ own", "u8@"));
+    assert(adds(e, "void* own", "u64"));
+    assert(adds(e, "u8 mut* own", "void mut*"));
+    assert(adds(e, "node* own mut@ own", "node* mut@ own"));
+    assert(adds(e, "string own", "string"));
     // The string family is one level, so a member of it owns only when its
     // source owns.
-    assert(adds(&e, "string own", "u8 mut@"));
-    assert(adds(&e, "u8@ own", "string"));
-    assert(adds(&e, "char@ own", "u8@"));
+    assert(adds(e, "string own", "u8 mut@"));
+    assert(adds(e, "u8@ own", "string"));
+    assert(adds(e, "char@ own", "u8@"));
     // A `void*` adds no `own` to itself either.
-    assert(adds(&e, "void* own", "void*"));
-    assert(adds(&e, "void mut* own", "node mut*"));
+    assert(adds(e, "void* own", "void*"));
+    assert(adds(e, "void mut* own", "node mut*"));
     // A scalar or a function pointer has no reference at all.
-    assert(adds(&e, "void* own", "i32"));
-    types.node* f = types_env.fn1(&e, types.type_void(&e.tt), types_env.type_of(&e, "node*"));
-    assert(types.type_cast_adds_own(types_env.type_of(&e, "void* own"), f));
+    assert(adds(e, "void* own", "i32"));
+    types.node* f = types_env.fn1(e, types.type_void(&e->tt), types_env.type_of(e, "node*"));
+    assert(types.type_cast_adds_own(types_env.type_of(e, "void* own"), f));
 }
 
 fn a_cast_that_adds_own_below_the_outermost_level() void {
-    types_env.env mut e = types_env.env{};
-    types_env.init(&e);
-    defer types_env.free(&e);
+    types_env.env mut* own e = types_env.make();
+    defer types_env.drop_made(move(e));
     // A level below the outermost is a level like any other. The target need
     // not own at the outermost level for the rule to apply.
-    assert(adds(&e, "node* own*", "node**"));
-    assert(adds(&e, "node* own@", "node*@"));
-    assert(adds(&e, "u8 mut@ own mut*", "u8 mut@ mut*"));
-    assert(adds(&e, "node mut* own mut@ own", "node mut* mut@"));
+    assert(adds(e, "node* own*", "node**"));
+    assert(adds(e, "node* own@", "node*@"));
+    assert(adds(e, "u8 mut@ own mut*", "u8 mut@ mut*"));
+    assert(adds(e, "node mut* own mut@ own", "node mut* mut@"));
     // The source has no reference at the depth of the target's `own`: the
     // `void` behind a `void*`, or a pointee type the cast reinterprets.
-    assert(adds(&e, "node* own*", "void*"));
-    assert(adds(&e, "node* own*", "void* own"));
-    assert(adds(&e, "node* own*", "i32*"));
-    assert(adds(&e, "node* own*", "string"));
+    assert(adds(e, "node* own*", "void*"));
+    assert(adds(e, "node* own*", "void* own"));
+    assert(adds(e, "node* own*", "i32*"));
+    assert(adds(e, "node* own*", "string"));
     // A fixed array adds no level: the elements are compared in step. An
     // array on one side only reinterprets the pointee, so the other side's
     // `own` stands where the source has no level.
-    assert(adds(&e, "node* own[2]", "node*[2]"));
-    assert(adds(&e, "node* own[2]*", "node**"));
-    assert(adds(&e, "node* own*", "node* own[2]*"));
-    assert(adds(&e, "node* own[2]*", "node* own*"));
+    assert(adds(e, "node* own[2]", "node*[2]"));
+    assert(adds(e, "node* own[2]*", "node**"));
+    assert(adds(e, "node* own*", "node* own[2]*"));
+    assert(adds(e, "node* own[2]*", "node* own*"));
 }
 
 fn a_cast_that_carries_or_drops_own_adds_none() void {
-    types_env.env mut e = types_env.env{};
-    types_env.init(&e);
-    defer types_env.free(&e);
+    types_env.env mut* own e = types_env.make();
+    defer types_env.drop_made(move(e));
     // The source owns every level the target owns.
-    assert(!adds(&e, "void* own", "node mut* own"));
-    assert(!adds(&e, "u8 mut* own", "void mut* own"));
-    assert(!adds(&e, "string own", "u8 mut@ own"));
-    assert(!adds(&e, "u8@ own", "string own"));
-    assert(!adds(&e, "node* own@ own", "node* own@ own"));
-    assert(!adds(&e, "node* own[2]", "node* own[2]"));
+    assert(!adds(e, "void* own", "node mut* own"));
+    assert(!adds(e, "u8 mut* own", "void mut* own"));
+    assert(!adds(e, "string own", "u8 mut@ own"));
+    assert(!adds(e, "u8@ own", "string own"));
+    assert(!adds(e, "node* own@ own", "node* own@ own"));
+    assert(!adds(e, "node* own[2]", "node* own[2]"));
     // A pointee the cast reinterprets keeps an `own` its source marks too.
-    assert(!adds(&e, "point* own*", "node* own*"));
+    assert(!adds(e, "point* own*", "node* own*"));
     // A dropped `own` adds nothing, at any level.
-    assert(!adds(&e, "node*", "node* own"));
-    assert(!adds(&e, "node* own@", "node* own mut@ own"));
-    assert(!adds(&e, "node mut* mut@", "node mut* own mut@ own"));
-    assert(!adds(&e, "node*[2]", "node* own[2]"));
-    assert(!adds(&e, "string", "string own"));
+    assert(!adds(e, "node*", "node* own"));
+    assert(!adds(e, "node* own@", "node* own mut@ own"));
+    assert(!adds(e, "node mut* mut@", "node mut* own mut@ own"));
+    assert(!adds(e, "node*[2]", "node* own[2]"));
+    assert(!adds(e, "string", "string own"));
     // A target with no reference owns nothing.
-    assert(!adds(&e, "u64", "node* own"));
-    assert(!adds(&e, "u64", "u64"));
-    assert(!adds(&e, "i32", "f64"));
-    assert(!adds(&e, "node*", "u64"));
-    assert(!adds(&e, "void*", "node**"));
+    assert(!adds(e, "u64", "node* own"));
+    assert(!adds(e, "u64", "u64"));
+    assert(!adds(e, "i32", "f64"));
+    assert(!adds(e, "node*", "u64"));
+    assert(!adds(e, "void*", "node**"));
 }
 
 fn the_matrix_admits_the_shape_and_the_checker_refuses_it() void {
-    types_env.env mut e = types_env.env{};
-    types_env.init(&e);
-    defer types_env.free(&e);
+    types_env.env mut* own e = types_env.make();
+    defer types_env.drop_made(move(e));
     // `type_cast_allowed` is the matrix alone. It answers true for these
     // pairs, so `check_cast` asks `type_cast_adds_own` after it.
-    assert(castable(&e, "i32* own", "i32*"));
-    assert(castable(&e, "void* own", "u64"));
-    assert(castable(&e, "u8 mut* own", "u64 mut*"));
-    assert(castable(&e, "void mut* own", "u8 mut*"));
-    assert(castable(&e, "string own", "string"));
+    assert(castable(e, "i32* own", "i32*"));
+    assert(castable(e, "void* own", "u64"));
+    assert(castable(e, "u8 mut* own", "u64 mut*"));
+    assert(castable(e, "void mut* own", "u8 mut*"));
+    assert(castable(e, "string own", "string"));
     // No cast gives a type to a `void*` (D3.14), so the matrix refuses this
     // shape before the walk of `own`.
-    assert(!castable(&e, "u8 mut* own", "void mut*"));
-    assert(adds(&e, "u8 mut* own", "void mut*"));
-    assert(castable(&e, "node* own mut@ own", "node* mut@ own"));
+    assert(!castable(e, "u8 mut* own", "void mut*"));
+    assert(adds(e, "u8 mut* own", "void mut*"));
+    assert(castable(e, "node* own mut@ own", "node* mut@ own"));
     // A target that adds `mut` as well fails the matrix first, which is why
     // test/lang/fail/casts/012 and 013 report the `mut`.
-    assert(!castable(&e, "i32 mut* own", "i32*"));
-    assert(adds(&e, "i32 mut* own", "i32*"));
-    assert(!castable(&e, "i32 mut@ own", "i32@"));
-    assert(adds(&e, "i32 mut@ own", "i32@"));
+    assert(!castable(e, "i32 mut* own", "i32*"));
+    assert(adds(e, "i32 mut* own", "i32*"));
+    assert(!castable(e, "i32 mut@ own", "i32@"));
+    assert(adds(e, "i32 mut@ own", "i32@"));
 }
 
 fn sample_types(types_env.env mut* e, types.node* mut@ list) u64 {
@@ -199,11 +195,10 @@ fn fail_pair(types_env.env mut* e, types.node* a, string between, types.node* b)
 // (D17.4). OWN_ADDING_PAIRS holds the table to the rule: two implications over
 // a table that named no `own` type would hold and prove nothing.
 fn every_pair_agrees_with_a_second_walk() void {
-    types_env.env mut e = types_env.env{};
-    types_env.init(&e);
-    defer types_env.free(&e);
+    types_env.env mut* own e = types_env.make();
+    defer types_env.drop_made(move(e));
     types.node*[24] mut list = {};
-    u64 n = sample_types(&e, list[..]);
+    u64 n = sample_types(e, list[..]);
     assert(n == SAMPLES_MAX);
     u64 mut adding = 0;
     u64 mut d = 0;
@@ -212,15 +207,15 @@ fn every_pair_agrees_with_a_second_walk() void {
         while (s < n) {
             bool walked = types.type_cast_adds_own(list[d], list[s]);
             if (walked != adds_by_loop(list[d], list[s])) {
-                fail_pair(&e, list[s], " disagrees between the two walks for ", list[d]);
+                fail_pair(e, list[s], " disagrees between the two walks for ", list[d]);
             }
             if (walked) {
                 adding += 1;
                 if (d == s) {
-                    fail_pair(&e, list[s], " adds own to itself: ", list[d]);
+                    fail_pair(e, list[s], " adds own to itself: ", list[d]);
                 }
                 if (types.type_assignable(list[d], list[s])) {
-                    fail_pair(&e, list[s], " adds own and converts to ", list[d]);
+                    fail_pair(e, list[s], " adds own and converts to ", list[d]);
                 }
             }
             s += 1;

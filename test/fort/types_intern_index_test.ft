@@ -105,20 +105,20 @@ fn make_many(types.table mut* tt, types.node* mut@ made) void {
 // After them, each type is still what its arguments intern to, no two are one node, and the
 // index holds every node that is not nominal once.
 fn every_node_survives_every_growth_of_the_index() void {
-    types.table mut tt = types.table{};
-    defer types.type_table_free(&tt);
-    types.node* s = types.type_struct(&tt, "early", decl_at(0));
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
+    types.node* s = types.type_struct(tt, "early", decl_at(0));
     types.node*[MANY * PER_ROUND] mut made = {};
-    make_many(&tt, made[..]);
-    index_is_well_formed(&tt);
-    assert(tt.index.len >= 8192);
-    assert(tt.indexed == plain_nodes(&tt));
-    assert(tt.count == tt.indexed + 1);
+    make_many(tt, made[..]);
+    index_is_well_formed(tt);
+    assert(tt->index.len >= 8192);
+    assert(tt->indexed == plain_nodes(tt));
+    assert(tt->count == tt->indexed + 1);
     types.node*[MANY * PER_ROUND] mut again = {};
-    u64 count_before = tt.count;
-    make_many(&tt, again[..]);
+    u64 count_before = tt->count;
+    make_many(tt, again[..]);
     // the second round made no node
-    assert(tt.count == count_before);
+    assert(tt->count == count_before);
     u64 mut i = 0;
     while (i < MANY * PER_ROUND) {
         assert(again[i] == made[i]);
@@ -143,50 +143,50 @@ fn every_node_survives_every_growth_of_the_index() void {
 // their node without intern, so a key of their kind that intern took first made another node.
 // The index keeps the first one, as the walk does.
 fn a_key_finds_the_first_equal_node_in_creation_order() void {
-    types.table mut tt = types.table{};
-    defer types.type_table_free(&tt);
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
     types.key mut k = types.key_of(types.type_kind.k_prim);
     k.prim = prim.prim_kind.prim_i32;
-    types.node* first = types.intern(&tt, &k);
-    types.node* second = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    types.node* first = types.intern(tt, &k);
+    types.node* second = types.type_prim(tt, prim.prim_kind.prim_i32);
     assert(first != second);
-    assert(types.intern(&tt, &k) == first);
-    assert(walk_find(&tt, &k) == first);
-    assert(types.index_find(&tt, &k) == first);
+    assert(types.intern(tt, &k) == first);
+    assert(walk_find(tt, &k) == first);
+    assert(types.index_find(tt, &k) == first);
     // the index holds the first node and not the second
-    assert(tt.indexed == 1);
-    index_is_well_formed(&tt);
+    assert(tt->indexed == 1);
+    index_is_well_formed(tt);
     // the same for `void`, which no constructor interns
     types.key v = types.key_of(types.type_kind.k_void);
-    types.node* made = types.intern(&tt, &v);
-    assert(types.type_void(&tt) != made);
-    assert(types.intern(&tt, &v) == made);
-    assert(walk_find(&tt, &v) == made);
+    types.node* made = types.intern(tt, &v);
+    assert(types.type_void(tt) != made);
+    assert(types.intern(tt, &v) == made);
+    assert(walk_find(tt, &v) == made);
 }
 
 // type_void, type_null, type_error and type_prim add their node to the index, so a key of their
 // kind finds the node that the constructor made.
 fn a_constructor_node_is_what_its_key_finds() void {
-    types.table mut tt = types.table{};
-    defer types.type_table_free(&tt);
-    types.node* v = types.type_void(&tt);
-    types.node* n = types.type_null(&tt);
-    types.node* e = types.type_error(&tt);
-    types.node* u = types.type_prim(&tt, prim.prim_kind.prim_u64);
-    assert(tt.indexed == 4);
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
+    types.node* v = types.type_void(tt);
+    types.node* n = types.type_null(tt);
+    types.node* e = types.type_error(tt);
+    types.node* u = types.type_prim(tt, prim.prim_kind.prim_u64);
+    assert(tt->indexed == 4);
     types.key kv = types.key_of(types.type_kind.k_void);
     types.key kn = types.key_of(types.type_kind.k_null);
     types.key ke = types.key_of(types.type_kind.k_error);
     types.key mut ku = types.key_of(types.type_kind.k_prim);
     ku.prim = prim.prim_kind.prim_u64;
-    assert(types.intern(&tt, &kv) == v);
-    assert(types.intern(&tt, &kn) == n);
-    assert(types.intern(&tt, &ke) == e);
-    assert(types.intern(&tt, &ku) == u);
-    assert(tt.count == 4);
+    assert(types.intern(tt, &kv) == v);
+    assert(types.intern(tt, &kn) == n);
+    assert(types.intern(tt, &ke) == e);
+    assert(types.intern(tt, &ku) == u);
+    assert(tt->count == 4);
     // a constructor called again makes nothing and adds nothing
-    assert(types.type_void(&tt) == v && types.type_prim(&tt, prim.prim_kind.prim_u64) == u);
-    assert(tt.indexed == 4);
+    assert(types.type_void(tt) == v && types.type_prim(tt, prim.prim_kind.prim_u64) == u);
+    assert(tt->indexed == 4);
 }
 
 // ---- keys that differ in one field ---------------------------------------------------------
@@ -194,40 +194,40 @@ fn a_constructor_node_is_what_its_key_finds() void {
 // Each field that node_same compares separates two keys: the kind, the primitive, `mut`, `own`,
 // `noreturn`, the element, the length, and the count and the order of the parameters.
 fn keys_that_differ_in_one_field_make_distinct_nodes() void {
-    types.table mut tt = types.table{};
-    defer types.type_table_free(&tt);
-    types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
-    types.node* u8t = types.type_prim(&tt, prim.prim_kind.prim_u8);
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
+    types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
+    types.node* u8t = types.type_prim(tt, prim.prim_kind.prim_u8);
     assert(i32t != u8t);
-    types.node* p = types.type_ptr(&tt, i32t, false, false);
-    assert(types.type_ptr(&tt, i32t, false, true) != p);
-    assert(types.type_ptr(&tt, i32t, true, false) != p);
-    assert(types.type_ptr(&tt, u8t, false, false) != p);
-    assert(types.type_span(&tt, i32t, false, false) != p);
-    assert(types.type_array(&tt, i32t, 3) != types.type_array(&tt, i32t, 4));
-    assert(types.type_string(&tt, false) != types.type_string(&tt, true));
-    assert(types.type_voidptr(&tt, false, false) != types.type_voidptr(&tt, false, true));
+    types.node* p = types.type_ptr(tt, i32t, false, false);
+    assert(types.type_ptr(tt, i32t, false, true) != p);
+    assert(types.type_ptr(tt, i32t, true, false) != p);
+    assert(types.type_ptr(tt, u8t, false, false) != p);
+    assert(types.type_span(tt, i32t, false, false) != p);
+    assert(types.type_array(tt, i32t, 3) != types.type_array(tt, i32t, 4));
+    assert(types.type_string(tt, false) != types.type_string(tt, true));
+    assert(types.type_voidptr(tt, false, false) != types.type_voidptr(tt, false, true));
     types.node*[2] ab = {i32t, u8t};
     types.node*[2] ba = {u8t, i32t};
     types.node*[1] a = {i32t};
-    types.node* f = types.type_fn(&tt, i32t, ab[..], false);
-    assert(types.type_fn(&tt, i32t, ba[..], false) != f);
-    assert(types.type_fn(&tt, i32t, a[..], false) != f);
-    assert(types.type_fn(&tt, u8t, ab[..], false) != f);
-    assert(types.type_fn(&tt, types.type_void(&tt), ab[..], true)
-           != types.type_fn(&tt, types.type_void(&tt), ab[..], false));
+    types.node* f = types.type_fn(tt, i32t, ab[..], false);
+    assert(types.type_fn(tt, i32t, ba[..], false) != f);
+    assert(types.type_fn(tt, i32t, a[..], false) != f);
+    assert(types.type_fn(tt, u8t, ab[..], false) != f);
+    assert(types.type_fn(tt, types.type_void(tt), ab[..], true)
+           != types.type_fn(tt, types.type_void(tt), ab[..], false));
     // each of them interns to itself again
-    assert(types.type_fn(&tt, i32t, ab[..], false) == f);
-    assert(types.type_ptr(&tt, i32t, false, false) == p);
-    index_is_well_formed(&tt);
-    assert(tt.indexed == plain_nodes(&tt));
+    assert(types.type_fn(tt, i32t, ab[..], false) == f);
+    assert(types.type_ptr(tt, i32t, false, false) == p);
+    index_is_well_formed(tt);
+    assert(tt->indexed == plain_nodes(tt));
 }
 
 // A parameter list enters a key by the nodes it names, not by the storage that holds them.
 fn equal_keys_hash_alike() void {
-    types.table mut tt = types.table{};
-    defer types.type_table_free(&tt);
-    types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
+    types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
     types.node*[2] one = {i32t, i32t};
     types.node*[2] two = {i32t, i32t};
     types.key mut a = types.key_of(types.type_kind.k_fn);
@@ -237,8 +237,8 @@ fn equal_keys_hash_alike() void {
     b.elem = i32t;
     b.params = two[..];
     assert(types.key_hash(&a) == types.key_hash(&b));
-    types.node* f = types.intern(&tt, &a);
-    assert(types.intern(&tt, &b) == f);
+    types.node* f = types.intern(tt, &a);
+    assert(types.intern(tt, &b) == f);
     // the node keeps its own copy of the list, and its key hashes as the caller's does
     types.key c = types.key_of_node(f);
     assert(c.params.ptr != one[..].ptr);
@@ -250,15 +250,15 @@ fn equal_keys_hash_alike() void {
 // Probes 2000 keys, half of them made and half not, and holds index_find against the walk over
 // every node in creation order for each.
 fn the_index_finds_what_the_walk_finds() void {
-    types.table mut tt = types.table{};
-    defer types.type_table_free(&tt);
-    types.node* i8t = types.type_prim(&tt, prim.prim_kind.prim_i8);
-    types.node* s = types.type_struct(&tt, "probe", decl_at(1));
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
+    types.node* i8t = types.type_prim(tt, prim.prim_kind.prim_i8);
+    types.node* s = types.type_struct(tt, "probe", decl_at(1));
     u64 mut n = 0;
     while (n < 1000) {
         // the even lengths alone exist
         if (n % 2 == 0) {
-            assert(types.type_array(&tt, i8t, n + 1) != null);
+            assert(types.type_array(tt, i8t, n + 1) != null);
         }
         n += 1;
     }
@@ -268,43 +268,43 @@ fn the_index_finds_what_the_walk_finds() void {
         types.key mut k = types.key_of(types.type_kind.k_array);
         k.elem = i8t;
         k.len = n + 1;
-        types.node* want = walk_find(&tt, &k);
-        assert(types.index_find(&tt, &k) == want);
+        types.node* want = walk_find(tt, &k);
+        assert(types.index_find(tt, &k) == want);
         if (want != null) {
             found += 1;
         }
         types.key mut p = types.key_of(types.type_kind.k_ptr);
         p.elem = s;
         p.is_own = n % 3 == 0;
-        assert(types.index_find(&tt, &p) == walk_find(&tt, &p));
+        assert(types.index_find(tt, &p) == walk_find(tt, &p));
         n += 1;
     }
     assert(found == 500);
     // a nominal key matches no node, through the index or the walk
     types.key mut nominal = types.key_of(types.type_kind.k_struct);
-    assert(types.index_find(&tt, &nominal) == null);
-    assert(walk_find(&tt, &nominal) == null);
+    assert(types.index_find(tt, &nominal) == null);
+    assert(walk_find(tt, &nominal) == null);
 }
 
 // ---- a freed table -------------------------------------------------------------------------
 
 // type_table_free empties the index with the nodes, so the table interns again from nothing.
 fn a_freed_table_interns_from_an_empty_index() void {
-    types.table mut tt = types.table{};
-    types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
+    types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
     u64 mut n = 0;
     while (n < 100) {
-        assert(types.type_array(&tt, i32t, n + 1) != null);
+        assert(types.type_array(tt, i32t, n + 1) != null);
         n += 1;
     }
-    types.type_table_free(&tt);
-    assert(tt.index.len == 0 && tt.indexed == 0 && tt.count == 0);
-    types.node* again = types.type_prim(&tt, prim.prim_kind.prim_i32);
-    types.node* a = types.type_array(&tt, again, 7);
-    assert(types.type_array(&tt, again, 7) == a);
-    assert(tt.indexed == 2 && tt.count == 2);
-    index_is_well_formed(&tt);
-    types.type_table_free(&tt);
+    types.type_table_free(tt);
+    assert(tt->index.len == 0 && tt->indexed == 0 && tt->count == 0);
+    types.node* again = types.type_prim(tt, prim.prim_kind.prim_i32);
+    types.node* a = types.type_array(tt, again, 7);
+    assert(types.type_array(tt, again, 7) == a);
+    assert(tt->indexed == 2 && tt->count == 2);
+    index_is_well_formed(tt);
 }
 
 fn main() i32 {

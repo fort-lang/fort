@@ -102,42 +102,37 @@ fn add_library(library_env.env mut* e) void {
 
 // The IR module of the client `lines` against the interface of the library, in `out`.
 fn emit_unit(string@ lines, strbuf.str_buf mut* out) void {
-    library_env.env mut lib = library_env.env{};
-    library_env.open(&lib);
-    defer library_env.close(&lib);
-    add_library(&lib);
-    assert(library_env.emit(&lib, "std", "lib/std"));
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    library_env.add_lines(&e, "main.ft", lines);
-    assert(library_env.check_against(&e, "std", "std.flib/interface.ft", library_env.text(&lib),
+    library_env.env mut* own lib = library_env.make();
+    defer library_env.drop_made(move(lib));
+    add_library(lib);
+    assert(library_env.emit(lib, "std", "lib/std"));
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.add_lines(e, "main.ft", lines);
+    assert(library_env.check_against(e, "std", "std.flib/interface.ft", library_env.text(lib),
                                      "main.ft"));
-    gen.emitter mut g = gen.emitter{};
-    gen.gen_init(&g, &e.m.s, gen.gen_options{});
-    defer gen.gen_free(&g);
-    assert(gen_fir.gen_program(&g, &e.ck, &e.m.set));
+    gen.emitter mut* own g = gen.make(&e->m.s, gen.gen_options{});
+    defer gen.drop_made(move(g));
+    assert(gen_fir.gen_program(g, &e->ck, &e->m.set));
     strbuf.clear(out);
-    strbuf.append(out, strbuf.view(&g.out));
+    strbuf.append(out, strbuf.view(&g->out));
 }
 
 // The IR module of the same sources as one whole program: the library is a search root.
 fn emit_whole(string@ lines, strbuf.str_buf mut* out) void {
-    library_env.env mut e = library_env.env{};
-    library_env.open(&e);
-    defer library_env.close(&e);
-    library_env.add_lines(&e, "lib/std/rt.ft", lower_env.RUNTIME[..]);
-    library_env.add_lines(&e, "lib/std/shapes.ft", SHAPES[..]);
-    library_env.add_lines(&e, "lib/std/paint.ft", PAINT[..]);
-    library_env.add_lines(&e, "main.ft", lines);
-    modules_env.std_dir_without_runtime(&e.m, "lib/std");
-    assert(library_env.check_with_sources(&e, "lib", "main.ft"));
-    gen.emitter mut g = gen.emitter{};
-    gen.gen_init(&g, &e.m.s, gen.gen_options{});
-    defer gen.gen_free(&g);
-    assert(gen_fir.gen_program(&g, &e.ck, &e.m.set));
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    library_env.add_lines(e, "lib/std/rt.ft", lower_env.RUNTIME[..]);
+    library_env.add_lines(e, "lib/std/shapes.ft", SHAPES[..]);
+    library_env.add_lines(e, "lib/std/paint.ft", PAINT[..]);
+    library_env.add_lines(e, "main.ft", lines);
+    modules_env.std_dir_without_runtime(&e->m, "lib/std");
+    assert(library_env.check_with_sources(e, "lib", "main.ft"));
+    gen.emitter mut* own g = gen.make(&e->m.s, gen.gen_options{});
+    defer gen.drop_made(move(g));
+    assert(gen_fir.gen_program(g, &e->ck, &e->m.set));
     strbuf.clear(out);
-    strbuf.append(out, strbuf.view(&g.out));
+    strbuf.append(out, strbuf.view(&g->out));
 }
 
 // Whether `text` holds `part`, printing the text when it does not.
@@ -240,12 +235,12 @@ string[5] NAMED = {
 
 fn the_unit_repeats_the_named_type_of_each_struct() void {
     strbuf.str_buf mut ir = strbuf.create();
-    defer strbuf.free(&ir);
+    defer del(ir.data);
     emit_unit(CLIENT[..], &ir);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     assert(same(lines_with(strbuf.view(&ir), "%", &got), joined(NAMED[..], &want)));
 }
 
@@ -270,18 +265,18 @@ string[11] GLOBALS = {
 
 fn each_constant_and_global_of_an_interface_module_is_external() void {
     strbuf.str_buf mut ir = strbuf.create();
-    defer strbuf.free(&ir);
+    defer del(ir.data);
     emit_unit(CLIENT[..], &ir);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     assert(same(lines_with(strbuf.view(&ir), "@\"", &got), joined(GLOBALS[..], &want)));
 }
 
 fn the_private_data_of_the_unit_starts_at_zero() void {
     strbuf.str_buf mut ir = strbuf.create();
-    defer strbuf.free(&ir);
+    defer del(ir.data);
     emit_unit(CLIENT[..], &ir);
     string text = strbuf.view(&ir);
     // the first file is the client's, the only module the unit defines a function of
@@ -301,7 +296,7 @@ fn the_private_data_of_the_unit_starts_at_zero() void {
 
 fn a_read_of_a_constant_that_is_no_value_reads_the_external_global() void {
     strbuf.str_buf mut ir = strbuf.create();
-    defer strbuf.free(&ir);
+    defer del(ir.data);
     emit_unit(CLIENT[..], &ir);
     string text = strbuf.view(&ir);
     // a copy of an aggregate constant, an element of one, a pointer constant, the `mut` global
@@ -316,7 +311,7 @@ fn a_read_of_a_constant_that_is_no_value_reads_the_external_global() void {
 
 fn an_enum_of_an_interface_module_has_a_private_table_in_the_unit() void {
     strbuf.str_buf mut ir = strbuf.create();
-    defer strbuf.free(&ir);
+    defer del(ir.data);
     emit_unit(CLIENT[..], &ir);
     string text = strbuf.view(&ir);
     string table = "@.enum.std.shapes.color = private unnamed_addr constant [3 x %fort.enum_member";
@@ -346,13 +341,13 @@ string[9] DECLARED = {
 
 fn each_function_of_an_interface_module_is_declared() void {
     strbuf.str_buf mut ir = strbuf.create();
-    defer strbuf.free(&ir);
+    defer del(ir.data);
     emit_unit(CLIENT[..], &ir);
     string text = strbuf.view(&ir);
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     // the runtime comes first, then std.shapes and std.paint; `mix` stands after `area`
     string mine = lines_with(text, "declare dso_local void @\"std.shapes.", &got);
     assert(str.starts_with(mine, "declare dso_local void @\"std.shapes.add\""));
@@ -362,11 +357,11 @@ fn each_function_of_an_interface_module_is_declared() void {
 
 fn each_runtime_entry_is_declared_before_the_other_modules() void {
     strbuf.str_buf mut ir = strbuf.create();
-    defer strbuf.free(&ir);
+    defer del(ir.data);
     emit_unit(CLIENT[..], &ir);
     string text = strbuf.view(&ir);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     string declared = lines_with(text, "declare dso_local ", &got);
     // each function of the runtime of lower_env, and the 6 and 2 of the library modules
     assert(count(declared, "\n") == runtime_functions() + 6 + 2);
@@ -377,7 +372,7 @@ fn each_runtime_entry_is_declared_before_the_other_modules() void {
         "declare dso_local void @\"std.shapes.add\"++",
     };
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     assert(has(declared, joined(last[..], &want)));
     // print_enum takes the member table as one span, which a call passes as one hidden pointer
     assert(has(declared, "declare dso_local void @\"std.rt.print_enum\"(i32, i32, ptr) #0\n"));
@@ -393,11 +388,11 @@ fn each_runtime_entry_is_declared_before_the_other_modules() void {
 
 fn the_unit_defines_no_function_of_an_interface_module() void {
     strbuf.str_buf mut ir = strbuf.create();
-    defer strbuf.free(&ir);
+    defer del(ir.data);
     emit_unit(CLIENT[..], &ir);
     string text = strbuf.view(&ir);
     strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    defer del(got.data);
     string defined = lines_with(text, "define ", &got);
     string[3] want_lines = {
         "define dso_local i32 @\"main.twice\"(i32 %x.in) #0 {",
@@ -405,7 +400,7 @@ fn the_unit_defines_no_function_of_an_interface_module() void {
         "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {",
     };
     strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
+    defer del(want.data);
     assert(same(defined, joined(want_lines[..], &want)));
     // each declared name is declared once and defined nowhere
     assert(count(text, "declare dso_local void @\"std.shapes.add\"(") == 1);
@@ -420,7 +415,7 @@ string[2] NO_FUNCTION = {
 
 fn a_declaration_alone_emits_the_attribute_group_it_names() void {
     strbuf.str_buf mut ir = strbuf.create();
-    defer strbuf.free(&ir);
+    defer del(ir.data);
     emit_unit(NO_FUNCTION[..], &ir);
     string text = strbuf.view(&ir);
     assert(count(text, "define ") == 0);
@@ -474,24 +469,24 @@ fn next_of(string text, u64 from, char ch) u64 {
 
 fn each_declaration_carries_the_types_of_the_whole_program_definition() void {
     strbuf.str_buf mut unit = strbuf.create();
-    defer strbuf.free(&unit);
+    defer del(unit.data);
     emit_unit(CLIENT[..], &unit);
     strbuf.str_buf mut whole = strbuf.create();
-    defer strbuf.free(&whole);
+    defer del(whole.data);
     emit_whole(CLIENT[..], &whole);
     // the whole program declares no fort function and has no external global
     assert(count(strbuf.view(&whole), "declare dso_local") == 0);
     assert(count(strbuf.view(&whole), "external") == 0);
     strbuf.str_buf mut declared_buf = strbuf.create();
-    defer strbuf.free(&declared_buf);
+    defer del(declared_buf.data);
     string declared = lines_with(strbuf.view(&unit), "declare dso_local ", &declared_buf);
     strbuf.str_buf mut defined_buf = strbuf.create();
-    defer strbuf.free(&defined_buf);
+    defer del(defined_buf.data);
     string defined = lines_with(strbuf.view(&whole), "define dso_local ", &defined_buf);
     strbuf.str_buf mut a = strbuf.create();
-    defer strbuf.free(&a);
+    defer del(a.data);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     u64 mut matched = 0;
     u64 mut at = 0;
     while (at < declared.len) {
@@ -502,7 +497,7 @@ fn each_declaration_carries_the_types_of_the_whole_program_definition() void {
         u64 name_at = cast(str.find(line, "@\""), u64);
         u64 name_end = next_of(line, name_at + 2, '"');
         strbuf.str_buf mut name = strbuf.create();
-        defer strbuf.free(&name);
+        defer del(name.data);
         strbuf.append(&name, line[name_at..name_end + 1]);
         strbuf.push(&name, '(');
         u64 mut d = 0;

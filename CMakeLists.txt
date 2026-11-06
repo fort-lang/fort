@@ -885,6 +885,17 @@ set_tests_properties(aggregate-fir PROPERTIES
     PROCESSORS ${FORT_LANG_JOBS}
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
+# Hold the suites of the emitter and the type table (test/fort/gen_* and types_*) at no site of
+# --aggregate-report and --leak-report, for the Linux and the Darwin target, with a control
+# program at one site of each report.
+add_test(NAME aggregate-gen
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_gen_test.py"
+            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}" -j "${FORT_LANG_JOBS}")
+set_tests_properties(aggregate-gen PROPERTIES
+    LABELS "fort;integration"
+    PROCESSORS ${FORT_LANG_JOBS}
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
+
 # Node's built-in runner tests the VS Code extension in editors/vscode.
 # It converts diagnostic documents into editor shapes.
 # It also converts 1-based byte columns to character offsets.

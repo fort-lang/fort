@@ -44,17 +44,16 @@ fn wrap(strbuf.str_buf mut* b, string decls) string {
 // therefore c, b, a: the inner block's `c`, then its `defer`, then the
 // function's, which runs after `return n` has stored its value.
 fn a_block_runs_its_own_deferred_statements_when_it_ends() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     strbuf.append(&src, "fn at_end(i64 n) i64 {\n    defer eprintln(\"a\");\n    {\n");
     strbuf.append(&src, "        defer eprintln(\"b\");\n        eprintln(\"c\");\n    }\n");
     strbuf.append(&src, "    return n;\n}\n");
-    string got = emit(&e, wrap(&b, strbuf.view(&src)), "at_end");
+    string got = emit(e, wrap(&b, strbuf.view(&src)), "at_end");
     string[31] want = {
         "define dso_local i64 @\"main.at_end\"(i64 %n.in) #0 {\n",
         "entry:\n",
@@ -88,13 +87,13 @@ fn a_block_runs_its_own_deferred_statements_when_it_ends() void {
         "  ret i64 %t7\n",
         "}\n",
     };
-    gen_env.expect_text(got, gen_env.join_lines(&e, want[..]));
+    gen_env.expect_text(got, gen_env.join_lines(e, want[..]));
     // Nothing was captured at `defer` time: each copy is the statement emitted
     // where the exit stands. So the three literals are three string constants
     // in the order the copies were written.
-    assert(gen_env.record_text(&e, 0) == "c");
-    assert(gen_env.record_text(&e, 1) == "b");
-    assert(gen_env.record_text(&e, 2) == "a");
+    assert(gen_env.record_text(e, 0) == "c");
+    assert(gen_env.record_text(e, 1) == "b");
+    assert(gen_env.record_text(e, 2) == "a");
 }
 
 // ---- exits -------------------------------------------------------------------------
@@ -104,17 +103,16 @@ fn a_block_runs_its_own_deferred_statements_when_it_ends() void {
 // a `for`, `continue` runs them before `step`, which is L3 here, and `break`
 // before the continuation, L4.
 fn a_defer_in_a_loop_body_is_copied_into_every_exit() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     strbuf.append(&src, "fn in_loop(bool go) void {\n    for (;;) {\n");
     strbuf.append(&src, "        defer eprintln(\"step\");\n        if (go) {\n");
     strbuf.append(&src, "            continue;\n        }\n        break;\n    }\n}\n");
-    string got = emit(&e, wrap(&b, strbuf.view(&src)), "in_loop");
+    string got = emit(e, wrap(&b, strbuf.view(&src)), "in_loop");
     string[24] want = {
         "L3:\n",
         "  br label %L1\n",
@@ -144,12 +142,12 @@ fn a_defer_in_a_loop_body_is_copied_into_every_exit() void {
         "  br label %L4\n",
         "}\n",
     };
-    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
+    gen_env.expect_in(got, gen_env.join_lines(e, want[..]));
     // Two exits, two copies, two string constants: the body never falls off
     // its own end here, since both arms of the `if` terminate.
-    assert(gen_env.record_text(&e, 0) == "step");
-    assert(gen_env.record_text(&e, 1) == "step");
-    assert(e.g.strs.len == 2);
+    assert(gen_env.record_text(e, 0) == "step");
+    assert(gen_env.record_text(e, 1) == "step");
+    assert(e->g.strs.len == 2);
 }
 
 // The same in a `do`, where the two exits go to two different blocks. The
@@ -157,18 +155,17 @@ fn a_defer_in_a_loop_body_is_copied_into_every_exit() void {
 // the `break` runs its own copy and branches to the continuation. The blocks
 // of the `do` are body L1, test L2 and done L3.
 fn a_defer_in_a_do_while_body_is_copied_into_both_exits() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     strbuf.append(&src, "fn in_do(bool go) void {\n    do {\n");
     strbuf.append(&src, "        defer eprintln(\"step\");\n        if (go) {\n");
     strbuf.append(&src, "            continue;\n        }\n        break;\n");
     strbuf.append(&src, "    } while (go);\n}\n");
-    string got = emit(&e, wrap(&b, strbuf.view(&src)), "in_do");
+    string got = emit(e, wrap(&b, strbuf.view(&src)), "in_do");
     string[26] want = {
         "L2:\n",
         "  %t3 = load i8, ptr %go.0, align 1\n",
@@ -199,10 +196,10 @@ fn a_defer_in_a_do_while_body_is_copied_into_both_exits() void {
         "  br label %L3\n",
         "}\n",
     };
-    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
-    assert(gen_env.record_text(&e, 0) == "step");
-    assert(gen_env.record_text(&e, 1) == "step");
-    assert(e.g.strs.len == 2);
+    gen_env.expect_in(got, gen_env.join_lines(e, want[..]));
+    assert(gen_env.record_text(e, 0) == "step");
+    assert(gen_env.record_text(e, 1) == "step");
+    assert(e->g.strs.len == 2);
 }
 
 // A `break` inside deferred code binds to a loop written inside that deferred
@@ -212,19 +209,18 @@ fn a_defer_in_a_do_while_body_is_copied_into_both_exits() void {
 // L6, `out` still runs, and the enclosing loop is left once, at the end of the
 // expansion. A branch to L3 there would put `out` after a terminator.
 fn a_break_of_a_loop_inside_deferred_code_branches_to_that_loop() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     strbuf.append(&src, "fn in_loop() void {\n    while (true) {\n        defer {\n");
     strbuf.append(&src, "            while (true) {\n                eprintln(\"in\");\n");
     strbuf.append(&src, "                break;\n            }\n");
     strbuf.append(&src, "            eprintln(\"out\");\n        }\n        break;\n");
     strbuf.append(&src, "    }\n}\n");
-    string got = emit(&e, wrap(&b, strbuf.view(&src)), "in_loop");
+    string got = emit(e, wrap(&b, strbuf.view(&src)), "in_loop");
     string[34] want = {
         "define dso_local void @\"main.in_loop\"() #0 {\n",
         "entry:\n",
@@ -261,26 +257,25 @@ fn a_break_of_a_loop_inside_deferred_code_branches_to_that_loop() void {
         "  call void @\"std.rt.print_str\"(i32 2, ptr %tmp1)\n",
         "  call void @\"std.rt.print_char\"(i32 2, i8 zeroext 10)\n",
     };
-    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
+    gen_env.expect_in(got, gen_env.join_lines(e, want[..]));
     gen_env.expect_in(got, "  br label %L3\n}\n");
-    assert(gen_env.record_text(&e, 0) == "in");
-    assert(gen_env.record_text(&e, 1) == "out");
-    assert(e.g.strs.len == 2);
+    assert(gen_env.record_text(e, 0) == "in");
+    assert(gen_env.record_text(e, 1) == "out");
+    assert(e->g.strs.len == 2);
 }
 
 // `return e` evaluates `e` before the deferred code runs, which cannot then
 // change the value returned: the value is in `%result` first.
 fn a_return_reads_its_value_before_the_deferred_code_runs() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     strbuf.append(&src, "fn early(i64 n) i64 {\n    defer eprintln(\"out\");\n");
     strbuf.append(&src, "    return n;\n}\n");
-    string got = emit(&e, wrap(&b, strbuf.view(&src)), "early");
+    string got = emit(e, wrap(&b, strbuf.view(&src)), "early");
     string[10] want = {
         "  %t0 = load i64, ptr %n.0, align 8\n",
         "  store i64 %t0, ptr %result, align 8\n",
@@ -293,7 +288,7 @@ fn a_return_reads_its_value_before_the_deferred_code_runs() void {
         "  %t3 = load i64, ptr %result, align 8\n",
         "  ret i64 %t3\n",
     };
-    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
+    gen_env.expect_in(got, gen_env.join_lines(e, want[..]));
 }
 
 // ---- results -----------------------------------------------------------------------
@@ -302,17 +297,16 @@ fn a_return_reads_its_value_before_the_deferred_code_runs() void {
 // so deferred code can reach it. The result lands in a temporary of the callee's own and
 // is copied out after the deferred code has run.
 fn an_aggregate_return_lands_in_a_temporary_when_anything_is_deferred() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     strbuf.append(&src, "struct point {\n    i64 x;\n    i64 y;\n}\n");
     strbuf.append(&src, "fn aggregate(point p) point {\n    defer eprintln(\"out\");\n");
     strbuf.append(&src, "    return p;\n}\n");
-    string got = emit(&e, wrap(&b, strbuf.view(&src)), "aggregate");
+    string got = emit(e, wrap(&b, strbuf.view(&src)), "aggregate");
     string[14] mut want = {
         "entry:\n",
         "  %tmp0 = alloca %struct.main.point, align 8\n",
@@ -329,22 +323,21 @@ fn an_aggregate_return_lands_in_a_temporary_when_anything_is_deferred() void {
         " i1 false)\n",
         "  ret void\n}\n",
     };
-    gen_env.expect_in(got, gen_env.join_lines(&e, want[0..14]));
+    gen_env.expect_in(got, gen_env.join_lines(e, want[0..14]));
 }
 
 // A function with nothing deferred writes the caller's block directly and pays
 // for no temporary.
 fn an_aggregate_return_writes_the_sret_block_when_nothing_is_deferred() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.str_buf mut src = strbuf.create();
-    defer strbuf.free(&src);
+    defer del(src.data);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
     strbuf.append(&src, "struct point {\n    i64 x;\n    i64 y;\n}\n");
     strbuf.append(&src, "fn plain(point p) point {\n    return p;\n}\n");
-    string got = emit(&e, wrap(&b, strbuf.view(&src)), "plain");
+    string got = emit(e, wrap(&b, strbuf.view(&src)), "plain");
     string[5] mut want = {
         "entry:\n",
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %p.in, i64 16,",
@@ -352,7 +345,7 @@ fn an_aggregate_return_writes_the_sret_block_when_nothing_is_deferred() void {
         "  ret void\n}\n",
         "",
     };
-    gen_env.expect_in(got, gen_env.join_lines(&e, want[0..4]));
+    gen_env.expect_in(got, gen_env.join_lines(e, want[0..4]));
     assert(str.find(got, "%tmp0") < 0);
 }
 
