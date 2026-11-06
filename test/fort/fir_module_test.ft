@@ -38,21 +38,20 @@ fn expect_global(fir_env.env mut* e, fir.global* g, ast.sym* named, string ty, i
 // ---- the module ---------------------------------------------------------------------------------
 
 fn functions_keep_their_order() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.module mut* own m = fir.module_make();
     defer fir.module_drop_made(move(m));
     fir.func mut* own first = fir.func_make();
-    *first = fir_env.func_of(&e, "add");
+    *first = fir_env.func_of(e, "add");
     defer fir.func_drop_made(move(first));
-    fir.local_add(first, fir_env.u64_ty(&e), fir.local_kind.lk_temp, null, fir_env.at(1, 1));
-    fir.func mut second = fir_env.func_of(&e, "nothing");
+    fir.local_add(first, fir_env.u64_ty(e), fir.local_kind.lk_temp, null, fir_env.at(1, 1));
+    fir.func mut second = fir_env.func_of(e, "nothing");
     fir.module_add_function(m, move(*first));
     fir.module_add_function(m, move(second));
     assert(fir.module_function_count(m) == 2);
-    assert(fir_env.sym_of(m, 0) == fir_env.sym(&e, "add"));
-    assert(fir_env.sym_of(m, 1) == fir_env.sym(&e, "nothing"));
+    assert(fir_env.sym_of(m, 0) == fir_env.sym(e, "add"));
+    assert(fir_env.sym_of(m, 1) == fir_env.sym(e, "nothing"));
     // The module holds the function as it was built.
     assert(fir.local_count(fir.module_function_at(m, 0)) == 4);
     // The move emptied the caller's function.
@@ -60,15 +59,14 @@ fn functions_keep_their_order() void {
 }
 
 fn many_functions_keep_their_order_while_the_vector_grows() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.module mut* own m = fir.module_make();
     defer fir.module_drop_made(move(m));
     u32 mut i = 0;
     while (i < 40) {
         fir.func mut* own f = fir.func_make();
-        *f = fir_env.func_of(&e, "nothing");
+        *f = fir_env.func_of(e, "nothing");
         defer fir.func_drop_made(move(f));
         u32 mut k = 0;
         while (k < i) {
@@ -87,40 +85,37 @@ fn many_functions_keep_their_order_while_the_vector_grows() void {
 }
 
 fn a_global_keeps_its_value() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.module mut* own m = fir.module_make();
     defer fir.module_drop_made(move(m));
-    ast.sym* limit = fir_env.sym(&e, "LIMIT");
-    ast.sym* total = fir_env.sym(&e, "total");
-    types.node* limit_ty = fir_env.ty(&e, "LIMIT");
-    types.node* total_ty = fir_env.ty(&e, "total");
+    ast.sym* limit = fir_env.sym(e, "LIMIT");
+    ast.sym* total = fir_env.sym(e, "total");
+    types.node* limit_ty = fir_env.ty(e, "LIMIT");
+    types.node* total_ty = fir_env.ty(e, "total");
     fir.module_add_global(m, fir.global{limit, limit_ty, consts.cv_from_i64(7), null});
     fir.module_add_global(m, fir.global{total, total_ty, consts.cv_from_i64(-3), null});
     assert(fir.module_global_count(m) == 2);
-    expect_global(&e, fir.module_global_at(m, 0), limit, "i32", 7);
-    expect_global(&e, fir.module_global_at(m, 1), total, "i32", -3);
+    expect_global(e, fir.module_global_at(m, 0), limit, "i32", 7);
+    expect_global(e, fir.module_global_at(m, 1), total, "i32", -3);
 }
 
 fn the_module_holds_the_entry_main() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.module mut* own m = fir.module_make();
     defer fir.module_drop_made(move(m));
     assert(m->main == null);
-    m->main = fir_env.sym(&e, "main");
+    m->main = fir_env.sym(e, "main");
     assert(name_of(m->main) == "main");
 }
 
 fn an_extern_used_twice_is_recorded_once() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.module mut* own m = fir.module_make();
     defer fir.module_drop_made(move(m));
-    ast.sym* puts = fir_env.sym(&e, "puts");
+    ast.sym* puts = fir_env.sym(e, "puts");
     fir.module_use_extern(m, puts);
     fir.module_use_extern(m, puts);
     assert(fir.module_extern_count(m) == 1);
@@ -133,14 +128,13 @@ fn an_extern_used_twice_is_recorded_once() void {
 }
 
 fn externs_keep_their_first_use_order() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.module mut* own m = fir.module_make();
     defer fir.module_drop_made(move(m));
-    ast.sym* labs = fir_env.sym(&e, "labs");
-    ast.sym* puts = fir_env.sym(&e, "puts");
-    ast.sym* abs = fir_env.sym(&e, "abs");
+    ast.sym* labs = fir_env.sym(e, "labs");
+    ast.sym* puts = fir_env.sym(e, "puts");
+    ast.sym* abs = fir_env.sym(e, "abs");
     fir.module_use_extern(m, labs);
     fir.module_use_extern(m, puts);
     fir.module_use_extern(m, labs);
@@ -153,15 +147,14 @@ fn externs_keep_their_first_use_order() void {
 }
 
 fn module_free_empties_the_module() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.module mut* own m = fir.module_make();
     // The module lives in an allocation, so that the frees under test run and its drop ends it.
     defer fir.module_drop_made(move(m));
-    fir.module_add_function(m, fir_env.func_of(&e, "add"));
-    fir.module_use_extern(m, fir_env.sym(&e, "puts"));
-    m->main = fir_env.sym(&e, "main");
+    fir.module_add_function(m, fir_env.func_of(e, "add"));
+    fir.module_use_extern(m, fir_env.sym(e, "puts"));
+    m->main = fir_env.sym(e, "main");
     fir.module_free(m);
     assert(fir.module_function_count(m) == 0);
     assert(fir.module_global_count(m) == 0);
@@ -176,14 +169,13 @@ fn module_free_empties_the_module() void {
 // module_free moved it by 51744 bytes or more under glibc 2.39 and 2.43; the releases stand in
 // module_drop now.
 fn a_module_leaves_the_heap_where_it_was() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    ast.sym* add = fir_env.sym(&e, "add");
-    ast.sym* limit = fir_env.sym(&e, "LIMIT");
-    ast.sym* puts = fir_env.sym(&e, "puts");
-    types.node* add_ty = fir_env.ty(&e, "add");
-    types.node* limit_ty = fir_env.ty(&e, "LIMIT");
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    ast.sym* add = fir_env.sym(e, "add");
+    ast.sym* limit = fir_env.sym(e, "LIMIT");
+    ast.sym* puts = fir_env.sym(e, "puts");
+    types.node* add_ty = fir_env.ty(e, "add");
+    types.node* limit_ty = fir_env.ty(e, "LIMIT");
     u64[3] mut live_at = {};
     // Forty distinct C names, one for each extern.
     ast.sym[40] mut names = {};
@@ -200,11 +192,11 @@ fn a_module_leaves_the_heap_where_it_was() void {
         u64 mut i = 0;
         while (i < 40) {
             fir.func mut* own f = fir.func_make();
-            *f = fir.func_new(fir_env.tt(&e), add, add_ty);
+            *f = fir.func_new(fir_env.tt(e), add, add_ty);
             defer fir.func_drop_made(move(f));
             u32 mut k = 0;
             while (k < 100) {
-                fir.local_add(f, fir_env.u64_ty(&e), fir.local_kind.lk_temp, null,
+                fir.local_add(f, fir_env.u64_ty(e), fir.local_kind.lk_temp, null,
                               fir_env.at(1, 1));
                 k += 1;
             }

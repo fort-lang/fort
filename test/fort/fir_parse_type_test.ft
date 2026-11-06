@@ -112,10 +112,26 @@ fn open(env mut* e) void {
     e->p = fir_parse.parser_create(&e->c.m.s, "t.fir", "", pre);
 }
 
-fn close(env mut* e) void {
-    fir_parse.parser_free(&e->p);
-    strbuf.free(&e->buf);
-    check_env.close(&e->c);
+// Opens an environment in an allocation of its own, which does not move: the checker and the
+// parser point into it.
+fn make() env mut* own {
+    env mut* own e = new(env);
+    open(e);
+    return e;
+}
+
+// Releases an environment that the caller moves in: the parser, the buffer, then the prelude.
+fn drop(env mut e) void {
+    fir_parse.parser_drop(move(e.p));
+    del(e.buf.data);
+    check_env.drop(move(e.c));
+}
+
+// Ends an environment of make that the caller moves in.
+fn drop_made(env mut* own p) void {
+    env kept = move(*p);
+    del(p);
+    drop(move(kept));
 }
 
 fn parse(env mut* e, string text) types.node* {
@@ -140,112 +156,106 @@ fn spelling(env mut* e, types.node* t) string {
 }
 
 fn every_form_resolves_to_the_checkers_node() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
     u64 mut i = 0;
     while (i < TYPE_COUNT) {
-        types.node* want = field(&e, i);
-        types.node* got = parse(&e, TYPES[i]);
+        types.node* want = field(e, i);
+        types.node* got = parse(e, TYPES[i]);
         if (got != want) {
             eprintln("fir_parse_type_test: <", TYPES[i], "> gives another node");
             panic("fir_parse_type_test: a spelling does not resolve to the checker's node");
         }
         i += 1;
     }
-    assert(check_env.errors(&e.c) == 0);
+    assert(check_env.errors(&e->c) == 0);
     println(i, " types");
 }
 
 // The spelling of the printer resolves back to the same node, except for a named type of another
 // module: the printer writes its bare name, which resolves in the prelude's scope alone.
 fn the_printers_spelling_resolves_back() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
     u64 mut i = 0;
     u64 mut foreign = 0;
     while (i < TYPE_COUNT) {
-        types.node* want = field(&e, i);
-        string text = spelling(&e, want);
+        types.node* want = field(e, i);
+        string text = spelling(e, want);
         if (text == "thing" || text == "thing*") {
             foreign += 1;
-        } else if (parse(&e, text) != want) {
+        } else if (parse(e, text) != want) {
             eprintln("fir_parse_type_test: <", text, "> gives another node");
             panic("fir_parse_type_test: a printed spelling does not resolve back");
         }
         i += 1;
     }
     assert(foreign == 2);
-    assert(check_env.errors(&e.c) == 0);
-    assert(parse(&e, "thing") == null);
-    assert(check_env.errors(&e.c) == 1);
-    assert(check_env.report_text(&e.c, 0) == "7:12: unknown type 'thing'");
+    assert(check_env.errors(&e->c) == 0);
+    assert(parse(e, "thing") == null);
+    assert(check_env.errors(&e->c) == 1);
+    assert(check_env.report_text(&e->c, 0) == "7:12: unknown type 'thing'");
 }
 
 fn the_prelude_names_its_own_nodes() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
-    assert(parse(&e, "point") == named(&e, "point"));
-    assert(parse(&e, "color") == named(&e, "color"));
-    assert(parse(&e, "void") == types.type_void(&e.c.ck.types));
-    types.node* pt = named(&e, "point");
-    assert(parse(&e, "point mut* own") == types.type_ptr(&e.c.ck.types, pt, true, true));
-    assert(check_env.errors(&e.c) == 0);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    assert(parse(e, "point") == named(e, "point"));
+    assert(parse(e, "color") == named(e, "color"));
+    assert(parse(e, "void") == types.type_void(&e->c.ck.types));
+    types.node* pt = named(e, "point");
+    assert(parse(e, "point mut* own") == types.type_ptr(&e->c.ck.types, pt, true, true));
+    assert(check_env.errors(&e->c) == 0);
 }
 
 fn an_unknown_name_is_one_diagnostic_at_the_position() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
-    assert(parse(&e, "nosuch") == null);
-    assert(check_env.errors(&e.c) == 1);
-    assert(check_env.report_text(&e.c, 0) == "7:12: unknown type 'nosuch'");
-    assert(check_env.report_file(&e.c, 0) == "t.fir");
+    env mut* own e = make();
+    defer drop_made(move(e));
+    assert(parse(e, "nosuch") == null);
+    assert(check_env.errors(&e->c) == 1);
+    assert(check_env.report_text(&e->c, 0) == "7:12: unknown type 'nosuch'");
+    assert(check_env.report_file(&e->c, 0) == "t.fir");
     // A name deeper in the spelling reports at its own column.
-    assert(parse(&e, "fn (i32) nosuch*") == null);
-    assert(check_env.errors(&e.c) == 2);
-    assert(check_env.report_text(&e.c, 1) == "7:21: unknown type 'nosuch'");
+    assert(parse(e, "fn (i32) nosuch*") == null);
+    assert(check_env.errors(&e->c) == 2);
+    assert(check_env.report_text(&e->c, 1) == "7:21: unknown type 'nosuch'");
 }
 
 fn a_malformed_spelling_is_one_diagnostic() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
     // A FIR type has no binding, so its outermost position takes no `mut`.
-    assert(parse(&e, "i32 mut") == null);
-    assert(check_env.errors(&e.c) == 1);
-    assert(check_env.report_text(&e.c, 0)
+    assert(parse(e, "i32 mut") == null);
+    assert(check_env.errors(&e->c) == 1);
+    assert(check_env.report_text(&e->c, 0)
            == "7:12: a FIR type has no binding: remove the outermost 'mut'");
     // Text after a whole type.
-    assert(parse(&e, "i32 i32") == null);
-    assert(check_env.errors(&e.c) == 2);
-    assert(check_env.report_text(&e.c, 1) == "7:16: expected the end of the type");
+    assert(parse(e, "i32 i32") == null);
+    assert(check_env.errors(&e->c) == 2);
+    assert(check_env.report_text(&e->c, 1) == "7:16: expected the end of the type");
     // No type at all.
-    assert(parse(&e, "") == null);
-    assert(check_env.errors(&e.c) == 3);
+    assert(parse(e, "") == null);
+    assert(check_env.errors(&e->c) == 3);
     // A marker the checker refuses.
-    assert(parse(&e, "i32 own") == null);
-    assert(check_env.errors(&e.c) == 4);
+    assert(parse(e, "i32 own") == null);
+    assert(check_env.errors(&e->c) == 4);
 }
 
 // An enum table has the type `enum_member*` as the prelude spells it, and this prelude declares
 // no `enum_member`.
 fn an_enum_table_needs_enum_member_in_the_prelude() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
-    fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e.c, "main"), &e.c.ck};
+    env mut* own e = make();
+    defer drop_made(move(e));
+    fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e->c, "main"), &e->c.ck};
     // `p` lives in an allocation, so that the leak rule proves its end: no call changes the
     // pointer, and drop_made holds each release once.
     fir_parse.fir_parser mut* own p = fir_parse.parser_make();
-    *p = fir_parse.parser_create(&e.c.m.s, "t.fir", "enum_table main.color", pre);
+    *p = fir_parse.parser_create(&e->c.m.s, "t.fir", "enum_table main.color", pre);
     defer fir_parse.parser_drop_made(move(p));
     fir.constant mut c = fir.constant{};
     assert(!fir_parse.parse_constant(p, &c));
-    assert(check_env.errors(&e.c) == 1);
-    assert(check_env.report_text(&e.c, 0) == "1:1: unknown type 'enum_member'");
+    assert(check_env.errors(&e->c) == 1);
+    assert(check_env.report_text(&e->c, 0) == "1:1: unknown type 'enum_member'");
 }
 
 fn main() i32 {

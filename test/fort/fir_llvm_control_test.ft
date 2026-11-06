@@ -31,9 +31,8 @@ string[9] WORKED = {
 // (spec/fir.md 11, 13). The blocks are `entry`, `%L1` and `%L2`, and each `return` loads
 // `%result`. The three modes write one text.
 fn the_worked_example_translates_whole() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[34] want = {
         "define dso_local i32 @\"main.f\"(i1 zeroext %c.in) #0 {",
         "entry:",
@@ -72,9 +71,9 @@ fn the_worked_example_translates_whole() void {
     };
     pass_env.mode[3] modes = {pass_env.CHECKED, pass_env.RELEASE, pass_env.NO_BOUNDS};
     for (pass_env.mode m : modes) {
-        string got = llvm_env.lowered_whole(&e, WORKED[..], "f", m);
-        llvm_env.expect(&e, got, want[..]);
-        llvm_env.verified(&e, got);
+        string got = llvm_env.lowered_whole(e, WORKED[..], "f", m);
+        llvm_env.expect(e, got, want[..]);
+        llvm_env.verified(e, got);
     }
 }
 
@@ -158,9 +157,8 @@ string[71] SOURCE = {
 // block, and `otherwise` as its default. The block after the `switch`, which no edge reaches, ends
 // in `unreachable`.
 fn an_integer_switch_and_unreachable() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[22] want = {
         "define dso_local i32 @\"main.ints\"(i32 %n.in) #0 {",
         "entry:",
@@ -186,18 +184,17 @@ fn an_integer_switch_and_unreachable() void {
         "L3:",
     };
     string[2] tail = {"  unreachable", "}"};
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "ints", pass_env.CHECKED);
-    llvm_env.expect2(&e, got, want[..], tail[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "ints", pass_env.CHECKED);
+    llvm_env.expect2(e, got, want[..], tail[..]);
+    llvm_env.verified(e, got);
 }
 
 // An enum `switch` with no `default` names the block of `fail(enum, ...)` as `otherwise`. That
 // block holds only `fail`, so it is the failure block `%L5`, after the four other blocks; its
 // number 1 is no label. It reports the value widened in the block of the `switch`.
 fn an_enum_switch_and_its_failure_block() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[30] want = {
         "define dso_local i32 @\"main.which\"(i32 %k.in) #0 {",
         "entry:",
@@ -230,17 +227,16 @@ fn an_enum_switch_and_its_failure_block() void {
         "  unreachable",
         "}",
     };
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "which", pass_env.CHECKED);
-    llvm_env.expect(&e, got, want[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "which", pass_env.CHECKED);
+    llvm_env.expect(e, got, want[..]);
+    llvm_env.verified(e, got);
 }
 
 // `return` of a `void` function is `ret void`. The kind `user` branches to the continuation
 // first, and its failure block reports the source text of the argument.
 fn a_user_check_branches_to_the_continuation_first() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[15] want = {
         "define dso_local void @\"main.check_user\"(i32 %x.in) #0 {",
         "entry:",
@@ -258,17 +254,16 @@ fn a_user_check_branches_to_the_continuation_first() void {
         "  unreachable",
         "}",
     };
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "check_user", pass_env.CHECKED);
-    llvm_env.expect(&e, got, want[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "check_user", pass_env.CHECKED);
+    llvm_env.expect(e, got, want[..]);
+    llvm_env.verified(e, got);
 }
 
 // A bounds check branches with the failure label first, and its failure block reports the index
 // and the length that the block of the check computed. The element loads in the continuation.
 fn a_bounds_check_branches_to_its_failure_block_first() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[26] want = {
         "define dso_local i32 @\"main.idx\"(ptr %a.in, i64 %i.in) #0 {",
         "entry:",
@@ -297,18 +292,17 @@ fn a_bounds_check_branches_to_its_failure_block_first() void {
         "  unreachable",
         "}",
     };
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "idx", pass_env.CHECKED);
-    llvm_env.expect(&e, got, want[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "idx", pass_env.CHECKED);
+    llvm_env.expect(e, got, want[..]);
+    llvm_env.verified(e, got);
 }
 
 // A `while` loop: `goto` is `br`, the condition a `bool` `switch`, and the check of `s += 1` a
 // `br i1` to the failure block `%L5`, which stands after `%L3` and `%L4` although block 2 makes
 // it. The `add` of the continuation takes the name of `extractvalue 0`.
 fn a_loop_writes_goto_and_its_failure_block_last() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[36] want = {
         "define dso_local i32 @\"main.loop\"(i32 %n.in) #0 {",
         "entry:",
@@ -347,16 +341,15 @@ fn a_loop_writes_goto_and_its_failure_block_last() void {
         "  unreachable",
         "}",
     };
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "loop", pass_env.CHECKED);
-    llvm_env.expect(&e, got, want[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "loop", pass_env.CHECKED);
+    llvm_env.expect(e, got, want[..]);
+    llvm_env.verified(e, got);
 }
 
 // A `noreturn` callee ends its block with the trap of D19.7.
 fn a_trap_follows_a_noreturn_call() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[20] want = {
         "define dso_local i32 @\"main.call_stop\"(i1 zeroext %c.in) #0 {",
         "entry:",
@@ -379,17 +372,16 @@ fn a_trap_follows_a_noreturn_call() void {
         "  ret i32 %t3",
         "}",
     };
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "call_stop", pass_env.CHECKED);
-    llvm_env.expect(&e, got, want[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "call_stop", pass_env.CHECKED);
+    llvm_env.expect(e, got, want[..]);
+    llvm_env.verified(e, got);
 }
 
 // An aggregate result is written through `%ret.sret`, and `return` is `ret void`. The literal
 // reads its member first (spec/fir.md 6).
 fn an_aggregate_result_returns_void() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[11] want = {
         "define dso_local void @\"main.make\"(ptr sret(%struct.main.pair) %ret.sret, i32 %x.in) \\",
         "#0 {",
@@ -404,9 +396,9 @@ fn an_aggregate_result_returns_void() void {
         "  ret void",
     };
     string[1] tail = {"}"};
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "make", pass_env.CHECKED);
-    llvm_env.expect2(&e, got, want[..], tail[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "make", pass_env.CHECKED);
+    llvm_env.expect2(e, got, want[..], tail[..]);
+    llvm_env.verified(e, got);
 }
 
 // ---- failures -----------------------------------------------------------------------------------
@@ -416,9 +408,8 @@ fn an_aggregate_result_returns_void() void {
 // `%tmp0` inside the failure block, because the block has no statement to hold the copy, and the
 // call passes its address (toolchain.md 6 items 7 and 19).
 fn a_panic_alone_in_its_block_is_a_failure_block() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[19] want = {
         "define dso_local void @\"main.msg\"(ptr %m.in, i1 zeroext %c.in) #0 {",
         "entry:",
@@ -440,18 +431,17 @@ fn a_panic_alone_in_its_block_is_a_failure_block() void {
         "  unreachable",
         "}",
     };
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "msg", pass_env.CHECKED);
-    llvm_env.expect(&e, got, want[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "msg", pass_env.CHECKED);
+    llvm_env.expect(e, got, want[..]);
+    llvm_env.verified(e, got);
 }
 
 // `panic` after statements is the call and `unreachable` in place, in the block `%L1` that holds
 // the statements, and no failure block follows (toolchain.md 6 item 19). The literal fills the
 // `string` temporary `%tmp0` field by field, and the call passes its address.
 fn a_panic_after_statements_stands_in_place() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[26] want = {
         "define dso_local void @\"main.boom\"(i1 zeroext %c.in, i32 %x.in) #0 {",
         "entry:",
@@ -480,17 +470,16 @@ fn a_panic_after_statements_stands_in_place() void {
         "  ret void",
         "}",
     };
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "boom", pass_env.CHECKED);
-    llvm_env.expect(&e, got, want[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "boom", pass_env.CHECKED);
+    llvm_env.expect(e, got, want[..]);
+    llvm_env.verified(e, got);
 }
 
 // `bb0` that ends in `fail` stays the entry block, with the call in place, because LLVM needs an
 // entry block. A `noreturn` function takes `#1`.
 fn a_panic_in_the_entry_block_stands_in_place() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[10] want = {
         "define dso_local void @\"main.stop\"() #1 {",
         "entry:",
@@ -503,17 +492,16 @@ fn a_panic_in_the_entry_block_stands_in_place() void {
         "  unreachable",
         "}",
     };
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "stop", pass_env.CHECKED);
-    llvm_env.expect(&e, got, want[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "stop", pass_env.CHECKED);
+    llvm_env.expect(e, got, want[..]);
+    llvm_env.verified(e, got);
 }
 
 // `bb0` that holds only `fail` stays the entry block too, and it copies the message parameter into
 // `%tmp0` before the call.
 fn a_panic_alone_in_the_entry_block_stands_in_place() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[7] want = {
         "define dso_local void @\"main.halt\"(ptr %m.in) #1 {",
         "entry:",
@@ -524,9 +512,9 @@ fn a_panic_alone_in_the_entry_block_stands_in_place() void {
         "  unreachable",
     };
     string[1] tail = {"}"};
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "halt", pass_env.CHECKED);
-    llvm_env.expect2(&e, got, want[..], tail[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "halt", pass_env.CHECKED);
+    llvm_env.expect2(e, got, want[..], tail[..]);
+    llvm_env.verified(e, got);
 }
 
 // The failure blocks stand after the normal blocks in the order of the numbers of the blocks that
@@ -534,9 +522,8 @@ fn a_panic_alone_in_the_entry_block_stands_in_place() void {
 // checks of the clauses, blocks 2 and 3, as `%L8` and `%L9`. The continuations 5 and 6 are the
 // last normal blocks, and the `add` and the `mul` there take `extractvalue 0`.
 fn the_failure_blocks_follow_the_blocks_that_make_them() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[53] want = {
         "define dso_local i32 @\"main.order\"(i32 %k.in, i32 %a.in, i32 %b.in) #0 {",
         "entry:",
@@ -599,9 +586,9 @@ fn the_failure_blocks_follow_the_blocks_that_make_them() void {
         "  unreachable",
         "}",
     };
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "order", pass_env.CHECKED);
-    llvm_env.expect2(&e, got, want[..], tail[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "order", pass_env.CHECKED);
+    llvm_env.expect2(e, got, want[..], tail[..]);
+    llvm_env.verified(e, got);
 }
 
 fn main() i32 {

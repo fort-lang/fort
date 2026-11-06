@@ -13,13 +13,12 @@ fn copy(u32 n) fir.operand {
 }
 
 fn an_assignment_holds_its_place_and_rvalue() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     // `f` lives in an allocation, so that the leak rule proves its end: no call changes the
     // pointer, and drop_made holds each release once.
     fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(&e, "add");
+    *f = fir_env.func_of(e, "add");
     defer fir.func_drop_made(move(f));
     fir.rvalue r = fir.rvalue_binary(f, fir.rvalue_kind.rv_add, copy(1), copy(1));
     fir.statement s = fir.stmt_assign(fir.place_local(0), r, fir_env.at(3, 5), 7);
@@ -64,11 +63,10 @@ fn the_exit_location_is_empty_until_an_expansion_sets_it() void {
 }
 
 fn an_assignment_writes_its_place_and_reads_its_operands() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(&e, "add");
+    *f = fir_env.func_of(e, "add");
     defer fir.func_drop_made(move(f));
     fir.place target = fir.place_local(0);
     fir.rvalue r = fir.rvalue_binary(f, fir.rvalue_kind.rv_add, copy(1), copy(2));
@@ -87,11 +85,10 @@ fn an_assignment_writes_its_place_and_reads_its_operands() void {
 }
 
 fn a_constant_operand_is_read_but_names_no_place() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(&e, "add");
+    *f = fir_env.func_of(e, "add");
     defer fir.func_drop_made(move(f));
     fir.operand one = fir.operand_const(fir.const_bool(true));
     fir.operand two = fir.operand_move(fir.place_local(2));
@@ -106,13 +103,12 @@ fn a_constant_operand_is_read_but_names_no_place() void {
 }
 
 fn a_call_through_a_value_reads_the_callee_first() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(&e, "add");
+    *f = fir_env.func_of(e, "add");
     defer fir.func_drop_made(move(f));
-    u32 callee = fir.local_add(f, fir_env.ty(&e, "add"), fir.local_kind.lk_temp, null,
+    u32 callee = fir.local_add(f, fir_env.ty(e, "add"), fir.local_kind.lk_temp, null,
                                fir_env.at(1, 1));
     u32 first = fir.operand_push(f, copy(1));
     fir.operand_push(f, copy(2));
@@ -131,11 +127,10 @@ fn a_call_through_a_value_reads_the_callee_first() void {
 }
 
 fn a_del_reads_and_writes_its_place() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(&e, "keep");
+    *f = fir_env.func_of(e, "keep");
     defer fir.func_drop_made(move(f));
     fir.place held = fir.place_field(f, fir.place_local(1), 0);
     fir.statement s = fir.stmt_del(held, fir_env.at(1, 1), 1);
@@ -153,11 +148,10 @@ fn a_del_reads_and_writes_its_place() void {
 }
 
 fn live_and_dead_read_and_write_nothing() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(&e, "add");
+    *f = fir_env.func_of(e, "add");
     defer fir.func_drop_made(move(f));
     fir.statement live = fir.stmt_live(1, fir_env.at(1, 1), 1);
     fir.statement dead = fir.stmt_dead(1, fir_env.at(1, 1), 1);
@@ -187,18 +181,17 @@ fn assign_of(fir.rvalue r) fir.statement {
 }
 
 fn every_rvalue_form_reads_its_operands_in_order() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(&e, "add");
+    *f = fir_env.func_of(e, "add");
     defer fir.func_drop_made(move(f));
-    types.table mut* tt = fir_env.tt(&e);
-    u32 ptr = fir.local_add(f, types.type_ptr(tt, fir_env.i32_ty(&e), false, false),
+    types.table mut* tt = fir_env.tt(e);
+    u32 ptr = fir.local_add(f, types.type_ptr(tt, fir_env.i32_ty(e), false, false),
                             fir.local_kind.lk_temp, null, fir_env.at(1, 1));
-    u32 arr = fir.local_add(f, types.type_array(tt, fir_env.i32_ty(&e), 4),
+    u32 arr = fir.local_add(f, types.type_array(tt, fir_env.i32_ty(e), 4),
                             fir.local_kind.lk_temp, null, fir_env.at(1, 1));
-    u32 callee = fir.local_add(f, fir_env.ty(&e, "add"), fir.local_kind.lk_temp, null,
+    u32 callee = fir.local_add(f, fir_env.ty(e, "add"), fir.local_kind.lk_temp, null,
                                fir_env.at(1, 1));
     u32[4] mut got = {};
     // use, a binary form and a unary form
@@ -209,9 +202,9 @@ fn every_rvalue_form_reads_its_operands_in_order() void {
     fir.statement not = assign_of(fir.rvalue_unary(f, fir.rvalue_kind.rv_not, copy(1)));
     assert(reads_of(f, &not, got[..]) == 1 && got[0] == 1);
     // cast and alloc read their one operand
-    fir.statement conv = assign_of(fir.rvalue_cast(f, fir_env.i64_ty(&e), copy(1)));
+    fir.statement conv = assign_of(fir.rvalue_cast(f, fir_env.i64_ty(e), copy(1)));
     assert(reads_of(f, &conv, got[..]) == 1 && got[0] == 1);
-    fir.statement alloc = assign_of(fir.rvalue_alloc(f, fir_env.i32_ty(&e), copy(2)));
+    fir.statement alloc = assign_of(fir.rvalue_alloc(f, fir_env.i32_ty(e), copy(2)));
     assert(reads_of(f, &alloc, got[..]) == 1 && got[0] == 2);
     // addr reads nothing; slice reads its two bounds; slice_ptr reads the pointer first
     fir.statement addr = assign_of(fir.rvalue_addr(f, fir.place_local(arr), false));
@@ -225,28 +218,27 @@ fn every_rvalue_form_reads_its_operands_in_order() void {
     // an aggregate and the three calls read their operands in order
     u32 first = fir.operand_push(f, copy(2));
     fir.operand_push(f, copy(1));
-    fir.statement agg = assign_of(fir.rvalue_aggregate_new(fir_env.ty(&e, "pair"), first, 2));
+    fir.statement agg = assign_of(fir.rvalue_aggregate_new(fir_env.ty(e, "pair"), first, 2));
     assert(reads_of(f, &agg, got[..]) == 2 && got[0] == 2 && got[1] == 1);
-    fir.statement direct = assign_of(fir.rvalue_call_fn(fir_env.sym(&e, "add"), first, 2));
+    fir.statement direct = assign_of(fir.rvalue_call_fn(fir_env.sym(e, "add"), first, 2));
     assert(reads_of(f, &direct, got[..]) == 2 && got[0] == 2 && got[1] == 1);
-    fir.statement ext = assign_of(fir.rvalue_call_extern(fir_env.sym(&e, "abs"), first, 1));
+    fir.statement ext = assign_of(fir.rvalue_call_extern(fir_env.sym(e, "abs"), first, 1));
     assert(reads_of(f, &ext, got[..]) == 1 && got[0] == 2);
     fir.statement value = assign_of(fir.rvalue_call_value(copy(callee), first, 2));
     assert(reads_of(f, &value, got[..]) == 3);
     assert(got[0] == callee && got[1] == 2 && got[2] == 1);
     // A call with no argument reads nothing, or only its callee.
-    fir.statement bare = assign_of(fir.rvalue_call_fn(fir_env.sym(&e, "nothing"), first, 0));
+    fir.statement bare = assign_of(fir.rvalue_call_fn(fir_env.sym(e, "nothing"), first, 0));
     assert(reads_of(f, &bare, got[..]) == 0);
     fir.statement bare_value = assign_of(fir.rvalue_call_value(copy(callee), first, 0));
     assert(reads_of(f, &bare_value, got[..]) == 1 && got[0] == callee);
 }
 
 fn a_statement_reads_a_place_with_projections() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
     fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(&e, "keep");
+    *f = fir_env.func_of(e, "keep");
     defer fir.func_drop_made(move(f));
     // `_0.1 = copy _1.1`: the write and the read are two fields of two locals.
     fir.place target = fir.place_field(f, fir.place_local(0), 1);
@@ -260,7 +252,7 @@ fn a_statement_reads_a_place_with_projections() void {
     assert(fir.stmt_reads_place(f, &s, 0, &read));
     assert(fir.place_compare(f, read, source) == fir.place_rel.pc_equal);
     assert(fir.place_compare(f, read, w) == fir.place_rel.pc_disjoint);
-    fir_env.expect(&e, fir.place_type(f, read), "u64");
+    fir_env.expect(e, fir.place_type(f, read), "u64");
 }
 
 // ---- index locals -----------------------------------------------------------------------
@@ -332,10 +324,9 @@ fn the_count_of_reads(indexed* x, fir.statement* s) u32 {
 }
 
 fn a_destination_reads_its_index_local_first() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    indexed mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    indexed mut* own x = make(e);
     defer drop_made(move(x));
     // `_a[_i] = copy _1`: `_i` is read, then `_1`. `_a[_i]` is written and not read.
     fir.place target = fir.place_index(&x->f, fir.place_local(x->a), x->i);
@@ -349,10 +340,9 @@ fn a_destination_reads_its_index_local_first() void {
 }
 
 fn an_operand_reads_its_index_local_before_its_place() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    indexed mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    indexed mut* own x = make(e);
     defer drop_made(move(x));
     // `_1 = copy _a[_i]`: `_i`, then `_a[_i]`.
     fir.place elem = fir.place_index(&x->f, fir.place_local(x->a), x->i);
@@ -374,10 +364,9 @@ fn an_operand_reads_its_index_local_before_its_place() void {
 }
 
 fn an_address_reads_its_index_local_and_not_its_place() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    indexed mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    indexed mut* own x = make(e);
     defer drop_made(move(x));
     // `_n = addr(_a[_i])`: `_i` only.
     fir.place elem = fir.place_index(&x->f, fir.place_local(x->a), x->i);
@@ -392,10 +381,9 @@ fn an_address_reads_its_index_local_and_not_its_place() void {
 }
 
 fn a_slice_reads_the_index_locals_of_its_place_then_its_bounds() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    indexed mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    indexed mut* own x = make(e);
     defer drop_made(move(x));
     // `_n = slice(_grid[_i].1, copy _j, copy _n)`: `_i`, `_j`, `_n`; not `_grid[_i].1`.
     fir.place row = fir.place_index(&x->f, fir.place_local(x->grid), x->i);
@@ -409,13 +397,12 @@ fn a_slice_reads_the_index_locals_of_its_place_then_its_bounds() void {
 }
 
 fn a_nested_place_reads_each_index_local_in_order() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    indexed mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    indexed mut* own x = make(e);
     defer drop_made(move(x));
     fir.place deep = nested(x);
-    fir_env.expect(&e, fir.place_type(&x->f, deep), "i32");
+    fir_env.expect(e, fir.place_type(&x->f, deep), "i32");
     // `_grid[_i].1[_j] = copy _grid[_i].1[_j]`: the destination gives `_i`, `_j`; the operand
     // gives `_i`, `_j` and its place.
     fir.rvalue r = fir.rvalue_use(&x->f, fir.operand_copy(deep));
@@ -435,10 +422,9 @@ fn a_nested_place_reads_each_index_local_in_order() void {
 }
 
 fn a_del_reads_its_index_local_then_its_place() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    indexed mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    indexed mut* own x = make(e);
     defer drop_made(move(x));
     // `del(move _holders[_i].0)`: `_i`, then the place, which the move reads.
     fir.place row = fir.place_index(&x->f, fir.place_local(x->holders), x->i);
@@ -450,13 +436,12 @@ fn a_del_reads_its_index_local_then_its_place() void {
 }
 
 fn a_call_reads_the_index_locals_of_its_callee_and_arguments() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    indexed mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    indexed mut* own x = make(e);
     defer drop_made(move(x));
     // `_a[_n] = call (copy _fns[_i])(copy _a[_j])`, with `_fns` a `fn (i32, i64) u64[2]`.
-    types.node* fns = types.type_array(fir_env.tt(&e), fir_env.ty(&e, "add"), 2);
+    types.node* fns = types.type_array(fir_env.tt(e), fir_env.ty(e, "add"), 2);
     u32 table = temp(&x->f, fns);
     fir.place callee = fir.place_index(&x->f, fir.place_local(table), x->i);
     fir.place arg = fir.place_index(&x->f, fir.place_local(x->a), x->j);
@@ -517,12 +502,11 @@ fn pointers_of(fir_env.env mut* e, indexed mut* x) pointers {
 }
 
 fn a_destination_reads_its_pointers_after_the_right_side() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    indexed mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    indexed mut* own x = make(e);
     defer drop_made(move(x));
-    pointers q = pointers_of(&e, x);
+    pointers q = pointers_of(e, x);
     // `(*_p).0 = copy _1`: `_1`, then `_p`, whose value the store loads.
     fir.place field = fir.place_field(&x->f, fir.place_deref(&x->f, fir.place_local(q.p)), 0);
     fir.statement s = fir.stmt_assign(field, fir.rvalue_use(&x->f, copy(1)), fir_env.at(1, 1), 1);
@@ -548,7 +532,7 @@ fn a_destination_reads_its_pointers_after_the_right_side() void {
     assert(reads_parts(x, &u, 2, prefix));
     // `_v.0[_i] = copy _1` with `_v: viewer`: the span `_v.0` stands behind a field, so the type
     // of each prefix decides; `_i`, then `_1`, then `_v.0`.
-    u32 v = temp(&x->f, fir_env.ty(&e, "viewer"));
+    u32 v = temp(&x->f, fir_env.ty(e, "viewer"));
     fir.place items = fir.place_field(&x->f, fir.place_local(v), 0);
     fir.place item = fir.place_index(&x->f, items, x->i);
     fir.statement w = fir.stmt_assign(item, fir.rvalue_use(&x->f, copy(1)), fir_env.at(1, 1), 1);
@@ -560,7 +544,7 @@ fn a_destination_reads_its_pointers_after_the_right_side() void {
     assert(reads_parts(x, &w, 2, header));
     // `_str[_i] = copy _1` with `_str: string`: `_i`, `_1`, then `_str`, whose pointer field the
     // index reads, as for a span
-    u32 str = temp(&x->f, types.type_string(fir_env.tt(&e), false));
+    u32 str = temp(&x->f, types.type_string(fir_env.tt(e), false));
     fir.place ch = fir.place_index(&x->f, fir.place_local(str), x->i);
     fir.statement c = fir.stmt_assign(ch, fir.rvalue_use(&x->f, copy(1)), fir_env.at(1, 1), 1);
     assert(the_count_of_reads(x, &c) == 3);
@@ -574,12 +558,11 @@ fn a_destination_reads_its_pointers_after_the_right_side() void {
 }
 
 fn an_address_reads_the_pointers_of_its_place() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    indexed mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    indexed mut* own x = make(e);
     defer drop_made(move(x));
-    pointers q = pointers_of(&e, x);
+    pointers q = pointers_of(e, x);
     // `_n = addr((*_p).1)`: `_p`, and not the field.
     fir.place field = fir.place_field(&x->f, fir.place_deref(&x->f, fir.place_local(q.p)), 1);
     fir.rvalue r = fir.rvalue_addr(&x->f, field, false);
@@ -594,7 +577,7 @@ fn an_address_reads_the_pointers_of_its_place() void {
     assert(reads_local(x, &t, 0, x->i));
     assert(reads_local(x, &t, 1, q.s));
     // `_n = addr(_str[_i])` with `_str: string`: `_i`, then `_str`
-    u32 str = temp(&x->f, types.type_string(fir_env.tt(&e), false));
+    u32 str = temp(&x->f, types.type_string(fir_env.tt(e), false));
     fir.place ch = fir.place_index(&x->f, fir.place_local(str), x->i);
     fir.rvalue b = fir.rvalue_addr(&x->f, ch, false);
     fir.statement u = fir.stmt_assign(fir.place_local(x->n), b, fir_env.at(1, 1), 1);
@@ -604,12 +587,11 @@ fn an_address_reads_the_pointers_of_its_place() void {
 }
 
 fn a_slice_of_a_span_reads_its_place() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    indexed mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    indexed mut* own x = make(e);
     defer drop_made(move(x));
-    pointers q = pointers_of(&e, x);
+    pointers q = pointers_of(e, x);
     // `_n = slice(_s, copy _i, copy _j)`: `_s`, whose pointer field the slice loads, then the
     // bounds.
     fir.rvalue r = fir.rvalue_slice(&x->f, fir.place_local(q.s), copy(x->i), copy(x->j), false);
@@ -627,10 +609,9 @@ fn a_slice_of_a_span_reads_its_place() void {
 }
 
 fn a_move_and_a_del_empty_the_place_they_read() void {
-    fir_env.env mut e = fir_env.env{};
-    fir_env.open(&e);
-    defer fir_env.close(&e);
-    indexed mut* own x = make(&e);
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    indexed mut* own x = make(e);
     defer drop_made(move(x));
     // `_1 = add(copy _a[_i], copy _a[_j])` empties nothing
     fir.place elem = fir.place_index(&x->f, fir.place_local(x->a), x->i);

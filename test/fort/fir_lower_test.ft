@@ -12,6 +12,7 @@
 /// lowering does not lower. Each case lowers one function of a checked source, holds that the
 /// result keeps every rule of the verifier, and compares its text.
 import fort.ast;
+import fort.check;
 import check_env;
 import fort.fir;
 import fort.fir_lower;
@@ -28,9 +29,8 @@ import std.strbuf;
 // The case of the ticket: a constant, a name and a scalar `return`. Each statement takes the index
 // of its source statement, and each assignment the location of its expression.
 fn a_scalar_declaration_takes_a_constant_or_a_name() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[1] source = {"fn f(i32 a) i32 { i32 b = 1; i32 c = a; return c; }"};
     string[16] want = {
         "fn main.f(_1 (a): i32) -> i32 {",
@@ -50,15 +50,14 @@ fn a_scalar_declaration_takes_a_constant_or_a_name() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // A global reads its place, a module-level constant is folded, and a function is a constant. A
 // declaration of each scalar kind writes the constant of its type (spec/fir.md 5.6).
 fn a_declaration_reads_globals_functions_and_every_scalar_kind() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[21] source = {
         "enum color {",
         "    red,",
@@ -131,15 +130,14 @@ fn a_declaration_reads_globals_functions_and_every_scalar_kind() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // `return x` of an `own` parameter or local is an implicit move (ANN_MOVE, D17.5): the operand is
 // `move _x` and not a copy, which rule V6 would refuse.
 fn a_return_of_an_owning_name_moves_it() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[3] source = {
         "fn keep(u8 mut* own p) u8 mut* own {",
         "    return p;",
@@ -155,7 +153,7 @@ fn a_return_of_an_owning_name_moves_it() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "keep"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "keep"), want[..]);
 }
 
 // ---- the named locals -------------------------------------------------------------------------
@@ -164,9 +162,8 @@ fn a_return_of_an_owning_name_moves_it() void {
 // nested blocks included, and walks only the branch of a `$if` that the checker selected
 // (spec/fir.md 5.3). `x` stands in a branch that the checker did not select, and takes no number.
 fn the_prescan_numbers_named_locals_in_declaration_order() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[15] source = {
         "fn f(bool c) i32 {",
         "    i32 a = 1;",
@@ -216,15 +213,14 @@ fn the_prescan_numbers_named_locals_in_declaration_order() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // An `else $if` chain lowers its first selected branch alone, and a chain that selects nothing
 // lowers nothing. A local of a branch that the checker did not select takes no number.
 fn a_compile_time_chain_lowers_its_selected_branch_alone() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[12] source = {
         "fn g() void {",
         "    $if (false) {",
@@ -252,7 +248,7 @@ fn a_compile_time_chain_lowers_its_selected_branch_alone() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "g"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "g"), want[..]);
 }
 
 // ---- the statement index ----------------------------------------------------------------------
@@ -260,9 +256,8 @@ fn a_compile_time_chain_lowers_its_selected_branch_alone() void {
 // The case of the ticket: the `if` takes `s1` and the statement inside it `s2`. The `goto` that
 // ends the arm belongs to the `if` and takes `s1`.
 fn an_if_takes_its_index_before_the_statements_inside_it() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[6] source = {
         "fn f(bool c) i32 {",
         "    if (c) {",
@@ -291,7 +286,7 @@ fn an_if_takes_its_index_before_the_statements_inside_it() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // Each `else if` is an `if` of its own and takes its own index (spec/fir.md 9.7). The blocks of
@@ -299,9 +294,8 @@ fn an_if_takes_its_index_before_the_statements_inside_it() void {
 // larger numbers than the `done` of the outer one. An arm that ends in `return` has no `goto`,
 // and a statement after a `return` starts a block that nothing names.
 fn an_else_if_chain_and_the_statements_after_a_return() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[15] source = {
         "fn f(bool c, bool d) i32 {",
         "    if (c) {",
@@ -374,15 +368,14 @@ fn an_else_if_chain_and_the_statements_after_a_return() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // An `if` inside an `if`: the inner one makes its blocks after the outer `done`, and the `goto`
 // that ends the outer arm takes the index of the outer `if` again after the inner statements.
 fn a_nested_if_restores_the_index_of_the_outer_one() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[9] source = {
         "fn nif(bool a, bool b) i32 {",
         "    if (a) {",
@@ -421,7 +414,7 @@ fn a_nested_if_restores_the_index_of_the_outer_one() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "nif"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "nif"), want[..]);
 }
 
 // The lowering keeps no state from one call to the next: two lowerings of one declaration give
@@ -431,9 +424,8 @@ fn a_nested_if_restores_the_index_of_the_outer_one() void {
 fn a_lowering_depends_on_its_function_alone() void {
     strbuf.str_buf mut first = strbuf.create();
     defer del(first.data);
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[16] source = {
         "fn f(u8 mut* own p, bool c) bool {",
         "    defer del(p);",
@@ -452,17 +444,17 @@ fn a_lowering_depends_on_its_function_alone() void {
         "    }",
         "}",
     };
-    lower_env.check_lines(&e, source[..], false);
-    strbuf.append(&first, lower_env.lower_checked(&e, "f"));
-    assert(lower_env.lower_checked(&e, "f") == strbuf.view(&first));
+    lower_env.check_lines(e, source[..], false);
+    strbuf.append(&first, lower_env.lower_checked(e, "f"));
+    assert(lower_env.lower_checked(e, "f") == strbuf.view(&first));
     // `f` lives in an allocation, so that the leak rule proves its end: no call changes the
     // pointer, and drop_made holds each release once.
     fir.func mut* own f = fir.func_make();
     defer fir.func_drop_made(move(f));
     fir_lower.report mut why = fir_lower.report{};
-    assert(!fir_lower.lower_function(&e.c.ck, lower_env.decl(&e, "g"), f, &why));
+    assert(!fir_lower.lower_function(&e->c.ck, lower_env.decl(e, "g"), f, &why));
     assert(why.kind == ast.ast_kind.k_ident && why.at.line == 14 && why.at.col == 17);
-    assert(lower_env.lower_checked(&e, "f") == strbuf.view(&first));
+    assert(lower_env.lower_checked(e, "f") == strbuf.view(&first));
     // the deferred `del(p)` stands at both returns and at no other place
     assert(str.find(strbuf.view(&first), "del(move _1) #2:11 exit 5:13 s5;") > 0);
     assert(str.find(strbuf.view(&first), "del(move _1) #2:11 exit 8:5 s7;") > 0);
@@ -474,9 +466,8 @@ fn a_lowering_depends_on_its_function_alone() void {
 // closing brace and with index 0 (spec/fir.md 9.6, 9.7). The checker proved that no path reaches
 // it, and rule V9 holds that.
 fn a_body_with_a_result_ends_in_unreachable() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[7] source = {
         "fn f(bool c) i32 {",
         "    if (c) {",
@@ -506,7 +497,7 @@ fn a_body_with_a_result_ends_in_unreachable() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // A `noreturn` body that reaches its end ends in `trap` (D8.5). The checker accepts such a body
@@ -514,9 +505,8 @@ fn a_body_with_a_result_ends_in_unreachable() void {
 // the last block and takes the `trap`. A block that has a terminator keeps it: a second call of
 // lower_end on a body that ends changes nothing.
 fn a_noreturn_body_ends_in_trap() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[4] source = {
         "fn stop() noreturn {",
         "    while (true) {",
@@ -541,8 +531,8 @@ fn a_noreturn_body_ends_in_trap() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "stop"), lowered[..]);
-    end_twice(&e);
+    lower_env.expect(lower_env.lower(e, source[..], "stop"), lowered[..]);
+    end_twice(e);
 }
 
 // Lowers the end of the body of `stop` twice into a new function, so that one `trap` ends it. The
@@ -686,15 +676,14 @@ u64 FORMER_REFUSALS = 82;
 // Each function of REFUSAL_SOURCE lowers, and each keeps every rule of the verifier: the 67 that
 // stopped at `defer`, `new`, `del`, an `own` declaration or an `own` store, and the 15 others.
 fn each_construct_that_stopped_the_lowering_lowers() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, REFUSAL_SOURCE[..], true);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, REFUSAL_SOURCE[..], true);
     u64 mut lowered = 0;
     for (string line : REFUSAL_SOURCE) {
         if (str.starts_with(line, "fn ")) {
             i64 open = str.index_of(line, '(');
-            lower_env.lower_checked(&e, line[3..cast(open, u64)]);
+            lower_env.lower_checked(e, line[3..cast(open, u64)]);
             lowered += 1;
         }
     }
@@ -719,10 +708,9 @@ string[10] POINTER_SPAN = {
 // A span of a pointer whose operand calls a function with `new` in its argument lowers, and it
 // keeps every rule of the verifier.
 fn a_pointer_span_with_a_writer_lowers() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    string text = lower_env.lower_str(&e, POINTER_SPAN[..], "from_cstr");
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string text = lower_env.lower_str(e, POINTER_SPAN[..], "from_cstr");
     assert(str.find(text, "slice_ptr(") >= 0);
 }
 
@@ -796,12 +784,11 @@ string[REFUSALS] REPORTS = {
 // stands, a deferred statement included: the report names the node and where it starts, and the
 // function stays empty.
 fn a_construct_not_lowered_stops_its_function() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     u64 mut i = 0;
     while (i < REFUSALS) {
-        string got = lower_env.refused_with(&e, NO_RUNTIME[..], REFUSED[i], false);
+        string got = lower_env.refused_with(e, NO_RUNTIME[..], REFUSED[i], false);
         if (got.len != REPORTS[i].len + 1 || got[0..REPORTS[i].len] != REPORTS[i]) {
             eprintln("fir_lower_test: ", REFUSED[i], ": expected <", REPORTS[i], ">, got <",
                      got, ">");
@@ -810,9 +797,9 @@ fn a_construct_not_lowered_stops_its_function() void {
         i += 1;
     }
     // the lowering lowers the other functions of the source
-    lower_env.check_lines(&e, NO_RUNTIME[..], false);
-    lower_env.lower_checked(&e, "own_if");
-    lower_env.lower_checked(&e, "count");
+    lower_env.check_lines(e, NO_RUNTIME[..], false);
+    lower_env.lower_checked(e, "own_if");
+    lower_env.lower_checked(e, "count");
 }
 
 // ---- the program ------------------------------------------------------------------------------
@@ -831,13 +818,12 @@ fn the_program_lists_its_functions_in_module_order() void {
     defer del(b.data);
     gen.node_ref_vec mut decls = gen.node_ref_vec{};
     defer del(decls.items);
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    check_env.reopen(&e.c);
-    check_env.add(&e.c, "std/rt.ft", "fn first() void {\n}\n");
-    modules_env.std_dir_without_runtime(&e.c.m, "std");
-    check_env.add(&e.c, "helper.ft", "fn twice(i32 x) i32 {\n    return x;\n}\n");
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    check_env.reopen(&e->c);
+    check_env.add(&e->c, "std/rt.ft", "fn first() void {\n}\n");
+    modules_env.std_dir_without_runtime(&e->c.m, "std");
+    check_env.add(&e->c, "helper.ft", "fn twice(i32 x) i32 {\n    return x;\n}\n");
     string[13] source = {
         "import helper;",
         "extern fn puts(char* s) i32;",
@@ -858,9 +844,9 @@ fn the_program_lists_its_functions_in_module_order() void {
         strbuf.push(&b, '\n');
     }
     strbuf.append(&b, "}\n");
-    check_env.add(&e.c, "main.ft", strbuf.view(&b));
-    assert(check_env.check_entry(&e.c, "main.ft"));
-    fir_lower.program_functions(&e.c.m.set, &decls);
+    check_env.add(&e->c, "main.ft", strbuf.view(&b));
+    assert(check_env.check_entry(&e->c, "main.ft"));
+    fir_lower.program_functions(&e->c.m.set, &decls);
     string[5] names = {"first", "twice", "early", "kept", "main"};
     assert(decls.len == 5);
     u64 mut i = 0;
@@ -868,6 +854,20 @@ fn the_program_lists_its_functions_in_module_order() void {
         assert(decl_name(&decls, i) == names[i]);
         i += 1;
     }
+}
+
+// lower_env.check_lines checks each source in a fresh sandbox (check_env.reopen), so the second of
+// two checks in one environment starts from a fresh checker: it holds the symbols of its source
+// alone. A reopen that kept the symbols of the first check would add the second set to them.
+fn a_second_check_starts_from_a_fresh_checker() void {
+    string[3] source = {"fn f(i32 a) i32 {", "    return a;", "}"};
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, source[..], true);
+    u64 first = check.check_sym_count(&e->c.ck);
+    assert(first > 0);
+    lower_env.check_lines(e, source[..], true);
+    assert(check.check_sym_count(&e->c.ck) == first);
 }
 
 fn main() i32 {
@@ -891,6 +891,7 @@ fn main() i32 {
     a_construct_not_lowered_stops_its_function();
     println("refusals ok");
     the_program_lists_its_functions_in_module_order();
+    a_second_check_starts_from_a_fresh_checker();
     println("program ok");
     return 0;
 }

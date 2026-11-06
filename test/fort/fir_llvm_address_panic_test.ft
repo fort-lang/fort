@@ -28,20 +28,19 @@ string[11] TEXT = {
 
 // A panic ends the program, so the case stands in a file of its own.
 fn main() i32 {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[1] prelude = {"i32 UNUSED = 0;"};
     // `m` lives in an allocation, so that the leak rule proves its end: no call changes the
     // pointer, and drop_made holds each release once.
     fir.module mut* own m = fir.module_make();
-    *m = llvm_env.parse(&e, prelude[..], TEXT[..]);
+    *m = llvm_env.parse(e, prelude[..], TEXT[..]);
     defer fir.module_drop_made(move(m));
     fir.func* f = fir.module_function_at(m, 0);
-    llvm_env.begin(&e.g);
+    llvm_env.begin(&e->g);
     // `t` ends in a block of its own, so that its `del`s come after the last call of its exit.
     {
-        fir_llvm.translator mut t = fir_llvm.open(&e.g, f);
+        fir_llvm.translator mut t = fir_llvm.open(&e->g, f);
         defer {
             del(t.locals);
             del(t.notes);

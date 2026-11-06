@@ -87,9 +87,8 @@ string[62] SOURCE = {
 // A `bool` result carries `zeroext`, a `u8` parameter `zeroext` and an `i16` parameter `signext`,
 // on the definition and at the call.
 fn a_narrow_call_extends_its_result_and_its_arguments() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[16] want = {
         "define dso_local zeroext i1 @\"main.call_narrow\"(i8 zeroext %x.in, i16 signext %y.in) \\",
         "#0 {",
@@ -109,13 +108,13 @@ fn a_narrow_call_extends_its_result_and_its_arguments() void {
         "  ret i1 %t5",
     };
     string[1] tail = {"}"};
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "call_narrow", pass_env.CHECKED);
-    llvm_env.expect2(&e, got, want[..], tail[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "call_narrow", pass_env.CHECKED);
+    llvm_env.expect2(e, got, want[..], tail[..]);
+    llvm_env.verified(e, got);
     string[1] callee = {
         "define dso_local zeroext i1 @\"main.narrow\"(i8 zeroext %a.in, i16 signext %b.in) #0 {",
     };
-    string whole = llvm_env.lowered_whole(&e, SOURCE[..], "narrow", pass_env.CHECKED);
+    string whole = llvm_env.lowered_whole(e, SOURCE[..], "narrow", pass_env.CHECKED);
     assert(whole[0..callee[0].len] == callee[0]);
 }
 
@@ -123,9 +122,8 @@ fn a_narrow_call_extends_its_result_and_its_arguments() void {
 // of a named local, and the storage of a temporary. A named aggregate argument goes into a new
 // `%tmp` slot, the caller-made copy; the storage of a temporary is that copy already.
 fn an_aggregate_result_and_an_aggregate_argument() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[24] want = {
         "define dso_local i32 @\"main.use_pair\"() #0 {",
         "entry:",
@@ -153,24 +151,23 @@ fn an_aggregate_result_and_an_aggregate_argument() void {
         "  call void @\"std.rt.fail_overflow\"(ptr @.file.0, i32 27, i32 20)",
     };
     string[2] tail = {"  unreachable", "}"};
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "use_pair", pass_env.CHECKED);
-    llvm_env.expect2(&e, got, want[..], tail[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "use_pair", pass_env.CHECKED);
+    llvm_env.expect2(e, got, want[..], tail[..]);
+    llvm_env.verified(e, got);
     string[2] callee = {
         "define dso_local void @\"main.make\"(ptr sret(%struct.main.pair) %ret.sret, i32 %x.in) \\",
         "#0 {",
     };
-    string whole = llvm_env.lowered_whole(&e, SOURCE[..], "make", pass_env.CHECKED);
-    string head = llvm_env.joined(&e, callee[..]);
+    string whole = llvm_env.lowered_whole(e, SOURCE[..], "make", pass_env.CHECKED);
+    string head = llvm_env.joined(e, callee[..]);
     assert(whole[0..head.len] == head);
 }
 
 // A struct of 24 bytes, wider than two words, takes the same `sret(%T)` on the definition and at
 // the call (notes/compiler.md 6, the size classes).
 fn a_wide_result_takes_sret_too() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[10] want = {
         "define dso_local i64 @\"main.call_wide\"() #0 {",
         "entry:",
@@ -184,13 +181,13 @@ fn a_wide_result_takes_sret_too() void {
         "  ret i64 %t2",
     };
     string[1] tail = {"}"};
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "call_wide", pass_env.CHECKED);
-    llvm_env.expect2(&e, got, want[..], tail[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "call_wide", pass_env.CHECKED);
+    llvm_env.expect2(e, got, want[..], tail[..]);
+    llvm_env.verified(e, got);
     string[1] callee = {
         "define dso_local void @\"main.wide\"(ptr sret(%struct.main.big) %ret.sret) #0 {",
     };
-    string whole = llvm_env.lowered_whole(&e, SOURCE[..], "wide", pass_env.CHECKED);
+    string whole = llvm_env.lowered_whole(e, SOURCE[..], "wide", pass_env.CHECKED);
     assert(whole[0..callee[0].len] == callee[0]);
 }
 
@@ -198,9 +195,8 @@ fn a_wide_result_takes_sret_too() void {
 // computes it after the arguments, as it computes the address of every destination after the
 // right side (spec/fir.md 12.5).
 fn the_result_address_comes_after_the_arguments() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[16] want = {
         "define dso_local i32 @\"main.fill\"(i32 %v.in) #0 {",
         "entry:",
@@ -220,17 +216,16 @@ fn the_result_address_comes_after_the_arguments() void {
         "  ret i32 %t5",
     };
     string[1] tail = {"}"};
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "fill", pass_env.CHECKED);
-    llvm_env.expect2(&e, got, want[..], tail[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "fill", pass_env.CHECKED);
+    llvm_env.expect2(e, got, want[..], tail[..]);
+    llvm_env.verified(e, got);
 }
 
 // A call through a function pointer reads the callee before the arguments and writes the call type
 // before it, the `sret` pointer of an aggregate result included (toolchain.md 6 item 7).
 fn a_call_through_a_pointer_writes_its_type() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[17] want = {
         "define dso_local i32 @\"main.through\"(ptr %op.in, ptr %mk.in) #0 {",
         "entry:",
@@ -251,18 +246,17 @@ fn a_call_through_a_pointer_writes_its_type() void {
         "  ret i32 %t5",
     };
     string[1] tail = {"}"};
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "through", pass_env.CHECKED);
-    llvm_env.expect2(&e, got, want[..], tail[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "through", pass_env.CHECKED);
+    llvm_env.expect2(e, got, want[..], tail[..]);
+    llvm_env.verified(e, got);
 }
 
 // `move s` into an owning aggregate parameter copies `s` into a new `%tmp` slot, the caller-made
 // copy, zeroes `s`, and passes the copy (toolchain.md 6 items 7 and 18). A call of a `void`
 // function with no argument is the call alone.
 fn a_moved_argument_is_copied_then_zeroed() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[5] want = {
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %s.0, i64 16, \\",
         "i1 false)",
@@ -270,16 +264,16 @@ fn a_moved_argument_is_copied_then_zeroed() void {
         "  call void @\"main.eat\"(ptr %tmp0)",
         "  ret void",
     };
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "feed", pass_env.CHECKED);
-    llvm_env.verified(&e, got);
-    llvm_env.contains(&e, got, want[..]);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "feed", pass_env.CHECKED);
+    llvm_env.verified(e, got);
+    llvm_env.contains(e, got, want[..]);
     string[4] body = {
         "define dso_local void @\"main.nothing\"() #0 {",
         "entry:",
         "  ret void",
         "}",
     };
-    llvm_env.expect(&e, llvm_env.lowered_whole(&e, SOURCE[..], "nothing", pass_env.CHECKED),
+    llvm_env.expect(e, llvm_env.lowered_whole(e, SOURCE[..], "nothing", pass_env.CHECKED),
                     body[..]);
 }
 
@@ -289,9 +283,8 @@ fn a_moved_argument_is_copied_then_zeroed() void {
 // prefix, and each carries `#3`. A narrow extern result and parameter carry `signext` and
 // `zeroext`. An argument of the variadic tail carries no attribute.
 fn an_extern_call_carries_its_c_form() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[20] want = {
         "define dso_local i64 @\"main.c_calls\"(ptr %fmt.in, ptr %buf.in, i8 signext %n.in) #0 {",
         "entry:",
@@ -315,9 +308,9 @@ fn an_extern_call_carries_its_c_form() void {
         "  ret i64 %t6",
     };
     string[1] tail = {"}"};
-    string got = llvm_env.lowered_whole(&e, SOURCE[..], "c_calls", pass_env.CHECKED);
-    llvm_env.expect2(&e, got, want[..], tail[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, SOURCE[..], "c_calls", pass_env.CHECKED);
+    llvm_env.expect2(e, got, want[..], tail[..]);
+    llvm_env.verified(e, got);
 }
 
 // The C name of extern `k` of `m`. The read through `m` stands in a function that takes it as a
@@ -336,19 +329,18 @@ fn name_main(fir.module mut* m) void {
 // variadic tail, the extension attributes, and `nobuiltin` on each. `#3` is the only group that an
 // extern call adds.
 fn the_extern_list_drives_the_declarations() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     // `m` lives in an allocation, so that the leak rule proves its end: no call changes the
     // pointer, and drop_made holds each release once.
     fir.module mut* own m = fir.module_make();
     defer fir.module_drop_made(move(m));
-    fir.module_add_function(m, llvm_env.lower(&e, SOURCE[..], "c_calls", pass_env.CHECKED));
+    fir.module_add_function(m, llvm_env.lower(e, SOURCE[..], "c_calls", pass_env.CHECKED));
     fir.module_collect_externs(m);
     assert(fir.module_extern_count(m) == 3);
     assert(extern_name(m, 0) == "printf");
     assert(extern_name(m, 2) == "write");
-    fir_llvm.translate_module(&e.g, m);
+    fir_llvm.translate_module(&e->g, m);
     string[6] want = {
         "declare i32 @printf(ptr, ...) nobuiltin",
         "declare signext i8 @c_narrow(i8 signext, i16 zeroext) nobuiltin",
@@ -357,7 +349,7 @@ fn the_extern_list_drives_the_declarations() void {
         "attributes #0 = { nounwind \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\" }",
         "attributes #3 = { nobuiltin }",
     };
-    llvm_env.expect(&e, llvm_env.module_tail(&e), want[..]);
+    llvm_env.expect(e, llvm_env.module_tail(e), want[..]);
 }
 
 // The source of an entry module whose `main` takes the argument span.
@@ -371,14 +363,13 @@ string[3] ENTRY = {
 // (spec/fir.md 5.1, toolchain.md 6 item 22): it builds the span in its own frame and passes it
 // as the caller-made copy, through the signature map.
 fn the_module_writes_the_c_main() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     fir.module mut* own m = fir.module_make();
     defer fir.module_drop_made(move(m));
-    fir.module_add_function(m, llvm_env.lower(&e, ENTRY[..], "main", pass_env.CHECKED));
+    fir.module_add_function(m, llvm_env.lower(e, ENTRY[..], "main", pass_env.CHECKED));
     name_main(m);
-    fir_llvm.translate_module(&e.g, m);
+    fir_llvm.translate_module(&e->g, m);
     string[10] want = {
         "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {",
         "entry:",
@@ -392,14 +383,14 @@ fn the_module_writes_the_c_main() void {
         "}",
     };
     string[2] head = {"define dso_local i32 @\"main.main\"(ptr %args.in) #0 {", "entry:"};
-    string got = strbuf.view(&e.g.funcs);
-    llvm_env.verified(&e, got);
-    llvm_env.contains(&e, got, head[..]);
-    llvm_env.contains(&e, got, want[..]);
+    string got = strbuf.view(&e->g.funcs);
+    llvm_env.verified(e, got);
+    llvm_env.contains(e, got, head[..]);
+    llvm_env.contains(e, got, want[..]);
     // gen_main alone writes the same definition
-    strbuf.clear(&e.g.funcs);
-    gen.gen_main(&e.g, m->main);
-    llvm_env.expect(&e, strbuf.view(&e.g.funcs), want[..]);
+    strbuf.clear(&e->g.funcs);
+    gen.gen_main(&e->g, m->main);
+    llvm_env.expect(e, strbuf.view(&e->g.funcs), want[..]);
 }
 
 // ---- the runtime entries ------------------------------------------------------------------------
@@ -437,9 +428,8 @@ string[26] RUNTIME = {
 // `bool`, `i8 zeroext` for a `char`, a `string` as the caller-made copy `%tmp1` that one pointer
 // passes, the enum table and its count as the span `%tmp0`, and the newline.
 fn each_print_entry_is_a_fort_call() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[49] want = {
         "define dso_local void @\"main.show\"(i32 %i.in, i16 zeroext %u.in, i1 zeroext %b.in, \\",
         "i8 zeroext %c.in, ptr %p.in, ptr %s.in, i32 %k.in, float %x.in, double %y.in) #0 {",
@@ -492,16 +482,15 @@ fn each_print_entry_is_a_fort_call() void {
         "  call void @\"std.rt.print_char\"(i32 1, i8 zeroext 10)",
     };
     string[2] tail = {"  ret void", "}"};
-    string got = llvm_env.lowered_whole(&e, RUNTIME[..], "show", pass_env.CHECKED);
-    llvm_env.expect2(&e, got, want[..], tail[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, RUNTIME[..], "show", pass_env.CHECKED);
+    llvm_env.expect2(e, got, want[..], tail[..]);
+    llvm_env.verified(e, got);
 }
 
 // A string equality calls `std.rt.str_eq`, whose `bool` result is `zeroext i1` at the call.
 fn a_string_equality_calls_str_eq() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[17] want = {
         "define dso_local zeroext i1 @\"main.same\"(ptr %a.in, ptr %b.in) #0 {",
         "entry:",
@@ -522,17 +511,16 @@ fn a_string_equality_calls_str_eq() void {
         "  ret i1 %t11",
     };
     string[1] tail = {"}"};
-    string got = llvm_env.lowered_whole(&e, RUNTIME[..], "same", pass_env.CHECKED);
-    llvm_env.expect2(&e, got, want[..], tail[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, RUNTIME[..], "same", pass_env.CHECKED);
+    llvm_env.expect2(e, got, want[..], tail[..]);
+    llvm_env.verified(e, got);
 }
 
 // The shift check reports the count as `i64` and the type name as `bytes`; the masked shift of the
 // continuation truncates the count.
 fn a_shift_check_calls_fail_shift() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[24] want = {
         "define dso_local i32 @\"main.shift\"(i32 %a.in, i32 %n.in) #0 {",
         "entry:",
@@ -559,17 +547,16 @@ fn a_shift_check_calls_fail_shift() void {
         "  unreachable",
         "}",
     };
-    string got = llvm_env.lowered_whole(&e, RUNTIME[..], "shift", pass_env.CHECKED);
-    llvm_env.expect(&e, got, want[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, RUNTIME[..], "shift", pass_env.CHECKED);
+    llvm_env.expect(e, got, want[..]);
+    llvm_env.verified(e, got);
 }
 
 // The division reports no operand: its zero check and its overflow check each take a failure
 // block, `%L3` and `%L4`, in the order of the blocks that make them.
 fn a_division_calls_fail_div_zero_and_fail_div_overflow() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[34] want = {
         "define dso_local i32 @\"main.quot\"(i32 %a.in, i32 %n.in) #0 {",
         "entry:",
@@ -607,17 +594,16 @@ fn a_division_calls_fail_div_zero_and_fail_div_overflow() void {
         "  unreachable",
     };
     string[1] tail = {"}"};
-    string got = llvm_env.lowered_whole(&e, RUNTIME[..], "quot", pass_env.CHECKED);
-    llvm_env.expect2(&e, got, want[..], tail[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, RUNTIME[..], "quot", pass_env.CHECKED);
+    llvm_env.expect2(e, got, want[..], tail[..]);
+    llvm_env.verified(e, got);
 }
 
 // A span expression checks both bounds with one branch and reports `lo`, `hi` and the length; the
 // header of the result goes into `%ret.sret` field by field.
 fn a_span_check_calls_fail_span() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[29] want = {
         "define dso_local void @\"main.part\"(ptr sret(%fort.span) %ret.sret, ptr %v.in, \\",
         "i64 %lo.in, i64 %hi.in) #0 {",
@@ -656,18 +642,17 @@ fn a_span_check_calls_fail_span() void {
         "  unreachable",
         "}",
     };
-    string got = llvm_env.lowered_whole(&e, RUNTIME[..], "part", pass_env.CHECKED);
-    llvm_env.expect2(&e, got, want[..], tail[..]);
-    llvm_env.verified(&e, got);
+    string got = llvm_env.lowered_whole(e, RUNTIME[..], "part", pass_env.CHECKED);
+    llvm_env.expect2(e, got, want[..], tail[..]);
+    llvm_env.verified(e, got);
 }
 
 // `new(i32, m)` with a signed count checks it with `alloc_count`. The emptiness pass proves the
 // store into `z`, so every mode folds it: the header is written straight into `z`, with no `%tmp`
 // slot and no overwrite check, and `del(z)` frees and zeroes it (spec/fir.md 11).
 fn an_allocation_calls_fail_alloc_count() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[22] want = {
         "define dso_local void @\"main.many\"(i64 %m.in) #0 {",
         "entry:",
@@ -700,9 +685,9 @@ fn an_allocation_calls_fail_alloc_count() void {
     };
     pass_env.mode[3] modes = {pass_env.CHECKED, pass_env.RELEASE, pass_env.NO_BOUNDS};
     for (pass_env.mode m : modes) {
-        string got = llvm_env.lowered_whole(&e, RUNTIME[..], "many", m);
-        llvm_env.expect2(&e, got, want[..], tail[..]);
-        llvm_env.verified(&e, got);
+        string got = llvm_env.lowered_whole(e, RUNTIME[..], "many", m);
+        llvm_env.expect2(e, got, want[..], tail[..]);
+        llvm_env.verified(e, got);
         assert(str.find(got, "fail_overwrite") < 0);
     }
 }

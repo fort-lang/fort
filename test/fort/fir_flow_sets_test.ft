@@ -107,13 +107,25 @@ struct env {
     fir.module m;
 }
 
-fn open(env mut* e) void {
+// Opens an environment in an allocation of its own, which does not move: the checker of the
+// fixture points into it. `new` gives the empty module.
+fn make() env mut* own {
+    env mut* own e = new(env);
     fir_env.open(&e->fx);
+    return e;
 }
 
-fn close(env mut* e) void {
-    fir.module_free(&e->m);
-    fir_env.close(&e->fx);
+// Releases an environment that the caller moves in: the module, then the fixture.
+fn drop(env mut e) void {
+    fir.module_drop(move(e.m));
+    fir_env.drop(move(e.fx));
+}
+
+// Ends an environment of make that the caller moves in.
+fn drop_made(env mut* own p) void {
+    env kept = move(*p);
+    del(p);
+    drop(move(kept));
 }
 
 // Parses the fixture's `f`, which takes `_1 (c): bool` and returns `i32`, with the `let` lines
@@ -205,9 +217,8 @@ fn agree_all(fir.func* f, u32 count) void {
 string LETS = "let _2 (x): i32; let _3 (y): i32; let _4 (z): i32;";
 
 fn the_set_transfer_reaches_the_fixpoint_of_the_function_transfer() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
     // a kill on one arm of a diamond, and a block that ends and then starts one local
     string[4] diamond = {
         "bb0: { live(_2); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
@@ -215,7 +226,7 @@ fn the_set_transfer_reaches_the_fixpoint_of_the_function_transfer() void {
         "bb2: { live(_4); dead(_4); live(_2); goto bb3; }",
         "bb3: { unreachable; }",
     };
-    agree_all(parse(&e, LETS, diamond[..]), 5);
+    agree_all(parse(e, LETS, diamond[..]), 5);
     // a kill carried around a back edge, and a gen that the loop body undoes
     string[4] loop = {
         "bb0: { live(_2); live(_3); goto bb1; }",
@@ -223,7 +234,7 @@ fn the_set_transfer_reaches_the_fixpoint_of_the_function_transfer() void {
         "bb2: { dead(_2); live(_4); dead(_3); live(_3); goto bb1; }",
         "bb3: { unreachable; }",
     };
-    agree_all(parse(&e, LETS, loop[..]), 5);
+    agree_all(parse(e, LETS, loop[..]), 5);
     // two entries into one loop
     string[4] irreducible = {
         "bb0: { live(_4); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
@@ -231,7 +242,7 @@ fn the_set_transfer_reaches_the_fixpoint_of_the_function_transfer() void {
         "bb2: { live(_3); switch(copy _1) -> [true: bb1, otherwise: bb3]; }",
         "bb3: { dead(_3); unreachable; }",
     };
-    agree_all(parse(&e, LETS, irreducible[..]), 5);
+    agree_all(parse(e, LETS, irreducible[..]), 5);
     // a block that nothing names, and a block that loops to itself
     string[4] apart = {
         "bb0: { live(_2); goto bb2; }",
@@ -239,7 +250,7 @@ fn the_set_transfer_reaches_the_fixpoint_of_the_function_transfer() void {
         "bb2: { dead(_2); switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
         "bb3: { live(_2); unreachable; }",
     };
-    agree_all(parse(&e, LETS, apart[..]), 5);
+    agree_all(parse(e, LETS, apart[..]), 5);
     // nested loops
     string[6] nested = {
         "bb0: { live(_2); goto bb1; }",
@@ -249,7 +260,7 @@ fn the_set_transfer_reaches_the_fixpoint_of_the_function_transfer() void {
         "bb4: { live(_2); dead(_3); goto bb1; }",
         "bb5: { unreachable; }",
     };
-    agree_all(parse(&e, LETS, nested[..]), 5);
+    agree_all(parse(e, LETS, nested[..]), 5);
 }
 
 // A second run with sets replaces the result of the first.
@@ -264,11 +275,10 @@ fn a_second_run_with_sets_replaces_the_result() void {
         del(kills[0].words);
         del(kills[1].words);
     }
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
     string[2] blocks = {"bb0: { live(_2); goto bb1; }", "bb1: { unreachable; }"};
-    fir.func* f = parse(&e, LETS, blocks[..]);
+    fir.func* f = parse(e, LETS, blocks[..]);
     fir.pred_table mut* own pt = fir.pred_table_make();
     *pt = fir.func_predecessors(f);
     defer fir.pred_table_drop_made(move(pt));
@@ -444,9 +454,8 @@ fn holds(fir_flow.dataflow* d, u32 b, u32 number) bool {
 }
 
 fn an_edge_set_holds_on_its_edge_as_a_block_on_that_edge_does() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
     u32[1] three = {3};
     u32[2] two_four = {2, 4};
     u32@ nothing = {};
@@ -464,9 +473,9 @@ fn an_edge_set_holds_on_its_edge_as_a_block_on_that_edge_does() void {
         "bb3: { unreachable; }",
         "bb4: { goto bb1; }",
     };
-    parse_pair(&e, diamond[..], diamond_split[..]);
-    fir.func* mut f = fir.module_function_at(&e.m, 0);
-    fir.func* mut g = fir.module_function_at(&e.m, 1);
+    parse_pair(e, diamond[..], diamond_split[..]);
+    fir.func* mut f = fir.module_function_at(&e->m, 0);
+    fir.func* mut g = fir.module_function_at(&e->m, 1);
     edge[1] into_then = {edge{0, 1, three[..]}};
     agree_edges_all(f, g, 5, into_then[..]);
     // the same edge set on the edge into bb2, the `otherwise` edge
@@ -477,9 +486,9 @@ fn an_edge_set_holds_on_its_edge_as_a_block_on_that_edge_does() void {
         "bb3: { unreachable; }",
         "bb4: { goto bb2; }",
     };
-    parse_pair(&e, diamond[..], other_split[..]);
-    f = fir.module_function_at(&e.m, 0);
-    g = fir.module_function_at(&e.m, 1);
+    parse_pair(e, diamond[..], other_split[..]);
+    f = fir.module_function_at(&e->m, 0);
+    g = fir.module_function_at(&e->m, 1);
     edge[1] into_else = {edge{0, 2, three[..]}};
     agree_edges_all(f, g, 5, into_else[..]);
     // the in-sets by hand: the number holds in bb2 and not in bb1, and the intersection at bb3
@@ -543,9 +552,9 @@ fn an_edge_set_holds_on_its_edge_as_a_block_on_that_edge_does() void {
         "bb4: { goto bb3; }",
         "bb5: { goto bb1; }",
     };
-    parse_pair(&e, loop[..], loop_split[..]);
-    f = fir.module_function_at(&e.m, 0);
-    g = fir.module_function_at(&e.m, 1);
+    parse_pair(e, loop[..], loop_split[..]);
+    f = fir.module_function_at(&e->m, 0);
+    g = fir.module_function_at(&e->m, 1);
     edge[2] around = {edge{1, 3, two_four[..]}, edge{2, 1, three[..]}};
     agree_edges_all(f, g, 5, around[..]);
     // a block that loops to itself, with its edge set on that edge, and an empty edge set
@@ -563,9 +572,9 @@ fn an_edge_set_holds_on_its_edge_as_a_block_on_that_edge_does() void {
         "bb4: { goto bb2; }",
         "bb5: { goto bb2; }",
     };
-    parse_pair(&e, apart[..], apart_split[..]);
-    f = fir.module_function_at(&e.m, 0);
-    g = fir.module_function_at(&e.m, 1);
+    parse_pair(e, apart[..], apart_split[..]);
+    f = fir.module_function_at(&e->m, 0);
+    g = fir.module_function_at(&e->m, 1);
     edge[2] looped = {edge{0, 2, nothing}, edge{2, 2, two_four[..]}};
     agree_edges_all(f, g, 5, looped[..]);
 }

@@ -80,9 +80,8 @@ string[55] ARITH = {
 // toolchain.md 6 item 15. The `add` of the continuation prints
 // nothing, and `_0` takes `%t3`, the name of `extractvalue 0` (spec/fir.md 12.2).
 fn a_checked_add_writes_the_intrinsic_once() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[14] want = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -99,10 +98,10 @@ fn a_checked_add_writes_the_intrinsic_once() void {
         "L1:",
         "  store i32 %t3, ptr %result, align 4",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, ARITH[..], "add", pass_env.CHECKED), want[..]);
-    assert(e.g.intrinsics[2 + 0 * 4 + 2]);
+    llvm_env.expect(e, llvm_env.lowered(e, ARITH[..], "add", pass_env.CHECKED), want[..]);
+    assert(e->g.intrinsics[2 + 0 * 4 + 2]);
     // the intrinsic and `#4` are marked for the declarations
-    assert(e.g.attrs[4]);
+    assert(e->g.attrs[4]);
     // in release the pass leaves a plain `add`, with no `nsw`
     string[4] plain = {
         "  %t0 = load i32, ptr %a.0, align 4",
@@ -110,18 +109,17 @@ fn a_checked_add_writes_the_intrinsic_once() void {
         "  %t2 = add i32 %t0, %t1",
         "  store i32 %t2, ptr %result, align 4",
     };
-    string got = llvm_env.lowered(&e, ARITH[..], "add", pass_env.RELEASE);
-    llvm_env.expect2(&e, got, want[0..6], plain[..]);
-    assert(!e.g.intrinsics[2 + 0 * 4 + 2]);
+    string got = llvm_env.lowered(e, ARITH[..], "add", pass_env.RELEASE);
+    llvm_env.expect2(e, got, want[0..6], plain[..]);
+    assert(!e->g.intrinsics[2 + 0 * 4 + 2]);
 }
 
 // The family and the width of the intrinsic follow the type of `a`: `usub` for a `u8`, `smul`
 // for an `i64`, and `ssub` of `0` for the negation of an `i16`, whose continuation reuses the
 // `sub` of the same two operands.
 fn the_intrinsic_follows_the_signedness_and_the_width() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[8] subu = {
         "  %t0 = load i8, ptr %a.0, align 1",
         "  %t1 = load i8, ptr %b.1, align 1",
@@ -140,8 +138,8 @@ fn the_intrinsic_follows_the_signedness_and_the_width() void {
         "  store i8 %a.in, ptr %a.0, align 1",
         "  store i8 %b.in, ptr %b.1, align 1",
     };
-    string mut got = llvm_env.lowered(&e, ARITH[..], "subu", pass_env.CHECKED);
-    llvm_env.expect2(&e, got, subu_entry[..], subu[..]);
+    string mut got = llvm_env.lowered(e, ARITH[..], "subu", pass_env.CHECKED);
+    llvm_env.expect2(e, got, subu_entry[..], subu[..]);
     string[5] mul = {
         "  %t0 = load i64, ptr %a.0, align 8",
         "  %t1 = load i64, ptr %b.1, align 8",
@@ -158,8 +156,8 @@ fn the_intrinsic_follows_the_signedness_and_the_width() void {
         "  store i64 %b.in, ptr %b.1, align 8",
     };
     string[3] mul_tail = {"", "L1:", "  store i64 %t3, ptr %result, align 8"};
-    got = llvm_env.lowered(&e, ARITH[..], "mul64", pass_env.CHECKED);
-    llvm_env.expect3(&e, got, mul_entry[..], mul[..], mul_tail[..]);
+    got = llvm_env.lowered(e, ARITH[..], "mul64", pass_env.CHECKED);
+    llvm_env.expect3(e, got, mul_entry[..], mul[..], mul_tail[..]);
     string[11] neg = {
         "entry:",
         "  %result = alloca i16, align 2",
@@ -173,16 +171,15 @@ fn the_intrinsic_follows_the_signedness_and_the_width() void {
         "L1:",
         "  store i16 %t2, ptr %result, align 2",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, ARITH[..], "neg", pass_env.CHECKED), neg[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, ARITH[..], "neg", pass_env.CHECKED), neg[..]);
 }
 
 // `a / b` on an `i32`: the zero test, then the two tests of `MIN / -1` and their `and`, then
 // `sdiv`. Each operand is loaded for each rvalue that names it (spec/fir.md 12.5). `a % b` on a
 // `u32` has no second check and is `urem`.
 fn division_by_signedness() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[21] want = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -206,7 +203,7 @@ fn division_by_signedness() void {
         "  %t9 = sdiv i32 %t7, %t8",
         "  store i32 %t9, ptr %result, align 4",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, ARITH[..], "div", pass_env.CHECKED), want[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, ARITH[..], "div", pass_env.CHECKED), want[..]);
     string[14] rem = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -223,15 +220,14 @@ fn division_by_signedness() void {
         "  %t4 = urem i32 %t2, %t3",
         "  store i32 %t4, ptr %result, align 4",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, ARITH[..], "remu", pass_env.CHECKED), rem[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, ARITH[..], "remu", pass_env.CHECKED), rem[..]);
 }
 
 // `+` on a `u32` is `llvm.uadd` and `*` on a `u16` is `llvm.umul`, whose continuations reuse
 // `extractvalue 0` as the signed forms do.
 fn the_unsigned_intrinsics() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[14] addu = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -248,7 +244,7 @@ fn the_unsigned_intrinsics() void {
         "L1:",
         "  store i32 %t3, ptr %result, align 4",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, ARITH[..], "addu", pass_env.CHECKED), addu[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, ARITH[..], "addu", pass_env.CHECKED), addu[..]);
     string[14] mulu = {
         "entry:",
         "  %result = alloca i16, align 2",
@@ -265,16 +261,15 @@ fn the_unsigned_intrinsics() void {
         "L1:",
         "  store i16 %t3, ptr %result, align 2",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, ARITH[..], "mulu", pass_env.CHECKED), mulu[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, ARITH[..], "mulu", pass_env.CHECKED), mulu[..]);
 }
 
 // `/` on a `u64` is `udiv` with the zero test alone, and `%` on an `i8` is `srem` after the test
 // of `-128 / -1`, whose smallest value the constant prints signed. The smallest value of `i16`
 // and of `i64` print signed too; division_by_signedness holds the one of `i32`.
 fn the_other_divisions() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[14] divu = {
         "entry:",
         "  %result = alloca i64, align 8",
@@ -291,7 +286,7 @@ fn the_other_divisions() void {
         "  %t4 = udiv i64 %t2, %t3",
         "  store i64 %t4, ptr %result, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, ARITH[..], "divu", pass_env.CHECKED), divu[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, ARITH[..], "divu", pass_env.CHECKED), divu[..]);
     string[21] rems = {
         "entry:",
         "  %result = alloca i8, align 1",
@@ -315,22 +310,21 @@ fn the_other_divisions() void {
         "  %t9 = srem i8 %t7, %t8",
         "  store i8 %t9, ptr %result, align 1",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, ARITH[..], "rems", pass_env.CHECKED), rems[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, ARITH[..], "rems", pass_env.CHECKED), rems[..]);
     string[2] min16 = {"  %t4 = load i16, ptr %a.0, align 2", "  %t5 = icmp eq i16 %t4, -32768"};
-    llvm_env.contains(&e, llvm_env.lowered(&e, ARITH[..], "div16", pass_env.CHECKED), min16[..]);
+    llvm_env.contains(e, llvm_env.lowered(e, ARITH[..], "div16", pass_env.CHECKED), min16[..]);
     string[2] min64 = {
         "  %t4 = load i64, ptr %a.0, align 8",
         "  %t5 = icmp eq i64 %t4, -9223372036854775808",
     };
-    llvm_env.contains(&e, llvm_env.lowered(&e, ARITH[..], "div64", pass_env.CHECKED), min64[..]);
+    llvm_env.contains(e, llvm_env.lowered(e, ARITH[..], "div64", pass_env.CHECKED), min64[..]);
 }
 
 // `&`, `^`, `|`, `~` and `!`: one instruction each, `xor` with `-1` for `~` and with `true` for
 // `!`.
 fn the_bitwise_operations() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[14] want = {
         "entry:",
         "  %result = alloca i16, align 2",
@@ -347,7 +341,7 @@ fn the_bitwise_operations() void {
         "  %t6 = or i16 %t2, %t5",
         "  store i16 %t6, ptr %result, align 2",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, ARITH[..], "bits", pass_env.CHECKED), want[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, ARITH[..], "bits", pass_env.CHECKED), want[..]);
     string[16] inv = {
         "entry:",
         "  %result = alloca i8, align 1",
@@ -366,7 +360,7 @@ fn the_bitwise_operations() void {
         "  %t6 = zext i1 %t5 to i8",
         "  store i8 %t6, ptr %result, align 1",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, ARITH[..], "inv", pass_env.CHECKED), inv[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, ARITH[..], "inv", pass_env.CHECKED), inv[..]);
 }
 
 // A shift widens the count to `i64` by its own signedness, compares it with the width, and
@@ -374,9 +368,8 @@ fn the_bitwise_operations() void {
 // `u64` (toolchain.md 6 item 15). Under --release the mask `and i64 ..., 31` replaces the
 // compare.
 fn the_shifts() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[15] shl = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -394,7 +387,7 @@ fn the_shifts() void {
         "  %t5 = shl i32 %t4, %t3",
         "  store i32 %t5, ptr %result, align 4",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, ARITH[..], "shl", pass_env.CHECKED), shl[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, ARITH[..], "shl", pass_env.CHECKED), shl[..]);
     string[13] masked = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -410,7 +403,7 @@ fn the_shifts() void {
         "  %t5 = shl i32 %t4, %t3",
         "  store i32 %t5, ptr %result, align 4",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, ARITH[..], "shl", pass_env.RELEASE), masked[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, ARITH[..], "shl", pass_env.RELEASE), masked[..]);
     string[15] shr = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -428,7 +421,7 @@ fn the_shifts() void {
         "  %t5 = ashr i32 %t4, %t3",
         "  store i32 %t5, ptr %result, align 4",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, ARITH[..], "shr", pass_env.CHECKED), shr[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, ARITH[..], "shr", pass_env.CHECKED), shr[..]);
     string[13] shru = {
         "entry:",
         "  %result = alloca i64, align 8",
@@ -444,14 +437,13 @@ fn the_shifts() void {
         "  %t3 = lshr i64 %t2, %t0",
         "  store i64 %t3, ptr %result, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, ARITH[..], "shru", pass_env.CHECKED), shru[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, ARITH[..], "shru", pass_env.CHECKED), shru[..]);
 }
 
 // Float arithmetic carries no fast-math flag, and the negation is `fneg` (D16).
 fn float_arithmetic() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[17] want = {
         "entry:",
         "  %result = alloca double, align 8",
@@ -471,7 +463,7 @@ fn float_arithmetic() void {
         "  %t9 = fneg double %t8",
         "  store double %t9, ptr %result, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, ARITH[..], "flt", pass_env.CHECKED), want[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, ARITH[..], "flt", pass_env.CHECKED), want[..]);
 }
 
 // ---- the reuse of an intrinsic ------------------------------------------------------------------
@@ -617,14 +609,13 @@ string[5] REUSE_ADD = {
 // its operation and its two operands are those of the intrinsic whose flag the check tests. Every
 // other `add` prints a plain `add` (spec/fir.md 12.2).
 fn only_the_same_operation_in_the_continuation_reuses() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[1] prelude = {"i32 UNUSED = 0;"};
     // `m` lives in an allocation, so that the leak rule proves its end: no call changes the
     // pointer, and drop_made holds each release once.
     fir.module mut* own m = fir.module_make();
-    *m = llvm_env.parse(&e, prelude[..], REUSE[..]);
+    *m = llvm_env.parse(e, prelude[..], REUSE[..]);
     defer fir.module_drop_made(move(m));
     string[6] swapped = {
         "",
@@ -634,8 +625,8 @@ fn only_the_same_operation_in_the_continuation_reuses() void {
         "  %t7 = add i32 %t5, %t6",
         "  store i32 %t7, ptr %result, align 4",
     };
-    string mut got = llvm_env.translate(&e, fir.module_function_at(m, 0));
-    llvm_env.expect3(&e, got, REUSE_ENTRY[..], REUSE_ADD[..], swapped[..]);
+    string mut got = llvm_env.translate(e, fir.module_function_at(m, 0));
+    llvm_env.expect3(e, got, REUSE_ENTRY[..], REUSE_ADD[..], swapped[..]);
     string[6] second = {
         "",
         "L1:",
@@ -644,8 +635,8 @@ fn only_the_same_operation_in_the_continuation_reuses() void {
         "  %t7 = add i32 %t5, %t6",
         "  store i32 %t7, ptr %result, align 4",
     };
-    got = llvm_env.translate(&e, fir.module_function_at(m, 1));
-    llvm_env.expect3(&e, got, REUSE_ENTRY[..], REUSE_ADD[..], second[..]);
+    got = llvm_env.translate(e, fir.module_function_at(m, 1));
+    llvm_env.expect3(e, got, REUSE_ENTRY[..], REUSE_ADD[..], second[..]);
     string[6] other = {
         "",
         "L1:",
@@ -654,10 +645,10 @@ fn only_the_same_operation_in_the_continuation_reuses() void {
         "  %t7 = sub i32 %t5, %t6",
         "  store i32 %t7, ptr %result, align 4",
     };
-    got = llvm_env.translate(&e, fir.module_function_at(m, 2));
-    llvm_env.expect3(&e, got, REUSE_ENTRY[..], REUSE_ADD[..], other[..]);
-    got = llvm_env.translate(&e, fir.module_function_at(m, 3));
-    llvm_env.expect3(&e, got, REUSE_ENTRY[..], REUSE_ADD[..], second[..]);
+    got = llvm_env.translate(e, fir.module_function_at(m, 2));
+    llvm_env.expect3(e, got, REUSE_ENTRY[..], REUSE_ADD[..], other[..]);
+    got = llvm_env.translate(e, fir.module_function_at(m, 3));
+    llvm_env.expect3(e, got, REUSE_ENTRY[..], REUSE_ADD[..], second[..]);
     string[8] away = {
         "",
         "L1:",
@@ -668,8 +659,8 @@ fn only_the_same_operation_in_the_continuation_reuses() void {
         "  %t7 = add i32 %t5, %t6",
         "  store i32 %t7, ptr %result, align 4",
     };
-    got = llvm_env.translate(&e, fir.module_function_at(m, 4));
-    llvm_env.expect3(&e, got, REUSE_ENTRY[..], REUSE_ADD[..], away[..]);
+    got = llvm_env.translate(e, fir.module_function_at(m, 4));
+    llvm_env.expect3(e, got, REUSE_ENTRY[..], REUSE_ADD[..], away[..]);
     string[7] late = {
         "",
         "L1:",
@@ -679,8 +670,8 @@ fn only_the_same_operation_in_the_continuation_reuses() void {
         "  %t7 = add i32 %t5, %t6",
         "  store i32 %t7, ptr %result, align 4",
     };
-    got = llvm_env.translate(&e, fir.module_function_at(m, 5));
-    llvm_env.expect3(&e, got, REUSE_ENTRY[..], REUSE_ADD[..], late[..]);
+    got = llvm_env.translate(e, fir.module_function_at(m, 5));
+    llvm_env.expect3(e, got, REUSE_ENTRY[..], REUSE_ADD[..], late[..]);
     string[16] alive = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -699,8 +690,8 @@ fn only_the_same_operation_in_the_continuation_reuses() void {
         "  %t4 = load i32, ptr %y.3, align 4",
         "  store i32 %t4, ptr %result, align 4",
     };
-    got = llvm_env.translate(&e, fir.module_function_at(m, 6));
-    llvm_env.expect(&e, got, alive[..]);
+    got = llvm_env.translate(e, fir.module_function_at(m, 6));
+    llvm_env.expect(e, got, alive[..]);
     // a store into `a` after the intrinsic changes the sum, so the `add` of the continuation
     // reads `a` again (spec/fir.md 12.2)
     string[7] written = {
@@ -712,8 +703,8 @@ fn only_the_same_operation_in_the_continuation_reuses() void {
         "  %t7 = add i32 %t5, %t6",
         "  store i32 %t7, ptr %result, align 4",
     };
-    got = llvm_env.translate(&e, fir.module_function_at(m, 7));
-    llvm_env.expect3(&e, got, REUSE_ENTRY[..], REUSE_ADD[..], written[..]);
+    got = llvm_env.translate(e, fir.module_function_at(m, 7));
+    llvm_env.expect3(e, got, REUSE_ENTRY[..], REUSE_ADD[..], written[..]);
 }
 
 // ---- comparisons --------------------------------------------------------------------------------
@@ -738,9 +729,8 @@ string[15] COMPARE = {
 
 // `<` on an `i32` is `icmp slt` and `>=` on a `u32` is `icmp uge`; the `&&` slot holds each side.
 fn integer_comparisons_by_signedness() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[29] want = {
         "entry:",
         "  %result = alloca i8, align 1",
@@ -772,15 +762,14 @@ fn integer_comparisons_by_signedness() void {
         "  %t10 = zext i1 %t9 to i8",
         "  store i8 %t10, ptr %result, align 1",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, COMPARE[..], "cmp", pass_env.CHECKED), want[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, COMPARE[..], "cmp", pass_env.CHECKED), want[..]);
 }
 
 // `!=` on floats is `fcmp une`, which is true for a NaN, and `==` on a pointer against `null` is
 // `icmp eq ptr`.
 fn float_and_pointer_comparisons() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[11] want = {
         "entry:",
         "  %result = alloca i8, align 1",
@@ -794,7 +783,7 @@ fn float_and_pointer_comparisons() void {
         "  %t3 = zext i1 %t2 to i8",
         "  store i8 %t3, ptr %result, align 1",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, COMPARE[..], "fcmp", pass_env.CHECKED), want[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, COMPARE[..], "fcmp", pass_env.CHECKED), want[..]);
     string[8] ptr = {
         "entry:",
         "  %result = alloca i8, align 1",
@@ -805,17 +794,16 @@ fn float_and_pointer_comparisons() void {
         "  %t2 = zext i1 %t1 to i8",
         "  store i8 %t2, ptr %result, align 1",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, COMPARE[..], "peq", pass_env.CHECKED), ptr[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, COMPARE[..], "peq", pass_env.CHECKED), ptr[..]);
 }
 
 // Each predicate once: the ordered float predicates `olt`, `ole`, `ogt`, `oge` and `oeq`, the
 // unsigned `ult`, `ule`, `ugt` and `ne` of a `u8`, and the signed `sle`, `sgt` and `sge` of an
 // `i8`.
 fn every_predicate() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
-    string got = llvm_env.lowered(&e, COMPARE[..], "order", pass_env.CHECKED);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
+    string got = llvm_env.lowered(e, COMPARE[..], "order", pass_env.CHECKED);
     string[12] predicates = {
         "fcmp olt double",
         "fcmp ole double",
@@ -898,9 +886,8 @@ fn cast_case(llvm_env.env mut* e, string name, string@ entry, string@ body) void
 // `fptrunc`. No fort source makes an `inttoptr`, because no cast makes a pointer from an integer
 // (D3.14).
 fn each_cast_prints_the_instruction_of_its_types() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[4] i32_entry = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -911,7 +898,7 @@ fn each_cast_prints_the_instruction_of_its_types() void {
         "  %t0 = load i32, ptr %x.0, align 4",
         "  store i32 %t0, ptr %result, align 4",
     };
-    cast_case(&e, "c1", i32_entry[..], same[..]);
+    cast_case(e, "c1", i32_entry[..], same[..]);
     string[5] bool_entry = {
         "entry:",
         "  %result = alloca i8, align 1",
@@ -925,7 +912,7 @@ fn each_cast_prints_the_instruction_of_its_types() void {
         "  %t3 = zext i1 %t2 to i8",
         "  store i8 %t3, ptr %result, align 1",
     };
-    cast_case(&e, "c2", bool_entry[..], widen[..]);
+    cast_case(e, "c2", bool_entry[..], widen[..]);
     string[4] i64_entry = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -937,7 +924,7 @@ fn each_cast_prints_the_instruction_of_its_types() void {
         "  %t1 = trunc i64 %t0 to i32",
         "  store i32 %t1, ptr %result, align 4",
     };
-    cast_case(&e, "c3", i64_entry[..], narrow[..]);
+    cast_case(e, "c3", i64_entry[..], narrow[..]);
     string[4] ptr_entry = {
         "entry:",
         "  %result = alloca i64, align 8",
@@ -949,7 +936,7 @@ fn each_cast_prints_the_instruction_of_its_types() void {
         "  %t1 = ptrtoint ptr %t0 to i64",
         "  store i64 %t1, ptr %result, align 8",
     };
-    cast_case(&e, "c4", ptr_entry[..], word[..]);
+    cast_case(e, "c4", ptr_entry[..], word[..]);
     string[4] f32_entry = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -961,10 +948,10 @@ fn each_cast_prints_the_instruction_of_its_types() void {
         "  %t1 = call i32 @llvm.fptosi.sat.i32.f32(float %t0)",
         "  store i32 %t1, ptr %result, align 4",
     };
-    cast_case(&e, "c5", f32_entry[..], saturate[..]);
+    cast_case(e, "c5", f32_entry[..], saturate[..]);
     // the conversion and its attribute group are marked for the declarations
-    assert(e.g.intrinsics[26 + 0 * 4 + 2]);
-    assert(e.g.attrs[4]);
+    assert(e->g.intrinsics[26 + 0 * 4 + 2]);
+    assert(e->g.attrs[4]);
     string[4] u8_entry = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -976,7 +963,7 @@ fn each_cast_prints_the_instruction_of_its_types() void {
         "  %t1 = zext i8 %t0 to i32",
         "  store i32 %t1, ptr %result, align 4",
     };
-    cast_case(&e, "c6", u8_entry[..], unsigned[..]);
+    cast_case(e, "c6", u8_entry[..], unsigned[..]);
     string[4] pointer_entry = {
         "entry:",
         "  %result = alloca ptr, align 8",
@@ -987,7 +974,7 @@ fn each_cast_prints_the_instruction_of_its_types() void {
         "  %t0 = load ptr, ptr %p.0, align 8",
         "  store ptr %t0, ptr %result, align 8",
     };
-    cast_case(&e, "c7", pointer_entry[..], same_pointer[..]);
+    cast_case(e, "c7", pointer_entry[..], same_pointer[..]);
     string[4] to_f64 = {
         "entry:",
         "  %result = alloca double, align 8",
@@ -999,7 +986,7 @@ fn each_cast_prints_the_instruction_of_its_types() void {
         "  %t1 = sitofp i32 %t0 to double",
         "  store double %t1, ptr %result, align 8",
     };
-    cast_case(&e, "c8", to_f64[..], signed[..]);
+    cast_case(e, "c8", to_f64[..], signed[..]);
     string[4] f64_entry = {
         "entry:",
         "  %result = alloca float, align 4",
@@ -1011,17 +998,16 @@ fn each_cast_prints_the_instruction_of_its_types() void {
         "  %t1 = fptrunc double %t0 to float",
         "  store float %t1, ptr %result, align 4",
     };
-    cast_case(&e, "c9", f64_entry[..], shorter[..]);
+    cast_case(e, "c9", f64_entry[..], shorter[..]);
 }
 
 // The translator writes the `u64` of FORGED_ADDRESS as a pointer with `inttoptr`.
 fn a_cast_from_u64_to_a_pointer_in_fir_text_prints_inttoptr() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[1] prelude = {"i32 UNUSED = 0;"};
     fir.module mut* own m = fir.module_make();
-    *m = llvm_env.parse(&e, prelude[..], FORGED_ADDRESS[..]);
+    *m = llvm_env.parse(e, prelude[..], FORGED_ADDRESS[..]);
     defer fir.module_drop_made(move(m));
     string[4] u64_entry = {
         "entry:",
@@ -1034,8 +1020,8 @@ fn a_cast_from_u64_to_a_pointer_in_fir_text_prints_inttoptr() void {
         "  %t1 = inttoptr i64 %t0 to ptr",
         "  store ptr %t1, ptr %result, align 8",
     };
-    string got = llvm_env.translate(&e, fir.module_function_at(m, 0));
-    llvm_env.expect2(&e, got, u64_entry[..], address[..]);
+    string got = llvm_env.translate(e, fir.module_function_at(m, 0));
+    llvm_env.expect2(e, got, u64_entry[..], address[..]);
 }
 
 // ---- addresses, headers and allocations ---------------------------------------------------------
@@ -1081,9 +1067,8 @@ string[35] HEADERS = {
 // `addr` of a field through a pointer is the address of the field, with no load of it; the
 // register that holds it names the `getelementptr`.
 fn an_address_prints_no_load() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[7] want = {
         "entry:",
         "  %result = alloca ptr, align 8",
@@ -1093,15 +1078,14 @@ fn an_address_prints_no_load() void {
         "  %t1 = getelementptr inbounds %struct.main.pair, ptr %t0, i32 0, i32 1",
         "  store ptr %t1, ptr %result, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, HEADERS[..], "where", pass_env.CHECKED), want[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, HEADERS[..], "where", pass_env.CHECKED), want[..]);
 }
 
 // `slice` of a fixed array: the element address at `lo`, `sub hi, lo`, then the pointer and the
 // length into the header of `%ret.sret` (toolchain.md 6 item 16).
 fn a_slice_of_a_fixed_array() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[18] want = {
         "entry:",
         "  %lo.1 = alloca i64, align 8",
@@ -1122,15 +1106,14 @@ fn a_slice_of_a_fixed_array() void {
         "  %t8 = getelementptr inbounds %fort.span, ptr %ret.sret, i32 0, i32 1",
         "  store i64 %t6, ptr %t8, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, HEADERS[..], "sl", pass_env.CHECKED), want[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, HEADERS[..], "sl", pass_env.CHECKED), want[..]);
 }
 
 // `slice` of a span reads its header: the length for each operand that names it, and the pointer
 // field for the element address.
 fn a_slice_of_a_span() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[27] want = {
         "entry:",
         "  %lo.1 = alloca i64, align 8",
@@ -1160,7 +1143,7 @@ fn a_slice_of_a_span() void {
         "  %t19 = getelementptr inbounds %fort.span, ptr %ret.sret, i32 0, i32 1",
         "  store i64 %t17, ptr %t19, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, HEADERS[..], "ss", pass_env.CHECKED), want[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, HEADERS[..], "ss", pass_env.CHECKED), want[..]);
 }
 
 // The module std.str of a sandbox, whose from_cstr may take `p[lo..hi]` of a raw pointer (D6.9).
@@ -1172,9 +1155,8 @@ string[3] FROM_CSTR = {
 
 // `slice_ptr` widens each bound to `i64` by its signedness and checks nothing.
 fn a_slice_of_a_pointer() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[18] want = {
         "entry:",
         "  %p.0 = alloca ptr, align 8",
@@ -1195,16 +1177,15 @@ fn a_slice_of_a_pointer() void {
         "  %t8 = getelementptr inbounds %fort.span, ptr %ret.sret, i32 0, i32 1",
         "  store i64 %t6, ptr %t8, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered_str(&e, FROM_CSTR[..], "from_cstr", pass_env.CHECKED),
+    llvm_env.expect(e, llvm_env.lowered_str(e, FROM_CSTR[..], "from_cstr", pass_env.CHECKED),
                     want[..]);
 }
 
 // A slice of a `string` keeps the element type `i8`. The bounds are constants that the checker
 // types `i32`, so their `cast<u64>` prints `sext` of a constant.
 fn a_slice_of_a_string() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[18] want = {
         "entry:",
         "  %t0 = sext i32 1 to i64",
@@ -1225,23 +1206,22 @@ fn a_slice_of_a_string() void {
         "  %t12 = getelementptr inbounds %fort.span, ptr %ret.sret, i32 0, i32 1",
         "  store i64 %t10, ptr %t12, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, HEADERS[..], "sub", pass_env.CHECKED), want[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, HEADERS[..], "sub", pass_env.CHECKED), want[..]);
 }
 
 // `alloc<i32>(const u64 1)` calls `std.rt.alloc` with the size, the count and the location of
 // the `new` (toolchain.md 6 item 17); the `move` of its register prints no zeroing. `new(u8, n)`
 // widens the count, checks it, and writes the header member by member.
 fn an_allocation_and_its_header() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[4] one = {
         "entry:",
         "  %result = alloca ptr, align 8",
         "  %t0 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, i32 18, i32 12)",
         "  store ptr %t0, ptr %result, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, HEADERS[..], "one", pass_env.CHECKED), one[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, HEADERS[..], "one", pass_env.CHECKED), one[..]);
     // the size of `pair` is 16 and its alignment 8: `std.rt.alloc` takes the size
     string[4] onep = {
         "entry:",
@@ -1249,7 +1229,7 @@ fn an_allocation_and_its_header() void {
         "  %t0 = call ptr @\"std.rt.alloc\"(i64 16, i64 1, ptr @.file.0, i32 34, i32 12)",
         "  store ptr %t0, ptr %result, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, HEADERS[..], "onep", pass_env.CHECKED), onep[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, HEADERS[..], "onep", pass_env.CHECKED), onep[..]);
     string[13] many = {
         "entry:",
         "  %n.0 = alloca i32, align 4",
@@ -1265,15 +1245,14 @@ fn an_allocation_and_its_header() void {
         "  %t5 = getelementptr inbounds %fort.span, ptr %ret.sret, i32 0, i32 1",
         "  store i64 %t1, ptr %t5, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, HEADERS[..], "many", pass_env.CHECKED), many[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, HEADERS[..], "many", pass_env.CHECKED), many[..]);
 }
 
 // A `string` constant writes `@.str.0` and its length into the header, and the zero of an
 // aggregate is `llvm.memset`.
 fn a_string_constant_and_an_aggregate_zero() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[5] text = {
         "entry:",
         "  %t0 = getelementptr inbounds %fort.span, ptr %ret.sret, i32 0, i32 0",
@@ -1281,8 +1260,8 @@ fn a_string_constant_and_an_aggregate_zero() void {
         "  %t1 = getelementptr inbounds %fort.span, ptr %ret.sret, i32 0, i32 1",
         "  store i64 2, ptr %t1, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, HEADERS[..], "text", pass_env.CHECKED), text[..]);
-    assert(e.g.strs.len == 1 && gen_text(&e, 0) == "hi");
+    llvm_env.expect(e, llvm_env.lowered(e, HEADERS[..], "text", pass_env.CHECKED), text[..]);
+    assert(e->g.strs.len == 1 && gen_text(e, 0) == "hi");
     string[5] zero = {
         "entry:",
         "  %z.0 = alloca %struct.main.pair, align 8",
@@ -1290,7 +1269,7 @@ fn a_string_constant_and_an_aggregate_zero() void {
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %z.0, \\",
         "i64 16, i1 false)",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, HEADERS[..], "zero", pass_env.CHECKED), zero[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, HEADERS[..], "zero", pass_env.CHECKED), zero[..]);
 }
 
 // The text of string record `i` of the translator's emitter.
@@ -1338,9 +1317,8 @@ string[31] AGGREGATES = {
 // constant is read before the first store (spec/fir.md 6), so its load comes before the
 // `getelementptr` of its field.
 fn a_literal_reads_every_member_first() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[5] lit2 = {
         "entry:",
         "  %t0 = getelementptr inbounds %struct.main.pair, ptr %ret.sret, i32 0, i32 0",
@@ -1348,7 +1326,7 @@ fn a_literal_reads_every_member_first() void {
         "  %t1 = getelementptr inbounds %struct.main.pair, ptr %ret.sret, i32 0, i32 1",
         "  store i64 2, ptr %t1, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, AGGREGATES[..], "lit2", pass_env.CHECKED), lit2[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, AGGREGATES[..], "lit2", pass_env.CHECKED), lit2[..]);
     string[8] lit = {
         "entry:",
         "  %x.0 = alloca i32, align 4",
@@ -1359,7 +1337,7 @@ fn a_literal_reads_every_member_first() void {
         "  %t2 = getelementptr inbounds %struct.main.pair, ptr %ret.sret, i32 0, i32 1",
         "  store i64 9, ptr %t2, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, AGGREGATES[..], "lit", pass_env.CHECKED), lit[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, AGGREGATES[..], "lit", pass_env.CHECKED), lit[..]);
     // a designated literal is `aggregate zeroed`: its member is read first, then the memset of
     // the whole value zeroes the field that it leaves out and the padding, then the named field
     string[7] des = {
@@ -1371,7 +1349,7 @@ fn a_literal_reads_every_member_first() void {
         "  %t1 = getelementptr inbounds %struct.main.pair, ptr %ret.sret, i32 0, i32 1",
         "  store i64 %t0, ptr %t1, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, AGGREGATES[..], "des", pass_env.CHECKED), des[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, AGGREGATES[..], "des", pass_env.CHECKED), des[..]);
     // an array literal writes each element through the array shape
     string[11] arr = {
         "entry:",
@@ -1386,7 +1364,7 @@ fn a_literal_reads_every_member_first() void {
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %ret.sret, ptr align 4 %v.1, \\",
         "i64 8, i1 false)",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, AGGREGATES[..], "arr", pass_env.CHECKED), arr[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, AGGREGATES[..], "arr", pass_env.CHECKED), arr[..]);
     // a `bool` element stores through `zext`
     string[15] flag = {
         "entry:",
@@ -1405,15 +1383,14 @@ fn a_literal_reads_every_member_first() void {
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 1 %ret.sret, ptr align 1 %v.1, \\",
         "i64 2, i1 false)",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, AGGREGATES[..], "flag", pass_env.CHECKED), flag[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, AGGREGATES[..], "flag", pass_env.CHECKED), flag[..]);
 }
 
 // An aggregate member that is no temporary is copied into a new `%tmp` slot before the first
 // store (spec/fir.md 12.1); a temporary is a `%tmp` slot already, and it is copied from in place.
 fn an_aggregate_member_goes_through_a_slot() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[19] want = {
         "entry:",
         "  %x.1 = alloca i32, align 4",
@@ -1435,15 +1412,14 @@ fn an_aggregate_member_goes_through_a_slot() void {
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %t5, ptr align 4 %tmp0, \\",
         "i64 8, i1 false)",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, AGGREGATES[..], "nest", pass_env.CHECKED), want[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, AGGREGATES[..], "nest", pass_env.CHECKED), want[..]);
 }
 
 // `*p = pair{p->b, p->a}` reads both members before it writes the first field, so it swaps: an
 // aggregate literal reads every member before the destination changes (D6.3, spec/fir.md 6).
 fn a_literal_that_reads_its_destination_swaps() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[16] want = {
         "entry:",
         "  %p.0 = alloca ptr, align 8",
@@ -1462,7 +1438,7 @@ fn a_literal_that_reads_its_destination_swaps() void {
         "  %t10 = getelementptr inbounds %struct.main.pair, ptr %t8, i32 0, i32 1",
         "  store i64 %t7, ptr %t10, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, AGGREGATES[..], "swap", pass_env.CHECKED), want[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, AGGREGATES[..], "swap", pass_env.CHECKED), want[..]);
 }
 
 // A member of aggregate type that reads the destination goes into a `%tmp` slot before the
@@ -1486,9 +1462,8 @@ string[14] TWINS = {
 };
 
 fn an_aggregate_member_that_reads_its_destination_swaps() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[20] turn = {
         "entry:",
         "  %t.0 = alloca ptr, align 8",
@@ -1511,16 +1486,15 @@ fn an_aggregate_member_that_reads_its_destination_swaps() void {
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t6, ptr align 8 %tmp1, \\",
         "i64 16, i1 false)",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, TWINS[..], "turn", pass_env.CHECKED), turn[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, TWINS[..], "turn", pass_env.CHECKED), turn[..]);
 }
 
 // `*a = i32[2]{(*a)[1], (*a)[0]}`: the two bounds checks, then both loads, then both stores.
 // The right side holds no writer, so target_place (src/fort/fir_lower.ft) holds no address of
 // `*a`, and the later load of `a` reads the pointer that the members read (D6.3).
 fn an_array_literal_that_reads_its_destination_swaps() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[22] flip = {
         "entry:",
         "  %a.0 = alloca ptr, align 8",
@@ -1545,7 +1519,7 @@ fn an_array_literal_that_reads_its_destination_swaps() void {
         "  %t12 = getelementptr inbounds [2 x i32], ptr %t10, i64 0, i64 1",
         "  store i32 %t9, ptr %t12, align 4",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, TWINS[..], "flip", pass_env.CHECKED), flip[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, TWINS[..], "flip", pass_env.CHECKED), flip[..]);
 }
 
 fn main() i32 {

@@ -256,16 +256,15 @@ fn expect_report(fir_lower.report* why, string name, bool signature, string want
 // review of the old behaviour measured a panic with exit 134 for the first two and for
 // `str_eq(char* a, u64 n)`: an index out of range at the second parameter, and rule V7.
 fn an_entry_with_other_parameters_stops_the_lowering() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     for (bad_entry c : BAD) {
         strbuf.str_buf mut rt = strbuf.create();
         defer del(rt.data);
         runtime_with(c.name, c.decl, &rt);
-        check_over(&e, strbuf.view(&rt), "");
+        check_over(e, strbuf.view(&rt), "");
         fir_lower.report mut why = fir_lower.report{};
-        refusal(&e, c.fn_name, &why);
+        refusal(e, c.fn_name, &why);
         expect_report(&why, c.name, true, c.report);
     }
 }
@@ -275,15 +274,14 @@ fn an_entry_with_other_parameters_stops_the_lowering() void {
 fn the_member_record_of_another_module_is_another_parameter() void {
     strbuf.str_buf mut rt = strbuf.create();
     defer del(rt.data);
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     strbuf.append(&rt, "import std.em;\n");
     runtime_with("print_enum", "fn print_enum(i32 fd, i32 v, em.enum_member* m, u64 n) void {\n}",
                  &rt);
-    check_over(&e, strbuf.view(&rt), "struct enum_member {\n    i32 value;\n    char* name;\n}\n");
+    check_over(e, strbuf.view(&rt), "struct enum_member {\n    i32 value;\n    char* name;\n}\n");
     fir_lower.report mut why = fir_lower.report{};
-    refusal(&e, "p_enum", &why);
+    refusal(e, "p_enum", &why);
     expect_report(&why, "print_enum", true, "// not supported: ident at 10:33");
 }
 
@@ -301,31 +299,30 @@ bad_entry[FITTING] FIT = {
 // The lowering accepts the result of a print that differs from `void`. With the runtime of
 // lower_env, which declares each entry as std/rt.ft does, it lowers every function of SOURCE.
 fn the_result_of_a_print_does_not_count() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     for (bad_entry c : FIT) {
         strbuf.str_buf mut rt = strbuf.create();
         defer del(rt.data);
         runtime_with(c.name, c.decl, &rt);
-        check_over(&e, strbuf.view(&rt), "");
+        check_over(e, strbuf.view(&rt), "");
         strbuf.str_buf mut call = strbuf.create();
         defer del(call.data);
         strbuf.append(&call, "call fn std.rt.");
         strbuf.append(&call, c.name);
         strbuf.push(&call, '(');
-        string text = lower_env.lower_checked(&e, c.fn_name);
+        string text = lower_env.lower_checked(e, c.fn_name);
         assert(str.find(text, strbuf.view(&call)) >= 0);
     }
-    lower_env.check_lines(&e, SOURCE[..], true);
+    lower_env.check_lines(e, SOURCE[..], true);
     // `!=` is `not` of the call of str_eq, and a function prints through print_ptr
-    assert(str.find(lower_env.lower_checked(&e, "differ"), " = not(copy ") >= 0);
-    assert(str.find(lower_env.lower_checked(&e, "p_fn"), "call fn std.rt.print_ptr(") >= 0);
+    assert(str.find(lower_env.lower_checked(e, "differ"), " = not(copy ") >= 0);
+    assert(str.find(lower_env.lower_checked(e, "p_fn"), "call fn std.rt.print_ptr(") >= 0);
     u64 mut i = 3;
     while (i < SOURCE_LINES) {
         string line = SOURCE[i];
         i64 paren = str.find(line, "(");
-        lower_env.lower_checked(&e, line[3..cast(paren, u64)]);
+        lower_env.lower_checked(e, line[3..cast(paren, u64)]);
         i += 1;
     }
 }
@@ -334,47 +331,44 @@ fn the_result_of_a_print_does_not_count() void {
 fn a_span_of_the_member_record_of_another_module_is_another_parameter() void {
     strbuf.str_buf mut rt = strbuf.create();
     defer del(rt.data);
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     strbuf.append(&rt, "import std.em;\n");
     runtime_with("print_enum", "fn print_enum(i32 fd, i32 v, em.enum_member@ table) void {\n}",
                  &rt);
-    check_over(&e, strbuf.view(&rt), "struct enum_member {\n    i32 value;\n    char* name;\n}\n");
+    check_over(e, strbuf.view(&rt), "struct enum_member {\n    i32 value;\n    char* name;\n}\n");
     fir_lower.report mut why = fir_lower.report{};
-    refusal(&e, "p_enum", &why);
+    refusal(e, "p_enum", &why);
     expect_report(&why, "print_enum", true, "// not supported: ident at 10:33");
 }
 
 // The runtime of lower_env gives print_str one `string`, print_enum one span of the member
 // table, and panic one `string`: the lowering passes the place of each as one operand.
 fn a_string_and_a_table_are_one_operand_each() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    lower_env.check_lines(&e, SOURCE[..], true);
-    assert(str.find(lower_env.lower_checked(&e, "p_str"),
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, SOURCE[..], true);
+    assert(str.find(lower_env.lower_checked(e, "p_str"),
                     "call fn std.rt.print_str(const i32 1, copy _1) #9:33 s1;") >= 0);
-    string table = lower_env.lower_checked(&e, "p_enum");
+    string table = lower_env.lower_checked(e, "p_enum");
     assert(str.find(table, "= aggregate enum_member@(const enum_table main.color, const u64 1)")
            >= 0);
     assert(str.find(table, "call fn std.rt.print_enum(const i32 1, copy _2, copy _3)") >= 0);
-    assert(str.find(lower_env.lower_checked(&e, "p_panic"), "fail(panic, copy _1) #18:29") >= 0);
+    assert(str.find(lower_env.lower_checked(e, "p_panic"), "fail(panic, copy _1) #18:29") >= 0);
 }
 
 // A runtime that lacks the entry gives a report with `signature` false, so the compile error says
 // that the runtime has no entry at all.
 fn a_missing_entry_is_no_entry_with_other_parameters() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     for (bad_entry c : BAD) {
         strbuf.str_buf mut rt = strbuf.create();
         defer del(rt.data);
         runtime_with(c.name, "", &rt);
-        check_over(&e, strbuf.view(&rt), "");
+        check_over(e, strbuf.view(&rt), "");
         fir_lower.report mut why = fir_lower.report{};
-        refusal(&e, c.fn_name, &why);
+        refusal(e, c.fn_name, &why);
         expect_report(&why, c.name, false, c.report);
     }
 }

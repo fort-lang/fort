@@ -72,9 +72,8 @@ pass_env.mode[3] OWN_MODES = {pass_env.CHECKED, pass_env.RELEASE, pass_env.NO_BO
 // overwrite check and folds `_3 = move p` and `q = move _3` into `q = move p`, so `_3` gets no
 // storage.
 fn a_pointer_move_zeroes_before_the_store() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[12] want = {
         "entry:",
         "  %result = alloca ptr, align 8",
@@ -93,10 +92,10 @@ fn a_pointer_move_zeroes_before_the_store() void {
         // `f` lives in an allocation, so that the leak rule proves its end: no call changes the
         // pointer, and drop_made holds each release once.
         fir.func mut* own f = fir.func_make();
-        *f = llvm_env.lower(&e, MOVES[..], "mv", m);
+        *f = llvm_env.lower(e, MOVES[..], "mv", m);
         defer fir.func_drop_made(move(f));
         assert(llvm_env.storage_of(f, 3) == fir_llvm.storage.sk_none);
-        llvm_env.expect(&e, llvm_env.translate(&e, f), want[..]);
+        llvm_env.expect(e, llvm_env.translate(e, f), want[..]);
     }
 }
 
@@ -105,9 +104,8 @@ fn a_pointer_move_zeroes_before_the_store() void {
 // memset, then out into `t`. The implicit move of `return t` goes through an intermediate of its
 // own.
 fn a_span_move_goes_through_an_intermediate() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[15] want = {
         "entry:",
         "  %t.1 = alloca %fort.span, align 8",
@@ -127,10 +125,10 @@ fn a_span_move_goes_through_an_intermediate() void {
     };
     for (pass_env.mode m : OWN_MODES) {
         fir.func mut* own f = fir.func_make();
-        *f = llvm_env.lower(&e, MOVES[..], "mvs", m);
+        *f = llvm_env.lower(e, MOVES[..], "mvs", m);
         defer fir.func_drop_made(move(f));
         assert(llvm_env.storage_of(f, 3) == fir_llvm.storage.sk_none);
-        llvm_env.expect(&e, llvm_env.translate(&e, f), want[..]);
+        llvm_env.expect(e, llvm_env.translate(e, f), want[..]);
     }
 }
 
@@ -138,9 +136,8 @@ fn a_span_move_goes_through_an_intermediate() void {
 // zeroing and come back after it (notes/compiler.md 6). The intermediate `%tmp0` of the fold
 // holds it, and `s` ends as it began. Every mode writes this text.
 fn a_move_into_its_own_place_keeps_the_value() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[13] want = {
         "entry:",
         "  %tmp0 = alloca %fort.span, align 8",
@@ -157,16 +154,15 @@ fn a_move_into_its_own_place_keeps_the_value() void {
         "i64 16, i1 false)",
     };
     for (pass_env.mode m : OWN_MODES) {
-        llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "self", m), want[..]);
+        llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "self", m), want[..]);
     }
 }
 
 // `*h = move(*g)`: the lowering holds the address of `*h` in the register `_3`, and the move
 // copies `*g` into `%tmp0`, zeroes it, then copies out through that register.
 fn a_move_through_two_pointers() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[13] want = {
         "entry:",
         "  %h.0 = alloca ptr, align 8",
@@ -182,15 +178,14 @@ fn a_move_through_two_pointers() void {
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t0, ptr align 8 %tmp0, \\",
         "i64 16, i1 false)",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "mh", pass_env.CHECKED), want[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "mh", pass_env.CHECKED), want[..]);
 }
 
 // A `cast` of `move p` carries the owner: the load and the zeroing, then nothing for a pointer
 // to a pointer, and the register of the cast is the load.
 fn a_cast_of_a_move() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[7] want = {
         "entry:",
         "  %result = alloca ptr, align 8",
@@ -200,16 +195,15 @@ fn a_cast_of_a_move() void {
         "  store ptr null, ptr %p.0, align 8",
         "  store ptr %t0, ptr %result, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "cp", pass_env.CHECKED), want[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "cp", pass_env.CHECKED), want[..]);
 }
 
 // `return *p` of an aggregate copies `*p` into `%ret.sret` with one `llvm.memcpy`, as the direct
 // path does. When the caller writes `t = swap(&t)`, the two operands are one address, which
 // `llvm.memcpy` allows (Q1 of T-249).
 fn a_copy_through_a_pointer_into_the_result() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[6] want = {
         "entry:",
         "  %p.0 = alloca ptr, align 8",
@@ -218,7 +212,7 @@ fn a_copy_through_a_pointer_into_the_result() void {
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %t0, \\",
         "i64 16, i1 false)",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "swap", pass_env.CHECKED), want[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "swap", pass_env.CHECKED), want[..]);
 }
 
 // ---- deletes ------------------------------------------------------------------------------------
@@ -226,9 +220,8 @@ fn a_copy_through_a_pointer_into_the_result() void {
 // `del(move p)` of a pointer: the load, the call of `std.rt.free`, `store ptr null`; of a span:
 // the load of field 0, the call, and a 16-byte `llvm.memset` (toolchain.md 6 item 17).
 fn a_delete_frees_and_zeroes() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[6] dp = {
         "entry:",
         "  %p.0 = alloca ptr, align 8",
@@ -237,7 +230,7 @@ fn a_delete_frees_and_zeroes() void {
         "  call void @\"std.rt.free\"(ptr %t0)",
         "  store ptr null, ptr %p.0, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "dp", pass_env.CHECKED), dp[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "dp", pass_env.CHECKED), dp[..]);
     string[5] ds = {
         "entry:",
         "  %t0 = getelementptr inbounds %fort.span, ptr %s.in, i32 0, i32 0",
@@ -245,7 +238,7 @@ fn a_delete_frees_and_zeroes() void {
         "  call void @\"std.rt.free\"(ptr %t1)",
         "  call void @llvm.memset.p0.i64(ptr align 8 %s.in, i8 0, i64 16, i1 false)",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "ds", pass_env.CHECKED), ds[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "ds", pass_env.CHECKED), ds[..]);
     // a field reached through a pointer is zeroed at the address that the load read
     string[8] df = {
         "entry:",
@@ -257,22 +250,21 @@ fn a_delete_frees_and_zeroes() void {
         "  call void @\"std.rt.free\"(ptr %t2)",
         "  store ptr null, ptr %t1, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "df", pass_env.CHECKED), df[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "df", pass_env.CHECKED), df[..]);
 }
 
 // `del(e)` of an rvalue deletes a temporary, whose zeroing nothing could read (V12): the register
 // of `new(u8)` is freed with no store, and the `%tmp0` header of `new(u8, 4)` is freed with no
 // `llvm.memset`.
 fn a_delete_of_a_temporary_zeroes_nothing() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     string[3] dt = {
         "entry:",
         "  %t0 = call ptr @\"std.rt.alloc\"(i64 1, i64 1, ptr @.file.0, i32 24, i32 9)",
         "  call void @\"std.rt.free\"(ptr %t0)",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "dt", pass_env.CHECKED), dt[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "dt", pass_env.CHECKED), dt[..]);
     string[14] dts = {
         "entry:",
         "  %tmp0 = alloca %fort.span, align 8",
@@ -289,7 +281,7 @@ fn a_delete_of_a_temporary_zeroes_nothing() void {
         "  %t6 = load ptr, ptr %t5, align 8",
         "  call void @\"std.rt.free\"(ptr %t6)",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "dts", pass_env.CHECKED), dts[..]);
+    llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "dts", pass_env.CHECKED), dts[..]);
 }
 
 // ---- temporaries --------------------------------------------------------------------------------
@@ -364,11 +356,10 @@ string[4] HOLDER = {
 // `%tmp` slot, and so does a move of a field of an aggregate temporary, which is fixed storage of
 // the temporary (spec/fir.md 12.1, V12). A move of a field of a named local zeroes the field.
 fn a_temporary_is_never_zeroed() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
     fir.module mut* own m = fir.module_make();
-    *m = llvm_env.parse(&e, HOLDER[..], TEMPS[..]);
+    *m = llvm_env.parse(e, HOLDER[..], TEMPS[..]);
     defer fir.module_drop_made(move(m));
     fir.func* slotmove = fir.module_function_at(m, 0);
     assert(llvm_env.storage_of(slotmove, 2) == fir_llvm.storage.sk_slot);
@@ -391,7 +382,7 @@ fn a_temporary_is_never_zeroed() void {
         "  %t2 = load ptr, ptr %tmp0, align 8",
         "  store ptr %t2, ptr %result, align 8",
     };
-    llvm_env.expect(&e, llvm_env.translate(&e, slotmove), slot[..]);
+    llvm_env.expect(e, llvm_env.translate(e, slotmove), slot[..]);
     string[7] field = {
         "entry:",
         "  %result = alloca ptr, align 8",
@@ -401,7 +392,7 @@ fn a_temporary_is_never_zeroed() void {
         "  %t1 = load ptr, ptr %t0, align 8",
         "  store ptr %t1, ptr %result, align 8",
     };
-    llvm_env.expect(&e, llvm_env.translate(&e, fir.module_function_at(m, 1)), field[..]);
+    llvm_env.expect(e, llvm_env.translate(e, fir.module_function_at(m, 1)), field[..]);
     string[8] named = {
         "entry:",
         "  %result = alloca ptr, align 8",
@@ -412,7 +403,7 @@ fn a_temporary_is_never_zeroed() void {
         "  store ptr null, ptr %t0, align 8",
         "  store ptr %t1, ptr %result, align 8",
     };
-    llvm_env.expect(&e, llvm_env.translate(&e, fir.module_function_at(m, 2)), named[..]);
+    llvm_env.expect(e, llvm_env.translate(e, fir.module_function_at(m, 2)), named[..]);
     fir.func* slotdel = fir.module_function_at(m, 3);
     assert(llvm_env.storage_of(slotdel, 2) == fir_llvm.storage.sk_slot);
     string[15] freed = {
@@ -432,7 +423,7 @@ fn a_temporary_is_never_zeroed() void {
         "  %t3 = load ptr, ptr %tmp0, align 8",
         "  call void @\"std.rt.free\"(ptr %t3)",
     };
-    llvm_env.expect(&e, llvm_env.translate(&e, slotdel), freed[..]);
+    llvm_env.expect(e, llvm_env.translate(e, slotdel), freed[..]);
 }
 
 fn main() i32 {

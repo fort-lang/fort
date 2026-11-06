@@ -218,13 +218,25 @@ struct env {
     fir.module m;
 }
 
-fn open(env mut* e) void {
+// Opens an environment in an allocation of its own, which does not move: the checker of the
+// fixture points into it. `new` gives the empty module.
+fn make() env mut* own {
+    env mut* own e = new(env);
     fir_env.open(&e->fx);
+    return e;
 }
 
-fn close(env mut* e) void {
-    fir.module_free(&e->m);
-    fir_env.close(&e->fx);
+// Releases an environment that the caller moves in: the module, then the fixture.
+fn drop(env mut e) void {
+    fir.module_drop(move(e.m));
+    fir_env.drop(move(e.fx));
+}
+
+// Ends an environment of make that the caller moves in.
+fn drop_made(env mut* own p) void {
+    env kept = move(*p);
+    del(p);
+    drop(move(kept));
 }
 
 // Parses the function `f` with the `let` lines `lets` and the blocks `blocks`, one text for each
@@ -282,10 +294,9 @@ string[4] DIAMOND = {
 };
 
 fn a_diamond_joins_both_arms() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
-    fir.func* f = parse(&e, "", DIAMOND[..]);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    fir.func* f = parse(e, "", DIAMOND[..]);
     fir_flow.dataflow mut* own all = run(f, 4, fir_flow.join_kind.join_intersect, mark_block);
     defer fir_flow.dataflow_drop_made(move(all));
     expect_block(all, 0, "", " 0");
@@ -304,9 +315,8 @@ fn a_diamond_joins_both_arms() void {
 }
 
 fn a_diamond_joins_a_kill_on_one_arm() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
     string lets = "let _2 (x): i32; let _3 (y): i32;";
     string[4] blocks = {
         "bb0: { live(_2); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
@@ -314,7 +324,7 @@ fn a_diamond_joins_a_kill_on_one_arm() void {
         "bb2: { goto bb3; }",
         "bb3: { unreachable; }",
     };
-    fir.func* f = parse(&e, lets, blocks[..]);
+    fir.func* f = parse(e, lets, blocks[..]);
     fir_flow.dataflow mut* own all = run(f, 4, fir_flow.join_kind.join_intersect, scope_marks);
     defer fir_flow.dataflow_drop_made(move(all));
     expect_block(all, 1, " 2", " 3");
@@ -333,10 +343,9 @@ string[4] LOOP = {
 };
 
 fn a_loop_reaches_its_fixpoint_through_the_back_edge() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
-    fir.func* f = parse(&e, "", LOOP[..]);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    fir.func* f = parse(e, "", LOOP[..]);
     fir_flow.dataflow mut* own all = run(f, 4, fir_flow.join_kind.join_intersect, mark_block);
     defer fir_flow.dataflow_drop_made(move(all));
     expect_block(all, 0, "", " 0");
@@ -356,9 +365,8 @@ fn a_loop_reaches_its_fixpoint_through_the_back_edge() void {
 }
 
 fn a_loop_carries_a_kill_around_the_back_edge() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
     string lets = "let _2 (x): i32; let _3 (y): i32;";
     string[4] blocks = {
         "bb0: { live(_2); live(_3); goto bb1; }",
@@ -366,7 +374,7 @@ fn a_loop_carries_a_kill_around_the_back_edge() void {
         "bb2: { dead(_2); goto bb1; }",
         "bb3: { unreachable; }",
     };
-    fir.func* f = parse(&e, lets, blocks[..]);
+    fir.func* f = parse(e, lets, blocks[..]);
     fir_flow.dataflow mut* own all = run(f, 4, fir_flow.join_kind.join_intersect, scope_marks);
     defer fir_flow.dataflow_drop_made(move(all));
     expect_block(all, 1, " 3", " 3");
@@ -378,12 +386,11 @@ fn a_loop_carries_a_kill_around_the_back_edge() void {
 }
 
 fn a_block_that_nothing_names_starts_from_the_initial_set() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
     // bb1 follows a terminator and nothing names it; bb2 has bb1 alone as predecessor
     string[3] blocks = {"bb0: { unreachable; }", "bb1: { goto bb2; }", "bb2: { unreachable; }"};
-    fir.func* f = parse(&e, "", blocks[..]);
+    fir.func* f = parse(e, "", blocks[..]);
     fir_flow.dataflow mut* own all = run(f, 3, fir_flow.join_kind.join_intersect, mark_block);
     defer fir_flow.dataflow_drop_made(move(all));
     expect_block(all, 1, " 0 1 2", " 0 1 2");
@@ -395,11 +402,10 @@ fn a_block_that_nothing_names_starts_from_the_initial_set() void {
 }
 
 fn the_entry_set_joins_the_in_set_of_bb0() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
     string[1] one = {"bb0: { unreachable; }"};
-    fir.func* f = parse(&e, "", one[..]);
+    fir.func* f = parse(e, "", one[..]);
     fir_flow.dataflow mut* own d =
         fir_flow.dataflow_make(3, fir_flow.join_kind.join_union, mark_block);
     defer fir_flow.dataflow_drop_made(move(d));
@@ -412,7 +418,7 @@ fn the_entry_set_joins_the_in_set_of_bb0() void {
         "bb1: { goto bb0; }",
         "bb2: { unreachable; }",
     };
-    fir.func* g = parse(&e, "", blocks[..]);
+    fir.func* g = parse(e, "", blocks[..]);
     fir_flow.dataflow mut* own back =
         fir_flow.dataflow_make(3, fir_flow.join_kind.join_union, mark_block);
     defer fir_flow.dataflow_drop_made(move(back));
@@ -425,16 +431,15 @@ fn the_entry_set_joins_the_in_set_of_bb0() void {
 }
 
 fn a_block_that_loops_to_itself_joins_its_own_out_set() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
     string lets = "let _2 (x): i32;";
     string[3] blocks = {
         "bb0: { goto bb1; }",
         "bb1: { live(_2); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
         "bb2: { unreachable; }",
     };
-    fir.func* f = parse(&e, lets, blocks[..]);
+    fir.func* f = parse(e, lets, blocks[..]);
     fir_flow.dataflow mut* own all = run(f, 3, fir_flow.join_kind.join_intersect, scope_marks);
     defer fir_flow.dataflow_drop_made(move(all));
     expect_block(all, 1, "", " 2");
@@ -445,10 +450,9 @@ fn a_block_that_loops_to_itself_joins_its_own_out_set() void {
 }
 
 fn a_table_built_once_gives_the_same_result() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
-    fir.func* f = parse(&e, "", LOOP[..]);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    fir.func* f = parse(e, "", LOOP[..]);
     fir.pred_table mut* own pt = fir.pred_table_make();
     *pt = fir.func_predecessors(f);
     defer fir.pred_table_drop_made(move(pt));
@@ -468,14 +472,13 @@ fn a_table_built_once_gives_the_same_result() void {
 }
 
 fn a_second_run_replaces_the_result() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
-    fir.func* f = parse(&e, "", LOOP[..]);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    fir.func* f = parse(e, "", LOOP[..]);
     fir_flow.dataflow mut* own d = run(f, 4, fir_flow.join_kind.join_union, mark_block);
     defer fir_flow.dataflow_drop_made(move(d));
     string[1] one = {"bb0: { unreachable; }"};
-    fir.func* g = parse(&e, "", one[..]);
+    fir.func* g = parse(e, "", one[..]);
     fir_flow.dataflow_forward(g, d);
     assert(d->ins.len == 1 && d->outs.len == 1);
     expect_block(d, 0, "", " 0");
@@ -522,16 +525,15 @@ fn chain(strbuf.str_buf mut* b) void {
 }
 
 fn a_block_that_a_switch_names_twice_waits_on_the_list_once() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
     string[4] blocks = {
         "bb0: { goto bb1; }",
         "bb1: { switch(copy _1) -> [true: bb2, false: bb2, otherwise: bb3]; }",
         "bb2: { goto bb1; }",
         "bb3: { unreachable; }",
     };
-    fir.func* f = parse(&e, "", blocks[..]);
+    fir.func* f = parse(e, "", blocks[..]);
     fir_flow.dataflow mut* own some = run(f, 4, fir_flow.join_kind.join_union, mark_block);
     defer fir_flow.dataflow_drop_made(move(some));
     expect_block(some, 2, " 0 1 2", " 0 1 2");
@@ -540,9 +542,8 @@ fn a_block_that_a_switch_names_twice_waits_on_the_list_once() void {
 }
 
 fn an_irreducible_loop_reaches_its_fixpoint() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
     // bb1 and bb2 form a loop with two entries from bb0
     string[4] blocks = {
         "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
@@ -550,7 +551,7 @@ fn an_irreducible_loop_reaches_its_fixpoint() void {
         "bb2: { switch(copy _1) -> [true: bb1, otherwise: bb3]; }",
         "bb3: { unreachable; }",
     };
-    fir.func* f = parse(&e, "", blocks[..]);
+    fir.func* f = parse(e, "", blocks[..]);
     fir_flow.dataflow mut* own all = run(f, 4, fir_flow.join_kind.join_intersect, mark_block);
     defer fir_flow.dataflow_drop_made(move(all));
     expect_block(all, 1, " 0", " 0 1");
@@ -566,9 +567,8 @@ fn an_irreducible_loop_reaches_its_fixpoint() void {
 }
 
 fn nested_loops_carry_the_inner_back_edge_to_the_outer_head() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
     // bb1 heads the outer loop and bb2 the inner loop; bb3 is the inner body and bb4 the outer
     // latch
     string[6] blocks = {
@@ -579,7 +579,7 @@ fn nested_loops_carry_the_inner_back_edge_to_the_outer_head() void {
         "bb4: { goto bb1; }",
         "bb5: { unreachable; }",
     };
-    fir.func* f = parse(&e, "", blocks[..]);
+    fir.func* f = parse(e, "", blocks[..]);
     fir_flow.dataflow mut* own all = run(f, 6, fir_flow.join_kind.join_intersect, mark_block);
     defer fir_flow.dataflow_drop_made(move(all));
     expect_block(all, 1, " 0", " 0 1");
@@ -611,10 +611,9 @@ fn chain_func(env mut* e) fir.func* {
 }
 
 fn the_transfers_stay_linear_in_the_blocks() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
-    fir.func* f = chain_func(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    fir.func* f = chain_func(e);
     // in ascending order every block but bb1 meets its predecessors done; the back edge changes
     // bb1 once, and bb1 keeps its out-set
     fir_flow.dataflow mut* own all = run(f, BLOCKS, fir_flow.join_kind.join_intersect, mark_block);
@@ -635,10 +634,9 @@ fn the_transfers_stay_linear_in_the_blocks() void {
 // releases. The address of a block is no view here: the address of one set of 80 bytes moved by
 // 465808 bytes with nothing leaked, because a round this large leaves free chunks of every size.
 fn two_hundred_rounds_leave_the_heap_where_it_was() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
-    fir.func* f = chain_func(&e);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    fir.func* f = chain_func(e);
     u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < fir_env.LEAK_ROUNDS) {
@@ -667,10 +665,9 @@ u64 CALLS = 100;
 // program, the allocator served the blocks that a deletion of `bits_free(&next)` leaked out of the
 // free chunks of those tests. The break then read 0.
 fn small_rounds_leave_the_heap_where_it_was() void {
-    env mut e = env{};
-    open(&e);
-    defer close(&e);
-    fir.func* f = parse(&e, "", LOOP[..]);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    fir.func* f = parse(e, "", LOOP[..]);
     fir.pred_table mut* own pt = fir.pred_table_make();
     *pt = fir.func_predecessors(f);
     defer fir.pred_table_drop_made(move(pt));

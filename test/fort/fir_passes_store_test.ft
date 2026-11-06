@@ -298,13 +298,12 @@ fn assignments(fir.func* f, u32 t) u32 {
 // the count of the assignments of the temporary drops by one. The check goes and its
 // continuation merges in every case, so each function ends with one block less.
 fn the_fold_needs_each_of_its_conditions() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     // `fm` lives in an allocation, so that the leak rule proves its end: no call changes the
     // pointer, and drop_made holds each release once.
     fir.module mut* own fm = fir.module_make();
-    *fm = pass_env.parse(&e, FOLD_PRELUDE[..], FOLD_TEXT[..]);
+    *fm = pass_env.parse(e, FOLD_PRELUDE[..], FOLD_TEXT[..]);
     defer fir.module_drop_made(move(fm));
     assert(fm->funcs.len == FOLD_COUNT);
     u64 mut k = 0;
@@ -312,7 +311,7 @@ fn the_fold_needs_each_of_its_conditions() void {
         fir.func mut* f = function_mut(fm, k);
         u32 before = assignments(f, FOLD_TEMPS[k]);
         u32 blocks = fir.block_count(f);
-        pass_env.build(&e, f, pass_env.RELEASE);
+        pass_env.build(e, f, pass_env.RELEASE);
         u32 after = assignments(f, FOLD_TEMPS[k]);
         if (FOLDS[k]) {
             assert(after + 1 == before);
@@ -328,9 +327,8 @@ fn the_fold_needs_each_of_its_conditions() void {
 // statement index of `_t = rvalue`. The store leaves the continuation, whose other statements
 // follow the folded store in the merged block.
 fn the_folded_store_keeps_the_rvalue_and_its_location() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[15] text = {
         "fn main.fa() -> void {",
         "    let _1 (p): u8 mut* own;",
@@ -362,7 +360,7 @@ fn the_folded_store_keeps_the_rvalue_and_its_location() void {
         "    }",
         "}",
     };
-    lower_env.expect(pass_env.run(&e, FOLD_PRELUDE[..], text[..], pass_env.RELEASE), want[..]);
+    lower_env.expect(pass_env.run(e, FOLD_PRELUDE[..], text[..], pass_env.RELEASE), want[..]);
 }
 
 // ---- the merge ----------------------------------------------------------------------------------
@@ -371,9 +369,8 @@ fn the_folded_store_keeps_the_rvalue_and_its_location() void {
 // V2 refuse the two, so the pass runs without the verifier. Each check goes, and its `goto` keeps
 // the target, because the merge takes no continuation that is its own block or `bb0`.
 fn the_merge_leaves_a_loop_and_the_entry() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[1] prelude = {"fn g(bool c) void {}"};
     string[8] text = {
         "fn main.g(_1 (c): bool) -> void {",
@@ -392,7 +389,7 @@ fn the_merge_leaves_a_loop_and_the_entry() void {
             lines[5] = "        check(copy _1, overflow) -> bb0;";
         }
         fir.module mut* own fm = fir.module_make();
-        *fm = pass_env.parse(&e, prelude[..], lines[..]);
+        *fm = pass_env.parse(e, prelude[..], lines[..]);
         fir.func mut* f = &fm->funcs.items[0];
         pass_env.build_proved(f, true, false);
         assert(fir.block_count(f) == 2);
@@ -408,9 +405,8 @@ fn the_merge_leaves_a_loop_and_the_entry() void {
 // which the `switch` of bb2 names, becomes bb1. A block that no terminator names and that stands
 // between them, bb4, keeps its place after them and becomes bb2.
 fn a_chain_of_continuations_merges_into_its_first_block() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[1] prelude = {"fn g(bool c) void {}"};
     string[23] text = {
         "fn main.g(_1 (c): bool) -> void {",
@@ -458,7 +454,7 @@ fn a_chain_of_continuations_merges_into_its_first_block() void {
         "    }",
         "}",
     };
-    lower_env.expect(pass_env.run(&e, prelude[..], text[..], pass_env.RELEASE), want[..]);
+    lower_env.expect(pass_env.run(e, prelude[..], text[..], pass_env.RELEASE), want[..]);
 }
 
 // The merge clears the slots of the blocks past the new count, so a block that a later pass adds
@@ -467,9 +463,8 @@ fn a_chain_of_continuations_merges_into_its_first_block() void {
 // then adds take the two cleared slots: each takes a statement and a terminator, and the function
 // still keeps every rule of the verifier.
 fn a_block_after_a_merge_starts_empty() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[1] prelude = {"fn g(bool c) void {}"};
     string[21] text = {
         "fn main.g(_1 (c): bool) -> void {",
@@ -495,10 +490,10 @@ fn a_block_after_a_merge_starts_empty() void {
         "}",
     };
     fir.module mut* own fm = fir.module_make();
-    *fm = pass_env.parse(&e, prelude[..], text[..]);
+    *fm = pass_env.parse(e, prelude[..], text[..]);
     defer fir.module_drop_made(move(fm));
     fir.func mut* f = &fm->funcs.items[0];
-    pass_env.build(&e, f, pass_env.RELEASE);
+    pass_env.build(e, f, pass_env.RELEASE);
     assert(fir.block_count(f) == 3);
     u32 mut k = 0;
     while (k < 2) {
@@ -511,7 +506,7 @@ fn a_block_after_a_merge_starts_empty() void {
         assert(fir.block_statement_count(f, b) == 1);
         k += 1;
     }
-    pass_env.verified(&e, f, "fir_passes_store_test: the verifier refuses the new blocks");
+    pass_env.verified(e, f, "fir_passes_store_test: the verifier refuses the new blocks");
 }
 
 fn main() i32 {

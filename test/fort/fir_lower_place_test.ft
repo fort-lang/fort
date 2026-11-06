@@ -14,9 +14,8 @@ import lower_env;
 // sign-extends a signed index, and the check reports it as an `i64` beside the length. The length
 // of a fixed array is a constant, and that of a `string` is field 1 (D6.8).
 fn an_index_is_a_temporary_and_a_check() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[4] source = {
         "fn f(i32[4] a, i32 i, string s, u8 k) char {",
         "    i32 x = a[i];",
@@ -55,7 +54,7 @@ fn an_index_is_a_temporary_and_a_check() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // A negative index is an operation whose result the cast sign-extends, so it fails the one
@@ -63,9 +62,8 @@ fn an_index_is_a_temporary_and_a_check() void {
 // element of a fixed array lowers as any other. The checker refuses a negative constant index and
 // a constant index past the end (D6.8), so the lowering never meets them.
 fn the_index_boundaries() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[6] source = {
         "fn f(i32[4] a, i32 i, u64 u, i8 b) i32 {",
         "    i32 x = a[-i];",
@@ -139,20 +137,19 @@ fn the_index_boundaries() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
     string[3] negative = {"fn h(i32[4] a) i32 {", "    return a[-1];", "}"};
-    assert(lower_env.diagnostic(&e, negative[..]) == "2:14: a negative index: -1");
+    assert(lower_env.diagnostic(e, negative[..]) == "2:14: a negative index: -1");
     string[3] past = {"fn k(i32[4] a) i32 {", "    return a[4];", "}"};
-    assert(lower_env.diagnostic(&e, past[..]) == "2:13: index 4 out of range for i32[4]");
+    assert(lower_env.diagnostic(e, past[..]) == "2:13: index 4 out of range for i32[4]");
 }
 
 // `a[lo..hi]` on a fixed array and a span: each bound as a `u64` temporary, `0` and the length for
 // an absent bound, the `or` of two `gt`, the span check with both bounds as `i64`, then `slice`,
 // which is `slice mut` for a `mut` span of a fixed array (D6.9).
 fn a_span_is_a_check_and_a_slice() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[9] source = {
         "fn f(i32[4] mut a, u8@ s, i64 lo, u32 hi) void {",
         "    i32 mut@ w = a[lo..hi];",
@@ -230,16 +227,15 @@ fn a_span_is_a_check_and_a_slice() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // `t[lo..]` of a `string` gives a `string`, and its absent high bound is field 1. `p[lo..hi]` of a
 // pointer is `slice_ptr` over the bounds as they stand, with no check (D6.9). Only `str.from_cstr`
 // and `rt.args_init` take that span, so the function is the from_cstr of a sandbox std.str.
 fn a_span_of_a_string_and_of_a_pointer() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[9] source = {
         "fn f(i32[4] mut a, u8@ s, i64 lo, u32 hi) void {",
         "    i32 mut@ w = a[lo..hi];",
@@ -283,14 +279,13 @@ fn a_span_of_a_string_and_of_a_pointer() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower_str(&e, source[..], "from_cstr"), want[..]);
+    lower_env.expect(lower_env.lower_str(e, source[..], "from_cstr"), want[..]);
 }
 
 // An empty span of a `string`, `s[0..0]`, lowers as any other: the check holds `0 <= 0 <= len`.
 fn an_empty_span_lowers_as_any_other() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[3] source = {
         "fn g(string s) string {",
         "    return s[0..0];",
@@ -323,15 +318,14 @@ fn an_empty_span_lowers_as_any_other() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "g"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "g"), want[..]);
 }
 
 // `a.f` is the field by its declaration index and `p->f` is `(*_p).k`; `.len` and `.ptr` of a
 // span or a `string` are fields 1 and 0, through `->` too (D6.10).
 fn a_field_and_an_arrow() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[19] source = {
         "struct point {",
         "    i32 x;",
@@ -381,15 +375,14 @@ fn a_field_and_an_arrow() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // `*q` is `(*_q)`. `&lv` is `addr(p)`, or `addr mut(p)` when the checker typed a `mut` pointer:
 // `&G` of a `mut` global and `&*q` of a `mut` pointer are `mut`, and `&a.y` of a parameter is not.
 fn a_dereference_and_an_address() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[19] source = {
         "struct point {",
         "    i32 x;",
@@ -443,7 +436,7 @@ fn a_dereference_and_an_address() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "g"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "g"), want[..]);
 }
 
 // A field or an index of an rvalue reads a temporary that holds the rvalue (D6.7): `mk().y` is
@@ -451,9 +444,8 @@ fn a_dereference_and_an_address() void {
 // of the struct that `h` points to, and the owning result of the call leaves its temporary by
 // `move` (D17.5).
 fn an_rvalue_goes_into_a_temporary_first() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[21] source = {
         "struct point {",
         "    i32 x;",
@@ -510,7 +502,7 @@ fn an_rvalue_goes_into_a_temporary_first() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // `arr()[g()]` calls `arr` before `g` (D6.3), and the element is read in the continuation of the
@@ -518,9 +510,8 @@ fn an_rvalue_goes_into_a_temporary_first() void {
 // `null` puts the constant into a temporary first. A span of a `mut` span keeps its `mut` and is no
 // `slice mut`, which only a fixed array takes (spec/fir.md 6).
 fn the_operand_of_an_index_runs_before_its_index() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[23] source = {
         "struct point {",
         "    i32 x;",
@@ -600,15 +591,14 @@ fn the_operand_of_an_index_runs_before_its_index() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // An element of an aggregate type is a place: `return pts[i]` copies the element into `_0` in the
 // continuation of the check.
 fn an_element_of_an_aggregate_type() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[23] source = {
         "struct point {",
         "    i32 x;",
@@ -653,7 +643,7 @@ fn an_element_of_an_aggregate_type() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "h"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "h"), want[..]);
 }
 
 // `pts[i].y` is a field of an element, and `m[j][i]` checks the outer index against 2 and the
@@ -661,9 +651,8 @@ fn an_element_of_an_aggregate_type() void {
 // after both checks. A string literal is indexed through a temporary, and a module constant
 // `string` is indexed in place, its length being field 1 of the global.
 fn an_index_of_an_index_a_field_and_a_constant() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[12] source = {
         "struct point {",
         "    i32 x;",
@@ -771,14 +760,13 @@ fn an_index_of_an_index_a_field_and_a_constant() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // `.len` of a fixed array is a constant that the checker folds, so it reads no place (D3.4).
 fn the_length_of_a_fixed_array_is_a_constant() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[3] source = {
         "fn f(i32[4] a) u64 {",
         "    return a.len;",
@@ -794,16 +782,15 @@ fn the_length_of_a_fixed_array_is_a_constant() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "f"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
 // `swap()` sets `P = &B2`. D6.3 evaluates the base to its address before the index, so the
 // lowering holds the address of `P->arr` before the call, and the element is of `B1`. `addr mut`
 // follows the `mut` of `P`.
 fn an_index_holds_its_base_before_a_writer() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[38] source = {
         "struct box {",
         "    i32[4] arr;",
@@ -867,14 +854,13 @@ fn an_index_holds_its_base_before_a_writer() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "read"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "read"), want[..]);
 }
 
 // `P->arr[swap()] = 5` stores into the `B1` that the held address names.
 fn an_assigned_index_holds_its_base() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[38] source = {
         "struct box {",
         "    i32[4] arr;",
@@ -938,14 +924,13 @@ fn an_assigned_index_holds_its_base() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "write"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "write"), want[..]);
 }
 
 // A bound that holds a writer holds the base of a span expression the same way.
 fn a_span_holds_its_base_before_a_writer() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[38] source = {
         "struct box {",
         "    i32[4] arr;",
@@ -1017,14 +1002,13 @@ fn a_span_holds_its_base_before_a_writer() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "span"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "span"), want[..]);
 }
 
 // `&P->arr[swap()]` takes the address of an element of `B1`.
 fn an_address_of_an_index_holds_its_base() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[38] source = {
         "struct box {",
         "    i32[4] arr;",
@@ -1090,15 +1074,14 @@ fn an_address_of_an_index_holds_its_base() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "address"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "address"), want[..]);
 }
 
 // `(*PS)[swap()]` holds the value of `PS`, the address of the span header; the header itself is
 // read after the call, where it is used, as for `S[swap()]` below.
 fn a_span_behind_a_pointer_holds_the_pointer() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[38] source = {
         "struct box {",
         "    i32[4] arr;",
@@ -1162,15 +1145,14 @@ fn a_span_behind_a_pointer_holds_the_pointer() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "through"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "through"), want[..]);
 }
 
 // `S[swap()]` reads no memory to find the header of `S`, so nothing is held: the header and the
 // element are read after the call (D6.3).
 fn a_span_with_no_deref_holds_nothing() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[38] source = {
         "struct box {",
         "    i32[4] arr;",
@@ -1232,14 +1214,13 @@ fn a_span_with_no_deref_holds_nothing() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "plain"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "plain"), want[..]);
 }
 
 // Behind `box* Q` the element is not `mut`, so the held address is `addr`, not `addr mut`.
 fn a_held_base_behind_a_pointer_that_is_not_mut() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[38] source = {
         "struct box {",
         "    i32[4] arr;",
@@ -1303,15 +1284,14 @@ fn a_held_base_behind_a_pointer_that_is_not_mut() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "readq"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "readq"), want[..]);
 }
 
 // `W[j]` reads the header of `W` to find its storage, so it is held after its own check and before
 // `swap()`; the element span of `W` is not `mut`, so the address is `addr`.
 fn a_held_base_behind_a_span_index() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[38] source = {
         "struct box {",
         "    i32[4] arr;",
@@ -1384,14 +1364,13 @@ fn a_held_base_behind_a_span_index() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "nested"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "nested"), want[..]);
 }
 
 // A writer in the high bound alone holds the base of the span expression too.
 fn a_high_bound_alone_holds_the_base() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[21] source = {
         "struct box {",
         "    i32[4] arr;",
@@ -1446,15 +1425,14 @@ fn a_high_bound_alone_holds_the_base() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "high"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "high"), want[..]);
 }
 
 // `P->sp2[j]` reads the header of `sp2` last, a span that is not `mut`, so the held address is
 // `addr` although `P` is `mut`.
 fn the_mut_of_a_held_base_is_that_of_its_last_read() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[21] source = {
         "struct box {",
         "    i32[4] arr;",
@@ -1510,15 +1488,14 @@ fn the_mut_of_a_held_base_is_that_of_its_last_read() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "inner"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "inner"), want[..]);
 }
 
 // `BS[j].arr` reads the header of the `mut` span `BS` last and no pointer, so the held address is
 // `addr mut`.
 fn a_held_base_behind_a_mut_span_is_mut() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
     string[21] source = {
         "struct box {",
         "    i32[4] arr;",
@@ -1580,7 +1557,7 @@ fn a_held_base_behind_a_mut_span_is_mut() void {
         "    }",
         "}",
     };
-    lower_env.expect(lower_env.lower(&e, source[..], "element"), want[..]);
+    lower_env.expect(lower_env.lower(e, source[..], "element"), want[..]);
 }
 
 fn main() i32 {
