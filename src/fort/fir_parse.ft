@@ -507,12 +507,30 @@ fn parser_create(session.session mut* s, string file, string src, prelude pre) f
     return p;
 }
 
+// parser_drop holds the releases, and the move leaves the zero value.
 fn parser_free(fir_parser mut* p) void {
-    ftok_free(&p->toks);
-    del(p->refs.items);
-    p->refs.len = 0;
-    ast.ast_arena_free(&p->arena);
-    strbuf.free(&p->msg);
+    parser_drop(move(*p));
+}
+
+// Frees a parser that the caller moves in: the tokens, the block references, the trees of the
+// type spellings, then the message buffer.
+fn parser_drop(fir_parser mut p) void {
+    del(p.toks.items);
+    del(p.refs.items);
+    ast.arena_drop(move(p.arena));
+    del(p.msg.data);
+}
+
+// A zero parser in an allocation of its own, for a function that lends the parser to calls.
+fn parser_make() fir_parser mut* own {
+    return new(fir_parser);
+}
+
+// Ends a parser of parser_make that the caller moves in.
+fn parser_drop_made(fir_parser mut* own p) void {
+    fir_parser kept = move(*p);
+    del(p);
+    parser_drop(move(kept));
 }
 
 /// Whether the cursor stands at the end of the text.

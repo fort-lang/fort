@@ -36,15 +36,26 @@ fn bind_and_ask(lower_env.env mut* e) void {
     ast.sym* param = ast.ast_child(decl, 0)->sym;
     ast.sym* local = ast.ast_child(decl->b, 0)->sym;
     ast.sym* function = decl->sym;
-    fir.func mut f = fir.func_new(&e->c.ck.types, decl->sym, decl->sym->ty);
-    defer fir.func_free(&f);
-    fir_lower.prescan(&f, decl->b);
-    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e->c.ck, .f = &f};
-    // The parameter and the local the body declares have one each.
-    assert(fir_lower.local_of(&lw, param) == 1);
-    assert(fir_lower.local_of(&lw, local) == 2);
-    println("bound");
-    // The function itself is a declaration of the module and never a local of
-    // the body being lowered.
-    fir_lower.local_of(&lw, function);
+    // `f` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.func mut* own f = fir.func_make();
+    *f = fir.func_new(&e->c.ck.types, decl->sym, decl->sym->ty);
+    defer fir.func_drop_made(move(f));
+    fir_lower.prescan(f, decl->b);
+    // `lw` ends in a block of its own, so that its `del`s come after the last call of its exit.
+    {
+        fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e->c.ck, .f = f};
+        defer {
+            del(lw.scopes.items);
+            del(lw.defers.items);
+            del(lw.named.items);
+        }
+        // The parameter and the local the body declares have one each.
+        assert(fir_lower.local_of(&lw, param) == 1);
+        assert(fir_lower.local_of(&lw, local) == 2);
+        println("bound");
+        // The function itself is a declaration of the module and never a local of
+        // the body being lowered.
+        fir_lower.local_of(&lw, function);
+    }
 }

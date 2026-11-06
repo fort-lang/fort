@@ -35,9 +35,12 @@ fn main() i32 {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.module mut m = llvm_env.parse(&e, PRELUDE[..], TEXT[..]);
-    defer fir.module_free(&m);
-    fir.func* f = fir.module_function_at(&m, 0);
+    // `m` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.module mut* own m = fir.module_make();
+    *m = llvm_env.parse(&e, PRELUDE[..], TEXT[..]);
+    defer fir.module_drop_made(move(m));
+    fir.func* f = fir.module_function_at(m, 0);
     println(fir.block_statement_count(f, 0) == 1);
     llvm_env.statement_text(&e, f, 0, 0);
     return 0;

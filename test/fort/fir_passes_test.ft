@@ -91,8 +91,11 @@ fn each_mode_removes_the_kinds_of_its_column() void {
     while (k < KIND_COUNT) {
         lines[2] = KIND_TERMS[k];
         for (pass_env.mode m : pass_env.MODES) {
-            fir.module mut fm = pass_env.parse(&e, KIND_PRELUDE[..], lines[..]);
-            fir.func mut* f = &fm.funcs.items[0];
+            // `fm` lives in an allocation, so that the leak rule proves its end: no call changes
+            // the pointer, and drop_made holds each release once.
+            fir.module mut* own fm = fir.module_make();
+            *fm = pass_env.parse(&e, KIND_PRELUDE[..], lines[..]);
+            fir.func mut* f = &fm->funcs.items[0];
             fir.term_kind before = fir_env.term_kind_of(f, 0);
             pass_env.build(&e, f, m);
             if ((m.release && BY_RELEASE[k]) || (m.no_bounds && BY_NO_BOUNDS[k])) {
@@ -106,7 +109,7 @@ fn each_mode_removes_the_kinds_of_its_column() void {
                 assert(fir_env.term_kind_of(f, 1) == fir.term_kind.tk_return);
                 kept += 1;
             }
-            fir.module_free(&fm);
+            fir.module_drop_made(move(fm));
         }
         k += 1;
     }
@@ -136,9 +139,10 @@ fn a_removed_check_leaves_goto_at_its_location() void {
         "    }",
         "}",
     };
-    fir.module mut fm = pass_env.parse(&e, prelude[..], text[..]);
-    defer fir.module_free(&fm);
-    fir.func mut* f = &fm.funcs.items[0];
+    fir.module mut* own fm = fir.module_make();
+    *fm = pass_env.parse(&e, prelude[..], text[..]);
+    defer fir.module_drop_made(move(fm));
+    fir.func mut* f = &fm->funcs.items[0];
     build_unverified(f, pass_env.RELEASE);
     assert(fir.block_count(f) == 3);
     expect_left_goto(&fir.block_at(f, 2)->term);
@@ -215,11 +219,11 @@ fn expect_mask(fir.func* f, u64 mask) void {
 // location, the exit and the statement index of the check, and the read of `_3` after the check
 // reads it.
 fn the_mask_is_the_width_of_the_named_type_less_one() void {
+    strbuf.str_buf mut term = strbuf.create();
+    defer del(term.data);
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
-    strbuf.str_buf mut term = strbuf.create();
-    defer strbuf.free(&term);
     string[13] mut lines = WIDTH_LINES;
     u64 mut k = 0;
     while (k < WIDTH_COUNT) {
@@ -228,11 +232,12 @@ fn the_mask_is_the_width_of_the_named_type_less_one() void {
         strbuf.append(&term, WIDTH_NAMES[k]);
         strbuf.append(&term, "\") -> bb1 #3:7 exit 9:1 s2;");
         lines[6] = strbuf.view(&term);
-        fir.module mut fm = pass_env.parse(&e, WIDTH_PRELUDE[..], lines[..]);
-        fir.func mut* f = &fm.funcs.items[0];
+        fir.module mut* own fm = fir.module_make();
+        *fm = pass_env.parse(&e, WIDTH_PRELUDE[..], lines[..]);
+        fir.func mut* f = &fm->funcs.items[0];
         pass_env.build(&e, f, pass_env.RELEASE);
         expect_mask(f, WIDTH_MASKS[k]);
-        fir.module_free(&fm);
+        fir.module_drop_made(move(fm));
         k += 1;
     }
 }
@@ -745,13 +750,13 @@ string[9] RVALUE_PRELUDE = {
 // Each pure rvalue goes with its assignment, and each other rvalue stays, in the default mode,
 // which removes no check. The text of each case is `_7 = <rvalue>;` and `return;`.
 fn a_pure_rvalue_goes_and_the_others_stay() void {
+    strbuf.str_buf mut assign = strbuf.create();
+    defer del(assign.data);
+    strbuf.str_buf mut let7 = strbuf.create();
+    defer del(let7.data);
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
-    strbuf.str_buf mut let7 = strbuf.create();
-    defer strbuf.free(&let7);
-    strbuf.str_buf mut assign = strbuf.create();
-    defer strbuf.free(&assign);
     string[7] mut lines = {
         "fn main.d(_1: i32, _2: i32, _3: f64, _4: u8@, _5: u8*, _6: u8 mut* own) -> void {",
         "",
@@ -773,8 +778,9 @@ fn a_pure_rvalue_goes_and_the_others_stay() void {
         strbuf.push(&assign, ';');
         lines[1] = strbuf.view(&let7);
         lines[3] = strbuf.view(&assign);
-        fir.module mut fm = pass_env.parse(&e, RVALUE_PRELUDE[..], lines[..]);
-        fir.func mut* f = &fm.funcs.items[0];
+        fir.module mut* own fm = fir.module_make();
+        *fm = pass_env.parse(&e, RVALUE_PRELUDE[..], lines[..]);
+        fir.func mut* f = &fm->funcs.items[0];
         pass_env.build(&e, f, pass_env.CHECKED);
         if (k < RVALUE_PURE) {
             assert(fir.block_statement_count(f, 0) == 0);
@@ -782,7 +788,7 @@ fn a_pure_rvalue_goes_and_the_others_stay() void {
             assert(fir.block_statement_count(f, 0) == 1);
             assert(assigned_local(f, 0, 0) == 7);
         }
-        fir.module_free(&fm);
+        fir.module_drop_made(move(fm));
         k += 1;
     }
 }

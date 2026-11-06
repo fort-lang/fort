@@ -339,14 +339,16 @@ fn the_extern_list_drives_the_declarations() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.module mut m = fir.module_new();
-    defer fir.module_free(&m);
-    fir.module_add_function(&m, llvm_env.lower(&e, SOURCE[..], "c_calls", pass_env.CHECKED));
-    fir.module_collect_externs(&m);
-    assert(fir.module_extern_count(&m) == 3);
-    assert(extern_name(&m, 0) == "printf");
-    assert(extern_name(&m, 2) == "write");
-    fir_llvm.translate_module(&e.g, &m);
+    // `m` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.module mut* own m = fir.module_make();
+    defer fir.module_drop_made(move(m));
+    fir.module_add_function(m, llvm_env.lower(&e, SOURCE[..], "c_calls", pass_env.CHECKED));
+    fir.module_collect_externs(m);
+    assert(fir.module_extern_count(m) == 3);
+    assert(extern_name(m, 0) == "printf");
+    assert(extern_name(m, 2) == "write");
+    fir_llvm.translate_module(&e.g, m);
     string[6] want = {
         "declare i32 @printf(ptr, ...) nobuiltin",
         "declare signext i8 @c_narrow(i8 signext, i16 zeroext) nobuiltin",
@@ -372,11 +374,11 @@ fn the_module_writes_the_c_main() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.module mut m = fir.module_new();
-    defer fir.module_free(&m);
-    fir.module_add_function(&m, llvm_env.lower(&e, ENTRY[..], "main", pass_env.CHECKED));
-    name_main(&m);
-    fir_llvm.translate_module(&e.g, &m);
+    fir.module mut* own m = fir.module_make();
+    defer fir.module_drop_made(move(m));
+    fir.module_add_function(m, llvm_env.lower(&e, ENTRY[..], "main", pass_env.CHECKED));
+    name_main(m);
+    fir_llvm.translate_module(&e.g, m);
     string[10] want = {
         "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {",
         "entry:",
@@ -396,7 +398,7 @@ fn the_module_writes_the_c_main() void {
     llvm_env.contains(&e, got, want[..]);
     // gen_main alone writes the same definition
     strbuf.clear(&e.g.funcs);
-    gen.gen_main(&e.g, m.main);
+    gen.gen_main(&e.g, m->main);
     llvm_env.expect(&e, strbuf.view(&e.g.funcs), want[..]);
 }
 

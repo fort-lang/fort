@@ -34,13 +34,23 @@ fn main() i32 {
 // reads through `decl` and `field` use no owner of its frame (D17.21).
 fn project_without_symbol(lower_env.env mut* e) void {
     ast.node* decl = lower_env.decl(e, "f");
-    fir.func mut f = fir.func_new(&e->c.ck.types, decl->sym, decl->sym->ty);
-    defer fir.func_free(&f);
-    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e->c.ck, .f = &f};
-    defer fir_lower.scopes_free(&lw.scopes);
-    fir_lower.prescan(&f, decl->b);
-    ast.node mut* field = check_env.node_in_main(&e->c, ast.ast_kind.k_field, "a");
-    println(field->sym != null);
-    field->sym = null;
-    fir_lower.project_field(&lw, field, fir.place_local(1));
+    // `f` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.func mut* own f = fir.func_make();
+    *f = fir.func_new(&e->c.ck.types, decl->sym, decl->sym->ty);
+    defer fir.func_drop_made(move(f));
+    // `lw` ends in a block of its own, so that its `del`s come after the last call of its exit.
+    {
+        fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e->c.ck, .f = f};
+        defer {
+            del(lw.scopes.items);
+            del(lw.defers.items);
+            del(lw.named.items);
+        }
+        fir_lower.prescan(f, decl->b);
+        ast.node mut* field = check_env.node_in_main(&e->c, ast.ast_kind.k_field, "a");
+        println(field->sym != null);
+        field->sym = null;
+        fir_lower.project_field(&lw, field, fir.place_local(1));
+    }
 }

@@ -429,6 +429,8 @@ fn a_nested_if_restores_the_index_of_the_outer_one() void {
 // inside a loop, with scopes, a named local and a deferred statement open. The sandbox has no
 // runtime, so the print of `g` stops its lowering, and `f` needs no runtime entry.
 fn a_lowering_depends_on_its_function_alone() void {
+    strbuf.str_buf mut first = strbuf.create();
+    defer del(first.data);
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
@@ -451,13 +453,14 @@ fn a_lowering_depends_on_its_function_alone() void {
         "}",
     };
     lower_env.check_lines(&e, source[..], false);
-    strbuf.str_buf mut first = strbuf.create();
-    defer strbuf.free(&first);
     strbuf.append(&first, lower_env.lower_checked(&e, "f"));
     assert(lower_env.lower_checked(&e, "f") == strbuf.view(&first));
-    fir.func mut f = fir.func{};
+    // `f` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.func mut* own f = fir.func_make();
+    defer fir.func_drop_made(move(f));
     fir_lower.report mut why = fir_lower.report{};
-    assert(!fir_lower.lower_function(&e.c.ck, lower_env.decl(&e, "g"), &f, &why));
+    assert(!fir_lower.lower_function(&e.c.ck, lower_env.decl(&e, "g"), f, &why));
     assert(why.kind == ast.ast_kind.k_ident && why.at.line == 14 && why.at.col == 17);
     assert(lower_env.lower_checked(&e, "f") == strbuf.view(&first));
     // the deferred `del(p)` stands at both returns and at no other place
@@ -548,15 +551,24 @@ fn a_noreturn_body_ends_in_trap() void {
 fn end_twice(lower_env.env mut* e) void {
     ast.node* decl = lower_env.decl(e, "stop");
     ast.node* body = decl->b;
-    fir.func mut f = fir.func_new(&e->c.ck.types, decl->sym, decl->sym->ty);
-    defer fir.func_free(&f);
-    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e->c.ck, .f = &f};
-    fir_lower.lower_end(&lw, body);
-    fir_lower.lower_end(&lw, body);
+    fir.func mut* own f = fir.func_make();
+    *f = fir.func_new(&e->c.ck.types, decl->sym, decl->sym->ty);
+    defer fir.func_drop_made(move(f));
+    // `lw` ends in a block of its own, so that its `del`s come after the last call of its exit.
+    {
+        fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e->c.ck, .f = f};
+        defer {
+            del(lw.scopes.items);
+            del(lw.defers.items);
+            del(lw.named.items);
+        }
+        fir_lower.lower_end(&lw, body);
+        fir_lower.lower_end(&lw, body);
+    }
     fir_verify.violation mut v = fir_verify.violation{};
-    assert(!fir_verify.find_violation(&f, &e->rt, &v));
+    assert(!fir_verify.find_violation(f, &e->rt, &v));
     strbuf.clear(&e->text);
-    fir_print.print_function(&f, &e->text);
+    fir_print.print_function(f, &e->text);
     string[7] want = {
         "fn main.stop() -> noreturn {",
         "    let _0: void;",
@@ -815,6 +827,10 @@ fn decl_name(gen.node_ref_vec* decls, u64 i) string {
 // each module the declarations in source order with the selected branch of each `$if`. An
 // `extern fn` has no body and is no function to lower.
 fn the_program_lists_its_functions_in_module_order() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    gen.node_ref_vec mut decls = gen.node_ref_vec{};
+    defer del(decls.items);
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
@@ -837,8 +853,6 @@ fn the_program_lists_its_functions_in_module_order() void {
         "fn main() i32 {",
         "    return helper.twice(0);",
     };
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     for (string line : source) {
         strbuf.append(&b, line);
         strbuf.push(&b, '\n');
@@ -846,8 +860,6 @@ fn the_program_lists_its_functions_in_module_order() void {
     strbuf.append(&b, "}\n");
     check_env.add(&e.c, "main.ft", strbuf.view(&b));
     assert(check_env.check_entry(&e.c, "main.ft"));
-    gen.node_ref_vec mut decls = gen.node_ref_vec{};
-    defer gen.refs_free(&decls);
     fir_lower.program_functions(&e.c.m.set, &decls);
     string[5] names = {"first", "twice", "early", "kept", "main"};
     assert(decls.len == 5);

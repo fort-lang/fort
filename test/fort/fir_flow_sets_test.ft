@@ -28,7 +28,7 @@ fn subtract_removes_the_numbers_of_the_source_word_by_word() void {
     u32[5] a_list = {0, 1, 63, 64, 129};
     u32[4] b_list = {1, 64, 100, 129};
     fir_flow.bits mut a = set_of(130, a_list[..]);
-    defer fir_flow.bits_free(&a);
+    defer del(a.words);
     fir_flow.bits mut b = set_of(130, b_list[..]);
     fir_flow.bits_subtract(&a, &b);
     u32[2] want_list = {0, 63};
@@ -52,12 +52,12 @@ fn subtract_removes_the_numbers_of_the_source_word_by_word() void {
     fir_flow.bits_clear(&all, 0);
     fir_flow.bits_clear(&all, 63);
     assert(fir_flow.bits_equal(&full, &all));
-    fir_flow.bits_free(&b);
-    fir_flow.bits_free(&want);
-    fir_flow.bits_free(&c);
-    fir_flow.bits_free(&empty);
-    fir_flow.bits_free(&full);
-    fir_flow.bits_free(&all);
+    del(b.words);
+    del(want.words);
+    del(c.words);
+    del(empty.words);
+    del(full.words);
+    del(all.words);
 }
 
 // ---- the dataflow --------------------------------------------------------------------------
@@ -121,7 +121,7 @@ fn close(env mut* e) void {
 fn parse(env mut* e, string lets, string@ blocks) fir.func* {
     fir.module_free(&e->m);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, "fn main.f(_1 (c): bool) -> i32 {\n");
     strbuf.append(&b, lets);
     strbuf.push(&b, '\n');
@@ -151,19 +151,22 @@ fn same_sets(fir_flow.dataflow* a, fir_flow.dataflow* b, u64 at) void {
 // Runs the dataflow of `join` over `f` twice, with scope_marks as a function and as sets, and
 // holds that the two reach one fixpoint after one count of transfers. Returns that count.
 fn agree(fir.func* f, u32 count, fir_flow.join_kind join, bool full_entry) u64 {
-    fir.pred_table mut pt = fir.func_predecessors(f);
-    defer fir.pred_table_free(&pt);
-    fir_flow.dataflow mut by_fn = fir_flow.dataflow_new(count, join, scope_marks);
-    defer fir_flow.dataflow_free(&by_fn);
-    fir_flow.dataflow mut by_sets = fir_flow.dataflow_new(count, join, refused);
-    defer fir_flow.dataflow_free(&by_sets);
+    // `pt` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.pred_table mut* own pt = fir.pred_table_make();
+    *pt = fir.func_predecessors(f);
+    defer fir.pred_table_drop_made(move(pt));
+    fir_flow.dataflow mut* own by_fn = fir_flow.dataflow_make(count, join, scope_marks);
+    defer fir_flow.dataflow_drop_made(move(by_fn));
+    fir_flow.dataflow mut* own by_sets = fir_flow.dataflow_make(count, join, refused);
+    defer fir_flow.dataflow_drop_made(move(by_sets));
     if (join == fir_flow.join_kind.join_intersect) {
-        fir_flow.bits_fill(&by_fn.init);
-        fir_flow.bits_fill(&by_sets.init);
+        fir_flow.bits_fill(&by_fn->init);
+        fir_flow.bits_fill(&by_sets->init);
     }
     if (full_entry) {
-        fir_flow.bits_fill(&by_fn.entry);
-        fir_flow.bits_fill(&by_sets.entry);
+        fir_flow.bits_fill(&by_fn->entry);
+        fir_flow.bits_fill(&by_sets->entry);
     }
     u32 n = fir.block_count(f);
     fir_flow.bits mut@ own gens = new(fir_flow.bits, cast(n, u64));
@@ -175,20 +178,20 @@ fn agree(fir.func* f, u32 count, fir_flow.join_kind join, bool full_entry) u64 {
         scope_sets(f, b, &gens[cast(b, u64)], &kills[cast(b, u64)]);
         b += 1;
     }
-    fir_flow.dataflow_forward_with(f, &pt, &by_fn);
-    fir_flow.dataflow_forward_sets(f, &pt, &by_sets, gens, kills);
-    assert(by_fn.steps == by_sets.steps);
+    fir_flow.dataflow_forward_with(f, pt, by_fn);
+    fir_flow.dataflow_forward_sets(f, pt, by_sets, gens, kills);
+    assert(by_fn->steps == by_sets->steps);
     b = 0;
     while (b < n) {
         u64 at = cast(b, u64);
-        same_sets(&by_fn, &by_sets, at);
+        same_sets(by_fn, by_sets, at);
         fir_flow.bits_free(&gens[at]);
         fir_flow.bits_free(&kills[at]);
         b += 1;
     }
     del(gens);
     del(kills);
-    return by_fn.steps;
+    return by_fn->steps;
 }
 
 // Runs agree under both joins, from an empty and from a full entry set.
@@ -251,34 +254,38 @@ fn the_set_transfer_reaches_the_fixpoint_of_the_function_transfer() void {
 
 // A second run with sets replaces the result of the first.
 fn a_second_run_with_sets_replaces_the_result() void {
+    fir_flow.bits[2] mut gens = {fir_flow.bits_new(5), fir_flow.bits_new(5)};
+    defer {
+        del(gens[0].words);
+        del(gens[1].words);
+    }
+    fir_flow.bits[2] mut kills = {fir_flow.bits_new(5), fir_flow.bits_new(5)};
+    defer {
+        del(kills[0].words);
+        del(kills[1].words);
+    }
     env mut e = env{};
     open(&e);
     defer close(&e);
     string[2] blocks = {"bb0: { live(_2); goto bb1; }", "bb1: { unreachable; }"};
     fir.func* f = parse(&e, LETS, blocks[..]);
-    fir.pred_table mut pt = fir.func_predecessors(f);
-    defer fir.pred_table_free(&pt);
-    fir_flow.dataflow mut d = fir_flow.dataflow_new(5, fir_flow.join_kind.join_union, refused);
-    defer fir_flow.dataflow_free(&d);
-    fir_flow.bits[2] mut gens = {fir_flow.bits_new(5), fir_flow.bits_new(5)};
-    fir_flow.bits[2] mut kills = {fir_flow.bits_new(5), fir_flow.bits_new(5)};
+    fir.pred_table mut* own pt = fir.pred_table_make();
+    *pt = fir.func_predecessors(f);
+    defer fir.pred_table_drop_made(move(pt));
+    fir_flow.dataflow mut* own d = fir_flow.dataflow_make(5, fir_flow.join_kind.join_union,
+                                                         refused);
+    defer fir_flow.dataflow_drop_made(move(d));
     fir_flow.bits_set(&gens[0], 2);
-    fir_flow.dataflow_forward_sets(f, &pt, &d, gens[..], kills[..]);
-    assert(holds(&d, 1, 2));
+    fir_flow.dataflow_forward_sets(f, pt, d, gens[..], kills[..]);
+    assert(holds(d, 1, 2));
     // the second run kills `_2` in bb0 and generates `_3`
     fir_flow.bits_clear(&gens[0], 2);
     fir_flow.bits_set(&gens[0], 3);
     fir_flow.bits_set(&kills[0], 2);
-    fir_flow.dataflow_forward_sets(f, &pt, &d, gens[..], kills[..]);
-    assert(!holds(&d, 1, 2));
-    assert(holds(&d, 1, 3));
-    assert(d.steps == 2);
-    u64 mut i = 0;
-    while (i < 2) {
-        fir_flow.bits_free(&gens[i]);
-        fir_flow.bits_free(&kills[i]);
-        i += 1;
-    }
+    fir_flow.dataflow_forward_sets(f, pt, d, gens[..], kills[..]);
+    assert(!holds(d, 1, 2));
+    assert(holds(d, 1, 3));
+    assert(d->steps == 2);
 }
 
 // ---- the edge sets -------------------------------------------------------------------------
@@ -319,17 +326,19 @@ fn agree_edges(fir.func* f, fir.func* split, u32 count, edge@ es, fir_flow.join_
     u32 n = fir.block_count(f);
     u32 m = fir.block_count(split);
     assert(cast(m, u64) == cast(n, u64) + es.len);
-    fir.pred_table mut pt = fir.func_predecessors(f);
-    defer fir.pred_table_free(&pt);
-    fir.pred_table mut spt = fir.func_predecessors(split);
-    defer fir.pred_table_free(&spt);
-    fir_flow.dataflow mut by_edges = fir_flow.dataflow_new(count, join, refused);
-    defer fir_flow.dataflow_free(&by_edges);
-    fir_flow.dataflow mut by_blocks = fir_flow.dataflow_new(count, join, refused);
-    defer fir_flow.dataflow_free(&by_blocks);
+    fir.pred_table mut* own pt = fir.pred_table_make();
+    *pt = fir.func_predecessors(f);
+    defer fir.pred_table_drop_made(move(pt));
+    fir.pred_table mut* own spt = fir.pred_table_make();
+    *spt = fir.func_predecessors(split);
+    defer fir.pred_table_drop_made(move(spt));
+    fir_flow.dataflow mut* own by_edges = fir_flow.dataflow_make(count, join, refused);
+    defer fir_flow.dataflow_drop_made(move(by_edges));
+    fir_flow.dataflow mut* own by_blocks = fir_flow.dataflow_make(count, join, refused);
+    defer fir_flow.dataflow_drop_made(move(by_blocks));
     if (join == fir_flow.join_kind.join_intersect) {
-        fir_flow.bits_fill(&by_edges.init);
-        fir_flow.bits_fill(&by_blocks.init);
+        fir_flow.bits_fill(&by_edges->init);
+        fir_flow.bits_fill(&by_blocks->init);
     }
     fir_flow.bits mut@ own gens = new(fir_flow.bits, cast(n, u64));
     fir_flow.bits mut@ own kills = new(fir_flow.bits, cast(n, u64));
@@ -359,14 +368,14 @@ fn agree_edges(fir.func* f, fir.func* split, u32 count, edge@ es, fir_flow.join_
         b += 1;
     }
     add_edges(es, n, edge_to, edge_gens, split_gens);
-    fir_flow.dataflow_forward_edges(f, &pt, &by_edges, gens, kills, edge_to, edge_gens);
-    fir_flow.dataflow_forward_sets(split, &spt, &by_blocks, split_gens, split_kills);
+    fir_flow.dataflow_forward_edges(f, pt, by_edges, gens, kills, edge_to, edge_gens);
+    fir_flow.dataflow_forward_sets(split, spt, by_blocks, split_gens, split_kills);
     b = 0;
     while (b < n) {
-        same_sets(&by_edges, &by_blocks, cast(b, u64));
+        same_sets(by_edges, by_blocks, cast(b, u64));
         b += 1;
     }
-    return by_edges.steps;
+    return by_edges->steps;
 }
 
 // Gives each edge set of `es` to its block in `edge_to` and `edge_gens`, and to the gen set of
@@ -399,7 +408,7 @@ fn agree_edges_all(fir.func* f, fir.func* split, u32 count, edge@ es) void {
 fn parse_pair(env mut* e, string@ blocks, string@ split) void {
     fir.module_free(&e->m);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     string[2] names = {"f", "g"};
     u64 mut n = 0;
     while (n < 2) {
@@ -475,11 +484,13 @@ fn an_edge_set_holds_on_its_edge_as_a_block_on_that_edge_does() void {
     agree_edges_all(f, g, 5, into_else[..]);
     // the in-sets by hand: the number holds in bb2 and not in bb1, and the intersection at bb3
     // drops it, because the edge from bb1 lacks it
-    fir.pred_table mut pt = fir.func_predecessors(f);
-    defer fir.pred_table_free(&pt);
-    fir_flow.dataflow mut d = fir_flow.dataflow_new(5, fir_flow.join_kind.join_intersect, refused);
-    defer fir_flow.dataflow_free(&d);
-    fir_flow.bits_fill(&d.init);
+    fir.pred_table mut* own pt = fir.pred_table_make();
+    *pt = fir.func_predecessors(f);
+    defer fir.pred_table_drop_made(move(pt));
+    fir_flow.dataflow mut* own d =
+        fir_flow.dataflow_make(5, fir_flow.join_kind.join_intersect, refused);
+    defer fir_flow.dataflow_drop_made(move(d));
+    fir_flow.bits_fill(&d->init);
     fir_flow.bits mut@ own gens = new(fir_flow.bits, 4);
     fir_flow.bits mut@ own kills = new(fir_flow.bits, 4);
     fir_flow.bits mut@ own edge_gens = new(fir_flow.bits, 4);
@@ -492,24 +503,24 @@ fn an_edge_set_holds_on_its_edge_as_a_block_on_that_edge_does() void {
     }
     edge_to[0] = 2;
     fir_flow.bits_set(&edge_gens[0], 3);
-    fir_flow.dataflow_forward_edges(f, &pt, &d, gens, kills, edge_to[..], edge_gens);
-    assert(holds(&d, 2, 3) && !holds(&d, 1, 3) && !holds(&d, 3, 3));
-    assert(holds(&d, 1, 2) && !holds(&d, 3, 2) && !holds(&d, 3, 4));
+    fir_flow.dataflow_forward_edges(f, pt, d, gens, kills, edge_to[..], edge_gens);
+    assert(holds(d, 2, 3) && !holds(d, 1, 3) && !holds(d, 3, 3));
+    assert(holds(d, 1, 2) && !holds(d, 3, 2) && !holds(d, 3, 4));
     // an edge set that names a block that no terminator of its block names changes nothing
     edge_to[0] = 3;
-    fir_flow.dataflow_forward_edges(f, &pt, &d, gens, kills, edge_to[..], edge_gens);
-    assert(!holds(&d, 1, 3) && !holds(&d, 2, 3) && !holds(&d, 3, 3));
-    fir_flow.dataflow mut plain = fir_flow.dataflow_new(5, fir_flow.join_kind.join_intersect,
-                                                        refused);
-    defer fir_flow.dataflow_free(&plain);
-    fir_flow.bits_fill(&plain.init);
-    fir_flow.dataflow_forward_sets(f, &pt, &plain, gens, kills);
+    fir_flow.dataflow_forward_edges(f, pt, d, gens, kills, edge_to[..], edge_gens);
+    assert(!holds(d, 1, 3) && !holds(d, 2, 3) && !holds(d, 3, 3));
+    fir_flow.dataflow mut* own plain =
+        fir_flow.dataflow_make(5, fir_flow.join_kind.join_intersect, refused);
+    defer fir_flow.dataflow_drop_made(move(plain));
+    fir_flow.bits_fill(&plain->init);
+    fir_flow.dataflow_forward_sets(f, pt, plain, gens, kills);
     u64 mut b = 0;
     while (b < 4) {
-        same_sets(&d, &plain, b);
+        same_sets(d, plain, b);
         b += 1;
     }
-    assert(d.steps == plain.steps);
+    assert(d->steps == plain->steps);
     free_sets(gens);
     free_sets(kills);
     free_sets(edge_gens);

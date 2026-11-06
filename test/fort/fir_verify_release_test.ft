@@ -35,6 +35,8 @@ u64 CALLS = 100;
 // no view. It runs first, as it did when it read the program break, which the free chunks of the
 // other tests of this program could absorb a leak from.
 fn small_rounds_leave_the_heap_where_it_was() void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer del(text.data);
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
     defer fir_env.close(&e);
@@ -47,15 +49,15 @@ fn small_rounds_leave_the_heap_where_it_was() void {
         "bb3: { return; }",
         "}",
     };
-    strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
     for (string line : lines) {
         strbuf.append(&text, line);
         strbuf.push(&text, '\n');
     }
-    fir.module mut m = fir.module_new();
-    defer fir.module_free(&m);
-    fir.func* f = parse(&e, &m, strbuf.view(&text));
+    // `m` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.module mut* own m = fir.module_make();
+    defer fir.module_drop_made(move(m));
+    fir.func* f = parse(&e, m, strbuf.view(&text));
     fir_verify.runtime rt = fir_verify.runtime{};
     u64[3] mut live_at = {};
     u64 mut round = 0;
@@ -116,15 +118,15 @@ fn chain(strbuf.str_buf mut* b) void {
 // 10 KB and the live view of support/heap.ft moves for a leak of one of them. At d2f5b2b6 the
 // smallest move that a deletion of a release made red was 9408 bytes, under glibc 2.39 and 2.43.
 fn chain_rounds_leave_the_heap_where_it_was() void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer del(text.data);
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
     defer fir_env.close(&e);
-    strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
     chain(&text);
-    fir.module mut m = fir.module_new();
-    defer fir.module_free(&m);
-    fir.func* f = parse(&e, &m, strbuf.view(&text));
+    fir.module mut* own m = fir.module_make();
+    defer fir.module_drop_made(move(m));
+    fir.func* f = parse(&e, m, strbuf.view(&text));
     assert(fir.block_count(f) == BLOCKS);
     fir_verify.runtime rt = fir_verify.runtime{};
     u64[3] mut live_at = {};

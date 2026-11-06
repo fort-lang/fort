@@ -11,24 +11,27 @@ import fort.prim;
 import fort.types;
 
 fn main() i32 {
-    types.table mut tt = types.table{};
-    defer types.type_table_free(&tt);
-    types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    // `tt` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
+    types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
     types.node*[2] params = {i32t, i32t};
-    types.node* fnty = types.type_fn(&tt, i32t, params[..], false);
-    fir.func mut f = fir.func_new(&tt, null, fnty);
-    defer fir.func_free(&f);
+    types.node* fnty = types.type_fn(tt, i32t, params[..], false);
+    fir.func mut* own f = fir.func_make();
+    *f = fir.func_new(tt, null, fnty);
+    defer fir.func_drop_made(move(f));
     diag.loc here = diag.loc_make("t.ft", 1, 1);
     // a struct of one i32 field, laid out as the checker lays it out
-    types.node* one = types.type_struct(&tt, "one", 1);
+    types.node* one = types.type_struct(tt, "one", 1);
     types.node*[1] fields = {i32t};
     u64[1] mut offsets = {};
     assert(types.type_layout_begin(one));
     assert(types.type_layout_struct(one, fields[..], offsets[..]));
-    u32 n = fir.local_add(&f, one, fir.local_kind.lk_temp, null, here);
-    assert(fir.place_type(&f, fir.place_field(&f, fir.place_local(n), 0)) == i32t);
-    fir.place p = fir.place_field(&f, fir.place_local(n), 1);
+    u32 n = fir.local_add(f, one, fir.local_kind.lk_temp, null, here);
+    assert(fir.place_type(f, fir.place_field(f, fir.place_local(n), 0)) == i32t);
+    fir.place p = fir.place_field(f, fir.place_local(n), 1);
     println("ready");
-    fir.place_type(&f, p);
+    fir.place_type(f, p);
     return 0;
 }

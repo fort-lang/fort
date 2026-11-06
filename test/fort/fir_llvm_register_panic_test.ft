@@ -32,9 +32,12 @@ fn main() i32 {
     llvm_env.open(&e);
     defer llvm_env.close(&e);
     string[1] prelude = {"i32 UNUSED = 0;"};
-    fir.module mut m = llvm_env.parse(&e, prelude[..], TEXT[..]);
-    defer fir.module_free(&m);
-    fir.func* f = fir.module_function_at(&m, 0);
+    // `m` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.module mut* own m = fir.module_make();
+    *m = llvm_env.parse(&e, prelude[..], TEXT[..]);
+    defer fir.module_drop_made(move(m));
+    fir.func* f = fir.module_function_at(m, 0);
     assert(llvm_env.storage_of(f, 1) == fir_llvm.storage.sk_register);
     // in order, the store of `_0` names the constant that `_1` holds
     string[1] want = {"  store i32 7, ptr %result, align 4"};

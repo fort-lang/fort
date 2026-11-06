@@ -10,17 +10,20 @@ import fort.prim;
 import fort.types;
 
 fn main() i32 {
-    types.table mut tt = types.table{};
-    defer types.type_table_free(&tt);
-    types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    // `tt` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
+    types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
     types.node*[2] params = {i32t, i32t};
-    types.node* fnty = types.type_fn(&tt, i32t, params[..], false);
-    fir.func mut f = fir.func_new(&tt, null, fnty);
-    defer fir.func_free(&f);
-    fir.module mut m = fir.module_new();
-    defer fir.module_free(&m);
-    fir.module_add_function(&m, move(f));
+    types.node* fnty = types.type_fn(tt, i32t, params[..], false);
+    fir.func mut* own f = fir.func_make();
+    *f = fir.func_new(tt, null, fnty);
+    defer fir.func_drop_made(move(f));
+    fir.module mut* own m = fir.module_make();
+    defer fir.module_drop_made(move(m));
+    fir.module_add_function(m, move(*f));
     println("ready");
-    fir.module_function_at(&m, 1);
+    fir.module_function_at(m, 1);
     return 0;
 }

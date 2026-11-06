@@ -223,7 +223,7 @@ fn open_with(env mut* e, string bounds, string other, bool as_global) void {
 fn open_runtime(env mut* e, string bounds, string message, string other, bool as_global) void {
     check_env.open(&e->c);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     runtime_text(&b, bounds, message, other, as_global);
     check_env.add(&e->c, "std/rt.ft", strbuf.view(&b));
     modules_env.std_dir_without_runtime(&e->c.m, "std");
@@ -340,9 +340,12 @@ fn parse_text(env mut* e) fir.module {
 
 // Parses the text of the case in e->text and returns the verdict of the verifier on it.
 fn text_verdict(env mut* e, fir_verify.violation mut* v) bool {
-    fir.module mut m = parse_text(e);
-    defer fir.module_free(&m);
-    return fir_verify.find_violation(fir.module_function_at(&m, 0), &e->rt, v);
+    // `m` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.module mut* own m = fir.module_make();
+    *m = parse_text(e);
+    defer fir.module_drop_made(move(m));
+    return fir_verify.find_violation(fir.module_function_at(m, 0), &e->rt, v);
 }
 
 // Holds that the verdict on a function is the violation of `rule` with the clause `what` at item
@@ -553,45 +556,48 @@ fn text_of(fir.func* f, fir_verify.violation* v, strbuf.str_buf mut* b) string {
 }
 
 fn the_text_names_the_rule_the_function_the_block_and_the_statement() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    fir.func mut f = func_of(&e, "nothing");
-    defer fir.func_free(&f);
-    fir.block_new(&f);
-    fir.block_set_terminator(&f, 0, fir.term_goto(1, at(1, 1), 3));
-    fir.block_append(&f, 1, fir.stmt_live(0, at(2, 1), 7));
+    fir.func mut* own f = fir.func_make();
+    *f = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(f));
+    fir.block_new(f);
+    fir.block_set_terminator(f, 0, fir.term_goto(1, at(1, 1), 3));
+    fir.block_append(f, 1, fir.stmt_live(0, at(2, 1), 7));
     fir_verify.violation mut v = fir_verify.violation{};
     // bb1 has a statement and no terminator: the position after the statement holds nothing
-    assert(fir_verify.find_violation(&f, &e.rt, &v));
+    assert(fir_verify.find_violation(f, &e.rt, &v));
     assert(v.rule == 1 && v.block == 1 && v.position == 1 && !v.has_stmt);
-    assert(text_of(&f, &v, &b)
+    assert(text_of(f, &v, &b)
            == "fir.verify: V1 the block has no terminator: main.nothing bb1 statement 1");
     // a statement gives its statement index
-    fir.block_set_terminator(&f, 1, fir.term_return(at(3, 1), 9));
-    assert(fir_verify.find_violation(&f, &e.rt, &v));
+    fir.block_set_terminator(f, 1, fir.term_return(at(3, 1), 9));
+    assert(fir_verify.find_violation(f, &e.rt, &v));
     assert(v.rule == 10 && v.block == 1 && v.position == 0 && v.has_stmt && v.stmt == 7);
     string mut want = "fir.verify: V10 live or dead of a local that is not named: ";
-    string mut got = text_of(&f, &v, &b);
+    string mut got = text_of(f, &v, &b);
     assert(got[0..want.len] == want);
     assert(got[want.len..got.len] == "main.nothing bb1 statement 0 (s7)");
     // a terminator gives the statement index of the terminator
-    fir.func mut g = func_of(&e, "nothing");
-    defer fir.func_free(&g);
-    fir.block_set_terminator(&g, 0, fir.term_goto(0, at(1, 1), 4));
-    assert(fir_verify.find_violation(&g, &e.rt, &v));
+    fir.func mut* own g = fir.func_make();
+    *g = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(g));
+    fir.block_set_terminator(g, 0, fir.term_goto(0, at(1, 1), 4));
+    assert(fir_verify.find_violation(g, &e.rt, &v));
     assert(v.rule == 2 && v.position == 0 && v.has_stmt && v.stmt == 4);
-    got = text_of(&g, &v, &b);
+    got = text_of(g, &v, &b);
     want = "fir.verify: V2 a terminator names the entry block: ";
     assert(got[0..want.len] == want);
     assert(got[want.len..got.len] == "main.nothing bb0 statement 0 (s4)");
     // a function with no symbol
-    fir.func mut h = fir.func_new(tt(&e), null, ty(&e, "nothing"));
-    defer fir.func_free(&h);
-    assert(fir_verify.find_violation(&h, &e.rt, &v));
-    assert(text_of(&h, &v, &b)
+    fir.func mut* own h = fir.func_make();
+    *h = fir.func_new(tt(&e), null, ty(&e, "nothing"));
+    defer fir.func_drop_made(move(h));
+    assert(fir_verify.find_violation(h, &e.rt, &v));
+    assert(text_of(h, &v, &b)
            == "fir.verify: V1 the block has no terminator: <no symbol> bb0 statement 0");
 }
 
@@ -602,26 +608,29 @@ fn v1_every_block_has_a_terminator() void {
     open(&e);
     defer close(&e);
     // the text cannot hold a block with no terminator, so the constructors build it
-    fir.func mut f = func_of(&e, "nothing");
-    defer fir.func_free(&f);
-    fir.block_new(&f);
-    fir.block_new(&f);
-    fir.block_set_terminator(&f, 0, fir.term_goto(1, at(1, 1), 1));
-    fir.block_set_terminator(&f, 1, fir.term_goto(2, at(1, 1), 1));
+    fir.func mut* own f = fir.func_make();
+    *f = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(f));
+    fir.block_new(f);
+    fir.block_new(f);
+    fir.block_set_terminator(f, 0, fir.term_goto(1, at(1, 1), 1));
+    fir.block_set_terminator(f, 1, fir.term_goto(2, at(1, 1), 1));
     // the last block has none
-    red_func(&e, &f, 1, fir_verify.V1_NO_TERMINATOR, 2, 0);
-    fir.block_set_terminator(&f, 2, fir.term_return(at(1, 1), 1));
-    green_func(&e, &f);
+    red_func(&e, f, 1, fir_verify.V1_NO_TERMINATOR, 2, 0);
+    fir.block_set_terminator(f, 2, fir.term_return(at(1, 1), 1));
+    green_func(&e, f);
     // V1 comes before V2, though bb0 breaks V2 and only bb1 breaks V1
-    fir.func mut g = func_of(&e, "nothing");
-    defer fir.func_free(&g);
-    fir.block_new(&g);
-    fir.block_set_terminator(&g, 0, fir.term_goto(0, at(1, 1), 1));
-    red_func(&e, &g, 1, fir_verify.V1_NO_TERMINATOR, 1, 0);
+    fir.func mut* own g = fir.func_make();
+    *g = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(g));
+    fir.block_new(g);
+    fir.block_set_terminator(g, 0, fir.term_goto(0, at(1, 1), 1));
+    red_func(&e, g, 1, fir_verify.V1_NO_TERMINATOR, 1, 0);
     // the first block may be the one with no terminator
-    fir.func mut h = func_of(&e, "nothing");
-    defer fir.func_free(&h);
-    red_func(&e, &h, 1, fir_verify.V1_NO_TERMINATOR, 0, 0);
+    fir.func mut* own h = fir.func_make();
+    *h = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(h));
+    red_func(&e, h, 1, fir_verify.V1_NO_TERMINATOR, 0, 0);
 }
 
 fn v2_names_no_block_past_the_last() void {
@@ -629,42 +638,47 @@ fn v2_names_no_block_past_the_last() void {
     open(&e);
     defer close(&e);
     // the parser refuses an unknown block, so the constructors build these
-    fir.func mut f = func_of(&e, "nothing");
-    defer fir.func_free(&f);
-    fir.block_new(&f);
-    fir.block_set_terminator(&f, 1, fir.term_return(at(1, 1), 1));
-    fir.block_set_terminator(&f, 0, fir.term_goto(2, at(1, 1), 1));
-    red_func(&e, &f, 2, fir_verify.V2_NO_BLOCK, 0, 0);
+    fir.func mut* own f = fir.func_make();
+    *f = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(f));
+    fir.block_new(f);
+    fir.block_set_terminator(f, 1, fir.term_return(at(1, 1), 1));
+    fir.block_set_terminator(f, 0, fir.term_goto(2, at(1, 1), 1));
+    red_func(&e, f, 2, fir_verify.V2_NO_BLOCK, 0, 0);
     // the last block is a block of the function
-    fir.func mut g = func_of(&e, "nothing");
-    defer fir.func_free(&g);
-    fir.block_new(&g);
-    fir.block_set_terminator(&g, 1, fir.term_return(at(1, 1), 1));
-    fir.block_set_terminator(&g, 0, fir.term_goto(1, at(1, 1), 1));
-    green_func(&e, &g);
+    fir.func mut* own g = fir.func_make();
+    *g = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(g));
+    fir.block_new(g);
+    fir.block_set_terminator(g, 1, fir.term_return(at(1, 1), 1));
+    fir.block_set_terminator(g, 0, fir.term_goto(1, at(1, 1), 1));
+    green_func(&e, g);
     // an arm and the otherwise block of a switch, and the continuation of a check
-    fir.func mut s = func_of(&e, "nothing");
-    defer fir.func_free(&s);
-    fir.block_new(&s);
-    fir.block_set_terminator(&s, 1, fir.term_return(at(1, 1), 1));
-    u32 first = fir.arm_push(&s, consts.cv_from_bool(true), 1);
-    fir.arm_push(&s, consts.cv_from_bool(false), 2);
+    fir.func mut* own s = fir.func_make();
+    *s = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(s));
+    fir.block_new(s);
+    fir.block_set_terminator(s, 1, fir.term_return(at(1, 1), 1));
+    u32 first = fir.arm_push(s, consts.cv_from_bool(true), 1);
+    fir.arm_push(s, consts.cv_from_bool(false), 2);
     fir.operand cond = fir.operand_const(fir.const_bool(true));
-    fir.block_set_terminator(&s, 0, fir.term_switch(cond, first, 2, 1, at(1, 1), 1));
-    red_func(&e, &s, 2, fir_verify.V2_NO_BLOCK, 0, 0);
-    fir.func mut o = func_of(&e, "nothing");
-    defer fir.func_free(&o);
-    fir.block_new(&o);
-    fir.block_set_terminator(&o, 1, fir.term_return(at(1, 1), 1));
-    fir.block_set_terminator(&o, 0, fir.term_switch(cond, 0, 0, 7, at(1, 1), 1));
-    red_func(&e, &o, 2, fir_verify.V2_NO_BLOCK, 0, 0);
-    fir.func mut c = func_of(&e, "nothing");
-    defer fir.func_free(&c);
-    fir.block_new(&c);
-    fir.block_set_terminator(&c, 0, fir.term_goto(1, at(1, 1), 1));
-    fir.block_set_terminator(&c, 1, fir.term_check(cond, fir.check_kind.chk_overflow, 0, 0, 2,
+    fir.block_set_terminator(s, 0, fir.term_switch(cond, first, 2, 1, at(1, 1), 1));
+    red_func(&e, s, 2, fir_verify.V2_NO_BLOCK, 0, 0);
+    fir.func mut* own o = fir.func_make();
+    *o = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(o));
+    fir.block_new(o);
+    fir.block_set_terminator(o, 1, fir.term_return(at(1, 1), 1));
+    fir.block_set_terminator(o, 0, fir.term_switch(cond, 0, 0, 7, at(1, 1), 1));
+    red_func(&e, o, 2, fir_verify.V2_NO_BLOCK, 0, 0);
+    fir.func mut* own c = fir.func_make();
+    *c = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(c));
+    fir.block_new(c);
+    fir.block_set_terminator(c, 0, fir.term_goto(1, at(1, 1), 1));
+    fir.block_set_terminator(c, 1, fir.term_check(cond, fir.check_kind.chk_overflow, 0, 0, 2,
                                                    at(1, 1), 1));
-    red_func(&e, &c, 2, fir_verify.V2_NO_BLOCK, 1, 0);
+    red_func(&e, c, 2, fir_verify.V2_NO_BLOCK, 1, 0);
 }
 
 fn v2_names_no_entry_block() void {
@@ -696,6 +710,8 @@ fn v2_names_no_entry_block() void {
 // ---- V3 --------------------------------------------------------------------------------------
 
 fn v3_each_projection_applies_to_the_type_before_it() void {
+    strbuf.str_buf mut lets = strbuf.create();
+    defer del(lets.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
@@ -743,8 +759,6 @@ fn v3_each_projection_applies_to_the_type_before_it() void {
     // the edges: every projection on the type it applies to
     string edges = "let _1: pair*; let _2: string own; let _3: u64; let _4: i32@; let _5: i32[4];";
     string more = "let _6: holder; let _7: i32; let _8: char*; let _9: char; let _10: u8;";
-    strbuf.str_buf mut lets = strbuf.create();
-    defer strbuf.free(&lets);
     strbuf.append(&lets, edges);
     strbuf.append(&lets, more);
     strbuf.append(&lets, " bb0: { _7 = copy (*_1).0; _8 = copy _2.0; _3 = copy _2.1;");
@@ -791,35 +805,38 @@ fn v3_names_a_local_of_the_function() void {
     open(&e);
     defer close(&e);
     // the parser refuses an unknown local, so the constructors build these
-    fir.func mut f = func_of(&e, "nothing");
-    defer fir.func_free(&f);
-    u32 one = fir.local_add(&f, prim_ty(&e, prim.prim_kind.prim_i32), fir.local_kind.lk_temp,
+    fir.func mut* own f = fir.func_make();
+    *f = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(f));
+    u32 one = fir.local_add(f, prim_ty(&e, prim.prim_kind.prim_i32), fir.local_kind.lk_temp,
                             null, at(1, 1));
-    fir.rvalue r = fir.rvalue_use(&f, fir.operand_copy(fir.place_local(2)));
-    fir.block_append(&f, 0, fir.stmt_assign(fir.place_local(one), r, at(1, 1), 1));
-    fir.block_set_terminator(&f, 0, fir.term_return(at(1, 1), 1));
-    red_func(&e, &f, 3, fir_verify.V3_NO_LOCAL, 0, 0);
+    fir.rvalue r = fir.rvalue_use(f, fir.operand_copy(fir.place_local(2)));
+    fir.block_append(f, 0, fir.stmt_assign(fir.place_local(one), r, at(1, 1), 1));
+    fir.block_set_terminator(f, 0, fir.term_return(at(1, 1), 1));
+    red_func(&e, f, 3, fir_verify.V3_NO_LOCAL, 0, 0);
     // the last local is a local of the function
-    fir.func mut g = func_of(&e, "nothing");
-    defer fir.func_free(&g);
-    u32 two = fir.local_add(&g, prim_ty(&e, prim.prim_kind.prim_i32), fir.local_kind.lk_temp,
+    fir.func mut* own g = fir.func_make();
+    *g = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(g));
+    u32 two = fir.local_add(g, prim_ty(&e, prim.prim_kind.prim_i32), fir.local_kind.lk_temp,
                             null, at(1, 1));
-    fir.rvalue s = fir.rvalue_use(&g, fir.operand_copy(fir.place_local(two)));
-    fir.block_append(&g, 0, fir.stmt_assign(fir.place_local(two), s, at(1, 1), 1));
-    fir.block_set_terminator(&g, 0, fir.term_return(at(1, 1), 1));
-    green_func(&e, &g);
+    fir.rvalue s = fir.rvalue_use(g, fir.operand_copy(fir.place_local(two)));
+    fir.block_append(g, 0, fir.stmt_assign(fir.place_local(two), s, at(1, 1), 1));
+    fir.block_set_terminator(g, 0, fir.term_return(at(1, 1), 1));
+    green_func(&e, g);
     // an index local past the last local
-    fir.func mut h = func_of(&e, "nothing");
-    defer fir.func_free(&h);
+    fir.func mut* own h = fir.func_make();
+    *h = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(h));
     types.node* cells = types.type_array(tt(&e), prim_ty(&e, prim.prim_kind.prim_i32), 4);
-    u32 arr = fir.local_add(&h, cells, fir.local_kind.lk_temp, null, at(1, 1));
-    u32 dst = fir.local_add(&h, prim_ty(&e, prim.prim_kind.prim_i32), fir.local_kind.lk_temp,
+    u32 arr = fir.local_add(h, cells, fir.local_kind.lk_temp, null, at(1, 1));
+    u32 dst = fir.local_add(h, prim_ty(&e, prim.prim_kind.prim_i32), fir.local_kind.lk_temp,
                             null, at(1, 1));
-    fir.place elem = fir.place_index(&h, fir.place_local(arr), 3);
-    fir.rvalue t = fir.rvalue_use(&h, fir.operand_copy(elem));
-    fir.block_append(&h, 0, fir.stmt_assign(fir.place_local(dst), t, at(1, 1), 1));
-    fir.block_set_terminator(&h, 0, fir.term_return(at(1, 1), 1));
-    red_func(&e, &h, 3, fir_verify.V3_INDEX_LOCAL, 0, 0);
+    fir.place elem = fir.place_index(h, fir.place_local(arr), 3);
+    fir.rvalue t = fir.rvalue_use(h, fir.operand_copy(elem));
+    fir.block_append(h, 0, fir.stmt_assign(fir.place_local(dst), t, at(1, 1), 1));
+    fir.block_set_terminator(h, 0, fir.term_return(at(1, 1), 1));
+    red_func(&e, h, 3, fir_verify.V3_INDEX_LOCAL, 0, 0);
 }
 
 fn v3_no_statement_writes_a_global_constant() void {
@@ -943,13 +960,13 @@ fn v4_bitwise_shift_and_float_forms() void {
 }
 
 fn v4_comparisons_take_scalars_and_order_numbers() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
     string cmp = "let _1: bool; let _2: pair; let _3: string; let _4: i32@; let _5: u8*;";
     string more = "let _6: color; let _7: char; let _8: fn (i32, i64) u64; let _9: void*;";
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, cmp);
     strbuf.append(&b, more);
     string lets = strbuf.view(&b);
@@ -979,13 +996,13 @@ fn v4_comparisons_take_scalars_and_order_numbers() void {
 }
 
 fn v4_casts_follow_d3_14() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
     string casts = "let _1: i32; let _2: pair; let _3: bool; let _4: u8*; let _5: u8 mut*;";
     string views = "let _6: string; let _7: u8@; let _8: color; let _9: i64; let _10: char;";
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, casts);
     strbuf.append(&b, views);
     string lets = strbuf.view(&b);
@@ -1003,14 +1020,14 @@ fn v4_casts_follow_d3_14() void {
 }
 
 fn v4_slices_and_allocations() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
     string arrs = "let _1: i32*; let _2: i32@; let _3: i32 mut@; let _4: string; let _5: i32[4];";
     string nums = "let _6: u64; let _7: i64; let _8: i32; let _9: bool; let _10: void*;";
     string more = "let _11: u8; let _12: u8 mut* own; let _13: i32 mut*;";
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, arrs);
     strbuf.append(&b, nums);
     strbuf.append(&b, more);
@@ -1054,13 +1071,13 @@ fn v4_slices_and_allocations() void {
 }
 
 fn v4_aggregates_fill_every_field_or_element() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
     string aggs = "let _1: i32; let _2: pair; let _3: i32[4]; let _4: string; let _5: u8*;";
     string more = "let _6: i32@; let _7: i32*; let _8: u8 mut@ own; let _9: u8 mut* own;";
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, aggs);
     strbuf.append(&b, more);
     string lets = strbuf.view(&b);
@@ -1091,6 +1108,8 @@ fn v4_aggregates_fill_every_field_or_element() void {
 }
 
 fn v4_calls_switches_and_checks() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
@@ -1103,8 +1122,6 @@ fn v4_calls_switches_and_checks() void {
           "_2 = call copy _1(const i32 1, const i64 2); return; }");
     string sw = "let _1: i32; let _2: bool; let _3: u8; let _4: i8; let _5: char; let _6: color;";
     string more = "let _7: f64; let _8: u8*; let _9: pair; let _10: u64; bb0: { switch(copy";
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, sw);
     strbuf.append(&b, more);
     string lets = strbuf.view(&b);
@@ -1167,39 +1184,41 @@ fn v4_an_rvalue_has_the_count_of_its_form() void {
     env mut e = env{};
     open(&e);
     defer close(&e);
-    fir.func mut f = func_of(&e, "nothing");
-    defer fir.func_free(&f);
+    fir.func mut* own f = fir.func_make();
+    *f = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(f));
     types.node* i32t = prim_ty(&e, prim.prim_kind.prim_i32);
-    u32 one = fir.local_add(&f, i32t, fir.local_kind.lk_temp, null, at(1, 1));
-    u32 first = fir.operand_push(&f, fir.operand_copy(fir.place_local(one)));
+    u32 one = fir.local_add(f, i32t, fir.local_kind.lk_temp, null, at(1, 1));
+    u32 first = fir.operand_push(f, fir.operand_copy(fir.place_local(one)));
     fir.rvalue add = fir.rvalue{.kind = fir.rvalue_kind.rv_add, .ops_first = first, .ops_len = 1};
-    fir.block_append(&f, 0, fir.stmt_assign(fir.place_local(one), add, at(1, 1), 1));
-    fir.block_set_terminator(&f, 0, fir.term_return(at(1, 1), 1));
-    red_func(&e, &f, 4, fir_verify.V4_ARITY, 0, 0);
-    fir.func mut g = func_of(&e, "nothing");
-    defer fir.func_free(&g);
+    fir.block_append(f, 0, fir.stmt_assign(fir.place_local(one), add, at(1, 1), 1));
+    fir.block_set_terminator(f, 0, fir.term_return(at(1, 1), 1));
+    red_func(&e, f, 4, fir_verify.V4_ARITY, 0, 0);
+    fir.func mut* own g = fir.func_make();
+    *g = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(g));
     types.node* ptr = types.type_ptr(tt(&e), i32t, false, false);
-    u32 two = fir.local_add(&g, ptr, fir.local_kind.lk_temp, null, at(1, 1));
-    u32 next = fir.operand_push(&g, fir.operand_copy(fir.place_local(two)));
+    u32 two = fir.local_add(g, ptr, fir.local_kind.lk_temp, null, at(1, 1));
+    u32 next = fir.operand_push(g, fir.operand_copy(fir.place_local(two)));
     fir.rvalue addr = fir.rvalue{
         .kind = fir.rvalue_kind.rv_addr,
         .ops_first = next,
         .ops_len = 1,
         .place = fir.place_local(two),
     };
-    fir.block_append(&g, 0, fir.stmt_assign(fir.place_local(two), addr, at(1, 1), 1));
-    fir.block_set_terminator(&g, 0, fir.term_return(at(1, 1), 1));
-    red_func(&e, &g, 4, fir_verify.V4_ARITY, 0, 0);
+    fir.block_append(g, 0, fir.stmt_assign(fir.place_local(two), addr, at(1, 1), 1));
+    fir.block_set_terminator(g, 0, fir.term_return(at(1, 1), 1));
+    red_func(&e, g, 4, fir_verify.V4_ARITY, 0, 0);
 }
 
 fn v4_a_switch_names_each_value_once() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
     string lets = "let _1: i32; let _2: bool; let _3: u8; let _4: char; let _5: color; bb0: {";
     string ret = " bb1: { return; }";
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     string[7] twice = {
         "switch(copy _1) -> [i32 1: bb1, i32 1: bb1, otherwise: bb1]; }",
         "switch(copy _1) -> [i32 1: bb1, i32 2: bb1, i32 1: bb1, otherwise: bb1]; }",
@@ -1246,14 +1265,15 @@ fn v4_an_overwrite_check_names_its_place() void {
     // a fail of the kind keeps V4, and V7 refuses it: the kind names no runtime entry
     red(&e, lets, "fail(overwrite); }", 7, fir_verify.V7_NO_ENTRY, 0, 0);
     // the constructors give the same record as the text
-    fir.func mut f = func_of(&e, "nothing");
-    defer fir.func_free(&f);
-    fir.block_new(&f);
-    fir.block_set_terminator(&f, 1, fir.term_return(at(1, 1), 1));
+    fir.func mut* own f = fir.func_make();
+    *f = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(f));
+    fir.block_new(f);
+    fir.block_set_terminator(f, 1, fir.term_return(at(1, 1), 1));
     fir.operand cond = fir.operand_const(fir.const_bool(false));
     fir.terminator t = fir.term_check(cond, fir.check_kind.chk_overwrite, 0, 0, 1, at(1, 1), 1);
-    fir.block_set_terminator(&f, 0, t);
-    red_func(&e, &f, 4, fir_verify.V4_CHECK_FORM, 0, 0);
+    fir.block_set_terminator(f, 0, t);
+    red_func(&e, f, 4, fir_verify.V4_CHECK_FORM, 0, 0);
 }
 
 // `void` has no storage and no size: no address of it, and no allocation of it.
@@ -1279,14 +1299,14 @@ fn v4_no_address_and_no_allocation_of_void() void {
 // ---- V5 and V6 -------------------------------------------------------------------------------
 
 fn v5_move_and_del_take_owning_places() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
     string mv = "let _1: i32; let _2: i32; let _3: u8*; let _4: pair; let _5: holder;";
     string more = "let _6: holder; let _7: u8 mut* own; let _8: u8 mut* own; let _9: bool;";
     string rest = "let _10: i64; let _11: u64;";
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, mv);
     strbuf.append(&b, more);
     strbuf.append(&b, rest);
@@ -1320,14 +1340,14 @@ fn v5_move_and_del_take_owning_places() void {
 }
 
 fn v6_an_owning_place_takes_a_move_a_constant_or_an_owning_rvalue() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
     string owning = "let _1: u8 mut* own; let _2: u8 mut* own; let _3: u8 mut*; let _4: holder;";
     string more = "let _5: holder; let _6: i32 mut* own; let _7: i32; let _8: u8 mut@ own;";
     string rest = "let _9: string own; let _10: u64;";
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, owning);
     strbuf.append(&b, more);
     strbuf.append(&b, rest);
@@ -1356,13 +1376,13 @@ fn v6_an_owning_place_takes_a_move_a_constant_or_an_owning_rvalue() void {
 }
 
 fn v6_owning_parameters_and_members_take_a_move_or_a_constant() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
     string owning = "let _1: u8 mut* own; let _2: u8 mut* own; let _3: u8 mut*; let _4: holder;";
     string more = "let _5: holder; let _6: fn (u8 mut* own) void; let _7: u8 mut@ own;";
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, owning);
     strbuf.append(&b, more);
     strbuf.append(&b, "let _8: void;");
@@ -1416,14 +1436,14 @@ fn v6_a_literal_fills_no_owning_position() void {
 
 // An owning value lands only where something owns it (D17.8).
 fn v6_an_owning_value_lands_in_an_owning_position() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
     string owning = "let _1: u8 mut* own; let _2: u8 mut*; let _3: bool; let _4: void;";
     string more = "let _5: u8 mut* own[2]; let _6: u8 mut*[2]; let _7: u8@; let _8: u8 mut@ own;";
     string rest = "let _9: string own; let _10: i32; let _11: char*; let _12: u64; bb0: {";
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, owning);
     strbuf.append(&b, more);
     strbuf.append(&b, rest);
@@ -1462,6 +1482,8 @@ fn v6_an_owning_value_lands_in_an_owning_position() void {
 
 // A cast to an owning type does not take a copy of an owning place, whatever place it fills.
 fn v6_a_cast_never_adds_own() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
@@ -1504,8 +1526,6 @@ fn v6_a_cast_never_adds_own() void {
     // a move carries `own` at each level where its place owns (D17.5)
     string moved = "let _1: u8 mut* own; let _2: u8* own; let _3: void* own; let _4: string own;";
     string spans = "let _5: u8@ own; let _6: u8 mut* own* own; let _7: void* own; bb0: {";
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, moved);
     strbuf.append(&b, spans);
     string both = strbuf.view(&b);
@@ -1544,14 +1564,14 @@ fn v6_a_cast_never_adds_own() void {
 // A copy lends what its place owns and a move carries it, so neither adds `own` at a level behind
 // the outermost, whatever position it fills (D3.14, D17.4).
 fn v6_a_copy_or_a_move_adds_no_own() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
     string views = "let _1: u8 mut**; let _2: u8 mut* own*; let _3: u8 mut** own; let _4: void;";
     string owners = "let _5: u8 mut* own* own; let _6: shelf; let _7: u8 mut* own*[2];";
     string deep = "let _8: u8 mut*[2]*; let _9: u8 mut* own[2]*; let _10: i32; bb0: {";
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, views);
     strbuf.append(&b, owners);
     strbuf.append(&b, deep);
@@ -1590,13 +1610,13 @@ fn v6_a_copy_or_a_move_adds_no_own() void {
 // ---- V7 --------------------------------------------------------------------------------------
 
 fn v7_a_call_matches_its_callee() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
     string call = "let _1: i32; let _2: i64; let _3: u64; let _4: char*; let _5: f64;";
     string more = "let _6: pair; let _7: fn (i32, i64) u64; let _8: void; bb0: {";
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, call);
     strbuf.append(&b, more);
     string lets = strbuf.view(&b);
@@ -1628,13 +1648,13 @@ fn v7_a_call_matches_its_callee() void {
 }
 
 fn v7_a_check_reports_what_its_runtime_entry_takes() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
     string ck = "let _1: bool; let _2: i64; let _3: u64; let _4: char*; let _5: i32;";
     string more = "let _6: string own; let _7: u8 mut* own; let _8: string; bb0: {";
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     strbuf.append(&b, ck);
     strbuf.append(&b, more);
     string lets = strbuf.view(&b);
@@ -1864,11 +1884,12 @@ fn v10_live_and_dead_name_a_named_local() void {
         fir_verify.V10_LOCAL, 0, 1);
     green(&e, "let _1 (x): i32;", "bb0: { live(_1); dead(_1); return; }");
     // the parser refuses an unknown local, so the constructors build this one
-    fir.func mut f = func_of(&e, "nothing");
-    defer fir.func_free(&f);
-    fir.block_append(&f, 0, fir.stmt_live(1, at(1, 1), 1));
-    fir.block_set_terminator(&f, 0, fir.term_return(at(1, 1), 1));
-    red_func(&e, &f, 10, fir_verify.V10_LOCAL, 0, 0);
+    fir.func mut* own f = fir.func_make();
+    *f = func_of(&e, "nothing");
+    defer fir.func_drop_made(move(f));
+    fir.block_append(f, 0, fir.stmt_live(1, at(1, 1), 1));
+    fir.block_set_terminator(f, 0, fir.term_return(at(1, 1), 1));
+    red_func(&e, f, 10, fir_verify.V10_LOCAL, 0, 0);
 }
 
 // ---- V9 --------------------------------------------------------------------------------------
@@ -2570,12 +2591,12 @@ fn flow_rules_follow_nested_loops() void {
 }
 
 fn flow_rules_scale_to_a_long_chain() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
     // bb0 to bb999 each go to the next block, and the last one ends in unreachable
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     u32 mut k = 0;
     while (k < 999) {
         strbuf.append(&b, "bb");
@@ -2595,16 +2616,17 @@ fn flow_rules_scale_to_a_long_chain() void {
 // Parses the function `header` whose lines are `lines` and returns what verify_report returns.
 fn lines_report(env mut* e, string header, string@ lines, strbuf.str_buf mut* out) bool {
     lines_text(e, header, lines);
-    fir.module mut m = parse_text(e);
-    defer fir.module_free(&m);
-    return fir_verify.verify_report(fir.module_function_at(&m, 0), &e->rt, out);
+    fir.module mut* own m = fir.module_make();
+    *m = parse_text(e);
+    defer fir.module_drop_made(move(m));
+    return fir_verify.verify_report(fir.module_function_at(m, 0), &e->rt, out);
 }
 
 // Holds that verify_report refuses the function `header` whose lines are `lines` with the text
 // `head` followed by `tail`.
 fn expect_report(env mut* e, string header, string@ lines, string head, string tail) void {
     strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
+    defer del(out.data);
     bool ok = lines_report(e, header, lines, &out);
     string got = strbuf.view(&out);
     bool same = got.len == head.len + tail.len && got[0..head.len] == head
@@ -2616,11 +2638,11 @@ fn expect_report(env mut* e, string header, string@ lines, string head, string t
 }
 
 fn verify_report_writes_the_first_violation() void {
+    strbuf.str_buf mut out = strbuf.create();
+    defer del(out.data);
     env mut e = env{};
     open(&e);
     defer close(&e);
-    strbuf.str_buf mut out = strbuf.create();
-    defer strbuf.free(&out);
     string[1] fine = {"bb0: { _0 = const i32 0; return; }"};
     assert(lines_report(&e, F, fine[..], &out));
     assert(strbuf.view(&out).len == 0);

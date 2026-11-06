@@ -12,20 +12,24 @@ import fort.prim;
 import fort.types;
 
 fn main() i32 {
-    types.table mut tt = types.table{};
-    defer types.type_table_free(&tt);
-    types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    // `tt` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    types.table mut* own tt = types.table_make();
+    defer types.table_drop_made(move(tt));
+    types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
     types.node*[2] params = {i32t, i32t};
-    types.node* fnty = types.type_fn(&tt, i32t, params[..], false);
-    fir.func mut f = fir.func_new(&tt, null, fnty);
-    defer fir.func_free(&f);
-    fir.func mut g = fir.func_new(&tt, null, fnty);
-    defer fir.func_free(&g);
-    u32 first = fir.arm_push(&g, consts.cv_from_u64(1), 0);
+    types.node* fnty = types.type_fn(tt, i32t, params[..], false);
+    fir.func mut* own f = fir.func_make();
+    *f = fir.func_new(tt, null, fnty);
+    defer fir.func_drop_made(move(f));
+    fir.func mut* own g = fir.func_make();
+    *g = fir.func_new(tt, null, fnty);
+    defer fir.func_drop_made(move(g));
+    u32 first = fir.arm_push(g, consts.cv_from_u64(1), 0);
     fir.operand a = fir.operand_copy(fir.place_local(1));
     fir.terminator t = fir.term_switch(a, first, 1, 0, diag.loc{}, 1);
-    assert(fir.term_arm(&g, &t, 0).target == 0);
+    assert(fir.term_arm(g, &t, 0).target == 0);
     println("ready");
-    fir.term_arm(&f, &t, 0);
+    fir.term_arm(f, &t, 0);
     return 0;
 }

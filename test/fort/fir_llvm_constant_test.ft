@@ -153,8 +153,11 @@ fn the_zero_of_each_scalar_type() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.module mut m = llvm_env.parse(&e, MIX[..], ZEROS[..]);
-    defer fir.module_free(&m);
+    // `m` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.module mut* own m = fir.module_make();
+    *m = llvm_env.parse(&e, MIX[..], ZEROS[..]);
+    defer fir.module_drop_made(move(m));
     string[14] want = {
         "entry:",
         "  %t0 = getelementptr inbounds %struct.main.mix, ptr %ret.sret, i32 0, i32 0",
@@ -171,7 +174,7 @@ fn the_zero_of_each_scalar_type() void {
         "  %t6 = getelementptr inbounds %struct.main.mix, ptr %ret.sret, i32 0, i32 5",
         "  store i16 1, ptr %t6, align 2",
     };
-    llvm_env.expect(&e, llvm_env.translate(&e, fir.module_function_at(&m, 0)), want[..]);
+    llvm_env.expect(&e, llvm_env.translate(&e, fir.module_function_at(m, 0)), want[..]);
 }
 
 // ---- calls --------------------------------------------------------------------------------------
@@ -183,13 +186,14 @@ fn a_call_writes_each_result_form() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.func mut f = llvm_env.lower(&e, SOURCE[..], "sink", pass_env.CHECKED);
-    defer fir.func_free(&f);
-    assert(fir.local_count(&f) == 2);
-    assert(llvm_env.storage_of(&f, 1) == fir_llvm.storage.sk_register);
+    fir.func mut* own f = fir.func_make();
+    *f = llvm_env.lower(&e, SOURCE[..], "sink", pass_env.CHECKED);
+    defer fir.func_drop_made(move(f));
+    assert(fir.local_count(f) == 2);
+    assert(llvm_env.storage_of(f, 1) == fir_llvm.storage.sk_register);
     u64 before = llvm_env.errors(&e);
     string[2] none = {"entry:", "  call void @\"main.nothing\"()"};
-    llvm_env.expect(&e, llvm_env.translate(&e, &f), none[..]);
+    llvm_env.expect(&e, llvm_env.translate(&e, f), none[..]);
     string[7] want = {
         "entry:",
         "  %result = alloca i32, align 4",
@@ -199,9 +203,10 @@ fn a_call_writes_each_result_form() void {
         "  %t1 = load i32, ptr %t0, align 4",
         "  store i32 %t1, ptr %result, align 4",
     };
-    fir.func mut g = llvm_env.lower(&e, SOURCE[..], "fetch", pass_env.CHECKED);
-    defer fir.func_free(&g);
-    llvm_env.expect(&e, llvm_env.translate(&e, &g), want[..]);
+    fir.func mut* own g = fir.func_make();
+    *g = llvm_env.lower(&e, SOURCE[..], "fetch", pass_env.CHECKED);
+    defer fir.func_drop_made(move(g));
+    llvm_env.expect(&e, llvm_env.translate(&e, g), want[..]);
     assert(llvm_env.errors(&e) == before);
     assert(!e.g.failed);
 }
@@ -247,29 +252,38 @@ fn each_storage_has_its_address() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.module mut m = llvm_env.parse(&e, PRELUDE[..], HELPERS[..]);
-    defer fir.module_free(&m);
-    fir.func* f = fir.module_function_at(&m, 0);
+    fir.module mut* own m = fir.module_make();
+    *m = llvm_env.parse(&e, PRELUDE[..], HELPERS[..]);
+    defer fir.module_drop_made(move(m));
+    fir.func* f = fir.module_function_at(m, 0);
     llvm_env.begin(&e.g);
-    fir_llvm.translator mut t = fir_llvm.open(&e.g, f);
-    defer fir_llvm.close(&t);
-    fir_llvm.write_locals(&t);
-    assert(fir_llvm.storage_at(&t, 0) == fir_llvm.storage.sk_result);
-    assert(fir_llvm.address_of(&t, 0) == "%result");
-    assert(fir_llvm.storage_at(&t, 1) == fir_llvm.storage.sk_incoming);
-    assert(fir_llvm.address_of(&t, 1) == "%p.in");
-    assert(fir_llvm.storage_at(&t, 2) == fir_llvm.storage.sk_param);
-    assert(fir_llvm.address_of(&t, 2) == "%x.1");
-    assert(fir_llvm.address_of(&t, 3) == "%q.2");
-    assert(fir_llvm.storage_at(&t, 4) == fir_llvm.storage.sk_named);
-    assert(fir_llvm.address_of(&t, 4) == "%b.3");
-    assert(fir_llvm.address_of(&t, 5) == "%f.4");
-    assert(fir_llvm.storage_at(&t, 6) == fir_llvm.storage.sk_slot);
-    assert(fir_llvm.address_of(&t, 6) == "%tmp0");
-    assert(fir_llvm.storage_at(&t, 7) == fir_llvm.storage.sk_register);
-    assert(fir_llvm.address_of(&t, 7) == "");
-    assert(fir_llvm.storage_at(&t, 8) == fir_llvm.storage.sk_none);
-    assert(fir_llvm.address_of(&t, 8) == "");
+    // `t` ends in a block of its own, so that its `del`s come after the last call of its exit.
+    {
+        fir_llvm.translator mut t = fir_llvm.open(&e.g, f);
+        defer {
+            del(t.locals);
+            del(t.notes);
+            del(t.cont_of);
+            del(t.fail_label);
+        }
+        fir_llvm.write_locals(&t);
+        assert(fir_llvm.storage_at(&t, 0) == fir_llvm.storage.sk_result);
+        assert(fir_llvm.address_of(&t, 0) == "%result");
+        assert(fir_llvm.storage_at(&t, 1) == fir_llvm.storage.sk_incoming);
+        assert(fir_llvm.address_of(&t, 1) == "%p.in");
+        assert(fir_llvm.storage_at(&t, 2) == fir_llvm.storage.sk_param);
+        assert(fir_llvm.address_of(&t, 2) == "%x.1");
+        assert(fir_llvm.address_of(&t, 3) == "%q.2");
+        assert(fir_llvm.storage_at(&t, 4) == fir_llvm.storage.sk_named);
+        assert(fir_llvm.address_of(&t, 4) == "%b.3");
+        assert(fir_llvm.address_of(&t, 5) == "%f.4");
+        assert(fir_llvm.storage_at(&t, 6) == fir_llvm.storage.sk_slot);
+        assert(fir_llvm.address_of(&t, 6) == "%tmp0");
+        assert(fir_llvm.storage_at(&t, 7) == fir_llvm.storage.sk_register);
+        assert(fir_llvm.address_of(&t, 7) == "");
+        assert(fir_llvm.storage_at(&t, 8) == fir_llvm.storage.sk_none);
+        assert(fir_llvm.address_of(&t, 8) == "");
+    }
     string[6] allocas = {
         "  %result = alloca i32, align 4",
         "  %x.1 = alloca i32, align 4",
@@ -294,45 +308,53 @@ fn the_place_helpers() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.module mut m = llvm_env.parse(&e, PRELUDE[..], HELPERS[..]);
-    defer fir.module_free(&m);
-    fir.func mut* f = &m.funcs.items[0];
+    fir.module mut* own m = fir.module_make();
+    *m = llvm_env.parse(&e, PRELUDE[..], HELPERS[..]);
+    defer fir.module_drop_made(move(m));
+    fir.func mut* f = &m->funcs.items[0];
     llvm_env.begin(&e.g);
-    fir_llvm.translator mut t = fir_llvm.open(&e.g, f);
-    defer fir_llvm.close(&t);
-    fir_llvm.write_locals(&t);
-    strbuf.clear(&e.g.body);
-    fir_llvm.place_copy(&t, fir.place_local(6), fir.place_local(1));
-    fir_llvm.place_copy(&t, fir.place_local(2), fir.place_local(2));
-    fir_llvm.place_zero(&t, fir.place_local(4));
-    fir_llvm.place_zero(&t, fir.place_local(5));
-    fir_llvm.place_zero(&t, fir.place_local(3));
-    fir_llvm.place_zero(&t, fir.place_local(6));
-    gen.gen_val len = fir_llvm.place_load(&t, fir.place_field(f, fir.place_local(1), 1));
-    assert(len.ty == "i64" && len.val == "%t3");
-    fir.place a = fir.place_field(f, fir.place_local(6), 0);
-    fir_llvm.place_store(&t, a, gen.gen_const_unsigned(&e.g, "i32", 5));
-    string[13] want = {
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %p.in, \\",
-        "i64 16, i1 false)",
-        "  %t0 = load i32, ptr %x.1, align 4",
-        "  store i32 %t0, ptr %x.1, align 4",
-        "  %t1 = zext i1 false to i8",
-        "  store i8 %t1, ptr %b.3, align 1",
-        "  store float 0.0, ptr %f.4, align 4",
-        "  store ptr null, ptr %q.2, align 8",
-        "  call void @llvm.memset.p0.i64(ptr align 8 %tmp0, i8 0, i64 16, i1 false)",
-        "  %t2 = getelementptr inbounds %struct.main.pair, ptr %p.in, i32 0, i32 1",
-        "  %t3 = load i64, ptr %t2, align 8",
-        "  %t4 = getelementptr inbounds %struct.main.pair, ptr %tmp0, i32 0, i32 0",
-        "  store i32 5, ptr %t4, align 4",
-    };
-    llvm_env.expect(&e, strbuf.view(&e.g.body), want[..]);
-    // a register takes a stored value as its own and prints nothing
-    fir_llvm.place_store(&t, fir.place_local(7), gen.gen_const_unsigned(&e.g, "i32", 9));
-    gen.gen_val nine = fir_llvm.place_load(&t, fir.place_local(7));
-    assert(nine.ty == "i32" && nine.val == "9");
-    llvm_env.expect(&e, strbuf.view(&e.g.body), want[..]);
+    {
+        fir_llvm.translator mut t = fir_llvm.open(&e.g, f);
+        defer {
+            del(t.locals);
+            del(t.notes);
+            del(t.cont_of);
+            del(t.fail_label);
+        }
+        fir_llvm.write_locals(&t);
+        strbuf.clear(&e.g.body);
+        fir_llvm.place_copy(&t, fir.place_local(6), fir.place_local(1));
+        fir_llvm.place_copy(&t, fir.place_local(2), fir.place_local(2));
+        fir_llvm.place_zero(&t, fir.place_local(4));
+        fir_llvm.place_zero(&t, fir.place_local(5));
+        fir_llvm.place_zero(&t, fir.place_local(3));
+        fir_llvm.place_zero(&t, fir.place_local(6));
+        gen.gen_val len = fir_llvm.place_load(&t, fir.place_field(f, fir.place_local(1), 1));
+        assert(len.ty == "i64" && len.val == "%t3");
+        fir.place a = fir.place_field(f, fir.place_local(6), 0);
+        fir_llvm.place_store(&t, a, gen.gen_const_unsigned(&e.g, "i32", 5));
+        string[13] want = {
+            "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %p.in, \\",
+            "i64 16, i1 false)",
+            "  %t0 = load i32, ptr %x.1, align 4",
+            "  store i32 %t0, ptr %x.1, align 4",
+            "  %t1 = zext i1 false to i8",
+            "  store i8 %t1, ptr %b.3, align 1",
+            "  store float 0.0, ptr %f.4, align 4",
+            "  store ptr null, ptr %q.2, align 8",
+            "  call void @llvm.memset.p0.i64(ptr align 8 %tmp0, i8 0, i64 16, i1 false)",
+            "  %t2 = getelementptr inbounds %struct.main.pair, ptr %p.in, i32 0, i32 1",
+            "  %t3 = load i64, ptr %t2, align 8",
+            "  %t4 = getelementptr inbounds %struct.main.pair, ptr %tmp0, i32 0, i32 0",
+            "  store i32 5, ptr %t4, align 4",
+        };
+        llvm_env.expect(&e, strbuf.view(&e.g.body), want[..]);
+        // a register takes a stored value as its own and prints nothing
+        fir_llvm.place_store(&t, fir.place_local(7), gen.gen_const_unsigned(&e.g, "i32", 9));
+        gen.gen_val nine = fir_llvm.place_load(&t, fir.place_local(7));
+        assert(nine.ty == "i32" && nine.val == "9");
+        llvm_env.expect(&e, strbuf.view(&e.g.body), want[..]);
+    }
 }
 
 // The text of string constant `k` of `g`. The read through `g` stands in a function that takes it
@@ -347,9 +369,10 @@ fn one_statement_alone() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.module mut m = llvm_env.parse(&e, PRELUDE[..], HELPERS[..]);
-    defer fir.module_free(&m);
-    fir.func* f = fir.module_function_at(&m, 0);
+    fir.module mut* own m = fir.module_make();
+    *m = llvm_env.parse(&e, PRELUDE[..], HELPERS[..]);
+    defer fir.module_drop_made(move(m));
+    fir.func* f = fir.module_function_at(m, 0);
     string[1] zero = {
         "  call void @llvm.memset.p0.i64(ptr align 8 %tmp0, i8 0, i64 16, i1 false)",
     };
@@ -358,7 +381,7 @@ fn one_statement_alone() void {
     string got = llvm_env.statement_text(&e, f, 0, 1);
     assert(got == "");
     string[1] text = {"  store ptr @.str.0, ptr %result, align 8"};
-    fir.func* g = fir.module_function_at(&m, 1);
+    fir.func* g = fir.module_function_at(m, 1);
     llvm_env.expect(&e, llvm_env.statement_text(&e, g, 0, 0), text[..]);
     assert(e.g.strs.len == 1 && string_at(&e.g, 0) == "hi");
 }
