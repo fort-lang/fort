@@ -5,12 +5,13 @@
 //| ok
 /// Checks FIR terminators: the constructors, the blocks each kind names, the kinds that abort,
 /// the checks each build mode removes, and the runtime entry and reported operands of each check
-/// kind against the declarations in std/rt.ft.
+/// kind against the rows of runtime_sig that the emitter calls the entries of std/rt.ft through.
 import fort.consts;
 import fort.fir;
+import fort.fir_llvm;
 import fir_env;
 import fort.prim;
-import std.rt;
+import fort.runtime_sig;
 import std.strbuf;
 import fort.types;
 
@@ -155,6 +156,12 @@ fn fail_trap_and_unreachable_abort() void {
 // The count of check kinds: chk_panic is the last member.
 u32 CHECK_KINDS = 11;
 
+// The most parameters of a runtime entry of a check: `fail_span(i64, i64, u64, char*, u32, u32)`.
+u64 CHECK_PARAMS_MAX = 6;
+
+// The start of the mangled name of each entry of std.rt (D9.7).
+string RT_PREFIX = "std.rt.";
+
 // Every mode removes the overwrite check, which the emptiness pass proved, --release removes the
 // overflow and the shift checks, and --no-bounds-check the bounds and the span checks (spec/fir.md
 // 8, 11).
@@ -192,11 +199,13 @@ fn the_build_modes_remove_their_checks() void {
 
 // ---- runtime entries --------------------------------------------------------------------
 //
-// A test/fort program runs in a temporary directory that holds only the program, so it cannot
-// open std/rt.ft. The compiler reads std/rt.ft when it compiles this test instead: each row binds
-// the entry `rt.<name>` to a local whose declared type spells the whole signature, and a
-// declaration that differs is a compile error. The row then holds check_entry against the name
-// and the signature that check_reported gives against the same spelling.
+// Each row holds the name of the runtime entry that a check of its kind calls and the signature
+// that check_reported gives, against one spelling. It then builds that signature as a type and
+// holds the row of runtime_sig that the emitter writes the call from (fir_llvm.entry_of) against
+// the row that runtime_sig.rt_signature_of_type makes of the type. This module is not trusted, so
+// it names no entry of std.rt: each of them takes a `char*`, so each is a boundary function
+// (D9.8). The run tests of test/lang/run/stdlib from 075 to 085 call each entry with arguments of
+// the types that a row spells, so a declaration of std/rt.ft that differs does not compile there.
 
 // The signature of a check of `kind` as the translator calls it: the reported operands, then
 // `char*`, `u32` and `u32`.
@@ -218,8 +227,24 @@ fn signature(fir_env.env mut* e, fir.check_kind kind) string {
     return strbuf.view(&e->buf);
 }
 
-fn row(fir_env.env mut* e, fir.check_kind kind, string name, string sig, bool bound) void {
-    assert(bound);
+// The type of the signature that `signature` spells.
+fn signature_type(fir_env.env mut* e, fir.check_kind kind) types.node* {
+    types.table mut* tt = fir_env.tt(e);
+    types.node*[CHECK_PARAMS_MAX] mut params = {};
+    u32 n = fir.check_reported_count(kind);
+    u64 mut k = 0;
+    while (k < cast(n, u64)) {
+        params[k] = fir.check_reported(kind, cast(k, u32), tt);
+        k += 1;
+    }
+    types.node* u32t = types.type_prim(tt, prim.prim_kind.prim_u32);
+    params[k] = fir_env.char_ptr(e);
+    params[k + 1] = u32t;
+    params[k + 2] = u32t;
+    return types.type_fn(tt, types.type_void(tt), params[0..k + 3], true);
+}
+
+fn row(fir_env.env mut* e, fir.check_kind kind, string name, string sig) void {
     if (fir.check_entry(kind) != name) {
         eprintln("fir_terminator_test: expected <", name, ">, got <", fir.check_entry(kind), ">");
         panic("fir_terminator_test: an entry name differs");
@@ -229,56 +254,46 @@ fn row(fir_env.env mut* e, fir.check_kind kind, string name, string sig, bool bo
         eprintln("fir_terminator_test: expected <", sig, ">, got <", got, ">");
         panic("fir_terminator_test: a reported operand differs");
     }
+    runtime_sig.rt_entry entry = fir_llvm.entry_of(kind);
+    string mangled = runtime_sig.rt_entry_name(entry);
+    assert(mangled.len == RT_PREFIX.len + name.len);
+    assert(mangled[..RT_PREFIX.len] == RT_PREFIX && mangled[RT_PREFIX.len..] == name);
+    runtime_sig.rt_sig made = runtime_sig.rt_signature_of_type(mangled, signature_type(e, kind));
+    runtime_sig.rt_sig used = runtime_sig.rt_sig_of(entry);
+    assert(made.result == used.result && made.is_noreturn == used.is_noreturn);
+    assert(made.p0 == used.p0 && made.p1 == used.p1 && made.p2 == used.p2);
+    assert(made.p3 == used.p3 && made.p4 == used.p4 && made.p5 == used.p5);
 }
 
 fn every_check_kind_calls_its_runtime_entry() void {
     fir_env.env mut* own e = fir_env.make();
     defer fir_env.drop_made(move(e));
     u32 mut rows = 0;
-    fn (char*, u32, u32) noreturn overflow = rt.fail_overflow;
-    row(e, fir.check_kind.chk_overflow, "fail_overflow", "fn (char*, u32, u32) noreturn",
-        overflow != null);
+    row(e, fir.check_kind.chk_overflow, "fail_overflow", "fn (char*, u32, u32) noreturn");
     rows += 1;
-    fn (i64, char*, char*, u32, u32) noreturn shift = rt.fail_shift;
-    row(e, fir.check_kind.chk_shift, "fail_shift",
-        "fn (i64, char*, char*, u32, u32) noreturn", shift != null);
+    row(e, fir.check_kind.chk_shift, "fail_shift", "fn (i64, char*, char*, u32, u32) noreturn");
     rows += 1;
-    fn (char*, u32, u32) noreturn div_zero = rt.fail_div_zero;
-    row(e, fir.check_kind.chk_div_zero, "fail_div_zero", "fn (char*, u32, u32) noreturn",
-        div_zero != null);
+    row(e, fir.check_kind.chk_div_zero, "fail_div_zero", "fn (char*, u32, u32) noreturn");
     rows += 1;
-    fn (char*, u32, u32) noreturn div_overflow = rt.fail_div_overflow;
-    row(e, fir.check_kind.chk_div_overflow, "fail_div_overflow",
-        "fn (char*, u32, u32) noreturn", div_overflow != null);
+    row(e, fir.check_kind.chk_div_overflow, "fail_div_overflow", "fn (char*, u32, u32) noreturn");
     rows += 1;
-    fn (i64, u64, char*, u32, u32) noreturn bounds = rt.fail_bounds;
-    row(e, fir.check_kind.chk_bounds, "fail_bounds", "fn (i64, u64, char*, u32, u32) noreturn",
-        bounds != null);
+    row(e, fir.check_kind.chk_bounds, "fail_bounds", "fn (i64, u64, char*, u32, u32) noreturn");
     rows += 1;
-    fn (i64, i64, u64, char*, u32, u32) noreturn span = rt.fail_span;
-    row(e, fir.check_kind.chk_span, "fail_span",
-        "fn (i64, i64, u64, char*, u32, u32) noreturn", span != null);
+    row(e, fir.check_kind.chk_span, "fail_span", "fn (i64, i64, u64, char*, u32, u32) noreturn");
     rows += 1;
-    fn (i64, char*, u32, u32) noreturn alloc_count = rt.fail_alloc_count;
     row(e, fir.check_kind.chk_alloc_count, "fail_alloc_count",
-        "fn (i64, char*, u32, u32) noreturn", alloc_count != null);
+        "fn (i64, char*, u32, u32) noreturn");
     rows += 1;
     // The overwrite check names no runtime entry: the emptiness pass proves it, and the build-mode
     // pass removes it in every mode (spec/fir.md 8).
     assert(fir.check_entry(fir.check_kind.chk_overwrite) == "");
     assert(fir.check_reported_count(fir.check_kind.chk_overwrite) == 0);
     rows += 1;
-    fn (i64, char*, char*, u32, u32) noreturn bad_enum = rt.fail_enum;
-    row(e, fir.check_kind.chk_enum, "fail_enum", "fn (i64, char*, char*, u32, u32) noreturn",
-        bad_enum != null);
+    row(e, fir.check_kind.chk_enum, "fail_enum", "fn (i64, char*, char*, u32, u32) noreturn");
     rows += 1;
-    fn (char*, char*, u32, u32) noreturn user = rt.assert_fail;
-    row(e, fir.check_kind.chk_user, "assert_fail", "fn (char*, char*, u32, u32) noreturn",
-        user != null);
+    row(e, fir.check_kind.chk_user, "assert_fail", "fn (char*, char*, u32, u32) noreturn");
     rows += 1;
-    fn (string, char*, u32, u32) noreturn stop = rt.panic;
-    row(e, fir.check_kind.chk_panic, "panic", "fn (string, char*, u32, u32) noreturn",
-        stop != null);
+    row(e, fir.check_kind.chk_panic, "panic", "fn (string, char*, u32, u32) noreturn");
     rows += 1;
     assert(rows == CHECK_KINDS);
     println(rows, " rows");

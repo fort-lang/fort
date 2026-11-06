@@ -999,13 +999,14 @@ fn a_cross_target_module_needs_no_std_dir() void {
 fn an_extern_of_an_unimported_module_conflicts_across_units() void {
     build_std(NO_MORE[..0]);
     // the program declares `abs` in another form than std.zz, which it does not import
-    write_file("main.ft", "extern fn abs(i64 x) i64;\nfn main() i32 {\n    return 0;\n}\n");
+    write_file("main.ft",
+               "import extern;\nextern fn abs(i64 x) i64;\nfn main() i32 {\n    return 0;\n}\n");
     string[4] args = {"--use", "std=std.flib", "--check", "main.ft"};
     assert(use_run(args[..]) == EXIT_COMPILE_ERROR);
     // the module outside the closure is the later declaration
     assert(err_has("std.flib/interface.ft:"));
     assert(err_has(": error: conflicting declarations of extern 'abs': the result type differs"));
-    assert(err_has("main.ft:1:11: note: previous declaration of 'abs' here"));
+    assert(err_has("main.ft:2:11: note: previous declaration of 'abs' here"));
     // a whole-program build reads no module that it does not import
     string[4] whole = {"--check", "--std-dir", "std", "main.ft"};
     assert(use_run(whole[..]) == EXIT_OK);
@@ -1036,16 +1037,17 @@ fn build_one(string name, string text) void {
 fn the_extern_check_reads_the_libraries_in_the_reverse_of_the_link_order() void {
     build_std(NO_MORE[..0]);
     // two libraries that use std and not each other, and declare `f` in two forms
-    build_one("x", "extern fn f(i32 a) void;\n");
-    build_one("y", "extern fn f(i64 a) void;\n");
+    build_one("x", "import extern;\nextern fn f(i32 a) void;\n");
+    build_one("y", "import extern;\nextern fn f(i64 a) void;\n");
     write_file("main.ft", "fn main() i32 {\n    return 0;\n}\n");
     // the link order is `x y std`, so the check reads std, then y, then x, and the error stands
     // at the declaration of x; the command line gives the other order
     string[8] args = {"--use", "y=y.flib", "--use", "x=x.flib", "--use", "std=std.flib", "--check",
                       "main.ft"};
     assert(use_run(args[..]) == EXIT_COMPILE_ERROR);
-    assert(err_has("x.flib/interface.ft:4:13: error: conflicting declarations of extern 'f'"));
-    assert(err_has("y.flib/interface.ft:4:11: note: previous declaration of 'f' here"));
+    // each section starts with its `import extern;`, so the declaration is on line 5
+    assert(err_has("x.flib/interface.ft:5:13: error: conflicting declarations of extern 'f'"));
+    assert(err_has("y.flib/interface.ft:5:11: note: previous declaration of 'f' here"));
 }
 
 fn the_check_document_lists_each_interface_file_once() void {
@@ -1198,12 +1200,12 @@ fn a_library_build_holds_its_externs_against_the_used_library() void {
     build_std(NO_MORE[..0]);
     make_dir("geom");
     // `abs` of std.zz, which geom does not import, in another form
-    write_file("geom/vec.ft", "extern fn abs(i64 x) i64;\n");
+    write_file("geom/vec.ft", "import extern;\nextern fn abs(i64 x) i64;\n");
     string[5] args = {"fort", "--lib", "geom", "geom", "--emit-interface"};
     string[2] uses = {"--use", "std=std.flib"};
     assert(run_with(args[..], uses[..]) == EXIT_COMPILE_ERROR);
     assert(err_has(": error: conflicting declarations of extern 'abs': the result type differs"));
-    assert(err_has("geom/vec.ft:1:11: note: previous declaration of 'abs' here"));
+    assert(err_has("geom/vec.ft:2:11: note: previous declaration of 'abs' here"));
 }
 
 // ---- more of the build ------------------------------------------------------------------
@@ -1386,10 +1388,10 @@ fn a_manifest_that_cannot_be_read_is_exit_two() void {
 fn a_closure_error_stops_before_the_extern_check() void {
     build_std(NO_MORE[..0]);
     // a wrong `abs` beside a type error: only the error of the closure stands
-    write_file("main.ft", "extern fn abs(i64 x) i64;\nbool B = 1;\n");
+    write_file("main.ft", "import extern;\nextern fn abs(i64 x) i64;\nbool B = 1;\n");
     string[4] args = {"--use", "std=std.flib", "--check", "main.ft"};
     assert(use_run(args[..]) == EXIT_COMPILE_ERROR);
-    assert(err_has("main.ft:2:10: error:"));
+    assert(err_has("main.ft:3:10: error:"));
     string own err = capture.text("err.txt");
     defer del(err);
     assert(str.find(err, "conflicting declarations") < 0);
@@ -1475,7 +1477,7 @@ fn the_index_holds_no_record_of_a_module_outside_the_closure() void {
 
 fn the_check_document_holds_a_conflict_outside_the_closure() void {
     build_std(NO_MORE[..0]);
-    write_file("main.ft", "extern fn abs(i64 x) i64;\n");
+    write_file("main.ft", "import extern;\nextern fn abs(i64 x) i64;\n");
     string[5] args = {"fort", "--check", "--json", "--use", "std=std.flib"};
     string[1] entry = {"main.ft"};
     assert(run_with(args[..], entry[..]) == EXIT_COMPILE_ERROR);
@@ -1486,7 +1488,7 @@ fn the_check_document_holds_a_conflict_outside_the_closure() void {
     assert(str.find(doc, "\"files\":[\"std.flib/interface.ft\",\"main.ft\"]") > 0);
     assert(str.find(doc, "{\"file\":\"std.flib/interface.ft\",\"line\":") > 0);
     assert(str.find(doc, "the result type differs") > 0);
-    assert(str.find(doc, "\"notes\":[{\"file\":\"main.ft\",\"line\":1,\"col\":11") > 0);
+    assert(str.find(doc, "\"notes\":[{\"file\":\"main.ft\",\"line\":2,\"col\":11") > 0);
 }
 
 fn a_trailing_separator_of_a_path_takes_no_second_one() void {
@@ -1562,7 +1564,7 @@ fn the_compile_options_of_a_used_library_are_not_compared() void {
 // A program with an unproved store into an `own` local (D17.11) and a declaration of `abs` in
 // another form than std.zz, which it does not import.
 string[12] OVERWRITE_LINES = {
-    "extern fn abs(i64 x) i64;",
+    "import extern; extern fn abs(i64 x) i64;",
     "fn make(i32 v) i32 mut* own {",
     "    i32 mut* own p = new(i32);",
     "    *p = v;",
@@ -1605,7 +1607,8 @@ fn the_emptiness_pass_reports_before_the_extern_check_outside() void {
     assert(got_ir == want_ir);
     assert(!exists("main.ll"));
     // with the store proved, the conflict outside the closure stands
-    write_file("main.ft", "extern fn abs(i64 x) i64;\nfn main() i32 {\n    return 0;\n}\n");
+    write_file("main.ft",
+               "import extern;\nextern fn abs(i64 x) i64;\nfn main() i32 {\n    return 0;\n}\n");
     assert(use_run(use_check[..]) == EXIT_COMPILE_ERROR);
     assert(err_has("conflicting declarations of extern 'abs'"));
     // a library build runs the pass before the extern check as well

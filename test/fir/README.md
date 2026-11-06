@@ -48,7 +48,8 @@ that does not fit make the compiler exit 2 before any pass runs, and the harness
 
 The prelude keeps the lines and the columns of the file. The compiler replaces the `//|` of each
 prelude line with three spaces and blanks every other line, so a diagnostic of the prelude names
-the line and the column in the `.fir` file.
+the line and the column in the `.fir` file. A prelude that declares an extern starts its first
+line with `import extern; ` (D9.8), so that each declaration keeps its line.
 
 The names of the FIR text resolve against the prelude:
 - A type spelling resolves in the scope of the prelude module alone (`spec/fir.md` 13). A struct

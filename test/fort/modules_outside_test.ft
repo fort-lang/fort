@@ -229,7 +229,7 @@ fn an_extern_of_an_unimported_module_is_held_against_the_closure() void {
     library_env.env mut* own e = library_env.make();
     defer library_env.drop_made(move(e));
     use(e, "std", std_text);
-    check_closure(e, "extern fn puts(i32* s) i32;\n");
+    check_closure(e, "import extern; extern fn puts(i32* s) i32;\n");
     string[1] names = {"std"};
     assert(!check_outside(e, names[..]));
     // Each section of the library declares `puts` in another form than the closure, and each
@@ -237,9 +237,9 @@ fn an_extern_of_an_unimported_module_is_held_against_the_closure() void {
     // the checker read std.out first only because std.pipe imports it.
     assert(library_env.reports(e) == 4);
     assert(report_is(e, 0, "std.ft.txt:5:16", PUTS_CONFLICT));
-    assert(report_is(e, 1, "main.ft:1:11", PUTS_NOTE));
+    assert(report_is(e, 1, "main.ft:1:26", PUTS_NOTE));
     assert(report_is(e, 2, "std.ft.txt:9:16", PUTS_CONFLICT));
-    assert(report_is(e, 3, "main.ft:1:11", PUTS_NOTE));
+    assert(report_is(e, 3, "main.ft:1:26", PUTS_NOTE));
 }
 
 // The same library, whose module `std.pipe` the byte order puts after `std.out`. The checker
@@ -257,7 +257,7 @@ fn the_extern_check_reads_a_library_in_byte_order_of_the_path() void {
     library_env.env mut* own e = library_env.make();
     defer library_env.drop_made(move(e));
     use(e, "std", std_text);
-    check_closure(e, "extern fn puts(i32* s) i32;\n");
+    check_closure(e, "import extern; extern fn puts(i32* s) i32;\n");
     string[1] names = {"std"};
     assert(!check_outside(e, names[..]));
     assert(modules_env.path_of(modules.outside_at(&e->m.set, 0)) == "std.z");
@@ -274,7 +274,7 @@ fn an_agreeing_extern_of_an_unimported_module_passes() void {
     defer library_env.drop_made(move(e));
     use(e, "std", std_text);
     // `u8` and `char` are one C type (D9.8)
-    check_closure(e, "extern fn puts(u8* s) i32;\n");
+    check_closure(e, "import extern; extern fn puts(u8* s) i32;\n");
     string[1] names = {"std"};
     assert(check_outside(e, names[..]));
     assert(library_env.reports(e) == 0);
@@ -299,9 +299,9 @@ fn an_imported_module_is_checked_in_the_closure_alone() void {
 string[1] RT_FILES = {"std/rt.ft"};
 string[1] RT_TEXTS = {"i32 B = 1;\n"};
 string[1] X_FILES = {"x/m.ft"};
-string[1] X_TEXTS = {"extern fn f(i32 a) void;\n"};
+string[1] X_TEXTS = {"import extern; extern fn f(i32 a) void;\n"};
 string[1] Y_FILES = {"y/m.ft"};
-string[1] Y_TEXTS = {"extern fn f(i64 a) void;\n"};
+string[1] Y_TEXTS = {"import extern; extern fn f(i64 a) void;\n"};
 
 // The reports of a closure that uses `std`, `x` and `y` and imports none of `x` and `y`, after
 // the extern check of the libraries in the order `names`.
@@ -326,14 +326,15 @@ fn the_later_library_in_the_given_order_takes_the_error() void {
     // the reverse of the link order `x y std`
     string[3] names = {"std", "y", "x"};
     check_two_libraries(e, names[..]);
-    assert(report_is(e, 0, "x.ft.txt:4:13", F_CONFLICT));
-    assert(report_is(e, 1, "y.ft.txt:4:11", F_NOTE));
+    // each section starts with its `import extern;`, so the declaration is on line 5
+    assert(report_is(e, 0, "x.ft.txt:5:13", F_CONFLICT));
+    assert(report_is(e, 1, "y.ft.txt:5:11", F_NOTE));
     library_env.env mut* own other = library_env.make();
     defer library_env.drop_made(move(other));
     string[3] reversed = {"std", "x", "y"};
     check_two_libraries(other, reversed[..]);
-    assert(report_is(other, 0, "y.ft.txt:4:13", F_CONFLICT));
-    assert(report_is(other, 1, "x.ft.txt:4:11", F_NOTE));
+    assert(report_is(other, 0, "y.ft.txt:5:13", F_CONFLICT));
+    assert(report_is(other, 1, "x.ft.txt:5:11", F_NOTE));
 }
 
 // ---- more of the extern check ----------------------------------------------------------
@@ -347,7 +348,12 @@ fn check_zz(library_env.env mut* e, string zz, string client) bool {
     string own std_text = interface_of("std", files[..], texts[..], "");
     defer del(std_text);
     use(e, "std", std_text);
-    check_closure(e, client);
+    // the client declares an extern, so it is trusted (D9.8)
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    strbuf.append(&b, "import extern; ");
+    strbuf.append(&b, client);
+    check_closure(e, strbuf.view(&b));
     string[1] names = {"std"};
     return check_outside(e, names[..]);
 }
@@ -426,7 +432,7 @@ fn interface_against(string name, string@ files, string@ texts, string@ used_nam
 string[2] A_FILES = {"a/m.ft", "a/n.ft"};
 string[2] A_TEXTS = {"i32 A = 1;\n", "import a.m;\ni32 N = m.A;\n"};
 string[1] B_FILES = {"b/k.ft"};
-string[1] B_TEXTS = {"import a.n;\nextern fn g(i64 x) void;\ni32 K = n.N;\n"};
+string[1] B_TEXTS = {"import extern; import a.n;\nextern fn g(i64 x) void;\ni32 K = n.N;\n"};
 
 fn a_section_outside_may_import_a_section_of_the_closure() void {
     string own std_text = interface_of("std", RT_FILES[..], RT_TEXTS[..], "");
@@ -445,13 +451,13 @@ fn a_section_outside_may_import_a_section_of_the_closure() void {
     use(e, "std", std_text);
     use(e, "a", a_text);
     use(e, "b", b_text);
-    check_closure(e, "import a.n;\ni32 Y = n.N;\nextern fn g(i32 x) void;\n");
+    check_closure(e, "import extern; import a.n;\ni32 Y = n.N;\nextern fn g(i32 x) void;\n");
     string[3] names = {"std", "a", "b"};
     assert(!check_outside(e, names[..]));
     // b.k alone is outside: its import a.n, and a.m behind it, are in the closure
     assert(modules.outside_count(&e->m.set) == 1);
     assert(modules_env.path_of(modules.outside_at(&e->m.set, 0)) == "b.k");
-    assert(report_is(e, 0, "b.ft.txt:6:13",
+    assert(report_is(e, 0, "b.ft.txt:7:13",
                      "error: conflicting declarations of extern 'g': parameter 1 differs"));
     assert(report_is(e, 1, "main.ft:3:11", "note: previous declaration of 'g' here"));
 }
@@ -462,7 +468,7 @@ fn an_empty_list_loads_nothing() void {
     library_env.env mut* own e = library_env.make();
     defer library_env.drop_made(move(e));
     use(e, "std", std_text);
-    check_closure(e, "extern fn puts(i32* s) i32;\n");
+    check_closure(e, "import extern; extern fn puts(i32* s) i32;\n");
     string[1] names = {"std"};
     assert(check_outside(e, names[..0]));
     assert(modules.outside_count(&e->m.set) == 0);
