@@ -1,0 +1,119 @@
+/// lex_env: the session and the token vector that the lexer suites lex through, and the queries
+/// of those suites over the tokens and the diagnostics of the last lex.
+//
+// test/fort/lexer_test.ft, lexer_errors_test.ft, lexer_literals_test.ft and lexer_dump_test.ft
+// each held a copy of this environment. One copy stands here, so the leak probe of lexer_test.ft
+// holds each release of its drop for all four.
+import fort.diag;
+import fort.lexer;
+import fort.session;
+
+// Each test reuses one session and token
+// vector. The session owns the diagnostic sink
+// and literal pool, and its release frees both.
+struct env {
+    session.session sess;
+    lexer.tok_vec toks;
+}
+
+// Frees an environment that the caller moves in: the tokens, then the session.
+fn drop(env mut e) void {
+    lexer.tokvec_drop(move(e.toks));
+    session.drop(move(e.sess));
+}
+
+// An empty environment in an allocation of its own, for a test that lends it to calls. `new`
+// fills it with the empty session and the empty vector.
+fn make() env mut* own {
+    return new(env);
+}
+
+// Ends an environment of make that the caller moves in.
+fn drop_made(env mut* own p) void {
+    env kept = move(*p);
+    del(p);
+    drop(move(kept));
+}
+
+// Lexes `src` as t.ft, dropping the tokens and the diagnostics of the lex
+// before it. The pool keeps the strings of both, which no test reads across
+// a call. Returns whether the file was clean.
+fn lex(env mut* e, string src) bool {
+    lexer.tokvec_free(&e->toks);
+    diag.reset(session.diags(&e->sess));
+    return lexer.lex_file(&e->sess, "t.ft", src, &e->toks);
+}
+
+// The tokens of the last lex, the end-of-file token included.
+fn count(env* e) u64 {
+    return lexer.tokvec_count(&e->toks);
+}
+
+fn tok(env* e, u64 i) lexer.token {
+    return lexer.tokvec_at(&e->toks, i);
+}
+
+// The name of the kind of token `i`, which is what an assertion compares.
+// Two kinds are equal when their names are (tok_kind_name is injective, as
+// kind_names_are_distinct asserts).
+fn kind(env* e, u64 i) string {
+    return lexer.tok_kind_name(tok(e, i).kind);
+}
+
+fn text(env* e, u64 i) string {
+    return tok(e, i).text;
+}
+
+// Whether token `i` starts at line `line`, column `col`.
+fn at(env* e, u64 i, u32 line, u32 col) bool {
+    return tok(e, i).line == line && tok(e, i).col == col;
+}
+
+// Whether token `i` covers `len` bytes from offset `off`.
+fn covers(env* e, u64 i, u64 off, u64 len) bool {
+    return tok(e, i).off == off && tok(e, i).len == len;
+}
+
+// The errors the last lex reported, notes excluded.
+fn errors(env mut* e) u64 {
+    return session.error_count(&e->sess);
+}
+
+// Whether the diagnostic `i` is an error at `line`:`col` of t.ft saying `msg`,
+// which is everything its text line carries.
+fn error_is(env mut* e, u64 i, u32 line, u32 col, string msg) bool {
+    diag.record r = diag.record_at(session.diags(&e->sess), i);
+    return r.severity == diag.severity.error && r.loc.file == "t.ft" && r.loc.line == line
+        && r.loc.col == col && r.msg == msg;
+}
+
+// The last lex succeeded with `n` tokens before the end-of-file token and
+// reported nothing.
+fn clean(env mut* e, string src, u64 n) bool {
+    bool ok = lex(e, src);
+    return ok && errors(e) == 0 && count(e) == n + 1
+        && tok(e, n).kind == lexer.tok_kind.eof;
+}
+
+// The last lex failed with exactly the one diagnostic given, and still lexed
+// the file whole, so the tokens end in the end-of-file token.
+fn one_error(env mut* e, string src, u32 line, u32 col, string msg) bool {
+    bool ok = lex(e, src);
+    if (ok || errors(e) != 1 || count(e) == 0) {
+        return false;
+    }
+    if (tok(e, count(e) - 1).kind != lexer.tok_kind.eof) {
+        return false;
+    }
+    return error_is(e, 0, line, col, msg);
+}
+
+// The last lex failed with exactly `n` diagnostics and still lexed the file
+// whole, so the tokens end in the end-of-file token.
+fn failed(env mut* e, string src, u64 n) bool {
+    bool ok = lex(e, src);
+    if (ok || errors(e) != n || count(e) == 0) {
+        return false;
+    }
+    return tok(e, count(e) - 1).kind == lexer.tok_kind.eof;
+}

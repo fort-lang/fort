@@ -898,15 +898,15 @@ fn tokens_entry(options* opts) i32 {
     // a batch driver writes the text form as it arrives
     diag.set_text(session.diags(s), true);
     session.show_sources(s);
-    // The buffers end in a block, before the session: the leak rule proves a `del` that no call
-    // follows, and the frees keep their order.
+    // The tokens and the dump end in a block, before the session. The dump comes first: the leak
+    // rule proves a `del` that no call follows, and the drop of the tokens is a call.
     {
-        lexer.tok_vec mut toks = lexer.tokvec_create();
-        defer del(toks.items);
-        bool clean = lexer.lex_file(s, opts->entry, source, &toks);
         strbuf.str_buf mut dump = strbuf.create();
         defer del(dump.data);
-        lexer.tok_dump(&toks, &dump);
+        lexer.tok_vec mut* own toks = lexer.tokvec_make();
+        defer lexer.tokvec_drop_made(move(toks));
+        bool clean = lexer.lex_file(s, opts->entry, source, toks);
+        lexer.tok_dump(toks, &dump);
         print(strbuf.view(&dump));
         if (clean) {
             return EXIT_OK;
@@ -934,13 +934,13 @@ fn ast_entry(options* opts) i32 {
     // the arena: the leak rule proves a `del` that no call follows, and the frees keep their
     // order.
     {
-        lexer.tok_vec mut toks = lexer.tokvec_create();
-        defer del(toks.items);
-        lexer.lex_file(s, opts->entry, source, &toks);
+        lexer.tok_vec mut* own toks = lexer.tokvec_make();
+        defer lexer.tokvec_drop_made(move(toks));
+        lexer.lex_file(s, opts->entry, source, toks);
         // the tokens cover the whole file, so the parse runs
         ast.arena mut* own ar = ast.arena_make();
         defer ast.arena_drop_made(move(ar));
-        ast.node mut* mod = parser.parse_module(s, opts->entry, &toks, ar);
+        ast.node mut* mod = parser.parse_module(s, opts->entry, toks, ar);
         {
             strbuf.str_buf mut dump = strbuf.create();
             defer del(dump.data);

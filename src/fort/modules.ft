@@ -805,12 +805,12 @@ fn load_module(session.session mut* s, module_set mut* set, string path, string 
 fn parse_file(session.session mut* s, module_set mut* set, module mut* m) void {
     // the diagnostic count says whether the file parsed, not null
     u64 before = session.error_count(s);
-    lexer.tok_vec mut toks = lexer.tokvec_create();
+    lexer.tok_vec mut* own toks = lexer.tokvec_make();
+    defer lexer.tokvec_drop_made(move(toks));
     // the tokens cover the file, so the parser runs either way
-    lexer.lex_file(s, m->file, m->source, &toks);
-    m->ast = parser.parse_module(s, m->file, &toks, &set->arena);
+    lexer.lex_file(s, m->file, m->source, toks);
+    m->ast = parser.parse_module(s, m->file, toks, &set->arena);
     m->parsed = session.error_count(s) == before;
-    del(toks.items);
 }
 
 // Adds a new module in the loading state and enters it in the path map. The caller enters a module
@@ -1081,10 +1081,10 @@ fn load_section(session.session mut* s, module_set mut* set, used_library* lib, 
 fn parse_section(session.session mut* s, module_set mut* set, used_library* lib, u64 k,
                  module mut* m) void {
     u64 before = session.error_count(s);
-    lexer.tok_vec mut toks = lexer.tokvec_create();
-    defer del(toks.items);
-    copy_tokens(lib, k, &toks);
-    m->ast = parser.parse_interface(s, m->file, &toks, &set->arena);
+    lexer.tok_vec mut* own toks = lexer.tokvec_make();
+    defer lexer.tokvec_drop_made(move(toks));
+    copy_tokens(lib, k, toks);
+    m->ast = parser.parse_interface(s, m->file, toks, &set->arena);
     m->parsed = session.error_count(s) == before;
 }
 
@@ -1102,14 +1102,14 @@ fn has_declaration(session.session mut* s, module_set mut* set, used_library* li
         return found != null && scope.is_declaration(found);
     }
     bool mut declares = false;
-    lexer.tok_vec mut toks = lexer.tokvec_create();
-    defer del(toks.items);
+    lexer.tok_vec mut* own toks = lexer.tokvec_make();
+    defer lexer.tokvec_drop_made(move(toks));
     ast.arena mut* own ar = ast.arena_make();
     defer ast.arena_drop_made(move(ar));
-    copy_tokens(lib, k, &toks);
+    copy_tokens(lib, k, toks);
     diag.mute(session.diags(s));
     u64 before = session.error_count(s);
-    ast.node mut* probed = parser.parse_interface(s, lib->file, &toks, ar);
+    ast.node mut* probed = parser.parse_interface(s, lib->file, toks, ar);
     if (probed != null && session.error_count(s) == before) {
         declares = selected_declares(probed, name);
     }
@@ -1236,15 +1236,15 @@ fn prefix_declares(session.session mut* s, module_set mut* set, string path, str
         return false;
     }
     bool mut declares = false;
-    lexer.tok_vec mut toks = lexer.tokvec_create();
-    defer del(toks.items);
+    lexer.tok_vec mut* own toks = lexer.tokvec_make();
+    defer lexer.tokvec_drop_made(move(toks));
     ast.arena mut* own ar = ast.arena_make();
     defer ast.arena_drop_made(move(ar));
     diag.mute(session.diags(s));
     u64 before = session.error_count(s);
     // a file that reported anything declares nothing
-    lexer.lex_file(s, file, source, &toks);
-    ast.node mut* probed = parser.parse_module(s, file, &toks, ar);
+    lexer.lex_file(s, file, source, toks);
+    ast.node mut* probed = parser.parse_module(s, file, toks, ar);
     if (probed != null && session.error_count(s) == before
         && comptime.select_module(s, probed)) {
         declares = selected_declares(probed, name);
@@ -1497,7 +1497,7 @@ fn drop(module_set mut set) void {
         used_library kept = move(*lib);
         del(lib);
         set.used.last = move(kept.made_before);
-        del(kept.toks.items);
+        lexer.tokvec_drop(move(kept.toks));
         del(kept.paths.items);
         strmap.drop(move(kept.sections));
         vec.int_drop(move(kept.firsts));

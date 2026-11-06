@@ -221,7 +221,9 @@ Words (the glossary: one word has one meaning in all of the compiler):
     (`session.drop`, `session.drop_made`). `find` searches and can fail (not `lookup`, `locate` or
     `search`). `work` is the W amount (not `cost` or `price`); `charge` takes
     W (not `spend`). `release` is only the ownership term: the program gives up storage.
-    (+) `index.free(ix)`. (-) `diag.create()`; use `diag.make()` (invented).
+    (+) `index.free(ix)`. In each pair of `create` and `make`, `create` gives the empty value and
+    `make` an `own` allocation of it (`session.create()`, `session.make()`). (-) a `make` that
+    gives the empty value, as `containers.str_make()` would (invented).
 13. Abbreviations come from a closed list: `ast`, `fir`, `llvm`, `lsp`, `rpc`, `json`, `uri`.
     Write every other word in full (`float`, not `flt`).
     (+) `index.write_json(ix, j)`. (-) `flt.ft` and `flt.flt_parse`.

@@ -26,34 +26,19 @@ struct env {
     string src;
 }
 
-fn create() env {
-    return env{session.create(), lexer.tokvec_create(), ast.arena{}, strbuf.create(),
-               strbuf.create(), strbuf.create(), ""};
-}
-
-// Releases everything one parse allocated: the nodes, the tokens, the
-// diagnostics and the interned strings.
-fn free(env mut* e) void {
-    ast.ast_arena_free(&e->arena);
-    lexer.tokvec_free(&e->toks);
-    strbuf.free(&e->buf);
-    strbuf.free(&e->src_buf);
-    strbuf.free(&e->join_buf);
-    session.free(&e->sess);
-}
-
-// Releases an environment that the caller moves in, in the order of free.
+// Releases an environment that the caller moves in: the nodes, the tokens, the three buffers,
+// then the diagnostics and the interned strings of the session.
 fn drop(env mut e) void {
     ast.arena_drop(move(e.arena));
-    del(e.toks.items);
-    del(e.buf.data);
-    del(e.src_buf.data);
-    del(e.join_buf.data);
+    lexer.tokvec_drop(move(e.toks));
+    strbuf.drop(move(e.buf));
+    strbuf.drop(move(e.src_buf));
+    strbuf.drop(move(e.join_buf));
     session.drop(move(e.sess));
 }
 
 // An empty environment in an allocation of its own, for a function that lends it to calls. `new`
-// fills the allocation with the value that create gives.
+// fills the allocation with the empty environment.
 fn make() env mut* own {
     return new(env);
 }
@@ -82,7 +67,7 @@ fn run(fn (env mut*) void body) void {
 // one across its assertions. The tokens are appended to the vector and
 // parse_module reads it from the first token. So a second lex into the same
 // vector would parse the first source again. The nodes stay in the arena
-// until free, since a caller may still hold the tree of an earlier parse.
+// until drop, since a caller may still hold the tree of an earlier parse.
 fn parse(env mut* e, string src) ast.node mut* {
     e->src = src;
     lexer.tokvec_truncate(&e->toks, 0);
