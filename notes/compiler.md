@@ -1451,8 +1451,9 @@ came here.
   A suite of `test/fort` makes its files with `os.set_mode`, `os.make_symlink`, `os.make_fifo`
   and `os.set_umask`, moves a descriptor with `io.dup` and `io.dup2`, and removes a variable with
   `sys.unset_env`. `test/fort/support/heap.ft` is the one module there that declares and calls C,
-  for the heap counters of glibc and Darwin. A suite text that a test compiles is a program and
-  not a suite module, so it can declare an extern.
+  for the heap counters of glibc and Darwin, and it starts with `import extern;`. A suite text
+  that a test compiles is a program and not a suite module: it declares or calls C when it starts
+  with `check_env.TRUST`, `import extern; ` with no newline, so each item keeps its line.
 
 - **A system call added to a print path must give errno back.** `sys.errno()` hands a program the
   errno of its own last library call (`stdlib.md` 2.4), and the print family runs between the two:

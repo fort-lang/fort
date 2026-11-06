@@ -23,10 +23,12 @@ import std.strbuf;
 fn two_modules(check_env.env mut* e, string in_main, string in_other) bool {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
+    strbuf.append(&b, check_env.TRUST);
     strbuf.append(&b, "fn one() i32 {\n    return 1;\n}\n");
     strbuf.append(&b, in_other);
     check_env.add(e, "other.ft", strbuf.view(&b));
     strbuf.clear(&b);
+    strbuf.append(&b, check_env.TRUST);
     strbuf.append(&b, "import other;\n");
     strbuf.append(&b, in_main);
     strbuf.append(&b, "fn main() i32 {\n    return other.one();\n}\n");
@@ -34,9 +36,15 @@ fn two_modules(check_env.env mut* e, string in_main, string in_other) bool {
     return check_env.check_entry(e, "main.ft");
 }
 
-// One module, `decls` and the `main` an entry module needs.
+// One module, `decls` and the `main` an entry module needs. The module is trusted, so that it may
+// declare an `extern fn` (D9.8), and its first line is `import extern;`, so a declaration on line
+// n of `decls` is on line n + 1 of the module.
 fn one_module(check_env.env mut* e, string decls) bool {
-    return check_env.check_decls(e, decls);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    strbuf.append(&b, "import extern;\n");
+    strbuf.append(&b, decls);
+    return check_env.check_decls(e, strbuf.view(&b));
 }
 
 // ---- the types an extern signature may use -----------------------------------------
@@ -240,7 +248,8 @@ fn the_main_symbol_is_reserved() void {
     // `extern` declaring the name is a signature nothing can check against
     // that definition.
     // The source defines no fort `main`, so the reservation is the one error.
-    assert(!check_env.check_src(e, "extern fn main(i32 argc, char* mut* argv) i32;\n"));
+    string reserved = "import extern; extern fn main(i32 argc, char* mut* argv) i32;\n";
+    assert(!check_env.check_src(e, reserved));
     assert(check_env.said(e, "'main' is reserved: the compiler emits it"));
     assert(check_env.errors(e) == 1);
 }
@@ -249,6 +258,7 @@ fn the_main_symbol_is_reserved() void {
 
 // The declarations that the rule of the pointers that C gives refuses, four strings each: the
 // declaration, the position of its error, and the extern and the type that the error names. The
+// position is on line 2, below the `import extern;` of one_module. The
 // rule reads the result, each parameter type of a function pointer parameter, each pointer type
 // that a level of a parameter holds where the parameter marks that level `mut` (through fixed
 // arrays, D5.2), and the same three of a function pointer type that C gives. The first type that
@@ -261,49 +271,49 @@ u64 REFUSED_LEN = 88;
 
 string[REFUSED_LEN] REFUSED = {
     "extern fn strchr(char* s, i32 c) char mut*;",
-    "1:34", "strchr", "char mut*",
+    "2:34", "strchr", "char mut*",
     "extern fn pick(i32 n, ...) u64 mut*;",
-    "1:28", "pick", "u64 mut*",
+    "2:28", "pick", "u64 mut*",
     "extern fn call(fn () u64* g) u64 mut*;",
-    "1:30", "call", "u64 mut*",
+    "2:30", "call", "u64 mut*",
     "extern fn take(void* p) u64 mut*;",
-    "1:25", "take", "u64 mut*",
+    "2:25", "take", "u64 mut*",
     "extern fn apply(u64* p, fn (u64 mut*) void cb) void;",
-    "1:25", "apply", "u64 mut*",
+    "2:25", "apply", "u64 mut*",
     "extern fn strtol(char* nptr, char mut* mut* endptr, i32 base) i64;",
-    "1:30", "strtol", "char mut*",
+    "2:30", "strtol", "char mut*",
     "extern fn deep(char* s, char mut* mut** out) void;",
-    "1:25", "deep", "char mut*",
+    "2:25", "deep", "char mut*",
     "extern fn two(char* s, char mut* mut* mut* out) void;",
-    "1:24", "two", "char mut* mut*",
+    "2:24", "two", "char mut* mut*",
     "extern fn fill(char* s, char mut*[2] mut* out) void;",
-    "1:25", "fill", "char mut*",
+    "2:25", "fill", "char mut*",
     "extern fn hold(void* p, void mut* mut* out) void;",
-    "1:25", "hold", "void mut*",
+    "2:25", "hold", "void mut*",
     "extern fn get_strchr() fn (char*, i32) char mut*;",
-    "1:24", "get_strchr", "char mut*",
+    "2:24", "get_strchr", "char mut*",
     "extern fn hand_back(char* s, (fn (char*) char mut*) mut* out) void;",
-    "1:30", "hand_back", "char mut*",
+    "2:30", "hand_back", "char mut*",
     "extern fn enroll(char* s, fn (fn (char*) char mut*) void cb) void;",
-    "1:27", "enroll", "char mut*",
+    "2:27", "enroll", "char mut*",
     "extern fn lend(char mut* own p) char mut*;",
-    "1:33", "lend", "char mut*",
+    "2:33", "lend", "char mut*",
     "extern fn bytes(u8 mut* s, u64 n) char mut*;",
-    "1:35", "bytes", "char mut*",
+    "2:35", "bytes", "char mut*",
     "extern fn chain(char** s) char mut**;",
-    "1:27", "chain", "char mut**",
+    "2:27", "chain", "char mut**",
     "extern fn both(char* s, u64 mut* mut* out) char mut*;",
-    "1:44", "both", "char mut*",
+    "2:44", "both", "char mut*",
     "extern fn two_out(char* s, char mut* mut* a, u64 mut* mut* b) void;",
-    "1:28", "two_out", "char mut*",
+    "2:28", "two_out", "char mut*",
     "extern fn rows(char*[2]* s) char mut*[2]*;",
-    "1:29", "rows", "char mut*[2]*",
+    "2:29", "rows", "char mut*[2]*",
     "extern fn o1(char* s) char mut* own*;",
-    "1:23", "o1", "char mut* own*",
+    "2:23", "o1", "char mut* own*",
     "extern fn f(i32 n, char* s) char mut*;",
-    "1:29", "f", "char mut*",
+    "2:29", "f", "char mut*",
     "extern fn g(u64* p, fn (u64 mut*, u64) void cb) void;",
-    "1:21", "g", "u64 mut*",
+    "2:21", "g", "u64 mut*",
 };
 
 // Declarations that the rule takes: a result with no `mut`, a parameter of the type of the result,
@@ -387,7 +397,8 @@ fn each_declaration_that_gives_no_new_mut_is_taken() void {
 }
 
 // A refused extern and a function that writes through its result.
-string CALLS_REFUSED = "extern fn f(char* s) char mut*;\nfn g(char* s) void {\n    *f(s) = 0;\n}\n";
+string CALLS_REFUSED =
+    "import extern; extern fn f(char* s) char mut*;\nfn g(char* s) void {\n    *f(s) = 0;\n}\n";
 
 fn a_refused_declaration_fails_its_symbol_and_its_calls_report_nothing(check_env.env mut* e) void {
     assert(!check_env.check_decls(e, CALLS_REFUSED));

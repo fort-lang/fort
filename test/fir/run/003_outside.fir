@@ -1,6 +1,6 @@
 //! pass: run main.f
 //! prelude:
-//| extern fn getpid() i32;
+//| import extern; extern fn getpid() i32;
 //! expect:
 //| outside getpid
 // A call of an extern that the interpreter does not run ends the run as `outside`.

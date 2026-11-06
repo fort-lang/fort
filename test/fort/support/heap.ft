@@ -35,7 +35,10 @@
 // 2.39 or 2.43. The live view and the same assertions failed the same 179 and 3
 // more, under each glibc where the two views failed them. notes/testing.md
 // gives the measurement.
+//
+// The module declares and calls C, so it is trusted (D9.8).
 
+import extern;
 import std.libc;
 
 $if ($cfg(target_os) == "macos") {
@@ -62,9 +65,10 @@ $if ($cfg(target_os) == "macos") {
     // task, a context, a type mask, the zone address, a reader (null reads
     // this process) and the recorder it calls with each batch of ranges. C
     // types the context as a `void*` and gives it to the recorder as it is,
-    // so this declaration names the walk that it points at.
+    // so this declaration names the walk that it points at. The recorder takes
+    // the batch as bytes, because its length comes from C (D9.8).
     struct introspection {
-        fn (u32, walk mut*, u32, u64, void*, fn (u32, walk mut*, u32, range*, u32) void) i32
+        fn (u32, walk mut*, u32, u64, void*, fn (u32, walk mut*, u32, u8*, u32) void) i32
             enumerator;
     }
 
@@ -104,8 +108,11 @@ $if ($cfg(target_os) == "macos") {
     // Adds the size of each range of one batch to the sum of the walk. The
     // zones are locked while it runs, so it allocates nothing and does not
     // panic: a batch larger than the copy sets the flag, and the caller
-    // asserts on the flag after the enumerator returns.
-    fn record(u32 task, walk mut* w, u32 kind, range* ranges, u32 count) void {
+    // asserts on the flag after the enumerator returns. `ranges` holds `count`
+    // ranges that C gives. The pointer and the count come from the caller, so
+    // `ranges` has the type `u8*`, and the function is a boundary function
+    // that only a trusted module names (D9.8).
+    fn record(u32 task, walk mut* w, u32 kind, u8* ranges, u32 count) void {
         u64 n = cast(count, u64);
         if (n > w->batch.len) {
             w->overflow = true;
@@ -114,7 +121,7 @@ $if ($cfg(target_os) == "macos") {
         if (n == 0) {
             return;
         }
-        libc.memcpy(cast(&w->batch[0], u8 mut*), cast(ranges, u8*), n * sizeof(range));
+        libc.memcpy(cast(&w->batch[0], u8 mut*), ranges, n * sizeof(range));
         u64 mut i = 0;
         while (i < n) {
             w->sum += w->batch[i].size;

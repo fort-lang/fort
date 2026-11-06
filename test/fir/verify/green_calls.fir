@@ -1,6 +1,6 @@
 //! pass: verify
 //! prelude:
-//| extern fn puts(char* s) i32;
+//| import extern; extern fn puts(char* s) i32;
 //| extern fn printf(char* format, ...) i32;
 //| fn add(i32 x, i64 y) i64 {
 //|     return 0;
