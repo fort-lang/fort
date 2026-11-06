@@ -902,14 +902,80 @@ static bool read_source(const char* path, sb_t* out) {
     return true;
 }
 
+// The first item `import extern;` of a trusted module (D9.3, D9.8). The C parser is frozen against
+// language work (notes/compiler.md 8) and does not read the form, so the walk blanks it.
+static const char TRUST_IMPORT[] = "import";
+static const char TRUST_EXTERN[] = "extern";
+
+// Whether `ch` is white space between two tokens.
+static bool is_blank(char ch) {
+    return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
+}
+
+// The offset of the first byte at or after `i` that is no white space.
+static uint64_t skip_blank(const sb_t* src, uint64_t i) {
+    while (i < src->len && is_blank(src->data[i])) {
+        i++;
+    }
+    return i;
+}
+
+// Whether `word` stands in `src` at `i`.
+static bool word_at(const sb_t* src, uint64_t i, const char* word) {
+    const uint64_t len = strlen(word);
+    return src->len - i >= len && memcmp(&src->data[i], word, len) == 0;
+}
+
+// Replaces a first item `import extern;` of `src` with spaces, so that each other token keeps its
+// line and its column. The first item is the first text that is no white space and no `//`
+// comment. White space may stand between the words and before the `;`, as fort reads them; a
+// newline there stays a newline. A form at any other place stays, as the parser reads it.
+static void blank_trust_form(sb_t* src) {
+    uint64_t i = 0;
+    while (i < src->len) {
+        if (is_blank(src->data[i])) {
+            i++;
+        } else if (src->data[i] == '/' && i + 1 < src->len && src->data[i + 1] == '/') {
+            while (i < src->len && src->data[i] != '\n') {
+                i++;
+            }
+        } else {
+            break;
+        }
+    }
+    uint64_t end = i;
+    if (!word_at(src, end, TRUST_IMPORT)) {
+        return;
+    }
+    end += strlen(TRUST_IMPORT);
+    if (end >= src->len || !is_blank(src->data[end])) {
+        return;
+    }
+    end = skip_blank(src, end);
+    if (!word_at(src, end, TRUST_EXTERN)) {
+        return;
+    }
+    end = skip_blank(src, end + strlen(TRUST_EXTERN));
+    if (end >= src->len || src->data[end] != ';') {
+        return;
+    }
+    for (uint64_t k = i; k <= end; k++) {
+        if (src->data[k] != '\n') {
+            src->data[k] = ' ';
+        }
+    }
+}
+
 // Parses one corpus file and records diagnostics without `//! error:` annotations.
-// An `//! error-any:` annotation accepts any source position.
+// An `//! error-any:` annotation accepts any source position. A first item `import extern;` is
+// blanked first (blank_trust_form).
 static void check_corpus_file(const char* path) {
     if (!read_source(path, &corpus_src)) {
         sb_append(&corpus_report, path);
         sb_append(&corpus_report, ": cannot be read\n");
         return;
     }
+    blank_trust_form(&corpus_src);
     const char* src = sb_cstr(&corpus_src);
     TEST_UNUSED(parse_text(src));
     const bool any = strstr(src, "//! error-any:") != NULL;
@@ -1009,6 +1075,45 @@ static void check_corpus_counts(void) {
     }
 }
 
+// The blank of the first item `import extern;` keeps the line and the column of each other token:
+// a source with the form parses as the same source with spaces in its place. A form after the first
+// item stays, and the parser reports it where the source writes it.
+TEST(a_first_trust_form_is_blanked_in_place, {
+    sb_t text;
+    sb_init(&text);
+    sb_append(&text, "//! fail\n// a comment\nimport extern;\nfn f() void {\n    i32 a = ;\n}\n");
+    blank_trust_form(&text);
+    TEST_ASSERT_EQ_STR(sb_cstr(&text),
+                       "//! fail\n// a comment\n              \nfn f() void {\n    i32 a = ;\n}\n");
+    TEST_ASSERT_EQ_STR(parse_fails(sb_cstr(&text)),
+                       "t.ft:5:13: error: expected an expression, found ';'\n");
+    sb_clear(&text);
+    sb_append(&text, "import std.io;\nimport extern;\n");
+    blank_trust_form(&text);
+    TEST_ASSERT_EQ_STR(sb_cstr(&text), "import std.io;\nimport extern;\n");
+    sb_clear(&text);
+    sb_append(&text, "import extern");
+    blank_trust_form(&text);
+    TEST_ASSERT_EQ_STR(sb_cstr(&text), "import extern");
+    // white space between the words and before the `;`, a newline among it
+    sb_clear(&text);
+    sb_append(&text, "import  extern ;\nfn f() void {\n}\n");
+    blank_trust_form(&text);
+    TEST_ASSERT_EQ_STR(sb_cstr(&text), "                \nfn f() void {\n}\n");
+    sb_clear(&text);
+    sb_append(&text, "import\textern\n;\nfn f() void {\n    i32 a = ;\n}\n");
+    blank_trust_form(&text);
+    TEST_ASSERT_EQ_STR(sb_cstr(&text), "             \n \nfn f() void {\n    i32 a = ;\n}\n");
+    TEST_ASSERT_EQ_STR(parse_fails(sb_cstr(&text)),
+                       "t.ft:4:13: error: expected an expression, found ';'\n");
+    // one word with no space between is a name and no form
+    sb_clear(&text);
+    sb_append(&text, "importextern;\n");
+    blank_trust_form(&text);
+    TEST_ASSERT_EQ_STR(sb_cstr(&text), "importextern;\n");
+    sb_free(&text);
+})
+
 TEST(the_corpus_files_with_two_syntax_errors_report_both, {
     sb_clear(&corpus_report);
     check_corpus_counts();
@@ -1066,6 +1171,7 @@ int main(int argc, char** argv) {
     TEST_RUN(every_recovery_point_records_what_it_skipped);
     TEST_RUN(an_unclosed_bracket_costs_its_construct_and_no_more);
     TEST_RUN(the_fail_corpus_reports_only_on_annotated_lines);
+    TEST_RUN(a_first_trust_form_is_blanked_in_place);
     TEST_RUN(the_corpus_files_with_two_syntax_errors_report_both);
     sb_free(&corpus_report);
     sb_free(&corpus_src);

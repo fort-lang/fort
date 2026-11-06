@@ -343,6 +343,32 @@ fn is_library_path(module_set* set, ast.node* path, u64 n) bool {
     return set->library.len > 0 && n > 0 && segment_at(path, 0) == set->library;
 }
 
+// Whether the module `path` comes from a trusted root (D9.8): the standard library directory, or
+// `<root>` in `fort --lib std <root>`. A path that starts with `std.` has its one candidate in one
+// of the two (candidate_count), and the path of no other module starts so. The path of an entry
+// module is the base name of its file, which holds no `.` (load), so an entry file `std.ft`, the
+// module `std`, is trusted only by its `import extern;`, as each other module is. An entry file
+// that the closure of `std.rt` read from the standard library directory before it, one file of
+// rt, libc, mem, str and strbuf at this writing, stays the module of that read, with its path and
+// its trust (entry_already_read). Each other file of that directory that the command line names
+// is the entry module of its base name and is not trusted.
+fn from_trusted_root(module_set* set, string path) bool {
+    if (path.len <= STD_SEGMENT.len || !str.starts_with(path, STD_SEGMENT)
+        || path[STD_SEGMENT.len] != PATH_SEPARATOR) {
+        return false;
+    }
+    if (set->library.len > 0) {
+        return set->library == STD_SEGMENT;
+    }
+    return set->std_dir.len > 0;
+}
+
+/// Whether the module `m` is trusted (D9.8): it begins with `import extern;`, it comes from a
+/// trusted root, or it is a section of the interface file of the used library `std`.
+fn trusted(module* m) bool {
+    return m->ast != null && (m->ast->flags & ast.FLAG_TRUSTED) != 0;
+}
+
 // The first `n` segments joined with `.` in `out`, without interning them.
 fn path_view(strbuf.str_buf mut* out, ast.node* path, u64 n) string {
     strbuf.clear(out);
@@ -794,6 +820,9 @@ fn load_module(session.session mut* s, module_set mut* set, string path, string 
     strmap.put(&set->by_real, m->real, cast(set->modules.len - 1, i64));
 
     parse_file(s, set, m);
+    if (from_trusted_root(set, path)) {
+        m->ast->flags |= ast.FLAG_TRUSTED;
+    }
     if (!m->parsed) {
         return null;
     }
@@ -1070,6 +1099,10 @@ fn load_section(session.session mut* s, module_set mut* set, used_library* lib, 
     m->interface = true;
     m->outside = set->outside;
     parse_section(s, set, lib, k, m);
+    if (lib->name == STD_SEGMENT) {
+        // a section of the library `std` is trusted with no `import extern;` (D9.8, D9.11)
+        m->ast->flags |= ast.FLAG_TRUSTED;
+    }
     if (!m->parsed) {
         return null;
     }

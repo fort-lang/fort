@@ -382,6 +382,67 @@ fn imports_come_before_every_declaration() void {
     assert(parse_env.diag_at(e, 0) == "2:1: error: an import comes before every declaration");
 }
 
+// The error of an `import extern;` that is not the first item of its module (D9.3).
+string TRUST_PLACE = "error: 'import extern;' stands only as the first item of a module";
+
+// `import extern;` imports no module and binds no name, so it adds no node: the module is
+// trusted (D9.3, D9.8), and the dump shows it as a word.
+fn the_trust_form_marks_its_module_trusted() void {
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
+    assert(parse_env.parse_dump(e, "import extern;\nimport std.io;\n")
+           == "(module trusted (import (path std io) nil))");
+    assert(parse_env.parse_dump(e, "import extern;\n") == "(module trusted)");
+    assert(parse_env.parse_dump(e, "import extern;\n$if (true) {\n    import std.io;\n}\n")
+           == "(module trusted (compile-if (bool true) (block (import (path std io) nil)) nil))");
+    assert(parse_env.errors(e) == 0);
+    // a module with no such form is not trusted
+    assert(parse_env.parse_dump(e, "import std.io;\n") == "(module (import (path std io) nil))");
+    assert(parse_env.errors(e) == 0);
+}
+
+// Parses `src` in a fresh environment and holds that it reported one error, `want`, and that the
+// module is `dump`.
+fn one_trust_error(string src, string want, string dump) void {
+    parse_env.env mut* own e = parse_env.make();
+    defer parse_env.drop_made(move(e));
+    string got = parse_env.parse_dump(e, src);
+    if (got != dump) {
+        eprintln("parser_stmt_test: expected ", dump, ", got ", got);
+        panic("parser_stmt_test: the module differs");
+    }
+    assert(parse_env.errors(e) == 1);
+    if (parse_env.diag_at(e, 0) != want) {
+        eprintln("parser_stmt_test: expected ", want, ", got ", parse_env.diag_at(e, 0));
+        panic("parser_stmt_test: the error differs");
+    }
+}
+
+// The form stands only as the first item, before each other import and in no `$if` (D9.3). A
+// misplaced one is one error at its `import`, and the parse goes on at the item after its `;`,
+// so no item is lost.
+fn the_trust_form_stands_only_first() void {
+    parse_env.env mut* own b = parse_env.make();
+    defer parse_env.drop_made(move(b));
+    string after_import = parse_env.join2(b, "2:1: ", TRUST_PLACE);
+    one_trust_error("import std.io;\nimport extern;\nimport std.os;\n", after_import,
+                    "(module (import (path std io) nil) (import (path std os) nil))");
+    // a second one: the first one holds
+    one_trust_error("import extern;\nimport extern;\ni32 N = 1;\n", after_import,
+                    "(module trusted (var N (type (prim i32)) (int 1)))");
+    // after a declaration
+    one_trust_error("i32 N = 1;\nimport extern;\ni32 M = 2;\n", after_import,
+                    "(module (var N (type (prim i32)) (int 1)) (var M (type (prim i32)) (int 2)))");
+    parse_env.env mut* own c = parse_env.make();
+    defer parse_env.drop_made(move(c));
+    string in_if = parse_env.join2(c, "2:5: ", TRUST_PLACE);
+    one_trust_error("$if (true) {\n    import extern;\n}\n", in_if,
+                    "(module (compile-if (bool true) (block) nil))");
+    // the form ends with its `;`
+    one_trust_error("import extern\nimport std.io;\n", "2:1: error: expected ';', found 'import'",
+                    "(module (error) (import (path std io) nil))");
+}
+
 fn main() i32 {
     a_declaration_carries_its_type_name_and_initializer();
     every_assignment_operator_is_a_statement();
@@ -406,6 +467,8 @@ fn main() i32 {
     structs_and_enums_carry_their_members();
     the_four_import_forms_of_d9_3();
     imports_come_before_every_declaration();
+    the_trust_form_marks_its_module_trusted();
+    the_trust_form_stands_only_first();
     println("ok");
     return 0;
 }

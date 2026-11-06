@@ -9,6 +9,7 @@
 //| symbol reading ok
 //| ambiguity ok
 //| prefix ok
+//| trust ok
 //| ok
 /// Checks search roots, import paths, the standard library root, ambiguity,
 /// and missing modules in src/fort/modules.ft.
@@ -839,6 +840,81 @@ fn no_further_module_is_read_after_an_import_failed() void {
     assert(modules_env.said(e, "module 'nothere' not found"));
 }
 
+// ---- the trusted modules (D9.8) -----------------------------------------------------
+
+// Whether the module `path` of the set is trusted. A path that the set lacks fails the test.
+fn trusted(modules_env.env* e, string path) bool {
+    modules.module* m = modules.find(&e->set, path);
+    assert(m != null);
+    return modules.trusted(m);
+}
+
+// A module that the loader reads from the standard library directory is trusted, the runtime
+// included, and a module of another root is not.
+fn a_module_of_the_standard_library_directory_is_trusted() void {
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    string main = "import std.io;\nimport util;\nimport stdio;\nfn main() i32 { return 0; }\n";
+    modules_env.add(e, "main.ft", main);
+    modules_env.add(e, "lib/io.ft", "fn close(i32 fd) i32 { return fd; }\n");
+    modules_env.add(e, "util.ft", modules_env.src_add());
+    // a path that starts with the letters `std` and no `.` is a module of another root
+    modules_env.add(e, "stdio.ft", modules_env.src_add());
+    modules_env.std_dir(e, "lib");
+    assert(modules_env.load(e, "main.ft"));
+    assert(trusted(e, "std.rt") && trusted(e, "std.io"));
+    assert(!trusted(e, "util") && !trusted(e, "main") && !trusted(e, "stdio"));
+}
+
+// A module of another root is trusted when its first item is `import extern;` (D9.3).
+fn a_module_that_starts_with_the_trust_form_is_trusted() void {
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import extern;\nimport util;\nfn main() i32 { return 0; }\n");
+    modules_env.add(e, "util.ft", "import extern;\nfn add(i32 a, i32 b) i32 { return a + b; }\n");
+    modules_env.add(e, "lib/io.ft", "fn close(i32 fd) i32 { return fd; }\n");
+    modules_env.std_dir(e, "lib");
+    assert(modules_env.load(e, "main.ft"));
+    assert(trusted(e, "main") && trusted(e, "util"));
+}
+
+// The name does not make a module trusted: the entry file `std.ft` is the module `std`, which the
+// command line names and no root gives, and a file of the standard library directory that the
+// closure of the runtime does not read is the entry module of its base name when the command line
+// names it (the_runtime_as_the_entry_stays_trusted holds a file that the closure reads).
+fn an_entry_module_is_trusted_only_by_its_form() void {
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "std.ft", modules_env.src_main());
+    modules_env.std_dir(e, "lib");
+    assert(modules_env.load(e, "std.ft"));
+    assert(!trusted(e, "std"));
+    modules_env.env mut* own f = modules_env.make();
+    defer modules_env.drop_made(move(f));
+    modules_env.add(f, "lib/io.ft", modules_env.src_main());
+    modules_env.std_dir(f, "lib");
+    assert(modules_env.load(f, "lib/io.ft"));
+    assert(!trusted(f, "io") && trusted(f, "std.rt"));
+    modules_env.env mut* own g = modules_env.make();
+    defer modules_env.drop_made(move(g));
+    modules_env.add(g, "std.ft", "import extern;\nfn main() i32 { return 0; }\n");
+    modules_env.std_dir(g, "lib");
+    assert(modules_env.load(g, "std.ft"));
+    assert(trusted(g, "std"));
+}
+
+// A file that the closure of the runtime read from the standard library directory, named on the
+// command line, stays the module of that read, with its path and its trust (entry_already_read).
+fn the_runtime_as_the_entry_stays_trusted() void {
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.std_dir(e, "lib");
+    assert(modules_env.load(e, "lib/rt.ft"));
+    assert(modules.count(&e->set) == 1);
+    assert(trusted(e, "std.rt"));
+    assert(modules.entry(&e->set) == modules.find(&e->set, "std.rt"));
+}
+
 fn main() i32 {
     the_entry_module_path_is_its_base_name();
     an_entry_file_in_a_directory_keeps_only_its_base_name();
@@ -911,6 +987,11 @@ fn main() i32 {
     every_failing_import_of_one_module_is_reported();
     no_further_module_is_read_after_an_import_failed();
     println("prefix ok");
+    a_module_of_the_standard_library_directory_is_trusted();
+    a_module_that_starts_with_the_trust_form_is_trusted();
+    an_entry_module_is_trusted_only_by_its_form();
+    the_runtime_as_the_entry_stays_trusted();
+    println("trust ok");
     println("ok");
     return 0;
 }
