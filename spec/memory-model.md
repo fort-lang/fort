@@ -469,7 +469,11 @@ exactly two things for ownership, and it checks two more at compile time:
   D17.11 applies, so `if (l->head == null) { l->head = new(node); }` passes (gen rule 6). The slot
   of an owning local is zeroed once on entry, so a declaration in a loop whose body does not `del`
   or `move` the local is an error: the back edge brings a live value to the declaration.
-  Assignments of owning aggregates are not checked field by field.
+  A store of a whole value of an owning aggregate is legal only when the compiler proves that each
+  `own` reference in the fixed storage of its destination holds the zero value at the store, with
+  the same facts. A declaration passes, because the storage of a local whose scope starts holds no
+  allocation. The compiler first reports each such store that it cannot prove and accepts the
+  program; a later change makes each such store a compile error (D17.11).
 - **The leak rule (D17.20).** A named local of `own` reference type at the end of its scope, and
   such a parameter or temporary at a `return`, must hold the zero value. So must each owner in the
   fixed storage of such a local of an owning aggregate type (D17.7), and the error names the first
@@ -504,7 +508,7 @@ u8 mut@ own other = move(buf);       // buf is {null, 0} again
 buf = move(other);                   // fine
 list mut l = {};
 l.head = new(node);                  // fine: zero-initialized field
-l = list{};                          // not checked: an aggregate assignment (D17.11); leaks
+l = list{};                          // reported, later an error: l.head can hold a node (D17.11)
 ```
 
 What is not tracked, exactly as in C (D10.7, D17.14): a view, or a copy of an `own` value made
@@ -927,9 +931,9 @@ Notes:
 - Division checks apply at every width and in both modes (D6.13, D11.3).
 - `assert` is active in both modes; its message carries the source text of the argument (D12.2).
 - The overwrite check guards every store into an lvalue of `own` reference type, a declaration
-  included, and nothing else: `move`, `del` and aggregate assignments have no overwrite check
-  (D17.11, section 2.5). It is a compile-time check in every build mode, and no build emits a
-  runtime check for it.
+  included, and every store of a whole value of an owning aggregate, which it reports and does not
+  refuse until a later change (D17.11, section 2.5). `move` and `del` have no overwrite check. It
+  is a compile-time check in every build mode, and no build emits a runtime check for it.
 - The `noreturn` guard is `call void @llvm.trap()` followed by `unreachable`, emitted after the
   body of a `noreturn` function and after every call to one (D8.5, D19.7). It is reachable only
   when an `extern` declared `noreturn` returns anyway. Linux x86-64 raises SIGILL.

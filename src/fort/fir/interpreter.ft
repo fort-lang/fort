@@ -358,6 +358,21 @@ fn location(machine* it) diag.loc {
     return bl->term.loc;
 }
 
+// The exit location of the statement that runs next in the frame at the top of the stack: the exit
+// that expanded a deferred statement, or the empty range for each other statement and for a
+// terminator (spec/fir.md 9.5).
+fn exit_location(machine* it) diag.loc {
+    if (it->frames.len == 0) {
+        return diag.loc{};
+    }
+    frame* fr = &it->frames.items[it->frames.len - 1];
+    fir.block* bl = fir.block_at(fr->f, fr->block);
+    if (cast(fr->next, u64) < bl->statements.len) {
+        return bl->statements.items[cast(fr->next, u64)].exit_loc;
+    }
+    return diag.loc{};
+}
+
 // Ends the run with `kind`, unless it has ended already.
 fn stop(machine mut* it, outcome_kind kind, string what) void {
     if (has_ended(it)) {
@@ -2099,6 +2114,7 @@ fn return_from(machine mut* it, u64 k) void {
     // the caller's statement stores the result
     it->sh.sym = caller->f->sym;
     it->sh.at = location(it);
+    it->sh.exit_at = exit_location(it);
     wait_kind wait = caller->wait;
     it->frames.items[c].wait = wait_kind.wk_none;
     switch (wait) {
@@ -2146,6 +2162,7 @@ fn step(machine mut* it) void {
     fir.block* bl = fir.block_at(fr->f, fr->block);
     it->sh.sym = fr->f->sym;
     it->sh.at = location(it);
+    it->sh.exit_at = exit_location(it);
     if (cast(fr->next, u64) < bl->statements.len) {
         execute(it, k, &bl->statements.items[cast(fr->next, u64)]);
         return;

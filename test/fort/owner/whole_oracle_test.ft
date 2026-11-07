@@ -1,0 +1,813 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| text: sites 32, proved 20, rejected with an event 10, false rejects 2
+//| source: sites 58, proved 36, rejected with an event 14, false rejects 8
+/// Holds the verdicts of the stores of a whole value of an owning aggregate in owner.prover
+/// (D17.11, spec/fir.md 11, Whole stores) against the runs of fir.interpreter and the events of
+/// fir.shadow (spec/ownership-design.md 3). A store over an owner slot of a live allocation is an
+/// `overwrite` event at the store. A whole store that the pass proves writes over no such slot on
+/// any run, so its run has no `overwrite` event there; a run that has one is a false accept, and
+/// the test panics. An `overwrite` event names the exit location of its statement, so each
+/// expansion of a deferred store at its own exit is a site of its own. Each case gives the verdict
+/// of each of its whole stores, in the order of the proof: `P` for a store that the pass proves,
+/// `R+` for a store that it does not prove and whose run has an `overwrite` event there, and `R-`
+/// for a store that it does not prove and whose run has none, a false reject. Each set prints its
+/// counts.
+import check_env;
+import fort.fir;
+import fort.fir_lower;
+import fort.fir_print;
+import fort.fir_verify;
+import fort.owner.prover;
+import run_env;
+import std.str;
+import std.strbuf;
+
+// The declarations that the cases name. `fill` gives a box whose owner holds an allocation.
+// `make` gives a box in an allocation whose owner holds an allocation, and `make_empty` one whose
+// owner is null. `G` is a global box, and a `holder` holds a box in an allocation of its own.
+string[34] PRELUDE = {
+    "struct box {",
+    "    u8 mut* own data;",
+    "}",
+    "box mut G = box{};",
+    "fn fill() box {",
+    "    return box{new(u8)};",
+    "}",
+    "fn take(box b) void {",
+    "    del(b.data);",
+    "}",
+    "fn make() box mut* own {",
+    "    box mut* own p = new(box);",
+    "    p->data = new(u8);",
+    "    return p;",
+    "}",
+    "fn make_empty() box mut* own {",
+    "    return new(box);",
+    "}",
+    "fn free_made(box mut* own p) void {",
+    "    box kept = move(*p);",
+    "    del(p);",
+    "    take(move(kept));",
+    "}",
+    "struct holder {",
+    "    box mut* own inner;",
+    "}",
+    "fn free_holder(holder mut* own h) void {",
+    "    free_made(move(h->inner));",
+    "    del(h);",
+    "}",
+    "fn one() u64 {",
+    "    return 1;",
+    "}",
+    "",
+};
+
+// The FIR cases. Each store of a case stands at a location of its own, the line of the statement
+// in the comment of the case.
+string[249] TEXT = {
+    // a fresh `new` and a value with no call: the temporary and the store through `p`: P P
+    "fn main.o1() -> void {",
+    "    let _1 (p): box mut* own #1:1;",
+    "    let _2: box;",
+    "    let _3: u8 mut* own;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        _1 = const zero box mut* own #1:1;",
+    "        live(_1) #1:1;",
+    "        _1 = alloc<box>(const u64 1) #1:1;",
+    "        _3 = alloc<u8>(const u64 1) #2:1;",
+    "        _2 = aggregate box(move _3) #2:1;",
+    "        (*_1) = move _2 #3:1;",
+    "        _4 = call fn main.free_made(move _1) #4:1;",
+    "        dead(_1) #4:1;",
+    "        return #4:1;",
+    "    }",
+    "}",
+    // a field of the fresh object filled first: P R+
+    "fn main.o2() -> void {",
+    "    let _1 (p): box mut* own #1:1;",
+    "    let _2: box;",
+    "    let _3: u8 mut* own;",
+    "    let _4: u8 mut* own;",
+    "    let _5: void;",
+    "    bb0: {",
+    "        _1 = const zero box mut* own #1:1;",
+    "        live(_1) #1:1;",
+    "        _1 = alloc<box>(const u64 1) #1:1;",
+    "        _3 = alloc<u8>(const u64 1) #2:1;",
+    "        (*_1).0 = move _3 #2:1;",
+    "        _4 = alloc<u8>(const u64 1) #3:1;",
+    "        _2 = aggregate box(move _4) #3:1;",
+    "        (*_1) = move _2 #4:1;",
+    "        _5 = call fn main.free_made(move _1) #5:1;",
+    "        dead(_1) #5:1;",
+    "        return #5:1;",
+    "    }",
+    "}",
+    // the make of another function fills its owner: P R+
+    "fn main.o3() -> void {",
+    "    let _1 (p): box mut* own #1:1;",
+    "    let _2: box;",
+    "    let _3: u8 mut* own;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        _1 = const zero box mut* own #1:1;",
+    "        live(_1) #1:1;",
+    "        _1 = call fn main.make() #1:1;",
+    "        _3 = alloc<u8>(const u64 1) #2:1;",
+    "        _2 = aggregate box(move _3) #2:1;",
+    "        (*_1) = move _2 #3:1;",
+    "        _4 = call fn main.free_made(move _1) #4:1;",
+    "        dead(_1) #4:1;",
+    "        return #4:1;",
+    "    }",
+    "}",
+    // the make of another function leaves its owner null, and the pass reads no callee: P R-
+    "fn main.o4() -> void {",
+    "    let _1 (p): box mut* own #1:1;",
+    "    let _2: box;",
+    "    let _3: u8 mut* own;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        _1 = const zero box mut* own #1:1;",
+    "        live(_1) #1:1;",
+    "        _1 = call fn main.make_empty() #1:1;",
+    "        _3 = alloc<u8>(const u64 1) #2:1;",
+    "        _2 = aggregate box(move _3) #2:1;",
+    "        (*_1) = move _2 #3:1;",
+    "        _4 = call fn main.free_made(move _1) #4:1;",
+    "        dead(_1) #4:1;",
+    "        return #4:1;",
+    "    }",
+    "}",
+    // a declaration, then a second call result over the first: P R+
+    "fn main.o5() -> void {",
+    "    let _1 (b): box #1:1;",
+    "    let _2: void;",
+    "    bb0: {",
+    "        live(_1) #1:1;",
+    "        _1 = call fn main.fill() #1:1;",
+    "        _1 = call fn main.fill() #2:1;",
+    "        _2 = call fn main.take(move _1) #3:1;",
+    "        dead(_1) #3:1;",
+    "        return #3:1;",
+    "    }",
+    "}",
+    // a `del` of the owner before the second store: P P
+    "fn main.o6() -> void {",
+    "    let _1 (b): box #1:1;",
+    "    let _2: void;",
+    "    bb0: {",
+    "        live(_1) #1:1;",
+    "        _1 = call fn main.fill() #1:1;",
+    "        del(move _1.0) #2:1;",
+    "        _1 = call fn main.fill() #3:1;",
+    "        _2 = call fn main.take(move _1) #4:1;",
+    "        dead(_1) #4:1;",
+    "        return #4:1;",
+    "    }",
+    "}",
+    // a global holds the zero value at the start of the run, but no fact: R- R+
+    "fn main.o7() -> void {",
+    "    bb0: {",
+    "        global main.G = call fn main.fill() #1:1;",
+    "        global main.G = call fn main.fill() #2:1;",
+    "        del(move global main.G.0) #3:1;",
+    "        return #3:1;",
+    "    }",
+    "}",
+    // the zero value over a live owner, and over a freed one: P R+ P
+    "fn main.o8() -> void {",
+    "    let _1 (b): box #1:1;",
+    "    let _2: u8 mut* own;",
+    "    bb0: {",
+    "        live(_1) #1:1;",
+    "        _1 = const zero box #1:1;",
+    "        _2 = alloc<u8>(const u64 1) #2:1;",
+    "        _1.0 = move _2 #2:1;",
+    "        _1 = const zero box #3:1;",
+    "        _2 = alloc<u8>(const u64 1) #4:1;",
+    "        _1.0 = move _2 #4:1;",
+    "        del(move _1.0) #5:1;",
+    "        _1 = const zero box #6:1;",
+    "        dead(_1) #6:1;",
+    "        return #6:1;",
+    "    }",
+    "}",
+    // an element of a fixed array of boxes with a constant key: P P R+
+    "fn main.o9() -> void {",
+    "    let _1 (v): box[2] #1:1;",
+    "    let _2: u64;",
+    "    let _3: u8 mut* own;",
+    "    let _4: box;",
+    "    let _5: u8 mut* own;",
+    "    let _6: u64;",
+    "    let _7: u64;",
+    "    bb0: {",
+    "        live(_1) #1:1;",
+    "        _1 = const zero box[2] #1:1;",
+    "        _2 = const u64 1;",
+    "        _3 = alloc<u8>(const u64 1) #2:1;",
+    "        _1[_2].0 = move _3 #2:1;",
+    "        _5 = alloc<u8>(const u64 1) #3:1;",
+    "        _4 = aggregate box(move _5) #3:1;",
+    "        _6 = const u64 1;",
+    "        _1[_6] = move _4 #4:1;",
+    "        del(move _1[_6].0) #5:1;",
+    "        _7 = const u64 0;",
+    "        del(move _1[_7].0) #5:1;",
+    "        dead(_1) #5:1;",
+    "        return #5:1;",
+    "    }",
+    "}",
+    // a test against null on the result of a make: the arm where the owner is null: P P
+    "fn main.o10() -> void {",
+    "    let _1 (p): box mut* own #1:1;",
+    "    let _2: bool;",
+    "    let _3: box;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        _1 = const zero box mut* own #1:1;",
+    "        live(_1) #1:1;",
+    "        _1 = call fn main.make_empty() #1:1;",
+    "        _2 = eq(copy (*_1).0, const null u8 mut* own) #2:1;",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2] #2:1;",
+    "    }",
+    "    bb1: {",
+    "        _3 = const zero box #3:1;",
+    "        (*_1) = move _3 #4:1;",
+    "        goto bb2 #4:1;",
+    "    }",
+    "    bb2: {",
+    "        _4 = call fn main.free_made(move _1) #5:1;",
+    "        dead(_1) #5:1;",
+    "        return #5:1;",
+    "    }",
+    "}",
+    // a temporary that the back edge brings live to its store: R+
+    "fn main.o11() -> void {",
+    "    let _1: box;",
+    "    let _2 (i): u64 #1:1;",
+    "    let _3: bool;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        live(_2) #1:1;",
+    "        _2 = const u64 0 #1:1;",
+    "        goto bb1 #1:1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = call fn main.fill() #2:1;",
+    "        _2 = add(copy _2, const u64 1) #3:1;",
+    "        _3 = lt(copy _2, const u64 2) #3:1;",
+    "        switch(copy _3) -> [true: bb1, otherwise: bb2] #3:1;",
+    "    }",
+    "    bb2: {",
+    "        _4 = call fn main.take(move _1) #4:1;",
+    "        dead(_2) #4:1;",
+    "        return #4:1;",
+    "    }",
+    "}",
+    // the call of the right side between the `addr` and the store makes the address stale: P R+
+    "fn main.o12() -> void {",
+    "    let _1 (p): box mut* own #1:1;",
+    "    let _2: box mut*;",
+    "    let _3: box;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        _1 = const zero box mut* own #1:1;",
+    "        live(_1) #1:1;",
+    "        _1 = call fn main.make() #1:1;",
+    "        _2 = addr mut((*_1)) #2:1;",
+    "        _3 = call fn main.fill() #3:1;",
+    "        (*_2) = move _3 #4:1;",
+    "        _4 = call fn main.free_made(move _1) #5:1;",
+    "        dead(_1) #5:1;",
+    "        return #5:1;",
+    "    }",
+    "}",
+    // a deref after the first projection gives no tracked place: P R+
+    "fn main.o13() -> void {",
+    "    let _1 (h): holder mut* own #1:1;",
+    "    let _2: box mut* own;",
+    "    let _3: box;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        _1 = const zero holder mut* own #1:1;",
+    "        live(_1) #1:1;",
+    "        _1 = alloc<holder>(const u64 1) #1:1;",
+    "        _2 = call fn main.make() #2:1;",
+    "        (*_1).0 = move _2 #2:1;",
+    "        _3 = call fn main.fill() #3:1;",
+    "        (*(*_1).0) = move _3 #4:1;",
+    "        _4 = call fn main.free_holder(move _1) #5:1;",
+    "        dead(_1) #5:1;",
+    "        return #5:1;",
+    "    }",
+    "}",
+    // an index that a call gives has no key: the scope bit proves the first store over the zero
+    // value, and not the second: P P P P R+
+    "fn main.o14() -> void {",
+    "    let _1 (v): box[2] #1:1;",
+    "    let _2: u64;",
+    "    let _3: box;",
+    "    let _4: box;",
+    "    let _5: u64;",
+    "    let _6: u64;",
+    "    bb0: {",
+    "        live(_1) #1:1;",
+    "        _1 = const zero box[2] #1:1;",
+    "        _2 = call fn main.one() #2:1;",
+    "        _3 = call fn main.fill() #3:1;",
+    "        _1[_2] = move _3 #4:1;",
+    "        _4 = call fn main.fill() #5:1;",
+    "        _1[_2] = move _4 #6:1;",
+    "        _5 = const u64 0;",
+    "        del(move _1[_5].0) #7:1;",
+    "        _6 = const u64 1;",
+    "        del(move _1[_6].0) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+};
+
+string[14] TEXT_VERDICTS = {
+    "P P", "P R+", "P R+", "P R-", "P R+", "P P", "R- R+", "P R+ P", "P P R+", "P P", "R+",
+    "P R+", "P R+", "P P P P R+",
+};
+
+// The counts of a set: its whole stores, those that the pass proves, those that it does not prove
+// and whose run has an `overwrite` event there, and the false rejects.
+struct counts {
+    u64 sites;
+    u64 proved;
+    u64 events;
+    u64 false_rejects;
+}
+
+// Whether the report `got` of a run has an `overwrite` event in the function whose dotted name is
+// `name` at the location `at`: a line `event overwrite in <name> at <line>:<col>`, then ` exit
+// <line>:<col>` when the store has an exit location and nothing of the kind when it has none, with
+// or without the tags after it. The exit location tells the expansions of one deferred store at two
+// exits apart (spec/fir.md 11).
+fn has_overwrite(string got, string name, diag_at at) bool {
+    strbuf.str_buf mut want = strbuf.create();
+    defer del(want.data);
+    strbuf.append(&want, "event overwrite in ");
+    strbuf.append(&want, name);
+    strbuf.append(&want, " at ");
+    strbuf.append_u64(&want, cast(at.line, u64));
+    strbuf.push(&want, ':');
+    strbuf.append_u64(&want, cast(at.col, u64));
+    if (at.exit_line > 0) {
+        strbuf.append(&want, " exit ");
+        strbuf.append_u64(&want, cast(at.exit_line, u64));
+        strbuf.push(&want, ':');
+        strbuf.append_u64(&want, cast(at.exit_col, u64));
+    }
+    string head = strbuf.view(&want);
+    u64 mut start = 0;
+    while (start < got.len) {
+        u64 mut end = start;
+        while (end < got.len && got[end] != '\n') {
+            end += 1;
+        }
+        string text = got[start..end];
+        if (str.starts_with(text, head) && is_tail(text[head.len..])) {
+            return true;
+        }
+        start = end + 1;
+    }
+    return false;
+}
+
+// Whether `rest`, the text of a line of an event after its location, ends the line or starts the
+// tags: empty, or a space and no exit location.
+fn is_tail(string rest) bool {
+    return rest.len == 0 || (rest[0] == ' ' && !str.starts_with(rest, " exit "));
+}
+
+// Appends the verdict of each whole store of the proof `p` of `f` to `out`, against the report
+// `got` of a run in the function whose dotted name is `name`, and counts them in `n`. Panics on a
+// false accept: a store that `p` proves and whose run has an `overwrite` event at its location and
+// its exit location.
+fn judge(fir.func* f, prover.proof* p, string got, string name, strbuf.str_buf mut* out,
+         counts mut* n) void {
+    strbuf.clear(out);
+    u64 mut k = 0;
+    while (k < p->wholes.len) {
+        prover.whole* w = &p->wholes[k];
+        diag_at at = loc_of(f, w);
+        bool event = has_overwrite(got, name, at);
+        if (k > 0) {
+            strbuf.push(out, ' ');
+        }
+        n->sites += 1;
+        if (w->proved && event) {
+            eprintln(name, " stores over a live owner at ", at.line, ":", at.col);
+            panic("whole_oracle_test: a false accept");
+        }
+        if (w->proved) {
+            strbuf.push(out, 'P');
+            n->proved += 1;
+        } else if (event) {
+            strbuf.append(out, "R+");
+            n->events += 1;
+        } else {
+            strbuf.append(out, "R-");
+            n->false_rejects += 1;
+        }
+        k += 1;
+    }
+}
+
+// The line and the column of a whole store, and those of its exit location, which are 0 for a
+// store that no expansion of a deferred statement made.
+struct diag_at {
+    u32 line;
+    u32 col;
+    u32 exit_line;
+    u32 exit_col;
+}
+
+// The location of the whole store `w` of `f`.
+fn loc_of(fir.func* f, prover.whole* w) diag_at {
+    fir.statement* s = fir.block_statement(f, w->block, w->index);
+    return diag_at{s->loc.line, s->loc.col, s->exit_loc.line, s->exit_loc.col};
+}
+
+// The dotted name of `f`, as a report of a run names it, in `out`.
+fn name_of(fir.func* f, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    fir_print.print_symbol(f->sym, out);
+}
+
+// Proves `f`, holds that the report `got` of its run ends in a return, and holds the verdicts of
+// its whole stores against `want`, with `name` as the dotted name of the function of the run.
+fn expect_case(fir.func* f, string got, string name, string want, counts mut* n) void {
+    strbuf.str_buf mut verdicts = strbuf.create();
+    defer del(verdicts.data);
+    if (!str.ends_with(got, "return\n")) {
+        eprintln(got);
+        panic("whole_oracle_test: a run does not return");
+    }
+    prover.proof mut* own p = prover.prove_made(f);
+    defer prover.drop_made(move(p));
+    judge(f, p, got, name, &verdicts, n);
+    if (strbuf.view(&verdicts) != want) {
+        eprintln(name, " gives ", strbuf.view(&verdicts), " and not ", want);
+        panic("whole_oracle_test: a verdict differs");
+    }
+}
+
+// Prints the counts of the set `set`.
+fn print_counts(string set, counts* n) void {
+    println(set, ": sites ", n->sites, ", proved ", n->proved, ", rejected with an event ",
+            n->events, ", false rejects ", n->false_rejects);
+}
+
+// Runs each FIR case and holds its verdicts against its run.
+fn each_text_case_holds_against_its_run(run_env.env mut* e) void {
+    run_env.check(e, PRELUDE[..]);
+    fir.module mut* own m = run_env.parse_made(e, TEXT[..]);
+    defer fir.module_drop_made(move(m));
+    run_text_cases(e, m);
+}
+
+// The runs of each_text_case_holds_against_its_run over the functions of `m`.
+fn run_text_cases(run_env.env mut* e, fir.module* m) void {
+    assert(m->funcs.len == TEXT_VERDICTS.len);
+    strbuf.str_buf mut name = strbuf.create();
+    defer del(name.data);
+    counts mut n = counts{};
+    u64[1] none = {0};
+    u64 mut k = 0;
+    while (k < m->funcs.len) {
+        fir.func* f = fir.module_function_at(m, k);
+        name_of(f, &name);
+        string got = run_env.run_in(e, m, strbuf.view(&name), none[..0]);
+        expect_case(f, got, strbuf.view(&name), TEXT_VERDICTS[k], &n);
+        k += 1;
+    }
+    print_counts("text", &n);
+}
+
+// The fort cases: each runs its function, and the function of its proof is the first name of its
+// pair in SOURCE_CASES.
+string[138] SOURCE = {
+    "struct box {",
+    "    u8 mut* own data;",
+    "}",
+    "fn fill() box {",
+    "    return box{new(u8)};",
+    "}",
+    "fn make() box mut* own {",
+    "    box mut* own p = new(box);",
+    "    p->data = new(u8);",
+    "    return p;",
+    "}",
+    // the probe of the ruling: R+ P
+    "fn s1() void {",
+    "    box mut* own p = make();",
+    "    *p = fill();",
+    "    box kept = move(*p);",
+    "    del(p);",
+    "    del(kept.data);",
+    "}",
+    // a fresh `new` and a `move` with no call between: P P
+    "fn s2() void {",
+    "    box mut* own p = new(box);",
+    "    box mut b = box{new(u8)};",
+    "    *p = move(b);",
+    "    del(p->data);",
+    "    del(p);",
+    "}",
+    // the call of the right side kills the fact of the fresh `new` (kill rule 5): R-
+    "fn s3() void {",
+    "    box mut* own p = new(box);",
+    "    *p = fill();",
+    "    del(p->data);",
+    "    del(p);",
+    "}",
+    // two declarations, then a store over a field that holds an allocation: P P R+
+    "fn s4() void {",
+    "    box mut b = box{};",
+    "    b.data = new(u8);",
+    "    box mut c = box{};",
+    "    b = move(c);",
+    "    del(b.data);",
+    "}",
+    // a declaration in a loop: P
+    "fn s5() void {",
+    "    for (i32 mut i = 0; i < 2; i++) {",
+    "        box mut b = fill();",
+    "        del(b.data);",
+    "    }",
+    "}",
+    // an element with a local key, after a store of the zero value only, and after its `del`: P P P
+    "fn s6() void {",
+    "    box[2] mut v = {};",
+    "    u64 k = 1;",
+    "    v[k] = fill();",
+    "    del(v[k].data);",
+    "    v[k] = fill();",
+    "    del(v[0].data);",
+    "    del(v[1].data);",
+    "}",
+    // a store through a parameter: R+ when `s7` calls it, and R- when `s8` calls it
+    "fn over(box mut* q) void {",
+    "    *q = fill();",
+    "}",
+    // the owner holds an allocation on one path only: R- when `some_true` calls it, and R+ when
+    // `some_false` calls it
+    "fn some_path(bool c) void {",
+    "    box mut b = fill();",
+    "    if (c) {",
+    "        del(b.data);",
+    "    }",
+    "    b = fill();",
+    "    del(b.data);",
+    "}",
+    // a `del` before each store of a loop: P P
+    "fn each_round() void {",
+    "    box mut b = box{};",
+    "    for (i32 mut i = 0; i < 2; i++) {",
+    "        del(b.data);",
+    "        b = fill();",
+    "    }",
+    "    del(b.data);",
+    "}",
+    // the back edge brings the value of the last round to the store: P R+
+    "fn no_del() void {",
+    "    box mut b = box{};",
+    "    for (i32 mut i = 0; i < 2; i++) {",
+    "        b = fill();",
+    "    }",
+    "    del(b.data);",
+    "}",
+    // the zero value twice through a parameter after a `del`: P P
+    "fn zero_twice(box mut* q) void {",
+    "    del(q->data);",
+    "    *q = box{};",
+    "    *q = box{};",
+    "}",
+    // an index that reads memory has no key: R+ when `shelf_caller` calls it
+    "struct shelf {",
+    "    u64 n;",
+    "    box[2] items;",
+    "}",
+    "fn at_n(shelf mut* s) void {",
+    "    s->items[s->n] = fill();",
+    "}",
+    // the kill rules of the first store through `p` end the fact that the `new` gave, so the
+    // second store is no proved store over the owner that the first put there: P P P R+
+    "fn twice() void {",
+    "    box mut* own p = new(box);",
+    "    box mut b = box{new(u8)};",
+    "    box mut c = box{new(u8)};",
+    "    *p = move(b);",
+    "    *p = move(c);",
+    "    del(p->data);",
+    "    del(p);",
+    "}",
+    // the deferred store expands at the `return` after the `del` and at the closing brace after a
+    // store, two whole stores at one location: P P P R+ when `two_false` calls it, and P P P R-
+    // when `two_true` calls it
+    "fn two_exits(bool c) void {",
+    "    box mut b = box{};",
+    "    defer b = fill();",
+    "    if (c) {",
+    "        del(b.data);",
+    "        return;",
+    "    }",
+    "    b = fill();",
+    "}",
+    // the deferred store expands at the closing brace after a store, and at the `return` after a
+    // store into the field, a live owner; the proof lists the store of the closing brace first:
+    // P P R- R+ when `mixed_true` calls it, and P P R+ R- when `mixed_false` calls it; each event
+    // names the exit of its expansion
+    "fn mixed(bool c) void {",
+    "    box mut b = box{};",
+    "    defer b = fill();",
+    "    if (c) {",
+    "        b.data = new(u8);",
+    "        return;",
+    "    }",
+    "    b = fill();",
+    "}",
+    // as `mixed`, with a deferred store of a `move`, which a step of the run executes and not the
+    // return of a call: P P P R- R+ when `move_true` calls it, and P P P R+ R- when `move_false`
+    // calls it
+    "fn move_defer(bool c) void {",
+    "    box mut b = box{};",
+    "    box mut x = box{new(u8)};",
+    "    defer b = move(x);",
+    "    if (c) {",
+    "        b.data = new(u8);",
+    "        return;",
+    "    }",
+    "    b = fill();",
+    "}",
+    // one run executes the expansion at the closing brace of the body and then the one at the
+    // `break`, two events of one location with two exit locations: P R+ R+
+    "fn loop_defer() void {",
+    "    for (i32 mut i = 0; i < 3; i++) {",
+    "        box mut b = box{};",
+    "        defer b = fill();",
+    "        b.data = new(u8);",
+    "        if (i == 1) {",
+    "            break;",
+    "        }",
+    "    }",
+    "}",
+};
+
+// The functions of the source cases: the function that the pass proves, the function that the run
+// calls, and the verdicts.
+string[66] SOURCE_CASES = {
+    "s1", "s1", "R+ P",
+    "s2", "s2", "P P",
+    "s3", "s3", "R-",
+    "s4", "s4", "P P R+",
+    "s5", "s5", "P",
+    "s6", "s6", "P P P",
+    "over", "s7", "R+",
+    "over", "s8", "R-",
+    "some_path", "some_true", "P R-",
+    "some_path", "some_false", "P R+",
+    "each_round", "each_round", "P P",
+    "no_del", "no_del", "P R+",
+    "zero_twice", "zero_caller", "P P",
+    "at_n", "shelf_caller", "R+",
+    "twice", "twice", "P P P R+",
+    "two_exits", "two_false", "P P P R+",
+    "two_exits", "two_true", "P P P R-",
+    "mixed", "mixed_true", "P P R- R+",
+    "mixed", "mixed_false", "P P R+ R-",
+    "move_defer", "move_true", "P P P R- R+",
+    "move_defer", "move_false", "P P P R+ R-",
+    "loop_defer", "loop_defer", "P R+ R+",
+};
+
+// The callers: `s7` gives `over` a box whose owner holds an allocation, and `s8` one whose owner it
+// freed. `some_true` and `some_false` take each path of `some_path`, `zero_caller` gives
+// `zero_twice` a box whose owner holds an allocation, and `shelf_caller` gives `at_n` a shelf whose
+// element `n` holds one. `two_false` and `two_true` take each exit of `two_exits`, `mixed_true`
+// and `mixed_false` each exit of `mixed`, and `move_true` and `move_false` each exit of
+// `move_defer`.
+string[46] CALLERS = {
+    "fn s7() void {",
+    "    box mut b = fill();",
+    "    over(&b);",
+    "    del(b.data);",
+    "}",
+    "fn s8() void {",
+    "    box mut b = fill();",
+    "    del(b.data);",
+    "    over(&b);",
+    "    del(b.data);",
+    "}",
+    "fn some_true() void {",
+    "    some_path(true);",
+    "}",
+    "fn some_false() void {",
+    "    some_path(false);",
+    "}",
+    "fn zero_caller() void {",
+    "    box mut b = fill();",
+    "    zero_twice(&b);",
+    "}",
+    "fn shelf_caller() void {",
+    "    shelf mut s = shelf{1, {fill(), fill()}};",
+    "    at_n(&s);",
+    "    del(s.items[0].data);",
+    "    del(s.items[1].data);",
+    "}",
+    "fn two_false() void {",
+    "    two_exits(false);",
+    "}",
+    "fn two_true() void {",
+    "    two_exits(true);",
+    "}",
+    "fn mixed_true() void {",
+    "    mixed(true);",
+    "}",
+    "fn mixed_false() void {",
+    "    mixed(false);",
+    "}",
+    "fn move_true() void {",
+    "    move_defer(true);",
+    "}",
+    "fn move_false() void {",
+    "    move_defer(false);",
+    "}",
+    "",
+};
+
+// Lowers the function `name` of the checked source of `e` into `out` and holds that the verifier
+// accepts it.
+fn lower(run_env.env mut* e, string name, fir.func mut* out) void {
+    fir_lower.report mut why = fir_lower.report{};
+    lower_decl(e, name, out, &why);
+    fir_verify.runtime rt = fir_verify.runtime_of(&e->c.ck);
+    fir_verify.violation mut v = fir_verify.violation{};
+    if (fir_verify.find_violation(out, &rt, &v)) {
+        panic("whole_oracle_test: the verifier refuses the lowering");
+    }
+}
+
+// Lowers the declaration of `name` of the checked source of `e` into `out`.
+fn lower_decl(run_env.env mut* e, string name, fir.func mut* out, fir_lower.report mut* why)
+    void {
+    if (!fir_lower.lower_function(&e->c.ck, check_env.sym_main(&e->c, name)->node, out, why)) {
+        panic("whole_oracle_test: the lowering refuses the function");
+    }
+}
+
+// Runs each fort case and holds the verdicts of its proved function against its run.
+fn each_source_case_holds_against_its_run(run_env.env mut* e) void {
+    string[184] mut all = {};
+    u64 mut k = 0;
+    while (k < SOURCE.len) {
+        all[k] = SOURCE[k];
+        k += 1;
+    }
+    while (k < all.len) {
+        all[k] = CALLERS[k - SOURCE.len];
+        k += 1;
+    }
+    run_env.check(e, all[..]);
+    run_source_cases(e);
+}
+
+// The runs of each_source_case_holds_against_its_run over SOURCE_CASES.
+fn run_source_cases(run_env.env mut* e) void {
+    strbuf.str_buf mut name = strbuf.create();
+    defer del(name.data);
+    fir.module mut* own none = fir.module_make();
+    defer fir.module_drop_made(move(none));
+    counts mut n = counts{};
+    u64[1] args = {0};
+    u64 mut k = 0;
+    while (k < SOURCE_CASES.len) {
+        fir.func mut* own f = fir.func_make();
+        lower(e, SOURCE_CASES[k], f);
+        name_of(f, &name);
+        string got = run_env.run_in(e, none, SOURCE_CASES[k + 1], args[..0]);
+        expect_case(f, got, strbuf.view(&name), SOURCE_CASES[k + 2], &n);
+        fir.func_drop_made(move(f));
+        k += 3;
+    }
+    print_counts("source", &n);
+}
+
+fn main() i32 {
+    run_env.env mut* own e = run_env.make();
+    defer run_env.drop_made(move(e));
+    e->events = true;
+    each_text_case_holds_against_its_run(e);
+    each_source_case_holds_against_its_run(e);
+    return 0;
+}

@@ -1,11 +1,14 @@
-/// Proves at compile time that each store into an `own` reference finds its destination empty:
-/// the forward must-empty analysis of the overwrite check (D17.11, spec/fir.md 11). It reads one
+/// Proves at compile time that each store into an `own` reference finds its destination empty: the
+/// forward must-empty analysis of the overwrite check (D17.11, spec/fir.md 11). It reads one
 /// verified FIR function before the build-mode pass, and it reads no other function. It holds the
 /// emptiness fact of spec/ownership-design.md 4.4, and with it it proves part 1 of the leak rule
 /// (D17.20): an owner local holds the zero value at each exit of its scope. It also proves part 2,
 /// which only reports for now: each inner owner of `*p` holds the zero value before a `del` or an
 /// owning `cast` of `p`. It proves part 1 for each owner below a local of an owning aggregate type
-/// too (spec/fir.md 11, Aggregates).
+/// too, and each exit that it does not prove is an error (spec/fir.md 11, Aggregates). It also
+/// proves each store of a whole value of an owning aggregate, which only reports until the
+/// migration of those stores ends: each owner below the destination holds the zero value
+/// (spec/fir.md 11, Whole stores).
 //
 // The analysis proves each store into a place of an `own` reference type that needs a proof
 // (find_stores): the fact of its place holds after its right side and before its own kill rules. A
@@ -25,9 +28,11 @@
 // (judge_exits). Part 2 adds the fact of each inner owner of each `del` or owning `cast`
 // (find_inners), and a fourth walk tests them (judge_inners). The exits of a local of an owning
 // aggregate type add the fact of each owner below the local, and a fifth walk tests them
-// (judge_aggregates). Before the facts dataflow, the fixpoint of owner.alias (run_aliases) gives
-// the origins and the exposures that kill rules 3 and 4 read (is_apart), and each walk moves that
-// state past each statement (apply_facts).
+// (judge_aggregates). The whole stores add the fact of each owner below each destination, and a
+// sixth walk tests them (judge_wholes); a store into a named local whose scope has ended reads the
+// fifth dataflow instead (mark_ended_wholes). Before the facts dataflow, the fixpoint of
+// owner.alias (run_aliases) gives the origins and the exposures that kill rules 3 and 4 read
+// (is_apart), and each walk moves that state past each statement (apply_facts).
 // The module uses switches and no function-pointer dispatch table. It holds no module-level
 // mutable state: each vector belongs to one call of prove, or to the proof that it returns.
 import fort.diag;
@@ -96,6 +101,37 @@ struct inner {
     bool proved;
 }
 
+/// The cause of a store of a whole value of an owning aggregate that the analysis does not prove,
+/// for the report of those stores (spec/fir.md 11, Whole stores). Cause 1: the destination is no
+/// tracked place, because an index of it has no key. Cause 2: the destination is no tracked place
+/// for another reason, such as a deref that does not follow a pointer local that is no memory at
+/// the start of the place, or a stale address of a whole store. Cause 3: each owner below the
+/// destination holds the zero value after the reads of the right side, and the kill rule of its
+/// `call` ends a fact. Cause 4: each other store that the facts do not prove. Cause 5: the function
+/// passed the whole-store work limit.
+enum whole_cause {
+    wc_none, // a proved store
+    wc_key, // cause 1
+    wc_pointer, // cause 2
+    wc_call, // cause 3
+    wc_facts, // cause 4
+    wc_limit, // cause 5
+}
+
+/// A store of a whole value of an owning aggregate (D17.11): statement `index` of block `block`,
+/// whose destination holds `owners` owners (place.count_owners). `first` is the first owner that
+/// the analysis does not prove, in the order of place.next_owner_step, `cause` says why, and
+/// `proved` says that it proves each owner. Such a store only reports until the migration of the
+/// whole stores ends (D17.11).
+struct whole {
+    u32 block;
+    u32 index;
+    u64 owners;
+    u64 first;
+    whole_cause cause;
+    bool proved;
+}
+
 /// The verdict of each `check(overwrite: p)` and of each store that needs a proof in one function,
 /// and of each obligation of part 1 of the leak rule. `proved[b]` says whether the check that ends
 /// block `b` is proved. It is true for a block that ends in another terminator. `stores` holds the
@@ -103,23 +139,27 @@ struct inner {
 /// of the leak rule in block order: the `dead` markers of a block in statement order, then its
 /// `return`, one for each local in number order (find_exits). `inners` holds the obligations of
 /// part 2 in block order and in statement order (find_inners). `checks` counts the checks,
-/// `unproved` counts the checks and the stores that the analysis does not prove, and `leaks`
-/// counts the exits that it does not prove. Each of them is a compile error (has_error).
-/// `inner_leaks` counts the obligations of part 2 that it does not prove, which are no error yet.
-/// `work` is the work of the overwrite proof, as WORK_LIMIT counts it, and `over` says that it
-/// passed the limit. `leak_work` adds the facts of the exits (count_owner_facts), and `leak_over`
-/// says that it passed the limit. `inner_work` adds the steps of the paths of the inner owners to
-/// `leak_work` (count_inner_steps), and `inner_over` says that it passed the limit. `alias_work` is
-/// the charge of the fixpoint of owner.alias, and `alias_on` says that the kill rules read its
-/// map: the fixpoint ran and ended within alias.WORK_LIMIT. `uses` holds the uses of rule (b) in
-/// block order and in the order of the reads (D17.21, prove_uses), and `use_unproved` counts those
-/// that the analysis does not prove. Each of them is a compile error too (has_error). `use_work` is
-/// the charge of the proof of rule (b), as USE_LIMIT counts it, and `use_over` says that it passed
+/// `unproved` counts the checks and the stores that the analysis does not prove, and `leaks` counts
+/// the exits that it does not prove. Each of them is a compile error (has_error). `inner_leaks`
+/// counts the obligations of part 2 that it does not prove, which are no error yet. `work` is the
+/// work of the overwrite proof, as WORK_LIMIT counts it, and `over` says that it passed the limit.
+/// `leak_work` adds the facts of the exits (count_owner_facts), and `leak_over` says that it passed
+/// the limit. `inner_work` adds the steps of the paths of the inner owners to `leak_work`
+/// (count_inner_steps), and `inner_over` says that it passed the limit. `alias_work` is the charge
+/// of the fixpoint of owner.alias, and `alias_on` says that the kill rules read its map: the
+/// fixpoint ran and ended within alias.WORK_LIMIT. `uses` holds the uses of rule (b) in block order
+/// and in the order of the reads (D17.21, prove_uses), and `use_unproved` counts those that the
+/// analysis does not prove. Each of them is a compile error too (has_error). `use_work` is the
+/// charge of the proof of rule (b), as USE_LIMIT counts it, and `use_over` says that it passed
 /// USE_LIMIT. `aggregates` holds the exits of the locals of an owning aggregate type in the order
 /// of `exits` (find_aggregates), and `aggregate_leaks` counts those that the analysis does not
 /// prove. Each of them is a compile error too (has_error). `aggregate_work` adds the steps of the
 /// paths of their owners to `inner_work` (count_aggregate_steps), and `aggregate_over` says that it
-/// passed the limit.
+/// passed the limit. `wholes` holds the stores of a whole value of an owning aggregate in block
+/// order and in statement order (find_wholes), and `whole_leaks` counts those that the analysis
+/// does not prove, which are no error. `whole_work` adds the steps of the paths of the owners below
+/// their destinations to `aggregate_work` (count_whole_steps), and `whole_over` says that it passed
+/// the limit.
 struct proof {
     bool mut@ own proved;
     store mut@ own stores;
@@ -145,6 +185,10 @@ struct proof {
     u32 aggregate_leaks;
     u64 aggregate_work;
     bool aggregate_over;
+    whole mut@ own wholes;
+    u32 whole_leaks;
+    u64 whole_work;
+    bool whole_over;
 }
 
 // Frees each vector of `p`. drop holds the releases, and the move leaves the zero proof, whose
@@ -161,6 +205,7 @@ fn drop(proof mut p) void {
     del(p.inners);
     del(p.uses);
     del(p.aggregates);
+    del(p.wholes);
 }
 
 // An empty proof in an allocation of its own, for a function that lends the proof to calls.
@@ -185,7 +230,9 @@ fn is_proved(proof* p, u32 b) bool {
 /// D17.11, an exit of an owner local or of a local of an owning aggregate type that it does not
 /// prove, the error of part 1 of the leak rule (D17.20), or a use that it does not prove, the error
 /// of rule (b) (D17.21). A function with an error reaches no later pass. An obligation of part 2
-/// that it does not prove is no error yet: part 2 only reports (D17.20).
+/// that it does not prove is no error yet: part 2 only reports (D17.20). A store of a whole value
+/// of an owning aggregate that it does not prove is no error until the migration of those stores
+/// ends (D17.11).
 fn has_error(proof* p) bool {
     return p->unproved > 0 || p->leaks > 0 || p->aggregate_leaks > 0 || p->use_unproved > 0;
 }
@@ -198,10 +245,12 @@ fn has_error(proof* p) bool {
 // `first_inner[k]` to `first_inner[k + 1] - 1` of `inner_fact`, in the order of the owners, and
 // `site_fact[k]` is the fact of the place that inner `k` releases. The facts of the owners of the
 // local of aggregate `k` of the proof are the facts `aggregate_fact[k]` and on, in the order of the
-// owners. `tested[b]` says that block `b` ends in a test against null, and then `tests[b]` is that
-// test (find_tests). `aliases` says which memory locals a place through a pointer can be
-// (alias.can_be), and `origins` is the set of origins that the walks of its state use. `units`
-// counts the statements and the terminators of the function (count_units).
+// owners. The facts of the owners below the destination of whole store `k` of the proof are the
+// facts `whole_fact[k]` and on, in the order of the owners, or none when it is NO_FACT. `tested[b]`
+// says that block `b` ends in a test against null, and then `tests[b]` is that test (find_tests).
+// `aliases` says which memory locals a place through a pointer can be (alias.can_be), and
+// `origins` is the set of origins that the walks of its state use. `units` counts the statements
+// and the terminators of the function (count_units).
 struct context {
     place.survey places;
     place.path mut@ own facts;
@@ -214,6 +263,7 @@ struct context {
     u64 mut@ own first_inner;
     u32 mut@ own site_fact;
     u32 mut@ own aggregate_fact;
+    u32 mut@ own whole_fact;
     bool mut@ own tested;
     place.test mut@ own tests;
     alias.map aliases;
@@ -236,6 +286,7 @@ fn context_drop(context mut c) void {
     del(c.first_inner);
     del(c.site_fact);
     del(c.aggregate_fact);
+    del(c.whole_fact);
     del(c.tested);
     del(c.tests);
     alias.drop(move(c.aliases));
@@ -507,20 +558,39 @@ fn apply_kills(context mut* c, fir.statement* s, place.path d, fir_flow.bits* st
 fn apply_facts(context mut* c, fir.statement* s, fir_flow.bits mut* stale,
               fir_flow.bits mut* fresh, fir_flow.bits mut* aliased, probes mut* pr, u32 fact,
               bool mut* held) void {
+    apply_reads(c, s, stale, fresh, aliased, pr);
+    apply_call(c, s, pr);
+    if (fact != NO_FACT) {
+        *held = fir_flow.bits_get(&pr->none, fact);
+    }
+    apply_store(c, s, stale, fresh, aliased, pr);
+}
+
+// The first step of apply_facts: the reads of the operands of `s`, their gen rule, their effect on
+// the fresh set, and their exposures of owner.alias.
+fn apply_reads(context mut* c, fir.statement* s, fir_flow.bits* stale, fir_flow.bits mut* fresh,
+               fir_flow.bits mut* aliased, probes mut* pr) void {
     gen_reads(c, s, stale, pr);
     place.apply_fresh_reads(&c->places, s, fresh);
     if (c->aliases.on) {
         alias.apply_reads(&c->aliases, s, aliased, &c->origins);
     }
+}
+
+// The second step of apply_facts: the kill rule of the `call` of the assignment `s`.
+fn apply_call(context* c, fir.statement* s, probes mut* pr) void {
+    if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call) {
+        kill_call(c, pr);
+    }
+}
+
+// The last step of apply_facts: the kill rules and the gen rule of the store of `s`, then its
+// effect on the fresh set and the stale set, and its borrows.
+fn apply_store(context mut* c, fir.statement* s, fir_flow.bits mut* stale,
+               fir_flow.bits mut* fresh, fir_flow.bits mut* aliased, probes mut* pr) void {
     if (s->kind == fir.stmt_kind.st_assign) {
         u64 mark = c->places.steps_len;
         place.path d = place.trace(&c->places, s->place, stale);
-        if (s->value.kind == fir.rvalue_kind.rv_call) {
-            kill_call(c, pr);
-        }
-        if (fact != NO_FACT) {
-            *held = fir_flow.bits_get(&pr->none, fact);
-        }
         apply_kills(c, s, d, stale, fresh, aliased, pr);
         if (is_zero_value(c, s->value)) {
             gen_below(c, d, pr);
@@ -1097,9 +1167,11 @@ fn prove_into(fir.func* f, u64 limit, u64 use_limit, proof mut* out) void {
     mark_checks(f, out, check_of);
     find_stores(f, check_of, out);
     find_inners(f, out);
+    find_wholes(f, out);
     bool overwrite = out->checks > 0 || out->stores.len > 0;
     // rule (b) needs a local owner, also one in a local of an owning aggregate or in `_0`
-    bool emptiness = overwrite || has_owner(f, false) || out->inners.len > 0;
+    bool emptiness = overwrite || has_owner(f, false) || out->inners.len > 0
+        || out->wholes.len > 0;
     bool owners = has_local_owner(f);
     if (!emptiness && !owners) {
         return;
@@ -1136,6 +1208,13 @@ fn prove_into(fir.func* f, u64 limit, u64 use_limit, proof mut* out) void {
     out->aggregate_work = types.capped_sum(out->inner_work,
                                            types.capped_product(units, count_aggregate_steps(f)));
     out->aggregate_over = out->aggregate_work > limit;
+    // the whole-store work holds the aggregate work, so each limit above passes it too
+    u64 whole_steps = types.capped_product(units, count_whole_steps(c, out));
+    out->whole_work = types.capped_sum(out->aggregate_work, whole_steps);
+    out->whole_over = out->whole_work > limit;
+    if (out->whole_over) {
+        pass_wholes(out);
+    }
     if (out->leak_over) {
         find_exits(c, null, out);
         pass_exits(c, out);
@@ -1156,9 +1235,9 @@ fn prove_into(fir.func* f, u64 limit, u64 use_limit, proof mut* out) void {
 
 // Runs the dataflows of the proof `c` within the limit and writes the verdict of each check and
 // each store into `out`, of each exit unless the leak work passed the limit, of each obligation of
-// part 2 unless the inner work passed it, and of each exit of a local of an owning aggregate type.
-// Its own function keeps the work of prove_within, a function of the compiler, within the measure
-// of D17.11.
+// part 2 unless the inner work passed it, of each exit of a local of an owning aggregate type, and
+// of each whole store unless the whole-store work passed the limit. Its own function keeps the
+// work of prove_within, a function of the compiler, within the measure of D17.11.
 fn run_dataflows(context mut* c, proof mut* out) void {
     fir.func* f = c->places.f;
     u32 locals = fir.local_count(f);
@@ -1166,6 +1245,10 @@ fn run_dataflows(context mut* c, proof mut* out) void {
     defer {
         del(pt.first);
         del(pt.preds);
+    }
+    if (!out->whole_over) {
+        // the stale set keeps the bit of each address of a whole store too
+        place.mark_whole_addresses(&c->places);
     }
     fir_flow.dataflow mut* own stale = fir_flow.dataflow_make(locals,
                                                               fir_flow.join_kind.join_union,
@@ -1192,6 +1275,9 @@ fn run_dataflows(context mut* c, proof mut* out) void {
         defer fir_flow.dataflow_drop_made(move(ended));
         run_ended(c, &pt, ended);
         find_exits(c, ended, out);
+        if (!out->whole_over) {
+            mark_ended_wholes(c, ended, out);
+        }
     } else if (!out->leak_over) {
         find_exits(c, null, out);
     }
@@ -1206,6 +1292,9 @@ fn run_dataflows(context mut* c, proof mut* out) void {
         collect_inner_facts(c, stale, out);
     }
     collect_aggregate_facts(c, out);
+    if (!out->whole_over) {
+        collect_whole_facts(c, stale, out);
+    }
     if (c->fact_count == 0) {
         judge(c, stale, fresh, null, scratch, out);
         if (!out->leak_over) {
@@ -1213,6 +1302,9 @@ fn run_dataflows(context mut* c, proof mut* out) void {
         }
         if (!out->inner_over) {
             judge_inners(c, stale, fresh, null, scratch, out);
+        }
+        if (!out->whole_over) {
+            judge_wholes(c, stale, fresh, null, out);
         }
         prove_uses(c, &pt, stale, out);
         return;
@@ -1231,6 +1323,9 @@ fn run_dataflows(context mut* c, proof mut* out) void {
         judge_inners(c, stale, fresh, facts, scratch, out);
     }
     judge_aggregates(c, stale, fresh, facts, out);
+    if (!out->whole_over) {
+        judge_wholes(c, stale, fresh, facts, out);
+    }
     prove_uses(c, &pt, stale, out);
 }
 
@@ -1901,6 +1996,300 @@ fn walk_aggregates(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* 
                 m += 1;
             }
             first[k] = m;
+            k += 1;
+        }
+    }
+}
+
+// ---- the whole stores --------------------------------------------------------------------------
+
+// Whether the statement `s` of `f` is a store of a whole value of an owning aggregate (D17.11): an
+// assignment whose place has an owning aggregate type (D17.7). A store into fixed storage of an
+// aggregate `_0` is none: it writes the destination of the caller, which no lvalue names, and the
+// lowering stores into it once on each path to `return` (spec/fir.md 11, Stores).
+fn is_whole_store(fir.func* f, fir.statement* s) bool {
+    if (s->kind != fir.stmt_kind.st_assign) {
+        return false;
+    }
+    bool result = fir.place_fixed(f, s->place) && is_aggregate_result(f, s->place.local);
+    return !result && types.type_is_owning_aggregate(fir.place_type(f, s->place));
+}
+
+// Counts the whole stores of `f` in block order and in statement order, and with `fill` writes
+// them into out->wholes, which has room for each.
+fn scan_wholes(fir.func* f, proof mut* out, bool fill) u64 {
+    u64 mut k = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            if (is_whole_store(f, s)) {
+                if (fill) {
+                    u64 owners = place.count_owners(fir.place_type(f, s->place));
+                    out->wholes[k] = whole{b, i, owners, 0, whole_cause.wc_none, false};
+                }
+                k += 1;
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    return k;
+}
+
+// Lists in out->wholes each store of a whole value of an owning aggregate (is_whole_store), in
+// block order and in statement order. They only report until the migration of the whole stores
+// ends (D17.11).
+fn find_wholes(fir.func* f, proof mut* out) void {
+    u64 count = scan_wholes(f, out, false);
+    if (count == 0) {
+        return;
+    }
+    del(out->wholes);
+    out->wholes = new(whole, count);
+    scan_wholes(f, out, true);
+}
+
+// The most projections of the path of the destination `p` of a whole store: those of `p`, or for
+// `(*_a)` of a temporary `_a` that one `addr` writes, those of the place of the `addr` when they
+// are more (place.whole_source).
+fn destination_steps(context* c, fir.place p) u64 {
+    u64 mut steps = cast(p.proj_len, u64);
+    if (place.is_deref_local(c->places.f, p) && place.is_single(&c->places, p.local)) {
+        fir.rvalue r = place.store_of(&c->places, p.local)->value;
+        if (r.kind == fir.rvalue_kind.rv_addr && cast(r.place.proj_len, u64) > steps) {
+            steps = cast(r.place.proj_len, u64);
+        }
+    }
+    return steps;
+}
+
+// The count of the steps of the paths of the owners below the destination of each whole store of
+// `out`: for each owner the steps of the destination (destination_steps) and 1 more than
+// place.depth_to_owners of its type. Each owner takes a fact, its path takes that many steps, and
+// each walk of the facts reads them, so the whole-store work counts them as the aggregate work
+// counts the owners below a local. It stops at types.OWNER_CAP.
+fn count_whole_steps(context* c, proof* out) u64 {
+    fir.func* f = c->places.f;
+    u64 mut sum = 0;
+    u64 mut k = 0;
+    while (k < out->wholes.len) {
+        whole* w = &out->wholes[k];
+        fir.place p = fir.block_statement(f, w->block, w->index)->place;
+        u64 depth = place.depth_to_owners(fir.place_type(f, p)) + 1;
+        u64 steps = types.capped_sum(depth, destination_steps(c, p));
+        sum = types.capped_sum(sum, types.capped_product(w->owners, steps));
+        k += 1;
+    }
+    return sum;
+}
+
+// Writes the verdict of each whole store past the whole-store work limit: none is proved, the first
+// owner is the first that the analysis does not prove, and the cause is the limit.
+fn pass_wholes(proof mut* out) void {
+    u64 mut k = 0;
+    while (k < out->wholes.len) {
+        out->wholes[k].proved = false;
+        out->wholes[k].first = 0;
+        out->wholes[k].cause = whole_cause.wc_limit;
+        out->whole_leaks += 1;
+        k += 1;
+    }
+}
+
+// Proves each whole store of `out` into fixed storage of a named local whose scope has ended on
+// each path to the store: the bit of the local in the fifth dataflow `ended` holds right before the
+// store (spec/fir.md 11, Whole stores). The frame of a call holds no allocation of the call, and a
+// value that the local still holds at its `dead` is the leak of that exit (D17.20), so the store
+// writes over no allocation that no rule reports. A declaration is such a store. The walk of each
+// block that holds a whole store applies the statements before it.
+fn mark_ended_wholes(context* c, fir_flow.dataflow* ended, proof mut* out) void {
+    fir_flow.bits mut at = fir_flow.bits_new(fir.local_count(c->places.f));
+    defer del(at.words);
+    u64 mut k = 0;
+    while (k < out->wholes.len) {
+        k = mark_ended_block(c, ended, out, k, &at);
+    }
+}
+
+// The walk of mark_ended_wholes over the block of whole store `k` of `out`, with `at` as the ended
+// set. Returns the first whole store of a later block. The caller keeps `at`, so it is no local
+// owner here.
+fn mark_ended_block(context* c, fir_flow.dataflow* ended, proof mut* out, u64 k,
+                    fir_flow.bits mut* at) u64 {
+    fir.func* f = c->places.f;
+    u32 b = out->wholes[k].block;
+    fir_flow.bits_copy(at, &ended->ins[cast(b, u64)]);
+    u64 mut j = k;
+    u32 mut i = 0;
+    while (j < out->wholes.len && out->wholes[j].block == b) {
+        whole mut* w = &out->wholes[j];
+        while (i < w->index) {
+            apply_ended(c, fir.block_statement(f, b, i), at);
+            i += 1;
+        }
+        fir.place p = fir.block_statement(f, b, i)->place;
+        bool named = fir.place_fixed(f, p)
+            && fir.local_at(f, p.local)->kind == fir.local_kind.lk_named;
+        if (named && fir_flow.bits_get(at, p.local)) {
+            w->proved = true;
+            w->first = w->owners;
+        }
+        j += 1;
+    }
+    return j;
+}
+
+// Gives the owners below the destination of each whole store of `out` that mark_ended_wholes did
+// not prove their facts (collect_destination). Each store takes facts of its own, with no search
+// for an earlier fact of a path: no rule reads the number of a fact. Called within the whole-store
+// work, which bounds the owners and their steps. The walk of each block that holds a whole store
+// reads the stale set before each statement.
+fn collect_whole_facts(context mut* c, fir_flow.dataflow* stale, proof mut* out) void {
+    fir.func* f = c->places.f;
+    del(c->whole_fact);
+    c->whole_fact = new(u32, out->wholes.len);
+    fir_flow.bits mut at_stale = fir_flow.bits_new(fir.local_count(f));
+    defer del(at_stale.words);
+    u64 mut k = 0;
+    while (k < out->wholes.len) {
+        u32 b = out->wholes[k].block;
+        fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
+        u32 mut i = 0;
+        while (k < out->wholes.len && out->wholes[k].block == b) {
+            whole mut* w = &out->wholes[k];
+            while (i < w->index) {
+                place.apply_stale(&c->places, fir.block_statement(f, b, i), &at_stale);
+                i += 1;
+            }
+            c->whole_fact[k] = NO_FACT;
+            if (!w->proved) {
+                collect_destination(c, w, k, &at_stale);
+            }
+            k += 1;
+        }
+    }
+}
+
+// Gives the whole store `w`, store `k` of the proof, a fact of its own for each owner below its
+// destination (place.put_owners_below), read with the stale set `stale` before the store. A
+// destination `(*_a)` of the address `_a` of a whole store reads as the place of its `addr mut`
+// while `_a` is not stale (place.whole_source). A destination that is no tracked place takes no
+// fact, and its store takes cause 1 when an index of it has no key, and cause 2 else, also for a
+// stale address of a whole store.
+fn collect_destination(context mut* c, whole mut* w, u64 k, fir_flow.bits* stale) void {
+    fir.func* f = c->places.f;
+    fir.place mut p = fir.block_statement(f, w->block, w->index)->place;
+    if (place.is_whole_place(&c->places, p)) {
+        if (fir_flow.bits_get(stale, p.local)) {
+            w->cause = whole_cause.wc_pointer;
+            return;
+        }
+        p = place.whole_source(&c->places, p);
+    }
+    u64 mark = c->places.steps_len;
+    place.path d = place.trace(&c->places, p, stale);
+    if (!d.tracked) {
+        w->cause = whole_cause.wc_pointer;
+        if (place.has_keyless_index(&c->places, d)) {
+            w->cause = whole_cause.wc_key;
+        }
+        c->places.steps_len = mark;
+        return;
+    }
+    c->whole_fact[k] = cast(c->fact_count, u32);
+    place.path mut@ own paths = new(place.path, w->owners);
+    place.put_owners_below(&c->places, d, fir.place_type(f, p), paths);
+    u64 mut m = 0;
+    while (m < paths.len) {
+        push_fact(c, paths[m]);
+        m += 1;
+    }
+    del(paths);
+}
+
+// The first owner of whole store `k` of the proof whose fact the first probe of `pr` does not
+// hold, or the count of its owners when it holds each one. With a null `d`, no fact holds.
+fn first_unheld(context* c, proof* out, u64 k, fir_flow.dataflow* d, probes* pr) u64 {
+    u32 base = c->whole_fact[k];
+    u64 mut m = 0;
+    while (d != null && m < out->wholes[k].owners
+           && fir_flow.bits_get(&pr->none, base + cast(m, u32))) {
+        m += 1;
+    }
+    return m;
+}
+
+// Writes the verdict of each whole store of `out` that mark_ended_wholes did not prove: the fact of
+// each owner below its destination holds after the reads of its operands and the kill of its
+// `call`, before the kill rules of its store, the test of a store into an `own` reference
+// (apply_facts). The first owner whose fact does not hold is `first`. The cause is cause 3 when
+// each fact held before the kill of the `call`, and else cause 4; a destination that is no tracked
+// place keeps the cause of collect_destination. Each store that the analysis does not prove counts
+// in out->whole_leaks. The walk of each block that holds a whole store starts from the sets that
+// its entry has in the dataflows, and it gives both probes one set. With a null `d`, no fact holds.
+fn judge_wholes(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fresh,
+                fir_flow.dataflow* d, proof mut* out) void {
+    fir.func* f = c->places.f;
+    u32 locals = fir.local_count(f);
+    fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
+    defer del(at_stale.words);
+    fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
+    defer del(at_fresh.words);
+    fir_flow.bits mut at_alias = alias_state(c);
+    defer del(at_alias.words);
+    // after the sets of the block: the drop of the probes is a call, and it must come before
+    // their `del`s
+    probes mut* own pr = new(probes);
+    defer probes_drop_made(move(pr));
+    *pr = make_probes(cast(c->fact_count, u32));
+    bool mut unused = false;
+    u64 mut k = 0;
+    while (k < out->wholes.len) {
+        u32 b = out->wholes[k].block;
+        if (d != null) {
+            fir_flow.bits_copy(&pr->none, &d->ins[cast(b, u64)]);
+            fir_flow.bits_copy(&pr->all, &d->ins[cast(b, u64)]);
+        }
+        fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
+        fir_flow.bits_copy(&at_fresh, &fresh->ins[cast(b, u64)]);
+        alias_in(c, b, &at_alias);
+        u32 mut i = 0;
+        while (k < out->wholes.len && out->wholes[k].block == b) {
+            whole mut* w = &out->wholes[k];
+            while (i < w->index) {
+                fir.statement* s = fir.block_statement(f, b, i);
+                if (d != null) {
+                    apply_facts(c, s, &at_stale, &at_fresh, &at_alias, pr, NO_FACT, &unused);
+                }
+                i += 1;
+            }
+            if (!w->proved && c->whole_fact[k] != NO_FACT) {
+                fir.statement* s = fir.block_statement(f, b, i);
+                if (d != null) {
+                    apply_reads(c, s, &at_stale, &at_fresh, &at_alias, pr);
+                }
+                bool before_call = first_unheld(c, out, k, d, pr) == w->owners;
+                if (d != null) {
+                    apply_call(c, s, pr);
+                }
+                w->first = first_unheld(c, out, k, d, pr);
+                w->proved = w->first == w->owners;
+                if (!w->proved) {
+                    w->cause = whole_cause.wc_facts;
+                    if (before_call) {
+                        w->cause = whole_cause.wc_call;
+                    }
+                }
+                if (d != null) {
+                    apply_store(c, s, &at_stale, &at_fresh, &at_alias, pr);
+                }
+                i += 1;
+            }
+            if (!w->proved) {
+                out->whole_leaks += 1;
+            }
             k += 1;
         }
     }

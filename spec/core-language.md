@@ -998,7 +998,9 @@ the store, because the old allocation would leak (D17.11). Otherwise it is a com
 `=` token, `overwriting owned value: cannot prove '<place>' is empty here`, in every build mode.
 The compiler tests the store after it evaluates `e`. `del` and `move` leave zero behind, so for
 locals `v`, `a` and `b`, `del(v.data); v.data = new(...)` and `a = move(b)` after `move(a)` pass.
-Owning aggregate assignments have no fieldwise overwrite check.
+When `lv` has an owning aggregate type, the store needs each `own` reference in the fixed storage
+of `lv` empty (D17.11). The compiler reports such a store that it cannot prove, and a later change
+makes it a compile error.
 
 ```fort
 i32 x = 1;

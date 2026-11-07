@@ -137,11 +137,14 @@ struct frame_vec {
     u64 len;
 }
 
-/// An event, the item where it happened and the tag of the value that it went through.
+/// An event, the item where it happened and the tag of the value that it went through. `exit` is
+/// the exit location of the statement of an `overwrite`, which tells the expansions of one deferred
+/// store at two exits apart, and the empty range for each other event and each other statement.
 struct event {
     event_kind kind;
     ast.sym* sym;
     diag.loc at;
+    diag.loc exit;
     tag t;
 }
 
@@ -150,18 +153,20 @@ struct event_vec {
     u64 len;
 }
 
-/// The shadow state of one run, which reports its events only with `reporting`. `sym` and `at`
-/// name the item that runs. The items of `quiet`, the `std.rt.free` that a `del` calls, end with
-/// no test, so the test at the end of the `del` counts. `value` is the tag of the last value that
-/// a load gave or an rvalue made, and `place` the tag of the last address. The `nargs` arguments
-/// of the extern that runs have the values `arg_values` and the tags `args`. A record of `entries`
-/// holds the start of a local of a frame that stands and, as its owner, the id of the entry whose
-/// address the run took; `ids` counts the ids.
+/// The shadow state of one run, which reports its events only with `reporting`. `sym` and `at` name
+/// the item that runs, and `exit_at` is the exit location of a statement that the expansion of a
+/// deferred statement made, or the empty range. The items of `quiet`, the `std.rt.free` that a
+/// `del` calls, end with no test, so the test at the end of the `del` counts. `value` is the tag of
+/// the last value that a load gave or an rvalue made, and `place` the tag of the last address. The
+/// `nargs` arguments of the extern that runs have the values `arg_values` and the tags `args`. A
+/// record of `entries` holds the start of a local of a frame that stands and, as its owner, the id
+/// of the entry whose address the run took; `ids` counts the ids.
 struct state {
     bool reporting;
     ast.sym* quiet;
     ast.sym* sym;
     diag.loc at;
+    diag.loc exit_at;
     tag value;
     tag place;
     range_vec allocations;
@@ -838,13 +843,21 @@ fn apply(state mut* sh, u64 dest, u64 from, u64 n, u64 callee, bool back) void {
 // ---- events -----------------------------------------------------------------------------------
 
 // Records an event of `kind` at the item that runs, through a value with the tag `t`, once. After
-// a `forged` event the run is outside the guarantee of each rule (A8), so it records no event.
+// a `forged` event the run is outside the guarantee of each rule (A8), so it records no event. An
+// `overwrite` keeps the exit location of its statement too, so the two expansions of one deferred
+// store give two events.
 fn report(state mut* sh, event_kind kind, tag t) void {
+    diag.loc mut exit = diag.loc{};
+    if (kind == event_kind.ev_overwrite) {
+        exit = sh->exit_at;
+    }
     for (u64 mut i = 0; i < sh->events.len; i++) {
         event* o = &sh->events.items[i];
+        bool same_exit = o->exit.line == exit.line && o->exit.col == exit.col;
         if (o->kind == event_kind.ev_forged
             || (o->kind == kind && o->sym == sh->sym && o->at.line == sh->at.line
-                && o->at.col == sh->at.col && is_same(o->t.o, t.o) && is_same(o->t.f, t.f))) {
+                && o->at.col == sh->at.col && same_exit && is_same(o->t.o, t.o)
+                && is_same(o->t.f, t.f))) {
             return;
         }
     }
@@ -857,7 +870,7 @@ fn report(state mut* sh, event_kind kind, tag t) void {
         del(v->items);
         v->items = move(bigger);
     }
-    v->items[v->len] = event{kind, sh->sym, sh->at, t};
+    v->items[v->len] = event{kind, sh->sym, sh->at, exit, t};
     v->len += 1;
 }
 
@@ -884,7 +897,8 @@ fn write_origin(origin* g, strbuf.str_buf mut* out) void {
 }
 
 /// With `reporting`, writes each event of `sh` as a line after `prefix`: `event <kind> in
-/// <function> at <line>:<col>`, then the owner tag and the frame or moved tag of its value.
+/// <function> at <line>:<col>`, then ` exit <line>:<col>` for an event with an exit location,
+/// then the owner tag and the frame or moved tag of its value.
 fn write_events(state* sh, string prefix, strbuf.str_buf mut* out) void {
     for (u64 mut i = 0; sh->reporting && i < sh->events.len; i++) {
         event* e = &sh->events.items[i];
@@ -897,6 +911,12 @@ fn write_events(state* sh, string prefix, strbuf.str_buf mut* out) void {
         strbuf.append_u64(out, cast(e->at.line, u64));
         strbuf.push(out, ':');
         strbuf.append_u64(out, cast(e->at.col, u64));
+        if (e->exit.line > 0) {
+            strbuf.append(out, " exit ");
+            strbuf.append_u64(out, cast(e->exit.line, u64));
+            strbuf.push(out, ':');
+            strbuf.append_u64(out, cast(e->exit.col, u64));
+        }
         write_origin(&e->t.o, out);
         write_origin(&e->t.f, out);
         strbuf.push(out, '\n');

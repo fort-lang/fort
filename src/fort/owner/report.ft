@@ -2,8 +2,9 @@
 /// and the position of each error (spec/fir.md 11, spec/ownership-design.md 4.1). It also writes
 /// the error of part 1 of the leak rule (D17.20) for each exit of an owner local or of a local of
 /// an owning aggregate type that owner.prover does not prove, the error of rule (b) (D17.21) for
-/// each use that it does not prove, and the line of `--leak-report` for each site of part 2 that it
-/// does not prove.
+/// each use that it does not prove, the line of `--leak-report` for each site of part 2 that it
+/// does not prove, and the lines of `--whole-store-report` for each store of a whole value of an
+/// owning aggregate that it does not prove.
 //
 // The module holds no module-level mutable state: each buffer belongs to one call.
 import fort.ast;
@@ -779,6 +780,175 @@ fn write_aggregates(fir.func* f, prover.proof* p, session.session mut* s,
         if (!a->at.proved && !is_aggregate_repeated(f, p, k)) {
             write_aggregate(f, a, p->aggregate_over && !limit_told, s, owner, text);
             limit_told = true;
+        }
+        k += 1;
+    }
+}
+
+// ---- the report of the whole stores ------------------------------------------------------------
+
+// The line of the cause `k` of a whole store that the analysis does not prove
+// (prover.whole_cause), or "" for no cause.
+fn whole_cause_text(prover.whole_cause k) string {
+    switch (k) {
+    case prover.whole_cause.wc_none:
+        return "";
+    case prover.whole_cause.wc_key:
+        return "cause 1: an index of the destination is no key";
+    case prover.whole_cause.wc_pointer:
+        return "cause 2: the analysis does not track the destination";
+    case prover.whole_cause.wc_call:
+        return "cause 3: the call of the right side kills the fact of the owner";
+    case prover.whole_cause.wc_facts:
+        return "cause 4: no fact proves that the owner is empty";
+    case prover.whole_cause.wc_limit:
+        return "cause 5: the whole-store work of the function passes the limit";
+    }
+}
+
+// The assignment of the tree `n` whose right side holds a node that starts at `at`, or null. The
+// lowering puts a store of an aggregate at the node of its right side, or at the node of an arm of
+// a conditional there (spec/fir.md 9.3).
+fn find_whole_assign(ast.node* n, diag.loc at) ast.node* {
+    if (n == null) {
+        return null;
+    }
+    if (n->kind == ast.ast_kind.k_assign && find_node(n->b, at) != null) {
+        return n;
+    }
+    ast.node* mut found = find_whole_assign(n->a, at);
+    if (found == null) {
+        found = find_whole_assign(n->b, at);
+    }
+    if (found == null) {
+        found = find_whole_assign(n->c, at);
+    }
+    if (found == null) {
+        found = find_whole_assign(n->d, at);
+    }
+    u64 mut i = 0;
+    while (found == null && i < ast.ast_len(n)) {
+        found = find_whole_assign(ast.ast_child(n, i), at);
+        i += 1;
+    }
+    return found;
+}
+
+/// Appends the text that names the first owner below the destination of the whole store `w` of `f`
+/// that the analysis does not prove, and gives in *at the position of its lines. The text is the
+/// source text of the target of the assignment, in a parenthesis unless it is a name, a call, a
+/// `cast`, an index, a field, `new` or `sizeof`, then `.` and the name of each field and `[n]` for
+/// element `n`, as `(*p).data` or `o->pair[k].data`, and the position is the `=`. A store that no
+/// assignment of the tree holds stands at its own location: a whole named local or parameter takes
+/// its declared name, and any other destination its FIR place and the number of each field,
+/// `(*_3).0`.
+fn write_whole_owner(fir.func* f, prover.whole* w, session.session mut* s,
+                     strbuf.str_buf mut* out, diag.loc mut* at) void {
+    fir.statement* st = fir.block_statement(f, w->block, w->index);
+    fir.place p = st->place;
+    types.node* t = fir.place_type(f, p);
+    *at = st->loc;
+    string mut name = "";
+    if (place.is_local(p) && fir.local_at(f, p.local)->kind != fir.local_kind.lk_temp) {
+        name = fir.local_name(fir.local_at(f, p.local));
+    }
+    // the reads of the tree come before the buffer, whose address the calls below take
+    ast.node* mut target = null;
+    diag.loc mut op = st->loc;
+    if (f->sym != null && f->sym->node != null && st->loc.line > 0) {
+        ast.node* n = find_whole_assign(f->sym->node, st->loc);
+        if (n != null) {
+            target = n->a;
+            op = n->loc;
+        }
+    }
+    bool postfix = target != null && is_postfix(target);
+    bool from_tree = write_whole_text(f, p, target, postfix, name, s, out);
+    if (from_tree) {
+        *at = op;
+    }
+    append_steps(t, w->first, !from_tree && name.len == 0, out);
+}
+
+// Appends the base of the text of write_whole_owner: the source text of `target`, in a parenthesis
+// unless `postfix`, or else `name` when it is not empty, or else the FIR place `p`. Returns whether
+// the text comes from `target`.
+fn write_whole_text(fir.func* f, fir.place p, ast.node* target, bool postfix, string name,
+                    session.session mut* s, strbuf.str_buf mut* out) bool {
+    strbuf.str_buf mut base = strbuf.create();
+    defer del(base.data);
+    if (target != null && write_text(target, s, &base)) {
+        append_operand(out, strbuf.view(&base), postfix);
+        return true;
+    }
+    if (name.len > 0) {
+        strbuf.append(out, name);
+    } else {
+        fir_print.print_place(f, p, out);
+    }
+    return false;
+}
+
+// Whether `seen` holds the position `at`.
+fn has_position(diag.loc@ seen, diag.loc at) bool {
+    u64 mut k = 0;
+    while (k < seen.len) {
+        if (is_same_loc(seen[k], at)) {
+            return true;
+        }
+        k += 1;
+    }
+    return false;
+}
+
+/// Appends the lines of `--whole-store-report` for each store of a whole value of an owning
+/// aggregate of `f` that `p` does not prove, once for each position, in the order of the stores
+/// (D17.11, spec/fir.md 11, Whole stores): `<file>:<line>:<col>: overwriting owned value: cannot
+/// prove '<place>' is empty here`, the note `del or move '<place>' before this store`, and the line
+/// of its cause (whole_cause_text), at the `=` of the assignment or at the location of the store.
+/// `<place>` names the first owner below the destination that the pass does not prove
+/// (write_whole_owner). A deferred store expands at each exit with one location, and the arms of a
+/// conditional store at one `=`, so the first store of a position gives its lines. Such a store is
+/// no error until the migration of the whole stores ends, so the lines go to `out` and not to the
+/// diagnostics.
+fn write_wholes(fir.func* f, prover.proof* p, session.session mut* s, strbuf.str_buf mut* out)
+    void {
+    strbuf.str_buf mut owner = strbuf.create();
+    defer del(owner.data);
+    diag.loc mut@ own seen = new(diag.loc, p->wholes.len);
+    defer del(seen);
+    write_whole_lines(f, p, s, &owner, seen, out);
+}
+
+// The lines of write_wholes, with the scratch buffer `owner` and room in `seen` for the position
+// of each store. The caller keeps both, so they are no local owners here.
+fn write_whole_lines(fir.func* f, prover.proof* p, session.session mut* s,
+                     strbuf.str_buf mut* owner, diag.loc mut@ seen, strbuf.str_buf mut* out)
+    void {
+    u64 mut count = 0;
+    u64 mut k = 0;
+    while (k < p->wholes.len) {
+        prover.whole* w = &p->wholes[k];
+        diag.loc mut at = diag.loc{};
+        if (!w->proved) {
+            strbuf.clear(owner);
+            write_whole_owner(f, w, s, owner, &at);
+        }
+        if (!w->proved && !has_position(seen[..count], at)) {
+            seen[count] = at;
+            count += 1;
+            write_position(at, out);
+            strbuf.append(out, "overwriting owned value: cannot prove '");
+            strbuf.append(out, strbuf.view(owner));
+            strbuf.append(out, "' is empty here\n");
+            write_position(at, out);
+            strbuf.append(out, "note: del or move '");
+            strbuf.append(out, strbuf.view(owner));
+            strbuf.append(out, "' before this store\n");
+            write_position(at, out);
+            strbuf.append(out, "note: ");
+            strbuf.append(out, whole_cause_text(w->cause));
+            strbuf.push(out, '\n');
         }
         k += 1;
     }
