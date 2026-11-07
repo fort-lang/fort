@@ -1045,12 +1045,16 @@ came here.
   the held addresses), and no other reading changes. Without that reading `p = new(box); *p =
   move(b);` was unproved, because no gen rule makes a place through `_a` empty. A declaration is a
   store into a named local whose bit in the ended dataflow is set (`mark_ended_wholes`), so the
-  facts, which give a named local no entry fact, do not decide it. Three shapes give most sites. A
-  call in the right side kills each fact reached through memory, a place through a fresh pointer
-  local too (kill rule 5 of D17.11), so `*pr = make_probes(count)` after `pr = new(probes)` is a
-  site of cause 3. The grow loop of a vector, `bigger[i] = move(v->items[i])`, has no fact, because
-  no gen rule makes an element of a fresh span empty. A literal with an omitted owner field, such as
-  `dataflow{.count = n}`, is no zero value, so the owners that it leaves zero take no fact.
+  facts, which give a named local no entry fact, do not decide it. A call keeps each fact through
+  a fresh pointer local (kill rule 5 of D17.11, `prover.survives_call`), and the `addr` of the
+  address of a whole store ends no freshness: the store through it ends the freshness of the local
+  of its place, after its test and before its kill rules (`place.apply_fresh_end`). So `*pr =
+  make_probes(count)` after `pr = new(probes)` is proved, and the marks of these addresses run in
+  each function, also past the whole-store work, so that no other verdict depends on that limit
+  (`place.mark_whole_addresses`). The grow loop of a vector, `bigger[i] = move(v->items[i])`, has
+  no fact, because no gen rule makes an element of a fresh span empty. A literal with an omitted
+  owner field, such as `dataflow{.count = n}`, is no zero value, so the owners that it leaves zero
+  take no fact.
   `test/fort/owner/whole_oracle_test.ft` holds each verdict against a run of `fir.interpreter`: a
   store that the pass proves and whose run gives an `overwrite` event at its location fails it.
   `fir.shadow` gives an `overwrite` the exit location of its statement (` exit <line>:<col>`), so

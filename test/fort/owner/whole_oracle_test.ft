@@ -1,8 +1,8 @@
 //! run
 //! flags: -I ../../src -I support
 //! stdout:
-//| text: sites 32, proved 20, rejected with an event 10, false rejects 2
-//| source: sites 58, proved 36, rejected with an event 14, false rejects 8
+//| text: sites 33, proved 20, rejected with an event 11, false rejects 2
+//| source: sites 65, proved 39, rejected with an event 19, false rejects 7
 /// Holds the verdicts of the stores of a whole value of an owning aggregate in owner.prover
 /// (D17.11, spec/fir.md 11, Whole stores) against the runs of fir.interpreter and the events of
 /// fir.shadow (spec/ownership-design.md 3). A store over an owner slot of a live allocation is an
@@ -27,7 +27,7 @@ import std.strbuf;
 // The declarations that the cases name. `fill` gives a box whose owner holds an allocation.
 // `make` gives a box in an allocation whose owner holds an allocation, and `make_empty` one whose
 // owner is null. `G` is a global box, and a `holder` holds a box in an allocation of its own.
-string[34] PRELUDE = {
+string[39] PRELUDE = {
     "struct box {",
     "    u8 mut* own data;",
     "}",
@@ -58,6 +58,11 @@ string[34] PRELUDE = {
     "    free_made(move(h->inner));",
     "    del(h);",
     "}",
+    "fn fill_at(box mut* own mut* pp) void {",
+    "    box mut* q = *pp;",
+    "    del(q->data);",
+    "    q->data = new(u8);",
+    "}",
     "fn one() u64 {",
     "    return 1;",
     "}",
@@ -66,7 +71,7 @@ string[34] PRELUDE = {
 
 // The FIR cases. Each store of a case stands at a location of its own, the line of the statement
 // in the comment of the case.
-string[249] TEXT = {
+string[268] TEXT = {
     // a fresh `new` and a value with no call: the temporary and the store through `p`: P P
     "fn main.o1() -> void {",
     "    let _1 (p): box mut* own #1:1;",
@@ -331,11 +336,31 @@ string[249] TEXT = {
     "        return #7:1;",
     "    }",
     "}",
+    // the address of the pointer local reaches the callee, which fills the owner: R+
+    "fn main.o15() -> void {",
+    "    let _1 (p): box mut* own #1:1;",
+    "    let _2: box mut* own mut*;",
+    "    let _3: void;",
+    "    let _4: box mut*;",
+    "    let _5: void;",
+    "    bb0: {",
+    "        _1 = const zero box mut* own #1:1;",
+    "        live(_1) #1:1;",
+    "        _1 = alloc<box>(const u64 1) #1:1;",
+    "        _2 = addr mut(_1) #2:1;",
+    "        _3 = call fn main.fill_at(copy _2) #2:1;",
+    "        _4 = addr mut((*_1)) #3:1;",
+    "        (*_4) = call fn main.fill() #3:1;",
+    "        _5 = call fn main.free_made(move _1) #4:1;",
+    "        dead(_1) #4:1;",
+    "        return #4:1;",
+    "    }",
+    "}",
 };
 
-string[14] TEXT_VERDICTS = {
+string[15] TEXT_VERDICTS = {
     "P P", "P R+", "P R+", "P R-", "P R+", "P P", "R- R+", "P R+ P", "P P R+", "P P", "R+",
-    "P R+", "P R+", "P P P P R+",
+    "P R+", "P R+", "P P P P R+", "R+",
 };
 
 // The counts of a set: its whole stores, those that the pass proves, those that it does not prove
@@ -496,7 +521,7 @@ fn run_text_cases(run_env.env mut* e, fir.module* m) void {
 
 // The fort cases: each runs its function, and the function of its proof is the first name of its
 // pair in SOURCE_CASES.
-string[138] SOURCE = {
+string[200] SOURCE = {
     "struct box {",
     "    u8 mut* own data;",
     "}",
@@ -524,7 +549,7 @@ string[138] SOURCE = {
     "    del(p->data);",
     "    del(p);",
     "}",
-    // the call of the right side kills the fact of the fresh `new` (kill rule 5): R-
+    // the call of the right side keeps the fact through the fresh `p` (kill rule 5): P
     "fn s3() void {",
     "    box mut* own p = new(box);",
     "    *p = fill();",
@@ -601,6 +626,74 @@ string[138] SOURCE = {
     "fn at_n(shelf mut* s) void {",
     "    s->items[s->n] = fill();",
     "}",
+    // a call between the fresh `new` and the store keeps the fact (kill rule 5): P P
+    "fn g() void {",
+    "}",
+    "fn call_first() void {",
+    "    box mut* own p = new(box);",
+    "    box mut b = box{new(u8)};",
+    "    g();",
+    "    *p = move(b);",
+    "    del(p->data);",
+    "    del(p);",
+    "}",
+    // a callee that gets the pointer fills the owner, and the store writes over it: R+
+    "fn fill_into(box mut* q) void {",
+    "    del(q->data);",
+    "    q->data = new(u8);",
+    "}",
+    "fn passed() void {",
+    "    box mut* own p = new(box);",
+    "    fill_into(p);",
+    "    *p = fill();",
+    "    del(p->data);",
+    "    del(p);",
+    "}",
+    // a copy of the pointer in a second local reaches the callee: R+
+    "fn copied() void {",
+    "    box mut* own p = new(box);",
+    "    box mut* q = p;",
+    "    fill_into(q);",
+    "    *p = fill();",
+    "    del(p->data);",
+    "    del(p);",
+    "}",
+    // the pointer in a field of a local reaches the callee through the address of the local: R+
+    "struct keeper {",
+    "    box mut* ptr;",
+    "}",
+    "fn fill_kept(keeper* k) void {",
+    "    fill_into(k->ptr);",
+    "}",
+    "fn stored() void {",
+    "    box mut* own p = new(box);",
+    "    keeper k = keeper{p};",
+    "    fill_kept(&k);",
+    "    *p = fill();",
+    "    del(p->data);",
+    "    del(p);",
+    "}",
+    // the address of the owner through the pointer reaches the callee: R+
+    "fn fill_slot(u8 mut* own mut* d) void {",
+    "    del(*d);",
+    "    *d = new(u8);",
+    "}",
+    "fn slot() void {",
+    "    box mut* own p = new(box);",
+    "    fill_slot(&p->data);",
+    "    *p = fill();",
+    "    del(p->data);",
+    "    del(p);",
+    "}",
+    // the back edge brings the owner that the store of the last round put there: R+
+    "fn rounds() void {",
+    "    box mut* own p = new(box);",
+    "    for (i32 mut i = 0; i < 2; i++) {",
+    "        *p = fill();",
+    "    }",
+    "    del(p->data);",
+    "    del(p);",
+    "}",
     // the kill rules of the first store through `p` end the fact that the `new` gave, so the
     // second store is no proved store over the owner that the first put there: P P P R+
     "fn twice() void {",
@@ -666,10 +759,10 @@ string[138] SOURCE = {
 
 // The functions of the source cases: the function that the pass proves, the function that the run
 // calls, and the verdicts.
-string[66] SOURCE_CASES = {
+string[84] SOURCE_CASES = {
     "s1", "s1", "R+ P",
     "s2", "s2", "P P",
-    "s3", "s3", "R-",
+    "s3", "s3", "P",
     "s4", "s4", "P P R+",
     "s5", "s5", "P",
     "s6", "s6", "P P P",
@@ -689,6 +782,12 @@ string[66] SOURCE_CASES = {
     "move_defer", "move_true", "P P P R- R+",
     "move_defer", "move_false", "P P P R+ R-",
     "loop_defer", "loop_defer", "P R+ R+",
+    "call_first", "call_first", "P P",
+    "passed", "passed", "R+",
+    "copied", "copied", "R+",
+    "stored", "stored", "R+",
+    "slot", "slot", "R+",
+    "rounds", "rounds", "R+",
 };
 
 // The callers: `s7` gives `over` a box whose owner holds an allocation, and `s8` one whose owner it
@@ -768,7 +867,7 @@ fn lower_decl(run_env.env mut* e, string name, fir.func mut* out, fir_lower.repo
 
 // Runs each fort case and holds the verdicts of its proved function against its run.
 fn each_source_case_holds_against_its_run(run_env.env mut* e) void {
-    string[184] mut all = {};
+    string[246] mut all = {};
     u64 mut k = 0;
     while (k < SOURCE.len) {
         all[k] = SOURCE[k];

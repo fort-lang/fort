@@ -3307,8 +3307,10 @@ says ownership is "by convention", this section supersedes it.
   For a local `b` of type `box`, whose field `data` is an `own` reference, `box mut* own p =
   new(box); *p = move(b);` passes, because `new` fills `*p` with zero (gen rule 5). For a function
   `make` that returns a `box mut* own`, `p = make(); *p = move(b);` does not pass: the facts of a
-  function say nothing about the result of another function. `p = new(box); *p = fill();` does not
-  pass either, because the call `fill()` kills the fact of `p->data` (kill rule 5). For a parameter
+  function say nothing about the result of another function. `p = new(box); *p = fill();` passes:
+  `p` is fresh, so the call `fill()` keeps the fact of `p->data` (kill rule 5). For a function
+  `keep` with a parameter of type `box mut*`, `p = new(box); keep(p); *p = fill();` does not pass:
+  the operand `p` of `keep` ends the freshness of `p`, so the call kills the fact. For a parameter
   `q` of type `box mut*`, `del(q->data); *q = box{};` passes.
   Until the migration of the whole stores of the trees ends, a whole store that the compiler cannot
   prove is no error. `fort --whole-store-report` implies `--check` and lists each such store, and
@@ -3439,7 +3441,13 @@ says ownership is "by convention", this section supersedes it.
      place with that base that is not separate from `d`. So a store into a pointer local `p` kills
      each fact through `p`, and a store into `b[j]` kills the fact of `b[i]`. A store into a
      local that is a key kills each fact whose place has that key.
-  2. A store into a place through a fresh pointer local kills only what rule 1 kills.
+  2. A store into a place through a fresh pointer local kills only what rule 1 kills. A whole
+     store into `*p` whose right side has a writer (a call, a `new`, a `move` or a `del`, `fir.md`
+     2) is no such store: the lowering writes it through an address of `*p` that it holds before
+     the right side (`fir.md` 9.3), so the store kills as a store through another pointer (rule
+     3), and it ends the freshness of `p` (`fir.md` 11, Fresh). So for a fresh `p` and a parameter
+     `q` of type `box mut*`, `del(q->data); *p = move(b); q->data = new(u8);` is an error at
+     `q->data`.
   3. Any other store through a pointer kills each fact about a place reached through memory, with
      three exceptions. It keeps a fact about a place through a fresh pointer local. It keeps a fact
      that rule 1 keeps for the same base. It keeps a fact about a place in the fixed storage of a
@@ -3461,7 +3469,11 @@ says ownership is "by convention", this section supersedes it.
      writes no byte of another local or another global, so it keeps their facts. Rule 1 applies to
      its own base.
   5. A call kills each fact except the facts about a local that is not memory and about its
-     places that are not reached through memory. `new` and `del` are no calls under this rule.
+     places that are not reached through memory, and the facts about a place through a fresh
+     pointer local. `new` and `del` are no calls under this rule. The operands of a call are read
+     before its kill, so an operand that copies or moves `n` ends the freshness of `n` first. No
+     other pointer names the object of a fresh `n`, and `n` is not memory, so the callee can reach
+     no byte of the object (D10.7).
   A store applies the kill rules first and its gen rule after them. A call in the right-hand side
   kills before the store. `del` and `move` are no stores, and they apply only their gen rule.
   Each store into an `own` reference-typed place needs the fact of that place after the
@@ -3501,8 +3513,10 @@ says ownership is "by convention", this section supersedes it.
   unknown. So an out-parameter store needs `del(*out); *out = move(buf);`.
   For a fresh `node mut* own n = new(node)` and locals `l` and `r`,
   `n->left = move(l); n->right = move(r);` passes: the store into `n->left` keeps the fact of the
-  separate field `n->right`. For parameters `p` and `q`, in `del(p->f); q->g = 0;
-  p->f = new(T);` the last store is an error, because `q` can hold the value of `p`.
+  separate field `n->right`. For a function `g`, `g(); n->left = move(l);` passes too, because the
+  call keeps the facts through the fresh `n` (kill rule 5). For parameters `p` and `q`, in
+  `del(p->f); q->g = 0; p->f = new(T);` the last store is an error, because `q` can hold the value
+  of `p`.
   For a parameter `v` of type `node_vec mut*`, `u64 k = v->len; del(v->items[k]);
   v->items[k] = move(n);` passes, because both elements have the key `k`. Without the local `k`,
   `v->items[v->len]` has no key, and the store is an error.
@@ -3602,6 +3616,18 @@ says ownership is "by convention", this section supersedes it.
   make(); *p = fill();` compiled and lost the allocation that `make` stored in `p->data`. The whole
   stores start as a report, as the overwrite check went from a report (5152c9fd) to an error
   (d8a9e096).
+  Amended 2026-11-07: kill rule 5 keeps the facts about a place through a fresh pointer local. The
+  coordinator ruled it on 2026-11-06 under the user ruling "Check whole stores" (user,
+  2026-11-06), which says that `new(T)` in the same function proves a whole store. Before, a call
+  killed each fact reached through memory, a fact through a fresh pointer local too, so `p =
+  new(box); *p = fill();` was no proof, and `g(); n->left = move(l);` after a fresh `new` of `n`
+  was an error. Measured with `fort --whole-store-report` over the 1,427 entries of the trees on
+  each target: 29 of the 30 whole stores of cause 3 are proved, each a store after a fresh `new` in
+  the same function. No entry changes its output under `--check` or `--leak-report`, so no error
+  of D17.11 or D17.20 in the trees changes. The coordinator ruled on 2026-11-07 that a whole store
+  through the address of a fresh `p` kills as a store through another pointer and ends the
+  freshness of `p`, the reading of `fir.md` 11; before, kill rule 2 read as if it covered such a
+  store, and the compiler did not.
 
 ### D17.12 Owned strings
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

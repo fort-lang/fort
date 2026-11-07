@@ -317,11 +317,15 @@ fn is_whole_address(survey* c, u32 a) bool {
     return owning && l->reads == 1 && l->checks == 0 && l->stores == 1;
 }
 
-/// Marks the addresses of the whole stores (is_whole_address) after mark_memory, and lists them
-/// with the held addresses as readers of the locals that the address of their place reads, so that
-/// the stale dataflow keeps their bits. No other reading of the analysis changes: trace, the
-/// freshness and the kill rules read no such address as its place.
-fn mark_whole_addresses(survey mut* c) void {
+/// Marks the addresses of the whole stores (is_whole_address) after mark_memory. With `readers`,
+/// it lists them with the held addresses as readers of the locals that the address of their place
+/// reads, so that the stale dataflow keeps their bits for the test of their stores; the whole-store
+/// work counts those steps, so a function past its limit gets no readers. The marks change the
+/// freshness in each function, within the limit or past it: the `addr` of such an address ends no
+/// freshness, and each store through it ends the freshness of the local of its place
+/// (apply_fresh_reads, apply_fresh_end). So no other verdict depends on the whole-store work. trace
+/// and the kill rules read no such address as its place.
+fn mark_whole_addresses(survey mut* c, bool readers) void {
     bool mut any = false;
     u32 mut k = 0;
     while (k < fir.local_count(c->f)) {
@@ -330,9 +334,15 @@ fn mark_whole_addresses(survey mut* c) void {
         any = any || l->whole;
         k += 1;
     }
-    if (any) {
+    if (any && readers) {
         mark_readers(c);
     }
+}
+
+// Whether the local `n` is a held address or the address of a whole store: a temporary that is no
+// memory, that one `addr mut` writes and that only its check and its stores read.
+fn is_address(survey* c, u32 n) bool {
+    return c->locals[cast(n, u64)].held || c->locals[cast(n, u64)].whole;
 }
 
 // Whether the statement `s` takes the address of the storage of a local, and which one in *out:
@@ -552,7 +562,7 @@ fn apply_stale(survey* c, fir.statement* s, fir_flow.bits mut* stale) void {
         r = c->readers[cast(r, u64)].next;
     }
     local_info* l = &c->locals[cast(s->place.local, u64)];
-    bool address = l->held || l->whole;
+    bool address = is_address(c, s->place.local);
     if (s->place.proj_len == 0 && (l->source.kind == key_kind.kk_local || address)) {
         fir_flow.bits_clear(stale, s->place.local);
     }
@@ -611,7 +621,9 @@ fn end_fresh(fir.operand o, fir_flow.bits mut* fresh) void {
 
 // The effect of the right side of the statement `s` on the fresh set: each operand that copies
 // or moves a local as a whole, and each `addr` or `slice` that names a place of a local, other
-// than the store of a held address, ends the freshness of that local.
+// than the store of a held address or of the address of a whole store, ends the freshness of that
+// local. Only its check and its stores read such an address, and it is no memory, so no call, no
+// other store and no operand gets its value.
 fn apply_fresh_reads(survey* c, fir.statement* s, fir_flow.bits mut* fresh) void {
     fir.operand mut o = fir.operand{};
     u32 mut i = 0;
@@ -624,9 +636,23 @@ fn apply_fresh_reads(survey* c, fir.statement* s, fir_flow.bits mut* fresh) void
     }
     fir.rvalue r = s->value;
     bool names = r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice;
-    bool held = is_local(s->place) && c->locals[cast(s->place.local, u64)].held;
+    bool held = is_local(s->place) && is_address(c, s->place.local);
     if (names && !held && r.place.base == fir.base_kind.bk_local) {
         fir_flow.bits_clear(fresh, r.place.local);
+    }
+}
+
+// The effect of a store through the address `_a` of a whole store on the fresh set: it ends the
+// freshness of the local of the place of the `addr` of `_a`, which the `addr` did not end. It
+// comes after the test of the store and before its kill rules, so the kill rules kill each fact
+// through that local, and the call of its right side keeps them (kill rule 5 of D17.11).
+fn apply_fresh_end(survey* c, fir.statement* s, fir_flow.bits mut* fresh) void {
+    if (s->kind != fir.stmt_kind.st_assign || !is_whole_place(c, s->place)) {
+        return;
+    }
+    fir.place p = whole_source(c, s->place);
+    if (p.base == fir.base_kind.bk_local) {
+        fir_flow.bits_clear(fresh, p.local);
     }
 }
 
