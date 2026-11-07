@@ -10,20 +10,24 @@ import std.io;
 import std.strbuf;
 import std.sys;
 
+// Ends a buffer in an allocation of `new` that the caller moves in (1.3).
+fn buf_drop_made(strbuf.str_buf mut* own p) void {
+    strbuf.str_buf kept = move(*p);
+    del(p);
+    strbuf.drop(move(kept));
+}
+
 // cat: copies one file to standard output. This is the worked example from
 // stdlib.md 2.4.
 fn main(string@ args) i32 {
     if (args.len != 2) {
         return 2;
     }
-    strbuf.str_buf mut buf = strbuf.create();
-    defer del(buf.data);
-    if (!io.read_file(args[1], &buf)) {
+    strbuf.str_buf mut* own buf = new(strbuf.str_buf);
+    defer buf_drop_made(move(buf));
+    if (!io.read_file(args[1], buf)) {
         eprintln("cat: ", args[1], ": errno ", sys.errno());
         return 1;
     }
-    if (!io.write_all(io.STDOUT, strbuf.bytes(&buf))) {
-        return 1;
-    }
-    return 0;
+    return io.write_all(io.STDOUT, strbuf.bytes(buf)) ? 0 : 1;
 }

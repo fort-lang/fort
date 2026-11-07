@@ -15,22 +15,29 @@ import std.vec;
 // The worked examples of stdlib.md 2.6, 2.7 and 2.8, run so that the
 // specification's own sample code is held against the library it describes.
 // Every declaration below the imports is the example as the document spells
-// it, with two changes that the leak rule proves: each deferred free of a
-// container is a `del` of its owner, and symtab_free moves the table into
-// symtab_drop, which holds each release once. The main at the end is this
+// it, with one change that the leak rule proves: symtab_free moves the table
+// into symtab_drop, which holds each release once. The main at the end is this
 // test's own, and it drives them.
 
 // stdlib.md 2.6.
+// Ends a buffer in an allocation of `new` that the caller moves in (1.3).
+fn buf_drop_made(strbuf.str_buf mut* own p) void {
+    strbuf.str_buf kept = move(*p);
+    del(p);
+    strbuf.drop(move(kept));
+}
+
 // Formats "    mov <reg>, <imm>\n". Ownership: the caller dels the result.
 fn mov_imm(string reg, i64 imm) string own {
-    strbuf.str_buf mut b = strbuf.with_cap(32);
-    defer del(b.data);
-    strbuf.append(&b, "    mov ");
-    strbuf.append(&b, reg);
-    strbuf.append(&b, ", ");
-    strbuf.append_i64(&b, imm);
-    strbuf.push(&b, '\n');
-    return strbuf.take(&b);   // an own rvalue flows into the own return type (D17.5)
+    strbuf.str_buf mut* own b = new(strbuf.str_buf);
+    defer buf_drop_made(move(b));
+    strbuf.reserve(b, 32);
+    strbuf.append(b, "    mov ");
+    strbuf.append(b, reg);
+    strbuf.append(b, ", ");
+    strbuf.append_i64(b, imm);
+    strbuf.push(b, '\n');
+    return strbuf.take(b);   // an own rvalue flows into the own return type (D17.5)
 }
 
 fn emit_mov(i32 fd) bool {
@@ -48,11 +55,14 @@ struct node_vec {
     u64 len;
 }
 
-// The typed copy of int_free, int_reserve, int_push and int_pop, which the document names and
-// does not show: `i64` is `node mut*` and the prefix `int_` is `node_`.
+// The typed copy of int_free, int_drop, int_reserve, int_push and int_pop, which the document
+// names and does not show: `i64` is `node mut*` and the prefix `int_` is `node_`.
 fn node_free(node_vec mut* v) void {
-    del(v->items);
-    v->len = 0;
+    node_drop(move(*v));
+}
+
+fn node_drop(node_vec mut v) void {
+    del(v.items);
 }
 
 fn node_reserve(node_vec mut* v, u64 extra) void {
@@ -99,14 +109,22 @@ fn value_of(node* p) i64 {
     return p->value;
 }
 
+// Ends a vector in an allocation of `new` that the caller moves in (1.3): node_drop, the typed
+// copy of int_drop, frees the slots.
+fn node_drop_made(node_vec mut* own p) void {
+    node_vec kept = move(*p);
+    del(p);
+    node_drop(move(kept));
+}
+
 fn demo() i64 {
-    node_vec mut stack = node_vec{};
-    defer del(stack.items);
+    node_vec mut* own stack = new(node_vec);  // the calls take the vector by pointer (1.3)
+    defer node_drop_made(move(stack));
     node mut* own n = new(node);              // new lands in an own place (D17.3, D17.8)
     defer del(n);
     n->value = 7;
-    node_push(&stack, n);                     // lends n; the vector never frees it
-    node mut* top = node_pop(&stack);         // the type that went in comes back
+    node_push(stack, n);                      // lends n; the vector never frees it
+    node mut* top = node_pop(stack);          // the type that went in comes back
     return value_of(top);
 }
 

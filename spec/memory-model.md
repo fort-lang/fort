@@ -407,15 +407,30 @@ fn arena_alloc(arena mut* a, u64 n) u8 mut@ {
 }
 
 fn arena_free(arena mut* a) void {
-    del(a->block);                       // frees every chunk at once; block is {null, 0}
-    a->used = 0;
+    arena_drop(move(*a));                // *a is {{null, 0}, 0} afterwards
 }
 
-arena mut ar = {new(u8, 4096), 0};
-u8 mut@ tmp = arena_alloc(&ar, 64);
+fn arena_drop(arena mut a) void {
+    del(a.block);                        // frees every chunk at once
+}
+
+fn arena_drop_made(arena mut* own p) void {
+    arena kept = move(*p);
+    del(p);
+    arena_drop(move(kept));
+}
+
+arena mut* own ar = new(arena);          // the calls take the arena by pointer (D17.20)
+defer arena_drop_made(move(ar));
+ar->block = new(u8, 4096);
+u8 mut@ tmp = arena_alloc(ar, 64);
 del(tmp);                                // error: cannot del 'tmp': not an own type (D17.9)
-arena_free(&ar);
 ```
+
+The arena lives in an allocation of `new`, because the calls lend it: a call kills what the
+compiler knows of a local whose address the function takes (D17.11), so `arena_free(&ar);` at the
+end of a local `arena mut ar` would leave an exit that the leak rule cannot prove (D17.20).
+`arena_drop_made` moves the arena out, frees the allocation and then the block.
 
 `defer` captures nothing: the statement runs with the values its variables hold at exit (D7.8,
 D16), so after `defer del(p);` a later `del(p); p = move(q);` makes the exit free `q`; had the
