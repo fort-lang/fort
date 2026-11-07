@@ -40,28 +40,26 @@ bullet at a time and without a rewrite.
   with a control tree);
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fir-run`,
   `library-interface`, `library-artifact`, `library-use`, `library-cache`, `fixpoint`,
-  `aggregate-sites`, `aggregate-front`, `aggregate-lsp`, `aggregate-fir`, `aggregate-gen`,
-  `aggregate-library`, `aggregate-owner`, `aggregate-parser`, `aggregate-misc`, `tty`, `stack_depth`
-  and `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C compiler.
-  `aggregate-sites` holds the sites of `--aggregate-report` in src/fort, src/lsp and std on both
-  targets at none, each line of a report at a known form, and a control program at the one site of
-  the module that it imports. `aggregate-front` holds the sites of `--aggregate-report` and
-  `--leak-report` in the suites test/fort/check_*, modules_* and session_* on both targets at none,
-  and a control program at one site of each report. `aggregate-lsp` does the same for the suites of
-  test/lsp, `aggregate-fir` for test/fort/fir_*, `aggregate-gen` for test/fort/gen_* and types_*,
-  `aggregate-library` for the suites test/fort/library/*_test.ft and the programs of test/library,
-  and `aggregate-owner` for the suites test/fort/owner/*_test.ft. `aggregate-parser` does the same
-  for the suites test/fort/parser_*, lexer_*, index_*, json_* and diag_*, and for
-  test/fort/support/index_env.ft, json_env.ft, lex_env.ft and parse_env.ft, which only they import.
-  `aggregate-misc` does the same for the other modules of test/fort/support and the suites
-  test/fort/driver_*, containers_*, scope_*, ast_*, consts_*, comptime_*, flt_*, runtime_*, fir/,
-  std/ and support_test.ft, and it is the one owner of the drops of those support modules: a drop
-  that misses a release has a site at its exit. The label `libraries` holds `library-compiler` and
-  `fort-modules-libraries`, which carry no step label, so `unit` and `integration` leave them out;
-  the CI job `libraries` runs them (`notes/environment.md` 7). `stack_depth` gives each compiler of
-  the build a 1 MB stack and a type of 254 nested groups (D2.11). Before the checkers kept their
-  suffixes on a stack of their own, that type needed 1792 KB in a darwin debug build. The unit tests
-  of the tools (`lang_selftest`, `fort_lint_selftest`, `mutate_selftest`) went on 2026-09-26.
+  `leak-sites`, `tty`, `stack_depth` and `lsp-binary`; bootstrap0 has none, since building
+  bootstrap-1 proves the C compiler. `leak-sites` (`test/leak_sites_test.py`) runs `--leak-report`
+  on both targets over each suite of test/fort and test/lsp, a program that imports each module of
+  test/fort/support, each program of test/library and each entry of test/lang. It holds each run at
+  no error (a fail entry of test/lang excepted), each line of a report at a known form, the sites
+  of part 2 of the leak rule in the test trees at its list, and a control program at one site.
+  Part 1 is a compile error on the owner locals and on the owning aggregate locals, so a drop of a
+  support module that misses a release leaves an error at its exit, which the test reads also in a
+  module that no suite imports. It replaced nine ctests of the report of the owning aggregate
+  locals, one for each test tree, and `aggregate-sites`, which held that report in src/fort,
+  src/lsp and std. Those three trees take the error from other steps: the last pin builds src/fort
+  and has no such error, so `fixpoint`, whose stage3 the compiler of HEAD builds, holds src/fort,
+  and so does `leak-sites` through each suite that imports a module of src/fort; the build of
+  `fort-lsp` with the compiler of HEAD holds src/lsp; and each test build holds the std modules
+  that it imports. The label `libraries` holds `library-compiler` and `fort-modules-libraries`,
+  which carry no step label, so `unit` and `integration` leave them out; the CI job `libraries`
+  runs them (`notes/environment.md` 7). `stack_depth` gives each compiler of the build a 1 MB
+  stack and a type of 254 nested groups (D2.11). Before the checkers kept their suffixes on a
+  stack of their own, that type needed 1792 KB in a darwin debug build. The unit tests of the
+  tools (`lang_selftest`, `fort_lint_selftest`, `mutate_selftest`) went on 2026-09-26.
   On linux each target runs as `tools/vm <target>`.
 - **GitHub PR CI supplies the merge gate** (2026-10-01; T-306).
   `.github/workflows/ci.yml` runs on PRs against the repository.
@@ -331,12 +329,12 @@ bullet at a time and without a rewrite.
 - **A free under test hides a defect of the drop at the end of the same local.** The free empties
   the local, so the drop at the end runs on the zero value, and a deletion of the drop call from
   the `drop_made` changes no stdout and gives no event of the fir-run oracle. In 6 tests of PR 212,
-  2 programs and 4 run tests, only `--aggregate-report` saw such a deletion.
-  `test/aggregate_lang_test.py` (ctest `aggregate-lang`) holds the sites of `--aggregate-report`
-  and `--leak-report` over test/lang on the Linux and the Darwin target, so a site that is not in
-  its lists turns it red; a change that ends a site removes it from the lists. To judge a drop,
-  delete each release and each drop call, one at a time, and run that test, the language harness
-  and the fir-run oracle.
+  2 programs and 4 run tests, only `--aggregate-report` saw such a deletion; that option went when
+  part 1 of the leak rule became an error on the owning aggregate locals. Such a deletion now
+  leaves an error at the exit of the drop or of the local, which the build of the test gives, and
+  ctest `leak-sites` gives it on the Linux and the Darwin target. To judge a drop, delete each
+  release and each drop call, one at a time, and run that test, the language harness and the
+  fir-run oracle.
 - **Put the drop of a type in the module of the type when a heap probe holds its free.** At
   dacafa1d the three probes of test/lsp reached each release of `json.free`, `docs.free`,
   `rpc.free` and `server.free`, and a deletion of each of the 15 releases turned a test red. A drop
@@ -813,10 +811,12 @@ bullet at a time and without a rewrite.
   where it read back an integer, a shape lends through `cast(x, i32*)` where it kept a `u64`, and
   `g4` reads no pointer back after its cast to `u64`. So each set prints `forged 0`, and the other
   counts did not change when the event came (measured).
-  **The test holds the report of the owning aggregate locals too** (D17.20). A site
+  **The test holds part 1 of the leak rule on the owning aggregate locals too** (D17.20). A site
   is a function and the location of a `dead` of a local of an owning aggregate type outside an
   abort block, or of a `return` of a function with a parameter or a temporary of such a type, from
-  the FIR, or of an exit of `proof.aggregates` (`add_aggregates`). Each `leak` event marks the site
+  the FIR, or of an exit of `proof.aggregates` (`add_aggregates`). The site is rejected only with
+  the error of the function (`prover.has_error`), so a mutant that drops the error prints false
+  accepts. Each `leak` event marks the site
   at its location and keeps its count outside part 1, so the counts of part 1 do not change. The
   event at a `return` does not say which owner leaked, so an exit of an owner local that the pass
   does not prove at that `return` rejects the site too. Such a masked site hides a wrong proof of

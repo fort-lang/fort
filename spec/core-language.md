@@ -319,8 +319,9 @@ a non-reference type or on a function-pointer type is an error; a struct or fixe
 contains an `own` reference by value is an owning aggregate (below). Ownership is a typing
 discipline, not a linear check: whether every allocation is freed exactly once is not tracked
 (D17.14, D15), and the idiom is `defer del(x);` (6.6). The leak rule of D17.20 is the one
-exception. It covers a named local of `own` reference type at the end of its scope, or such a
-parameter or temporary at a `return`, that can hold an allocation. It also covers a `del` or an
+exception. It covers a named local of `own` reference type or of an owning aggregate type at the
+end of its scope, or such a parameter or temporary at a `return`, that can hold an allocation in
+itself or in an owner of its fixed storage. It also covers a `del` or an
 `own` cast that frees an object whose owners can hold allocations (`memory-model.md` 2.5). An exit
 of such a local, parameter or temporary that the compiler cannot prove is a compile error. The
 compiler first reports each such `del` and `cast` that it cannot prove and accepts the program; a

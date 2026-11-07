@@ -831,8 +831,9 @@ scalar, a struct, a fixed array or a function-pointer type is an error; a struct
 contains an `own` reference is an owning aggregate instead (section 8.5). Ownership is a typing
 discipline, not a linear check: a use after `move` is diagnosed only by D17.21, for a local owner
 (D17.14, D15). A leak is diagnosed only by D17.20. It covers a named local of `own` reference type
-at the end of its scope, or such a parameter or temporary at a `return`, that can hold an
-allocation. It also covers a `del` or an `own` cast that frees an object whose owners can hold
+or of an owning aggregate type (section 8.5) at the end of its scope, or such a parameter or
+temporary at a `return`, that can hold an allocation in itself or in an owner of its fixed storage.
+It also covers a `del` or an `own` cast that frees an object whose owners can hold
 allocations. An exit of such a local, parameter or temporary that the compiler cannot prove is a
 compile error. The compiler first reports each such `del` and `cast` that it cannot prove and
 accepts the program; a later change makes each of them a compile error.
@@ -1008,8 +1009,10 @@ would strand the rest (D17.8). `del` of an aggregate is an error, because `del` 
 struct frees its own fields, one `del` per `own` field, and a container exposes a `free`
 function that does so (D13.5). Functions therefore take an owning struct by pointer, `vec*` or
 `vec mut*`, and a range `for` over owning elements is an error (`core-language.md` 6.4).
-An owning aggregate assignment has no fieldwise overwrite check (D17.11), and the leak rule of
-D17.20 does not check an owning aggregate local at the exit of its scope.
+An owning aggregate assignment has no fieldwise overwrite check (D17.11). The leak rule of D17.20
+checks each owner in the fixed storage of an owning aggregate local at each exit of its scope: an
+owner that the compiler cannot prove empty there is a compile error that names it, such as
+`p.a`.
 
 ```fort
 struct vec { i32 mut@ own data; u64 len; }

@@ -269,12 +269,13 @@ file: `fort [options] --lib <name> <root>`.
   9.8). The second is a function that needs a print function, `str_eq` or the entry of a check kind
   of `std.rt` that the closure lacks or declares in another form (`spec/fir.md` 9.8). The third is a
   function with an overwrite check that the emptiness pass does not prove, which is the error of
-  D17.11 (`spec/fir.md` 11). The fourth is a function with an exit of an owner local that the
-  emptiness pass does not prove, which is the error of part 1 of D17.20 (`spec/fir.md` 11). The
-  fifth is a function with a use after `move` or `del` that the emptiness pass does not prove, which
-  is the error of D17.21 (`spec/fir.md` 11). For a print function or `str_eq`, another form is
-  another signature (`spec/fir.md` 9.8). For the entry of a check kind, another form is other
-  parameters than rule V7 requires. A check that the selected mode removes needs no entry.
+  D17.11 (`spec/fir.md` 11). The fourth is a function with an exit of an owner local or of a
+  local of an owning aggregate type that the emptiness pass does not prove, which is the error of
+  part 1 of D17.20 (`spec/fir.md` 11). The fifth is a function with a use after `move` or `del`
+  that the emptiness pass does not prove, which is the error of D17.21 (`spec/fir.md` 11). For a
+  print function or `str_eq`, another form is another signature (`spec/fir.md` 9.8). For the entry
+  of a check kind, another form is other parameters than rule V7 requires. A check that the
+  selected mode removes needs no entry.
   The compiler assumes the other `std.rt` functions that it calls (`alloc`, `free`, `args_init`,
   `args`, `flush_all`) and does not test them.
   `--fir-stats` then writes one line to stdout after the module is written, `lowered N of M`: N
@@ -468,8 +469,8 @@ Section 2.1 gives the steps of a library build (D9.11).
 3. Check every module in dependency order, imported modules first (exit 1).
    In every build mode, lower and verify each fort body of the closure, and run the emptiness
    pass of `fir.md` 11 on it (D17.11). An overwrite check that the pass cannot prove is a source
-   error (exit 1), and so are an exit of an owner local (D17.20) and a use after `move` or `del`
-   (D17.21) that the pass cannot prove.
+   error (exit 1), and so are an exit of an owner local or of a local of an owning aggregate type
+   (D17.20) and a use after `move` or `del` (D17.21) that the pass cannot prove.
 4. Emit one LLVM IR module for the closure to `<tmp>/<entry>.ll` (D19.1), or to the `-S` output
    and stop.
 5. Run `<cc>` over that module once: it compiles and links in one invocation (D14.3), exit 2 on
@@ -2409,8 +2410,9 @@ implementable; the design is to be planned in the implementation phase.
   and, on each assignment, whether the target is an `own` lvalue that needs the overwrite check.
 - **Codegen.** For each function, the lowering makes FIR from the annotated AST and expands the
   deferred statements statically at each exit (D7.8, D19.8); the verifier tests the FIR, the
-  emptiness pass proves each overwrite check (D17.11), each exit of an owner local (D17.20) and
-  each use after `move` or `del` (D17.21), the build-mode pass applies the selected mode, and the
+  emptiness pass proves each overwrite check (D17.11), each exit of an owner local and of a local
+  of an owning aggregate type (D17.20) and each use after `move` or `del` (D17.21), the build-mode
+  pass applies the selected mode, and the
   verifier tests it again; the translator then
   appends the text of section 6 to a single LLVM IR module (D19.1), with no libLLVM and no register
   allocation: locals are `alloca`s in the entry block and intermediates are SSA temporaries or
