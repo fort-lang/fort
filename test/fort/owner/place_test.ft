@@ -9,6 +9,7 @@
 //| stores ok
 //| tests ok
 //| whole addresses ok
+//| values ok
 /// Checks the helpers of owner.place that rule (b) of D17.21 reads: the owners in fixed storage of
 /// a local and below a place, the local keys of a path and the rank of a key, the number of an
 /// owner in a type, the owners that a read in fixed storage reads, the parts of a place, the count
@@ -717,6 +718,145 @@ fn expect_keyless(place.survey mut* c, fir.func mut* f) void {
     assert(whole.tracked && !place.has_keyless_index(c, whole));
 }
 
+// The values of the temporaries (spec/fir.md 11, Values). `_3` holds a zero literal and `_6` its
+// `move`, both zero values. `_4` holds a literal with a member that holds a value, and `_8` one
+// with the integer 7, so both hold a literal. The designated literal of `b` leaves its last two
+// members out. `_9` takes two stores, `_10` is memory, and `_12` and `_13` read each other in a
+// block that no edge reaches, so none of them holds a known value. `_14` is the constant key 0,
+// `_18` the constant key 1, and the array literal of `a` holds null in its first element.
+string[43] VALUES = {
+    "fn main.v1(_1 (x): i32 mut* own, _2 (y): i32 mut* own) -> void {",
+    "    let _3: pair;",
+    "    let _4: pair;",
+    "    let _5 (b): box;",
+    "    let _6: pair;",
+    "    let _7: i32 mut* own mut*;",
+    "    let _8: box;",
+    "    let _9: pair;",
+    "    let _10: pair;",
+    "    let _11: box;",
+    "    let _12: i32 mut* own;",
+    "    let _13: i32 mut* own;",
+    "    let _14: u64;",
+    "    let _15: pair;",
+    "    let _16: pair;",
+    "    let _17 (a): i32 mut* own[2];",
+    "    let _18: u64;",
+    "    bb0: {",
+    "        _3 = aggregate pair(const null i32 mut* own, const zero i32 mut* own);",
+    "        _4 = aggregate pair(move _1, const null i32 mut* own);",
+    "        _5 = aggregate zeroed box(move _4, const i32 7, const zero i32 mut* own[2],",
+    "            const zero u8 mut@ own);",
+    "        _6 = move _3;",
+    "        _9 = aggregate pair(const null i32 mut* own, const null i32 mut* own);",
+    "        _9 = aggregate pair(const null i32 mut* own, const null i32 mut* own);",
+    "        _15 = move _9;",
+    "        _10 = aggregate pair(const null i32 mut* own, const null i32 mut* own);",
+    "        _7 = addr mut(_10.0);",
+    "        _16 = move _10;",
+    "        _8 = aggregate box(move _6, const i32 7, const zero i32 mut* own[2],",
+    "            const zero u8 mut@ own);",
+    "        _11 = move _8;",
+    "        _14 = const u64 0;",
+    "        _17 = aggregate i32 mut* own[2](const null i32 mut* own, move _2);",
+    "        _18 = const u64 1;",
+    "        return;",
+    "    }",
+    "    bb1: {",
+    "        _12 = move _13;",
+    "        _13 = move _12;",
+    "        goto bb1;",
+    "    }",
+    "}",
+};
+
+// The marks of mark_values: a temporary that one store writes with a literal and that one `move`
+// reads holds a zero value when each operand is one, at any depth, and a literal else. Two
+// stores, an address and a chain that reads itself give no known value, and neither does a named
+// local. A store of a literal writes the zero value into a member when its operand is a zero
+// value, at any depth of the literals in temporaries: a field and an element at a constant key.
+fn the_values_of_the_temporaries_are_marked() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], VALUES[..]);
+    defer fir.module_drop_made(move(m));
+    fir.func mut* f = &m->funcs.items[0];
+    pass_env.verified(e, f, "place_test: the verifier refuses the values");
+    place.survey mut* own c = survey_of(f);
+    defer place.drop_made(move(c));
+    // before the marks, no local has a value
+    assert(info_at(c, 3).value == place.temp_value.tv_unseen);
+    place.mark_values(c);
+    assert(info_at(c, 3).value == place.temp_value.tv_zero);
+    assert(info_at(c, 6).value == place.temp_value.tv_zero);
+    assert(info_at(c, 4).value == place.temp_value.tv_literal);
+    assert(info_at(c, 8).value == place.temp_value.tv_literal);
+    assert(info_at(c, 9).value == place.temp_value.tv_other);
+    assert(info_at(c, 10).value == place.temp_value.tv_other);
+    assert(info_at(c, 12).value == place.temp_value.tv_other);
+    assert(info_at(c, 13).value == place.temp_value.tv_other);
+    assert(info_at(c, 5).value == place.temp_value.tv_other);
+    expect_values(c, f);
+    expect_members(c, f);
+    println("values ok");
+}
+
+// The zero values and the literals among the rvalues of VALUES.
+fn expect_values(place.survey* c, fir.func* f) void {
+    fir.rvalue designated = fir.block_statement(f, 0, 2)->value;
+    assert(place.is_zero_rvalue(c, fir.block_statement(f, 0, 0)->value));
+    assert(place.is_zero_rvalue(c, fir.block_statement(f, 0, 3)->value));
+    assert(!place.is_zero_rvalue(c, designated));
+    assert(!place.is_zero_rvalue(c, fir.block_statement(f, 0, 10)->value));
+    assert(!place.is_zero_rvalue(c, fir.block_statement(f, 0, 6)->value));
+    assert(place.is_literal(c, designated));
+    assert(place.is_literal(c, fir.block_statement(f, 0, 11)->value));
+    assert(!place.is_literal(c, fir.block_statement(f, 0, 3)->value));
+    assert(!place.is_literal(c, fir.block_statement(f, 0, 12)->value));
+}
+
+// The members of the literal of `b`, and of the literal in `_8` through the `move` of `_11`.
+fn expect_members(place.survey mut* c, fir.func mut* f) void {
+    // before the set: a call after an address of the set could change it (D17.21)
+    fir.rvalue designated = fir.block_statement(f, 0, 2)->value;
+    fir.rvalue moved = fir.block_statement(f, 0, 11)->value;
+    fir.rvalue zero_move = fir.block_statement(f, 0, 3)->value;
+    fir.rvalue array = fir.block_statement(f, 0, 13)->value;
+    fir_flow.bits mut stale = fir_flow.bits_new(fir.local_count(f));
+    defer del(stale.words);
+    // `p.a` holds the `move` of `_1` in the literal of `_4`, and `p.b` its null
+    assert(!is_zero_member_of(c, f, designated, 5, ".0.0", &stale));
+    assert(is_zero_member_of(c, f, designated, 5, ".0.1", &stale));
+    // `v` holds 7, and the designated literal leaves `e` and `data` out
+    assert(!is_zero_member_of(c, f, designated, 5, ".1", &stale));
+    assert(is_zero_member_of(c, f, designated, 5, ".2[14]", &stale));
+    assert(is_zero_member_of(c, f, designated, 5, ".3", &stale));
+    // each element of a zero member holds the zero value, whatever its index
+    assert(is_zero_member_of(c, f, designated, 5, ".2[2]", &stale));
+    // `_8` holds the zero value `_6` in `p`
+    assert(is_zero_member_of(c, f, moved, 5, ".0.1", &stale));
+    assert(is_zero_member_of(c, f, moved, 5, ".0", &stale));
+    assert(!is_zero_member_of(c, f, moved, 5, ".1", &stale));
+    // a store of a zero temporary is no literal, so it names no member of its own
+    assert(!is_zero_member_of(c, f, zero_move, 5, ".0", &stale));
+    // an element of an array literal at a constant key names its operand, and an index whose key
+    // is no constant names none
+    assert(is_zero_member_of(c, f, array, 17, "[14]", &stale));
+    assert(!is_zero_member_of(c, f, array, 17, "[18]", &stale));
+    assert(!is_zero_member_of(c, f, array, 17, "[2]", &stale));
+}
+
+// Whether the store of the rvalue `r` writes the zero value into the member that the place `_n`
+// with the projections of `text` names (place.is_zero_member).
+fn is_zero_member_of(place.survey mut* c, fir.func mut* f, fir.rvalue r, u32 n, string text,
+                     fir_flow.bits* stale) bool {
+    u64 mark = c->steps_len;
+    place.path q = place.trace(c, place_of(f, n, text), stale);
+    bool zero = place.is_zero_member(c, r, q, 0);
+    c->steps_len = mark;
+    return zero;
+}
+
 fn main() i32 {
     the_owners_follow_the_order_of_the_type();
     the_keys_of_a_path_count_and_rank_their_locals();
@@ -726,5 +866,6 @@ fn main() i32 {
     a_light_survey_counts_the_stores();
     a_test_gives_the_edge_of_each_value();
     the_address_of_a_whole_store_is_marked_and_turns_stale();
+    the_values_of_the_temporaries_are_marked();
     return 0;
 }
