@@ -9,8 +9,15 @@ the next design of `notes/ownership-retrospective.md` 8, and section 13 checks e
 
 **The premise.** The user ruled on 2026-10-23: "Coarse and sound". The ruling changes no rule of
 the language. It has five points, and this design applies each of them:
-1. A call kills each fact about a memory place: kill rule 5 of D17.11 stays at each call. So the
-   design has no private memory local and no assumption about the arguments of a call.
+1. A call kills each fact about a memory place: kill rule 5 of D17.11 stays at each call, but for
+   the exceptions that this point names. So the design has no private memory local and no
+   assumption about the arguments of a call. Each exception is a refinement of section 7 with a
+   proof of its own, and kill rule 5 states it:
+   - R11: a call keeps the empty facts through a pointer local that holds a `new` of this
+     function, while no other pointer names the object and no call or store took a copy of the
+     pointer: a fresh pointer local of D17.11.
+   Amended 2026-11-07: the user ruled "Narrow premise 1". Before, the point had no exception, and a
+   call killed each fact through a pointer, through a fresh pointer local too.
 2. A borrow of an owner that goes anywhere other than a view local pins the owner. That covers a
    field, an array element, memory, the return slot `_0` and a call argument. It also covers a place
    of a type that is no reference, such as a `u64` through a cast. A later `del` or `move` of a
@@ -1202,6 +1209,19 @@ counts of its rules before and after it. A report count can change the order of 
 - **R10 typed aliasing**: a place through a pointer can be only a memory place of a matching type.
   D17.4 drops `own` at the second level and D3.14 allows casts, so it needs an assumption on the
   program that the user rules on. Revision 3 measured a typed form that missed D17.4.
+- **R11 a fresh allocation at a call.** A call keeps each fact about a place through a fresh
+  pointer local: no pointer but the local names the object of its `new`, the local is no memory,
+  and an operand of the call that copies or moves the local ends its freshness before the kill, so
+  no callee reaches the object (D10.7). It narrows premise 1 for these places alone, and premise 1
+  names it (the user, 2026-11-07, "Narrow premise 1"). Its decision is kill rule 5 of D17.11, which
+  the coordinator ruled on 2026-11-06 under the user ruling "Check whole stores" (2026-11-06):
+  `new(T)` in the same function proves a whole store. `spec/fir.md` 11
+  (Kill, Fresh) gives its FIR form; the `addr` of the address of a whole store ends no freshness,
+  and its store ends it before its kill rules. Gain (measured, `fort --whole-store-report` over the
+  1,427 entries of the trees on each target): 29 of the 30 sites of cause 3 of the 472, each a
+  store after a fresh `new` in the same function; no entry changes its output under `--check` or
+  `--leak-report`. The oracle test keeps 0 false accepts in each set; its exhaustive family loses
+  22 false rejects of rule (a) and 132 of part 2, and its seeded family 1 of rule (a).
 
 ## 8. Summaries
 
@@ -1268,13 +1288,16 @@ digits   = "0" | nonzero { digit } ;
 
 ## 9. Budgets
 
-- Lines: `src/fort/owner/` holds at most 8,000 lines, with the 1,456 that move from
+- Lines: `src/fort/owner/` holds at most 9,000 lines, with the 1,456 that move from
   `fir/emptiness.ft` (measured). V1 needs 5,000: 900 for `owner.place`, 3,600 for `owner.prover` and
   500 for `owner.report`, and each of R1 to R4 adds 400 to `owner.summary` (estimated, low; R1
   dropped, section 7). The
-  oracle holds at most 3,500 more (need: 2,800), so the caps give 11,500 (Q6). The wave held 61,355.
+  oracle holds at most 3,500 more (need: 2,800), so the caps give 12,500 (Q6). The wave held 61,355.
   The count of the oracle is `wc -l` of the two modules of 3.1, as the coordinator ratified on
-  2026-10-27: 3,421 with the event `forged` (measured).
+  2026-10-27: 3,421 with the event `forged` (measured). Amended 2026-11-07: the user ruled "Raise
+  cap to 9,000". Before, the cap of `src/fort/owner/` was 8,000 lines and the caps gave 11,500;
+  the analysis measured 8,441 lines before refinement R11 and 8,680 after it and gen rule 7 of
+  D17.11 (`wc -l src/fort/owner/*.ft`). A change that would pass 9,000 goes to the user.
 - Each PR writes `wc -l` of `src/fort/owner/*.ft` and of the oracle in its ticket; a PR that
   would pass a cap goes to the user. The test ratio stays above `agents/lines.py --min 3.0`.
 - Time: `fort --check` of `src/fort/main.ft` takes 0.94 to 0.96 s (measured: three runs, 90b50c0a,

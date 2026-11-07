@@ -398,16 +398,32 @@ fn gen_exact(context* c, place.path p, probes mut* pr) void {
     }
 }
 
-// The kill rule of a `call`: it keeps the facts about a local that is no memory and about its
-// places that are not reached through memory.
-fn kill_call(context* c, probes mut* pr) void {
+// The kill rule of a `call` (kill rule 5 of D17.11): it kills each fact that does not survive a
+// call (survives_call). `fresh` holds the fresh set after the reads of the operands of the call.
+fn kill_call(context* c, fir_flow.bits* fresh, probes mut* pr) void {
     u64 mut k = 0;
     while (k < c->fact_count) {
-        if (place.is_through_memory(&c->places, c->facts[k])) {
+        if (!survives_call(c, c->facts[k], fresh)) {
             kill(pr, cast(k, u32));
         }
         k += 1;
     }
+}
+
+// Whether the fact of the path `q` survives a call, with `fresh` as the fresh set after the reads
+// of its operands: a fact about a local that is no memory and about its places that are not
+// reached through memory, whose storage no callee can name, and a fact about a place through a
+// fresh pointer local. No pointer but the local names the object of a fresh local, and the
+// addresses that its held addresses and the addresses of its whole stores hold, in temporaries
+// that are no memory and that only their checks and stores read. The local is no memory, and an
+// operand that copies or moves it ended its freshness before the kill. A callee reaches storage of
+// the caller only through a value that derives from its operands, the globals and memory (D10.7),
+// so it writes no byte of the object. Each other exception joins this test.
+fn survives_call(context* c, place.path q, fir_flow.bits* fresh) bool {
+    if (!place.is_through_memory(&c->places, q)) {
+        return true;
+    }
+    return place.is_through_fresh(&c->places, q, fresh);
 }
 
 // The kill rules of a store into `d`, with the fresh set after its right side and the state
@@ -559,7 +575,7 @@ fn apply_facts(context mut* c, fir.statement* s, fir_flow.bits mut* stale,
               fir_flow.bits mut* fresh, fir_flow.bits mut* aliased, probes mut* pr, u32 fact,
               bool mut* held) void {
     apply_reads(c, s, stale, fresh, aliased, pr);
-    apply_call(c, s, pr);
+    apply_call(c, s, fresh, pr);
     if (fact != NO_FACT) {
         *held = fir_flow.bits_get(&pr->none, fact);
     }
@@ -577,17 +593,20 @@ fn apply_reads(context mut* c, fir.statement* s, fir_flow.bits* stale, fir_flow.
     }
 }
 
-// The second step of apply_facts: the kill rule of the `call` of the assignment `s`.
-fn apply_call(context* c, fir.statement* s, probes mut* pr) void {
+// The second step of apply_facts: the kill rule of the `call` of the assignment `s`, with `fresh`
+// as the fresh set after the reads of its operands.
+fn apply_call(context* c, fir.statement* s, fir_flow.bits* fresh, probes mut* pr) void {
     if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call) {
-        kill_call(c, pr);
+        kill_call(c, fresh, pr);
     }
 }
 
-// The last step of apply_facts: the kill rules and the gen rule of the store of `s`, then its
-// effect on the fresh set and the stale set, and its borrows.
+// The last step of apply_facts: the end of the freshness that a store through the address of a
+// whole store gives, the kill rules and the gen rule of the store of `s`, then its effect on the
+// fresh set and the stale set, and its borrows.
 fn apply_store(context mut* c, fir.statement* s, fir_flow.bits mut* stale,
                fir_flow.bits mut* fresh, fir_flow.bits mut* aliased, probes mut* pr) void {
+    place.apply_fresh_end(&c->places, s, fresh);
     if (s->kind == fir.stmt_kind.st_assign) {
         u64 mark = c->places.steps_len;
         place.path d = place.trace(&c->places, s->place, stale);
@@ -707,8 +726,10 @@ fn run_locals(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d, bool
             fir.statement* s = fir.block_statement(f, b, i);
             if (fresh) {
                 place.apply_fresh_reads(&c->places, s, &pr->none);
+                place.apply_fresh_end(&c->places, s, &pr->none);
                 place.apply_fresh_store(&c->places, s, &pr->none);
                 place.apply_fresh_reads(&c->places, s, &pr->all);
+                place.apply_fresh_end(&c->places, s, &pr->all);
                 place.apply_fresh_store(&c->places, s, &pr->all);
             } else {
                 place.apply_stale(&c->places, s, &pr->none);
@@ -1246,10 +1267,9 @@ fn run_dataflows(context mut* c, proof mut* out) void {
         del(pt.first);
         del(pt.preds);
     }
-    if (!out->whole_over) {
-        // the stale set keeps the bit of each address of a whole store too
-        place.mark_whole_addresses(&c->places);
-    }
+    // the marks change the freshness in each function; within the whole-store work, the stale
+    // set keeps the bit of each address of a whole store too
+    place.mark_whole_addresses(&c->places, !out->whole_over);
     fir_flow.dataflow mut* own stale = fir_flow.dataflow_make(locals,
                                                               fir_flow.join_kind.join_union,
                                                               transfer_none);
@@ -2272,7 +2292,7 @@ fn judge_wholes(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
                 }
                 bool before_call = first_unheld(c, out, k, d, pr) == w->owners;
                 if (d != null) {
-                    apply_call(c, s, pr);
+                    apply_call(c, s, &at_fresh, pr);
                 }
                 w->first = first_unheld(c, out, k, d, pr);
                 w->proved = w->first == w->owners;

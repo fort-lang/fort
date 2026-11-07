@@ -27,7 +27,11 @@
     "itself. The first stage runs test/fort/owner/alias_test.ft too, which holds each of them.",
     "D17.11-alias-limit-loop, -limit-first, -slice-index, -callee and -address-own came from the",
     "review of R6: the loop that passes the limit on a later turn, the first transfer past it, and",
-    "three precision rules; test/fort/owner/alias_test.ft holds each."
+    "three precision rules; test/fort/owner/alias_test.ft holds each.",
+    "The rows D17.11-kill-call-fresh hold kill rule 5 for a place through a fresh pointer local",
+    "(prover.survives_call): the exception itself, the freshness that it reads, and the reads of",
+    "the operands of the call before its kill. The CALLS cases of test/fort/owner/prover_test.ft",
+    "hold each."
   ],
   "sources": [
     "src/fort/owner/alias.ft",
@@ -154,8 +158,8 @@
     {
       "decision": "D17.11-kill-call",
       "file": "src/fort/owner/prover.ft",
-      "old": "    if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call) {\n        kill_call(c, pr);",
-      "new": "    if (false) {\n        kill_call(c, pr);",
+      "old": "    if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call) {\n        kill_call(c, fresh, pr);",
+      "new": "    if (false) {\n        kill_call(c, fresh, pr);",
       "what": "a call kills no fact"
     },
     {
@@ -168,15 +172,15 @@
     {
       "decision": "D17.11-store-test-call",
       "file": "src/fort/owner/prover.ft",
-      "old": "    apply_call(c, s, pr);\n    if (fact != NO_FACT) {\n        *held = fir_flow.bits_get(&pr->none, fact);\n    }",
-      "new": "    if (fact != NO_FACT) {\n        *held = fir_flow.bits_get(&pr->none, fact);\n    }\n    apply_call(c, s, pr);",
+      "old": "    apply_call(c, s, fresh, pr);\n    if (fact != NO_FACT) {\n        *held = fir_flow.bits_get(&pr->none, fact);\n    }",
+      "new": "    if (fact != NO_FACT) {\n        *held = fir_flow.bits_get(&pr->none, fact);\n    }\n    apply_call(c, s, fresh, pr);",
       "what": "a store tests its fact before the kill of its call"
     },
     {
       "decision": "D17.11-store-test-kills",
       "file": "src/fort/owner/prover.ft",
-      "old": "    apply_call(c, s, pr);\n    if (fact != NO_FACT) {",
-      "new": "    apply_call(c, s, pr);\n    if (s->kind == fir.stmt_kind.st_assign) {\n        place.path d = place.trace(&c->places, s->place, stale);\n        apply_kills(c, s, d, stale, fresh, aliased, pr);\n    }\n    if (fact != NO_FACT) {",
+      "old": "    apply_call(c, s, fresh, pr);\n    if (fact != NO_FACT) {",
+      "new": "    apply_call(c, s, fresh, pr);\n    if (s->kind == fir.stmt_kind.st_assign) {\n        place.path d = place.trace(&c->places, s->place, stale);\n        apply_kills(c, s, d, stale, fresh, aliased, pr);\n    }\n    if (fact != NO_FACT) {",
       "what": "a store tests its fact after its own kill rules"
     },
     {
@@ -343,15 +347,15 @@
     {
       "decision": "D17.11-kill-call-direct",
       "file": "src/fort/owner/prover.ft",
-      "old": "    if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call) {\n        kill_call(c, pr);",
-      "new": "    if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call\n        && s->value.callee == fir.callee_kind.cl_fn) {\n        kill_call(c, pr);",
+      "old": "    if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call) {\n        kill_call(c, fresh, pr);",
+      "new": "    if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call\n        && s->value.callee == fir.callee_kind.cl_fn) {\n        kill_call(c, fresh, pr);",
       "what": "an extern call or a call through a function value kills no fact"
     },
     {
       "decision": "D17.11-kill-call-void",
       "file": "src/fort/owner/prover.ft",
-      "old": "    if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call) {\n        kill_call(c, pr);",
-      "new": "    if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call\n        && fir.place_type(c->places.f, s->place)->kind != types.type_kind.k_void) {\n        kill_call(c, pr);",
+      "old": "    if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call) {\n        kill_call(c, fresh, pr);",
+      "new": "    if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call\n        && fir.place_type(c->places.f, s->place)->kind != types.type_kind.k_void) {\n        kill_call(c, fresh, pr);",
       "what": "a call with a `void` destination kills no fact"
     },
     {
@@ -899,6 +903,27 @@
       "old": "    if (owning) {\n        return;\n    }\n    fir.place mut pointer = p;",
       "new": "    fir.place mut pointer = p;",
       "what": "an address through an `own` pointer or span borrows what a copy of it borrows"
+    },
+    {
+      "decision": "D17.11-kill-call-fresh",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    return place.is_through_fresh(&c->places, q, fresh);\n}",
+      "new": "    return false;\n}",
+      "what": "a call kills each fact through a fresh pointer local"
+    },
+    {
+      "decision": "D17.11-kill-call-fresh-any",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    return place.is_through_fresh(&c->places, q, fresh);\n}",
+      "new": "    return q.base == fir.base_kind.bk_local && place.is_through(&c->places, q, q.local);\n}",
+      "what": "a call keeps each fact through a pointer local that is not fresh"
+    },
+    {
+      "decision": "D17.11-kill-call-fresh-reads",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    apply_reads(c, s, stale, fresh, aliased, pr);\n    apply_call(c, s, fresh, pr);",
+      "new": "    apply_call(c, s, fresh, pr);\n    apply_reads(c, s, stale, fresh, aliased, pr);",
+      "what": "the kill of a call reads the fresh set before the reads of its operands"
     }
   ]
 }

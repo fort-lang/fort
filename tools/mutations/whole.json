@@ -16,7 +16,12 @@
     "table runs in the Linux VM with the debug preset and the default runner. The md5 guard reads",
     "the product compiler, whose driver imports owner.prover and owner.report.",
     "The four rows D17.11-whole-event hold the exit location that fir.shadow gives an",
-    "`overwrite` (src/fort/fir/shadow.ft, src/fort/fir/interpreter.ft), which the oracle test reads."
+    "`overwrite` (src/fort/fir/shadow.ft, src/fort/fir/interpreter.ft), which the oracle test reads.",
+    "The rows D17.11-whole-fresh and D17.11-whole-address-readers and -limit hold the freshness",
+    "around the address of a whole store: its `addr` ends no freshness, and its store ends the",
+    "freshness of the local of its place before its kill rules, in the walks and in the fresh",
+    "dataflow (place.apply_fresh_reads, place.apply_fresh_end); the marks run past the",
+    "whole-store work too, and only within it does the stale dataflow keep their bits."
   ],
   "sources": [
     "src/fort/owner/prover.ft",
@@ -85,7 +90,7 @@
     {
       "decision": "D17.11-whole-call",
       "file": "src/fort/owner/prover.ft",
-      "old": "                    apply_call(c, s, pr);",
+      "old": "                    apply_call(c, s, &at_fresh, pr);",
       "new": "",
       "what": "the test of a whole store comes before the kill of the call of its right side"
     },
@@ -155,14 +160,14 @@
     {
       "decision": "D17.11-whole-address-clear",
       "file": "src/fort/owner/place.ft",
-      "old": "    bool address = l->held || l->whole;",
-      "new": "    bool address = l->held;",
+      "old": "    bool address = is_address(c, s->place.local);",
+      "new": "    bool address = c->locals[cast(s->place.local, u64)].held;",
       "what": "the store of an address of a whole store keeps it stale"
     },
     {
       "decision": "D17.11-whole-address-mark",
       "file": "src/fort/owner/prover.ft",
-      "old": "        place.mark_whole_addresses(&c->places);",
+      "old": "    place.mark_whole_addresses(&c->places, !out->whole_over);",
       "new": "",
       "what": "the pass marks no address of a whole store"
     },
@@ -256,6 +261,55 @@
       "old": "    it->sh.exit_at = exit_location(it);\n    wait_kind wait",
       "new": "    wait_kind wait",
       "what": "the store of a call result keeps the exit location of the callee"
+    },
+    {
+      "decision": "D17.11-whole-fresh-addr",
+      "file": "src/fort/owner/place.ft",
+      "old": "    bool held = is_local(s->place) && is_address(c, s->place.local);",
+      "new": "    bool held = is_local(s->place) && c->locals[cast(s->place.local, u64)].held;",
+      "what": "the `addr` of the address of a whole store ends the freshness of its local"
+    },
+    {
+      "decision": "D17.11-whole-fresh-end",
+      "file": "src/fort/owner/place.ft",
+      "old": "    if (p.base == fir.base_kind.bk_local) {\n        fir_flow.bits_clear(fresh, p.local);",
+      "new": "    if (false) {\n        fir_flow.bits_clear(fresh, p.local);",
+      "what": "a store through the address of a whole store keeps the freshness of the local of its place"
+    },
+    {
+      "decision": "D17.11-whole-fresh-end-all",
+      "file": "src/fort/owner/place.ft",
+      "old": "        fir_flow.bits_clear(fresh, p.local);",
+      "new": "        fir_flow.bits_clear_all(fresh);",
+      "what": "a store through the address of a whole store ends the freshness of each local"
+    },
+    {
+      "decision": "D17.11-whole-fresh-end-walk",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    place.apply_fresh_end(&c->places, s, fresh);\n    if (s->kind == fir.stmt_kind.st_assign) {",
+      "new": "    if (s->kind == fir.stmt_kind.st_assign) {",
+      "what": "the walks keep the freshness at a store through the address of a whole store"
+    },
+    {
+      "decision": "D17.11-whole-fresh-end-flow",
+      "file": "src/fort/owner/prover.ft",
+      "old": "                place.apply_fresh_end(&c->places, s, &pr->none);\n                place.apply_fresh_store(&c->places, s, &pr->none);\n                place.apply_fresh_reads(&c->places, s, &pr->all);\n                place.apply_fresh_end(&c->places, s, &pr->all);",
+      "new": "                place.apply_fresh_store(&c->places, s, &pr->none);\n                place.apply_fresh_reads(&c->places, s, &pr->all);",
+      "what": "the fresh dataflow carries no end of freshness of a store through the address of a whole store"
+    },
+    {
+      "decision": "D17.11-whole-address-readers",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    place.mark_whole_addresses(&c->places, !out->whole_over);",
+      "new": "    place.mark_whole_addresses(&c->places, false);",
+      "what": "the stale dataflow keeps no bit of an address of a whole store"
+    },
+    {
+      "decision": "D17.11-whole-address-limit",
+      "file": "src/fort/owner/place.ft",
+      "old": "        l->whole = is_whole_address(c, k);",
+      "new": "        l->whole = readers && is_whole_address(c, k);",
+      "what": "past the whole-store work, the `addr` of the address of a whole store ends freshness"
     }
   ]
 }
