@@ -89,9 +89,17 @@ $if ($cfg(target_os) == "macos") {
         introspection* introspect;
     }
 
+    // C: mach_task_self, mach_task_self(3) of macOS, <mach/mach_init.h>.
+    // gives: the port of this task, an integer and no pointer. writes: no fort storage.
+    // keeps: no pointer. calls: no fort function. frees: nothing.
     extern fn mach_task_self() u32;
     // C stores the address of its array of zone pointers into *addresses. The array is storage of
     // C that fort code only reads, so the pointer that C stores has no `mut` (D17.13).
+    // C: malloc_get_all_zones, <malloc/malloc.h> of macOS.
+    // gives: at addresses, the address of an array of count zone pointers in storage of C, with
+    // no `mut`; each names a malloc_zone_t, whose first fields `zone` gives. writes: one pointer
+    // at addresses and one u32 at count. keeps: no pointer. calls: no fort function: reader is
+    // a function pointer of C, and a null reader reads this process. frees: nothing.
     extern fn malloc_get_all_zones(u32 task, void* reader, zone** mut* addresses,
                                    u32 mut* count) i32;
 
@@ -100,6 +108,9 @@ $if ($cfg(target_os) == "macos") {
     // extern that takes storage with pointer places. `libc.memcpy` takes
     // bytes, and a cast to bytes would hide each pointer place. Two
     // declarations of one symbol agree (D9.8), so this one is not memcpy.
+    // C: bcopy, bcopy(3) of macOS.
+    // writes: n bytes at destination, from the n bytes at source, which can overlap them.
+    // gives: no pointer. keeps: no pointer. calls: no fort function. frees: nothing.
     extern fn bcopy(zone** source, zone* mut* destination, u64 n) void;
 
     // MALLOC_PTR_IN_USE_RANGE_TYPE: the live blocks.
@@ -112,6 +123,14 @@ $if ($cfg(target_os) == "macos") {
     // ranges that C gives. The pointer and the count come from the caller, so
     // `ranges` has the type `u8*`, and the function is a boundary function
     // that only a trusted module names (D9.8).
+    // C call libc.memcpy: cast(&w->batch[0], u8 mut*) keeps the bound of w->batch, 4096 ranges
+    // (D9.8 rule 2). w names a live walk: C gives back the context &w that live_view gives the
+    // enumerator, a local of live_view that lives until the enumerator returns, and C calls
+    // record only in that call, as the point "keeps" of A7 says. ranges and count are parameter
+    // sources (rule 1), so record is a boundary function, and its caller, the enumerator of C,
+    // gives count ranges at ranges. The length n * sizeof(range) fits both, because the test
+    // above holds n <= w->batch.len. w->batch is fort storage and the ranges are storage of C,
+    // so the two do not overlap.
     fn record(u32 task, walk mut* w, u32 kind, u8* ranges, u32 count) void {
         u64 n = cast(count, u64);
         if (n > w->batch.len) {
@@ -129,6 +148,16 @@ $if ($cfg(target_os) == "macos") {
         }
     }
 
+    // C call mach_task_self: no pointer argument.
+    // C call malloc_get_all_zones: reader is null; &zones keeps one `zone**` and &count one u32
+    // (D9.8 rule 2), and C writes one of each.
+    // C call bcopy: zones, storage that malloc_get_all_zones wrote in this function, count zone
+    // pointers (rule 3), and &list[0], which keeps the bound of list, 64 zone pointers (rule 2).
+    // The length n * sizeof(zone*) fits both: n is count, and the assert holds n <= list.len.
+    // C call z->introspect->enumerator: a function pointer that C gave in the zone z, which the
+    // row of malloc_get_all_zones gives (rule 3). &w keeps one walk (rule 2), which C gives back
+    // to record as its context, and record goes to C as a value. reader is null. C calls record
+    // with ranges in storage of its own.
     fn live_view() u64 {
         zone** mut zones = null;
         u32 mut count = 0;
@@ -176,8 +205,14 @@ $if ($cfg(target_os) == "macos") {
         // parameter. Another architecture has no live view, and a probe that
         // calls live_view there does not build. std has no binding for
         // mallinfo2 and this module is its one caller.
+        // C: mallinfo2, mallinfo2(3) of glibc 2.33, and the x86-64 System V ABI 3.2.3.
+        // writes: the 80 bytes of struct mallinfo2 at result, the hidden pointer by which C
+        // returns a struct of that size. gives: no pointer: C gives result back in rax, and the
+        // `void` result drops it. keeps: no pointer. calls: no fort function. frees: nothing.
         extern fn mallinfo2(malloc_counts mut* result) void;
 
+        // C call mallinfo2: &counts keeps one malloc_counts, 80 bytes (D9.8 rule 2), which C
+        // fills.
         fn live_view() u64 {
             malloc_counts mut counts = {};
             mallinfo2(&counts);
