@@ -3523,9 +3523,10 @@ says ownership is "by convention", this section supersedes it.
 - rule: Not tracked, exactly as in C: a view, or a copy made before a `move` or `del`, used after
   the allocation was freed; an `own` value that is never freed, except where D17.20 applies.
   D17.20 makes two kinds of leak compile errors. The first is a named local of `own` reference
-  type at the end of its scope, or such a parameter or temporary at a `return`, that can hold an
-  allocation. The second is a `del` or an `own` cast that frees an object whose owners can hold
-  allocations. Each site of the first kind is a compile error. The compiler first reports each
+  type or of an owning aggregate type (D17.7) at the end of its scope, or such a parameter or
+  temporary at a `return`, that can hold an allocation. The second is a `del` or an `own` cast that
+  frees an object whose owners can hold allocations. Each site of the first kind is a compile
+  error. The compiler first reports each
   site of the second kind and accepts the program; a later change makes each such site a compile
   error (D17.20). D17.21 makes each use of a local owner that a `move`, a `del` or a call can have
   vacated a compile error. The linear check that would make the other leaks and the other uses
@@ -3540,6 +3541,8 @@ says ownership is "by convention", this section supersedes it.
   reported each site of both kinds and accepted the program.
   Amended 2026-10-31: D17.21 takes the uses of a local owner after its `move` or `del` out of the
   deferred linear check. Before, the deferred check covered each use after `move`.
+  Amended 2026-11-06: the first kind covers a local of an owning aggregate type too (D17.20).
+  Before, it covered a local of `own` reference type only.
 
 ### D17.20 Leak
 - owner: `memory-model.md` (`move`, `del`, transfer, lending, the overwrite check, the leak rule),
@@ -3578,16 +3581,31 @@ says ownership is "by convention", this section supersedes it.
   temporary holds an allocation. Second, a named local has no obligation at a `return`. FIR text can
   reach a `return` with a named local whose scope no `dead` ended (`fir.md` 11, Exits), but the
   lowering writes the `dead` of each named local of each scope that a `return` leaves (`fir.md`
-  9.5), so the obligation of a lowered named local stands at a `dead`. The first error of part 1 in
-  such a function has a second note at the same position: `the function exceeds the work limit of
-  the leak rule; split it`. The note names no limit of D17.11. The work of D17.11 and its verdicts
-  do not change, so the first error of D17.11 in a function past both limits takes the note of
-  D17.11. Only `big` of `fail/ownership/060` passes the limit of the leak work, on purpose.
-  Part 1 applies only to a named local, a parameter or a temporary whose type is an `own`
-  reference. A local of an owning aggregate type (D17.7) has no obligation of part 1, and its leak
-  is outside the guarantee of this rule, until a later change makes each exit of such a local that
-  the analysis cannot prove a compile error and amends this entry. That change follows the
-  migration of each such exit (the user, 2026-11-01: "Drop R1, migrate all").
+  9.5), so the obligation of a lowered named local stands at a `dead`. The first error of an owner
+  local in such a function has a second note at the same position: `the function exceeds the work
+  limit of the leak rule; split it`. The note names no limit of D17.11. The work of D17.11 and its
+  verdicts do not change, so the first error of D17.11 in a function past both limits takes the
+  note of D17.11. Only `big` of `fail/ownership/060` and `big` of `fail/ownership/090` pass the
+  limit of the leak work, on purpose.
+  Part 1 applies to a named local, a parameter or a temporary whose type is an `own` reference or
+  an owning aggregate type (D17.7). The local owners of a local of an owning aggregate type are the
+  owners in its fixed storage: each field and each element at a constant index of a fixed array,
+  also through nested structs and fixed arrays, whose type is an `own` reference. There is one
+  error for each location and local, and `<place>` names the first local owner of the local that
+  the analysis does not prove: `p.a`, `e.one.a`, `v[0]`. The order is that of the declarations of
+  the fields and of the indexes of the elements, and the owners below a field or an element come
+  before those of the next one.
+  The exits of the locals of an owning aggregate type have a limit of their own. Their aggregate
+  work is the sum of the leak work and two products: the statements and terminators of the
+  function times the steps of the inner owners of part 2 (`fir.md` 11, Inner owners), and the
+  statements and terminators times the steps of the owners of each local of an owning aggregate
+  type, which are 1 more than the most steps from the type of the local to an owner, for each
+  owner. A count stops at 2^32 (4294967296). When the aggregate work passes 1048576 (2^20), the
+  analysis proves no exit of a local of an owning aggregate type. The first such error in the
+  function has a second note at the same position: `the function exceeds the aggregate work limit;
+  split it`. The aggregate work holds the leak work, so past the limit of the leak work the second
+  exception above holds for a named local of an owning aggregate type too. The work of D17.11, the
+  leak work and their verdicts do not change.
   Part 2. Take `del(p)` where the type of `p` is `T* own`, of each mutability, and `T` holds owners
   in its fixed storage. The analysis must prove each owner of `*p` empty, as a tracked place of
   D17.11 through `p`. Otherwise the `del` is a compile error, because it frees an object whose
@@ -3616,8 +3634,12 @@ says ownership is "by convention", this section supersedes it.
   function still owns, and it does nothing on a vacated or a null owner (D17.9). For part 2, the
   fix moves each inner owner into a local first.
   So `{ i32 mut* own n = new(i32); }` is an error at the closing brace, and
-  `{ i32 mut* own n = new(i32); defer del(n); }` passes. For `struct pair { i32* own a; i32* own
-  b; }`, `pair mut* own q = new(pair); del(q);` passes, because `new` fills `*q` with zero (D10.2).
+  `{ i32 mut* own n = new(i32); defer del(n); }` passes. For `struct buf { i32 mut* own data; }`
+  and a function `fill` that takes a `buf mut*`, `{ buf mut b = buf{}; fill(&b); }` is an error at
+  the closing brace that names `b.data`, because the call can leave an allocation there, and
+  `{ buf mut b = buf{}; defer del(b.data); fill(&b); }` passes.
+  For `struct pair { i32* own a; i32* own b; }`, `pair mut* own q = new(pair); del(q);` passes,
+  because `new` fills `*q` with zero (D10.2).
   For a parameter `q` of type `pair mut* own`, `del(q);` alone is an error, because the entry
   values of `q->a` and `q->b` are unknown, and `del(q->a); del(q->b); del(q);` passes. In
   `if (q == null) { del(q); return; }`, the `del` passes too, because the test makes `q` empty in
@@ -3633,8 +3655,8 @@ says ownership is "by convention", this section supersedes it.
   an error", the user, 2026-10-22), so the rule keeps no list of known gaps. `del` is shallow
   (D17.7), so a `del` of an object whose owners hold allocations leaks them. The order of the
   rules follows the ruling on Q1 (`spec/ownership-design.md` 12) and the ruling of 2026-11-01: the
-  `own` locals and the shallow `del` come first, the owning aggregates follow the migration of their
-  exits, and a span of owners follows R8.
+  `own` locals and the shallow `del` came first, the owning aggregates followed the migration of
+  their exits, and a span of owners follows R8.
 - history: Amended 2026-10-24: the user approved parts 1 and 2 of spec/ownership-design.md 6.3
   (user, 2026-10-24). The coordinator ruled the position and the note of the error of part 2, the
   message of a `cast` and the text of `<place>`. The coordinator also ratified seven additions to
@@ -3662,6 +3684,14 @@ says ownership is "by convention", this section supersedes it.
   migrate all" (user, 2026-11-01) after a probe of R1 proved 1,148 of the 5,616 exits that the
   aggregate report lists and added 0.19 to 0.21 s to `fort --check` of `src/fort/main.ft`
   (`spec/ownership-design.md` 7). Before, the owning aggregate locals waited "until refinement R1".
+  Amended 2026-11-06: part 1 covers the locals of an owning aggregate type, and each exit of such
+  a local that the analysis cannot prove is a compile error. Before, such a local had no obligation
+  of part 1, and the option `--aggregate-report` listed each exit that the analysis could not prove
+  and accepted the program (40713b8f). The migration that the user ruled on 2026-11-01 ("Drop R1,
+  migrate all") ended each such exit in each tree that CI compiles, on the Linux and the Darwin
+  target, but two exits of a fail test, which now hold the error. The option went with the error.
+  The entry takes the aggregate work, its limit and its note, which `fir.md` 11 held alone, and the
+  text of `<place>` for such a local; the coordinator ratified both on 2026-10-31.
 
 ### D17.21 Use after move or del
 - owner: `memory-model.md` (`move`, `del`, transfer, lending, the overwrite check, the leak rule,

@@ -471,7 +471,9 @@ exactly two things for ownership, and it checks two more at compile time:
   or `move` the local is an error: the back edge brings a live value to the declaration.
   Assignments of owning aggregates are not checked field by field.
 - **The leak rule (D17.20).** A named local of `own` reference type at the end of its scope, and
-  such a parameter or temporary at a `return`, must hold the zero value. The compiler proves it
+  such a parameter or temporary at a `return`, must hold the zero value. So must each owner in the
+  fixed storage of such a local of an owning aggregate type (D17.7), and the error names the first
+  owner that the compiler does not prove, such as `b.data` or `v[0]`. The compiler proves it
   with the facts of the overwrite check. Otherwise the exit is a compile error, because the
   allocation can leak: `leak: cannot prove '<place>' is empty at this exit`, with the note
   `del or move '<place>' before this exit`. The error stands at the closing brace, or at the
@@ -486,9 +488,9 @@ exactly two things for ownership, and it checks two more at compile time:
   `cast` of the zero value frees nothing, so it needs no proof of the owners of `*p`, as after
   `move(p)`, after `del(p)` and in the arm where a test finds `p` null (D17.20). `del` fixes a leak
   at an exit, and it does nothing on an empty owner (D17.9). For a `del(p)` whose `*p` can hold
-  live owners, the fix moves each inner owner into a local first. D17.20 does not check an owning
-  aggregate local at an exit. A `del` or a `cast` of a span whose elements hold owners needs no
-  proof for those owners, but a span local of `own` type still needs the zero value at an exit. An
+  live owners, the fix moves each inner owner into a local first. A `del` or a `cast` of a span
+  whose elements hold owners needs no proof for those owners, but a span local of `own` type still
+  needs the zero value at an exit. An
   exit that the compiler cannot prove is a compile error. The compiler first reports each `del` and
   each `cast` that it cannot prove and accepts the program; a later change makes each such site a
   compile error (D17.20).

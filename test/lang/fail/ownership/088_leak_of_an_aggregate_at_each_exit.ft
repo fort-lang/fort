@@ -1,0 +1,82 @@
+//! fail
+// The other exits of a local of an owning aggregate type that the analysis cannot prove (D17.20):
+// the owner holds an allocation on each path, or a call after its `del` kills its fact. The error
+// names the first owner that the analysis does not prove: a field (`b.data`), a field of a nested
+// struct (`e.one.data`) or an element of a fixed array (`v[0]`). In `late` the call of `note` after
+// the `del` kills the fact of the memory local `b` (D17.11), and in `first` the deferred `del` runs
+// after the last call, so it passes. The parameter `b` of `kept` has no fact at the entry, so its
+// `return` at the closing brace is an error. In `looped` the `break` leaves the loop with an
+// allocation in `v[0]`, and the closing brace of the loop body, after a `del` of each element, is
+// no error. In `skipped` the `continue` leaves the body with an allocation in `b.data`. In
+// `clause` the scope of `e` ends at the last token of its `case` clause.
+struct buf {
+    i32 mut* own data;
+}
+
+struct env {
+    buf one;
+    buf two;
+}
+
+fn touch(buf mut* b) void {
+}
+
+fn note() void {
+}
+
+fn late() void {
+    buf mut b = buf{};
+    touch(&b);
+    del(b.data);
+    note();
+} //! error: cannot prove 'b.data' is empty at this exit
+
+fn first() void {
+    buf mut b = buf{};
+    defer del(b.data);
+    touch(&b);
+    note();
+}
+
+fn kept(buf b) void {
+} //! error: cannot prove 'b.data' is empty at this exit
+
+fn looped(bool c) void {
+    while (c) {
+        i32 mut* own[2] mut v = {new(i32), null};
+        if (c) {
+            break; //! error: cannot prove 'v[0]' is empty at this exit
+        }
+        del(v[0]);
+        del(v[1]);
+    }
+}
+
+fn skipped(bool c) void {
+    while (c) {
+        buf mut b = buf{};
+        b.data = new(i32);
+        if (c) {
+            continue; //! error: cannot prove 'b.data' is empty at this exit
+        }
+        del(b.data);
+    }
+}
+
+fn clause(i32 k) void {
+    switch (k) {
+    case 1:
+        env e = env{buf{new(i32)}, buf{}}; //! error: cannot prove 'e.one.data' is empty
+    default:
+    }
+}
+
+fn main() i32 {
+    late();
+    first();
+    kept(buf{});
+    looped(false);
+    skipped(false);
+    clause(0);
+    return 0;
+}

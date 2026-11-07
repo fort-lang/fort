@@ -354,14 +354,14 @@ fn help_prints_the_usage_line_and_the_option_table() void {
     assert(str.starts_with(out, "usage: fort [options] entry.ft\noptions:\n"));
     // One line per option follows the usage line and the
     // `options:` header.
-    assert(capture.line_count(out) == 40);
+    assert(capture.line_count(out) == 39);
     assert(str.find(out, "--overwrite-report") < 0);
     string leak =
         "  --leak-report      as --check, and write each leak site that is no error yet\n";
     assert(str.find(out, leak) >= 0);
-    string aggregate =
-        "  --aggregate-report as --check, and write each leak of an owning aggregate local\n";
-    assert(str.find(out, aggregate) >= 0);
+    // part 1 of the leak rule is an error on the owning aggregates too, so their report option is
+    // gone (D17.20)
+    assert(str.find(out, "--aggregate-report") < 0);
     // rule (b) is an error, so its report option is gone (D17.21)
     assert(str.find(out, "--move-report") < 0);
     string ar = "  --ar <path>        the archiver that writes the lib.a of --lib (default ar)\n";
@@ -2074,18 +2074,20 @@ fn the_leak_report_refuses_the_document() void {
     assert(err_has("fort: error: --leak-report does not combine with --json or --index\n"));
 }
 
-// A program with two locals of an owning aggregate type. The call that takes the address of `b`
-// kills the fact of `b.data`, and it leaves an allocation there, which leaks at the `return`. The
-// pass proves the exit of `c`, which is no memory local.
-string[14] AGG_SITE = {
+// A program with two locals of an owning aggregate type and an owner local `n`. The call that takes
+// the address of `b` kills the fact of `b.data`, and it leaves an allocation there, which leaks at
+// the `return`. The pass proves the exit of `c`, which is no memory local. `n` leaks at the
+// `return` too. `new(i32)` needs no runtime entry that the runtime of write_runtime lacks.
+string[15] AGG_SITE = {
     "struct buf {",
-    "    u8 mut@ own data;",
+    "    i32 mut* own data;",
     "}",
     "fn fill(buf mut* b) void {",
     "    del(b->data);",
-    "    b->data = new(u8, 4);",
+    "    b->data = new(i32);",
     "}",
     "fn main() i32 {",
+    "    u8 mut* own n = new(u8);",
     "    buf mut b = buf{};",
     "    fill(&b);",
     "    buf mut c = buf{};",
@@ -2094,60 +2096,59 @@ string[14] AGG_SITE = {
     "}",
 };
 
-// The lines of --aggregate-report for AGG_SITE: the exit of `b` at the `return`, with its cause.
-// listed joins the entries, so the last line takes two.
-string[4] AGG_SITE_LISTED = {
-    "agg.ft:13:5: leak: cannot prove 'b.data' is empty at this exit\n",
-    "agg.ft:13:5: note: del or move 'b.data' before this exit\n",
-    "agg.ft:13:5: note: cause 1: R1 can prove it if each callee that takes its address ",
-    "empties the owner\n",
+// The diagnostic lines of AGG_SITE: the error of the leak rule and its note at the `return`, for
+// the owner local `n` first and then for the first owner of `b` (D17.20).
+string[4] AGG_ERRORS = {
+    "agg.ft:14:5: error: leak: cannot prove 'n' is empty at this exit\n",
+    "agg.ft:14:5: note: del or move 'n' before this exit\n",
+    "agg.ft:14:5: error: leak: cannot prove 'b.data' is empty at this exit\n",
+    "agg.ft:14:5: note: del or move 'b.data' before this exit\n",
 };
 
-// --aggregate-report implies --check, and it lists on stdout each exit of a local of an owning
-// aggregate type that the pass does not prove, with the message and the note of D17.20 and a line
-// of its cause. Such an exit is no error until refinement R1, so the run exits 0 with no
-// diagnostic, as --check does, and no build runs. With --leak-report the run lists the lines of
-// both reports in one print.
-fn the_aggregate_report_lists_each_exit_of_an_owning_aggregate() void {
+// An exit of a local of an owning aggregate type that the emptiness pass does not prove is the
+// error of the leak rule with its note at the same position, after the errors of the owner locals
+// of the function, in each build mode, under --check, --check --json, --fir and --fir-after
+// (D17.20, spec/fir.md 11): the run exits 1 and writes no module, no FIR and no line but the
+// diagnostics. --leak-report lists no such exit, because each is an error.
+fn each_unproved_aggregate_exit_is_an_error_in_every_mode() void {
     write_runtime();
     write_lines("agg.ft", AGG_SITE[..]);
-    remove_file("a.out");
-    string[3] mut report = {"fort", "--aggregate-report", "agg.ft"};
-    assert(run(report[0..3]) == EXIT_OK);
-    assert(captured_err_is_empty());
-    assert(listed(AGG_SITE_LISTED[..]));
-    assert(!file_exists("a.out"));
-    string[3] mut check = {"fort", "--check", "agg.ft"};
-    assert(run(check[0..3]) == EXIT_OK);
-    assert(captured_err_is_empty());
-    assert(listed(AGG_SITE_LISTED[..0]));
-    string[4] mut both = {"fort", "--leak-report", "--aggregate-report", "agg.ft"};
-    assert(run(both[0..4]) == EXIT_OK);
-    assert(captured_err_is_empty());
-    assert(listed(AGG_SITE_LISTED[..]));
-    string[4] mut moded = {"fort", "--aggregate-report", "-S", "agg.ft"};
+    string[6] mut build = {"fort", "-S", "-S", "agg.ft", "-o", "agg.ll"};
     for (string mode : MODES) {
-        moded[2] = mode;
-        assert(run(moded[0..4]) == EXIT_OK);
-        assert(listed(AGG_SITE_LISTED[..]));
+        remove_file("agg.ll");
+        build[2] = mode;
+        assert(run(build[0..6]) == EXIT_COMPILE_ERROR);
+        assert(reported_in_order("agg.ft:", AGG_ERRORS[..]));
+        assert(!file_exists("agg.ll"));
     }
-    // a program with an error keeps its status and its diagnostics
-    write_lines("leak_sites.ft", LEAK_SITES[..]);
-    string[3] mut errors = {"fort", "--aggregate-report", "leak_sites.ft"};
-    assert(run(errors[0..3]) == EXIT_COMPILE_ERROR);
-    assert(reported_leak_sites());
-    assert(listed(AGG_SITE_LISTED[..0]));
+    string[3] mut check = {"fort", "--check", "agg.ft"};
+    assert(run(check[0..3]) == EXIT_COMPILE_ERROR);
+    assert(reported_in_order("agg.ft:", AGG_ERRORS[..]));
+    assert(listed(AGG_ERRORS[..0]));
+    string[4] mut document = {"fort", "--check", "--json", "agg.ft"};
+    assert(run(document[0..4]) == EXIT_COMPILE_ERROR);
+    assert(captured_err_is_empty());
+    assert(out_has("leak: cannot prove 'b.data' is empty at this exit"));
+    assert(out_has("del or move 'b.data' before this exit"));
+    string[3] mut fir_mode = {"fort", "--fir", "agg.ft"};
+    assert(run(fir_mode[0..3]) == EXIT_COMPILE_ERROR);
+    assert(reported_in_order("agg.ft:", AGG_ERRORS[..]));
+    assert(listed(AGG_ERRORS[..0]));
+    string[3] mut after = {"fort", "--fir-after=build-mode", "agg.ft"};
+    assert(run(after[0..3]) == EXIT_COMPILE_ERROR);
+    assert(reported_in_order("agg.ft:", AGG_ERRORS[..]));
+    string[3] mut report = {"fort", "--leak-report", "agg.ft"};
+    assert(run(report[0..3]) == EXIT_COMPILE_ERROR);
+    assert(reported_in_order("agg.ft:", AGG_ERRORS[..]));
+    assert(listed(AGG_ERRORS[..0]));
 }
 
-// The report and the document of --json both go to stdout, so the two do not combine, and
-// --index sets --json.
-fn the_aggregate_report_refuses_the_document() void {
-    string[4] mut json = {"fort", "--aggregate-report", "--json", "entry.ft"};
-    assert(run(json[0..4]) == EXIT_USAGE);
-    assert(err_has("fort: error: --aggregate-report does not combine with --json or --index\n"));
-    string[4] mut index = {"fort", "--index", "--aggregate-report", "entry.ft"};
-    assert(run(index[0..4]) == EXIT_USAGE);
-    assert(err_has("fort: error: --aggregate-report does not combine with --json or --index\n"));
+// Part 1 of the leak rule is an error on the owning aggregate locals, so their report option is
+// gone (D17.20), as --move-report went when rule (b) became an error.
+fn aggregate_report_is_an_unknown_option() void {
+    string[3] mut argv = {"fort", "--aggregate-report", "entry.ft"};
+    assert(run(argv[0..3]) == EXIT_USAGE);
+    assert(err_has("fort: error: unknown option '--aggregate-report'\n"));
 }
 
 // A program whose one use of rule (b) is the load through `p` after its `move` (D17.21). The
@@ -2290,14 +2291,19 @@ fn the_use_error_is_the_same_in_each_mode() void {
     }
 }
 
-// One function with an error of each rule of the emptiness pass: the store into `p` on line 3 of
-// D17.11, the leak of `q` at the `return` of line 7 of D17.20, and the use of `p` on line 6 of
-// D17.21. The errors stand in the order of the rules, D17.11, D17.20 and then D17.21, and not in
-// the order of the lines (spec/fir.md 11, Uses).
-string[8] THREE_RULES = {
+// One function with an error of each rule of the emptiness pass: the store into `p` on line 6 of
+// D17.11, the leaks of `q` and of the owner `b.a` at the `return` of line 11 of D17.20, and the use
+// of `p` on line 10 of D17.21. The errors stand in the order of the rules, D17.11, D17.20 and then
+// D17.21, and not in the order of the lines (spec/fir.md 11, Uses). D17.20 gives the owner locals
+// first and then the locals of an owning aggregate type.
+string[12] THREE_RULES = {
+    "struct box {",
+    "    i32 mut* own a;",
+    "}",
     "fn main() i32 {",
     "    i32 mut* own mut p = new(i32);",
     "    p = new(i32);",
+    "    box b = box{new(i32)};",
     "    i32 mut* own q = new(i32);",
     "    del(p);",
     "    i32 v = *p;",
@@ -2305,13 +2311,15 @@ string[8] THREE_RULES = {
     "}",
 };
 
-string[6] THREE_RULES_ERRORS = {
-    "three_rules.ft:3:7: error: overwriting owned value: cannot prove 'p' is empty here\n",
-    "three_rules.ft:3:7: note: del or move 'p' before this store\n",
-    "three_rules.ft:7:5: error: leak: cannot prove 'q' is empty at this exit\n",
-    "three_rules.ft:7:5: note: del or move 'q' before this exit\n",
-    "three_rules.ft:6:14: error: use after move or del: 'p' can be vacated here\n",
-    "three_rules.ft:5:5: note: 'p' is deleted here\n",
+string[8] THREE_RULES_ERRORS = {
+    "three_rules.ft:6:7: error: overwriting owned value: cannot prove 'p' is empty here\n",
+    "three_rules.ft:6:7: note: del or move 'p' before this store\n",
+    "three_rules.ft:11:5: error: leak: cannot prove 'q' is empty at this exit\n",
+    "three_rules.ft:11:5: note: del or move 'q' before this exit\n",
+    "three_rules.ft:11:5: error: leak: cannot prove 'b.a' is empty at this exit\n",
+    "three_rules.ft:11:5: note: del or move 'b.a' before this exit\n",
+    "three_rules.ft:10:14: error: use after move or del: 'p' can be vacated here\n",
+    "three_rules.ft:9:5: note: 'p' is deleted here\n",
 };
 
 // A build and --check give the errors of THREE_RULES in the order of the rules.
@@ -2862,8 +2870,8 @@ fn main() i32 {
     the_leak_report_lists_each_site_of_part_2();
     the_leak_report_lists_a_site_at_a_cast();
     the_leak_report_refuses_the_document();
-    the_aggregate_report_lists_each_exit_of_an_owning_aggregate();
-    the_aggregate_report_refuses_the_document();
+    each_unproved_aggregate_exit_is_an_error_in_every_mode();
+    aggregate_report_is_an_unknown_option();
     each_unproved_use_is_an_error_in_every_mode();
     the_use_error_is_the_same_in_each_mode();
     the_errors_of_one_function_stand_in_the_order_of_the_rules();

@@ -1,0 +1,57 @@
+//! fail
+// A local of an owning aggregate type holds owners in its fixed storage, and each of them must hold
+// the zero value at each exit of the local (D17.20, D17.7). The analysis reads no callee, and a
+// call kills each fact of a memory local (D17.11). In `freed` the deferred `free_buf(&b)` is the
+// last call before the closing brace, so the brace is an error that names the owner. In `filled`
+// a call that takes the address of `b` comes after the `del`, and `fill` leaves an allocation in
+// `b.data`, so the leak is real at run time. In `dropped` no call takes the address of `c`, so the
+// call of the drop that takes `c` by `move` kills no fact of it, and the brace passes. In
+// `deleted` the deferred `del` of the owner runs after the last call, and the brace passes too.
+struct buf {
+    i32 mut* own data;
+}
+
+fn fill(buf mut* b) void {
+    del(b->data);
+    b->data = new(i32);
+}
+
+fn free_buf(buf mut* b) void {
+    del(b->data);
+}
+
+fn drop_buf(buf mut b) void {
+    del(b.data);
+}
+
+fn freed() void {
+    buf mut b = buf{};
+    defer free_buf(&b);
+    fill(&b);
+} //! error: cannot prove 'b.data' is empty at this exit
+
+fn filled() void {
+    buf mut b = buf{};
+    del(b.data);
+    fill(&b);
+} //! error: cannot prove 'b.data' is empty at this exit
+
+fn dropped() void {
+    buf mut c = buf{};
+    c.data = new(i32);
+    drop_buf(move(c));
+}
+
+fn deleted() void {
+    buf mut b = buf{};
+    defer del(b.data);
+    fill(&b);
+}
+
+fn main() i32 {
+    freed();
+    filled();
+    dropped();
+    deleted();
+    return 0;
+}

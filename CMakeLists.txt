@@ -389,16 +389,6 @@ add_test(NAME fixpoint
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(fixpoint PROPERTIES LABELS "fort;integration")
 
-# The exits of the owning aggregate locals that the leak rule does not prove, in the compiler, the
-# language server and the standard library, for both targets: the test holds the count of each
-# file.
-add_test(NAME aggregate-sites
-    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_sites_test.py"
-            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}")
-set_tests_properties(aggregate-sites PROPERTIES
-    LABELS "fort;integration"
-    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
 # No function of src/fort, src/lsp, std, test/fort, test/lsp or test/library dels the storage below
 # a field or an element of a span whose type has a value drop: such a field ends through the drop of
 # its type, so each release stands once. A text scan with a control tree; it needs no compiler.
@@ -844,100 +834,14 @@ set_tests_properties(overwrite_oracle PROPERTIES
     LABELS "fort;integration"
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
-# Hold the sites of --aggregate-report and --leak-report over each entry of test/lang, for the
-# Linux and the Darwin target: a site that is not in the lists of the test turns it red.
-add_test(NAME aggregate-lang
-    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_lang_test.py"
+# Hold the sites of --leak-report, part 2 of the leak rule, in the test trees (test/fort with its
+# support modules, test/lsp, test/library and test/lang) for the Linux and the Darwin target, and
+# each run of the report at no error, with a control program at one site. Part 1 is a compile
+# error, which the build of each test holds.
+add_test(NAME leak-sites
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/leak_sites_test.py"
             --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}" -j "${FORT_LANG_JOBS}")
-set_tests_properties(aggregate-lang PROPERTIES
-    LABELS "fort;integration"
-    PROCESSORS ${FORT_LANG_JOBS}
-    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
-
-# The sites of --aggregate-report and --leak-report in the suites of the session, the module
-# loader and the checker (test/fort/check_*, modules_*, session_*), for both targets: the test
-# holds no site in them.
-add_test(NAME aggregate-front
-    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_front_test.py"
-            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}" -j "${FORT_LANG_JOBS}")
-set_tests_properties(aggregate-front PROPERTIES
-    LABELS "fort;integration"
-    PROCESSORS ${FORT_LANG_JOBS}
-    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
-
-# Hold the suites of the lexer, the parser, the index, the JSON writer and the diagnostics
-# (test/fort/parser_*, lexer_*, index_*, json_*, diag_*) at no site of --aggregate-report and
-# --leak-report, for the Linux and the Darwin target, with a control program at one site of each
-# report.
-add_test(NAME aggregate-parser
-    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_parser_test.py"
-            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}" -j "${FORT_LANG_JOBS}")
-set_tests_properties(aggregate-parser PROPERTIES
-    LABELS "fort;integration"
-    PROCESSORS ${FORT_LANG_JOBS}
-    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
-
-# Hold the suites of test/lsp at no site of --aggregate-report and --leak-report, for the Linux
-# and the Darwin target, with a control program at one site of each report.
-add_test(NAME aggregate-lsp
-    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_lsp_test.py"
-            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}" -j "${FORT_LANG_JOBS}")
-set_tests_properties(aggregate-lsp PROPERTIES
-    LABELS "fort;integration"
-    PROCESSORS ${FORT_LANG_JOBS}
-    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
-
-# Hold the suites of the FIR (test/fort/fir_*) at no site of --aggregate-report and --leak-report,
-# for the Linux and the Darwin target, with a control program at one site of each report.
-add_test(NAME aggregate-fir
-    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_fir_test.py"
-            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}" -j "${FORT_LANG_JOBS}")
-set_tests_properties(aggregate-fir PROPERTIES
-    LABELS "fort;integration"
-    PROCESSORS ${FORT_LANG_JOBS}
-    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
-
-# Hold the suites of the emitter and the type table (test/fort/gen_* and types_*) at no site of
-# --aggregate-report and --leak-report, for the Linux and the Darwin target, with a control
-# program at one site of each report.
-add_test(NAME aggregate-gen
-    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_gen_test.py"
-            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}" -j "${FORT_LANG_JOBS}")
-set_tests_properties(aggregate-gen PROPERTIES
-    LABELS "fort;integration"
-    PROCESSORS ${FORT_LANG_JOBS}
-    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
-
-# The sites of --aggregate-report and --leak-report in the tests of the library builds
-# (test/fort/library and the programs of test/library), for both targets: the test holds no site
-# in them.
-add_test(NAME aggregate-library
-    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_library_test.py"
-            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}" -j "${FORT_LANG_JOBS}")
-set_tests_properties(aggregate-library PROPERTIES
-    LABELS "fort;integration"
-    PROCESSORS ${FORT_LANG_JOBS}
-    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
-
-# The sites of --aggregate-report and --leak-report in the suites of the ownership passes
-# (test/fort/owner), for both targets: the test holds no site in them.
-add_test(NAME aggregate-owner
-    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_owner_test.py"
-            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}" -j "${FORT_LANG_JOBS}")
-set_tests_properties(aggregate-owner PROPERTIES
-    LABELS "fort;integration"
-    PROCESSORS ${FORT_LANG_JOBS}
-    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
-
-# Hold test/fort/support (but the four modules of aggregate-parser) and the suites
-# test/fort/driver_*, containers_*, scope_*, ast_*, consts_*, comptime_*, flt_*, runtime_*, fir/,
-# std/ and support_test at no site of --aggregate-report and --leak-report, for the Linux and the
-# Darwin target, with a control program at one site of each report. It is the one owner of the
-# drops of those support modules.
-add_test(NAME aggregate-misc
-    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_misc_test.py"
-            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}" -j "${FORT_LANG_JOBS}")
-set_tests_properties(aggregate-misc PROPERTIES
+set_tests_properties(leak-sites PROPERTIES
     LABELS "fort;integration"
     PROCESSORS ${FORT_LANG_JOBS}
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")

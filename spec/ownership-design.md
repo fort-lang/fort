@@ -818,12 +818,14 @@ The probe P4 of section 14 runs V1, and the column R1 adds the first refinement 
 cell gives sites/functions (measured with P4). The direction says how the real count can differ.
 The probe gives no key to an index that a local holds (high), and it loses the type of 72 places of
 `src/fort` (low, section 14). `?` means both directions. `pass` marks a row that the report-only
-mode of the real pass measured in place of P4. The row R1 of the owning aggregate locals counts the
-sites of the real pass that are not of cause 1 (6.3): it takes each callee as one that empties the
-owner, so it is low (`pass, low`). The probe of R1 (section 7) left 464/87, 1/1, 0/0,
-3,593/2,330 and 88/38 in the five columns. The user dropped R1 on 2026-11-01, so the migration
-takes each site of the row `(c) owning aggregate local` (6.3). Rule (b) is an error (6.2), so its
-rows hold 0: the error rejects each use. No cast in the corpora carries `own` to another pointee
+mode of the real pass measured in place of P4. The row R1 of the owning aggregate locals counted
+the sites of the real pass that were not of cause 1 (6.3): it took each callee as one that empties
+the owner, so it was low. The probe of R1 (section 7) left 464/87, 1/1, 0/0, 3,593/2,330 and 88/38
+in the five columns. The user dropped R1 on 2026-11-01, so the migration took each site of the row
+`(c) owning aggregate local` (6.3). Rule (b) is an error (6.2), and so is part 1 of rule (c) on
+the owning aggregate locals (6.3), so their rows hold 0: the error rejects each use and each such
+exit. 6.3 keeps the counts of the report before the migration. No cast in the corpora carries
+`own` to another pointee
 type with owners, so part 2 of rule (c) has 0 sites at a cast (measured, P4 and `--leak-report`).
 
 | rule and variant           | src/fort  | src/lsp | std   | test/fort    | test/lang | dir       |
@@ -832,8 +834,8 @@ type with owners, so part 2 of rule (c) has 0 sites at a cast (measured, P4 and 
 | (b) memory owner, direct   | 0/0       | 0/0     | 0/0   | 0/0          | 0/0       | pass      |
 | (b) memory owner, indirect | 0/0       | 0/0     | 0/0   | 0/0          | 0/0       | pass      |
 | (c) `own` local/param/temp | 2/2       | 0/0     | 0/0   | 0/0          | 32/24     | pass      |
-| (c) owning aggregate local | 669/167   | 1/1     | 2/1   | 4,231/2,703  | 167/84    | pass      |
-| (c) the same, with R1      | 373/67    | 0/0     | 0/0   | 1,460/893    | 83/35     | pass, low |
+| (c) owning aggregate local | 0/0       | 0/0     | 0/0   | 0/0          | 0/0       | pass      |
+| (c) the same, with R1      | 0/0       | 0/0     | 0/0   | 0/0          | 0/0       | pass      |
 | (c) part 2, a pointer      | 14/13     | 2/2     | 0/0   | 0/0          | 41/18     | pass      |
 | (c) part 2, a span (Q7)    | 29/21     | 4/4     | 0/0   | 2/1          | 8/5       | ?         |
 | (d) a maybe-vacated `del`  | 5/4       | 0/0     | 0/0   | 1/1          | 63/34     | ?         |
@@ -1010,6 +1012,18 @@ whose elements hold owners, for which no element is tracked, waits for R8.
   aggregate local that the analysis cannot prove becomes an error of part 1 (D17.20). `del` is a
   fix at each site: a `del` of each owner of the local after its last call frees what the callee
   left, and it does nothing on an empty owner (D17.9).
+- Error of part 1 on the owning aggregate locals (2026-11-06, D17.20). The migration ended: at
+  672dfa81, `--aggregate-report` listed 0 sites over the 1,403 entries of the trees that CI
+  compiles (src/fort, src/lsp, std, test/fort and its support modules, test/lsp, test/library,
+  test/lang, test/tty, test/highlight and the fixtures of the editor), for the Linux and the
+  Darwin target, but 2 exits of `fail/ownership/083`, a fail test of rule (b), which now give the
+  error beside their errors of rule (b). Each exit of such a local that the analysis cannot prove
+  is an error of part 1 since then, and `--aggregate-report` went with the causes that it gave.
+  The fail tests `fail/ownership/086` to `089` hold an error of each of the four causes above, and
+  `fail/modules/033` holds one in an imported module. `run/ownership/074` holds each form of the
+  migration (`notes/compiler.md` 6): a `del` of each owner, an end that drains a chain, the order
+  of the ends, a block for each end, a split, a drop by `move`, an allocation, and the drop of a
+  composite context.
 - Size: decision S, report M, migration M (the `own` locals, part 2) or L (the aggregates), error S.
 
 ### 6.4 (d) A double `del`
@@ -1308,7 +1322,7 @@ one PR (impl-hard, rev-deep). The oracle and the move are impl-hard and rev-deep
    directory. The coordinator ruled on 2026-10-31 that its report comes before 7, so that the user
    rules on R1 against the counts of the real pass (6.3). The report adds no error, so the ruling
    on Q1 holds. The user then dropped R1, so the migration takes each of the 5,616 sites, and the
-   error follows it (6.3).
+   error follows it (6.3). The error is done (D17.20, 2026-11-06).
 9. `refine-alias` (R6, M), after 5: it adds `B` for the frames that view locals borrow and the
    origin `exposed`. It also adds one may-fact for each memory local: the local can be exposed.
    Its decision is D17.11 (Borrows), with the five points of R6 (section 7).

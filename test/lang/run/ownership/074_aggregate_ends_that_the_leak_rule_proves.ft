@@ -1,0 +1,251 @@
+//! run
+//! stdout:
+//| del 3
+//| end 2
+//| order 5 1
+//| block 1 2
+//| split 9
+//| drop 11
+//| allocation 13
+//| composite 2 1 5
+// The forms that end a local of an owning aggregate type where part 1 of the leak rule proves each
+// exit (D17.20), each in a run that prints what it reads. `del`: the deferred `del` of each owner,
+// with no call after it. `end`: a free that calls, then a loop on `!= null`, whose exit edge makes
+// the owner empty (D17.11, gen rule 6). `order`: the local whose end calls comes last, so its end
+// runs first and the `del`s of the other local run after it. `block`: two locals whose ends call,
+// each in a block of its own. `split`: a function that returns its local lends it to a helper that
+// holds the local whose end calls. `drop`: a value that moves out of an allocation into a local
+// whose address no call takes ends through a drop that takes it by `move`. `allocation`: a value
+// that the function lends to calls lives in an allocation and ends through a drop of the
+// allocation. `composite`: a context with two chains and a leaf, whose drop moves each chain into
+// the drop of its type. fail/ownership/086 to 089 hold the errors beside them.
+struct leaf {
+    i32 v;
+}
+
+struct node {
+    node mut* own next;
+    i32 v;
+}
+
+struct pair {
+    leaf mut* own a;
+    leaf mut* own b;
+}
+
+struct chain {
+    node mut* own head;
+}
+
+struct ctx {
+    chain c;
+    chain d;
+    leaf mut* own a;
+}
+
+fn make_pair(i32 a, i32 b) pair {
+    leaf mut* own x = new(leaf);
+    x->v = a;
+    leaf mut* own y = new(leaf);
+    y->v = b;
+    return pair{move(x), move(y)};
+}
+
+// A read through a pointer parameter: the owners are no local owners here (D17.21).
+fn sum_pair(pair* p) i32 {
+    return p->a->v + p->b->v;
+}
+
+fn drop_pair(pair mut p) void {
+    del(p.a);
+    del(p.b);
+}
+
+// Ends a pair in an allocation of `new` that the caller moves in: the value moves out, the
+// allocation goes, and drop_pair frees the leaves.
+fn pair_drop_made(pair mut* own p) void {
+    pair kept = move(*p);
+    del(p);
+    drop_pair(move(kept));
+}
+
+fn push(chain mut* c, i32 v) void {
+    node mut* own n = new(node);
+    n->v = v;
+    n->next = move(c->head);
+    c->head = move(n);
+}
+
+fn count(chain* c) i32 {
+    i32 mut k = 0;
+    node* mut at = c->head;
+    while (at != null) {
+        k += 1;
+        at = at->next;
+    }
+    return k;
+}
+
+fn free_chain(chain mut* c) void {
+    while (c->head != null) {
+        node mut* own n = move(c->head);
+        node mut* own next = move(n->next);
+        del(n);
+        c->head = move(next);
+    }
+}
+
+// Drains a chain that the caller moves in: the loop on `!= null` makes `c.head` empty at the exit.
+fn drop_chain(chain mut c) void {
+    while (c.head != null) {
+        free_chain(&c);
+    }
+}
+
+fn drop_ctx(ctx mut x) void {
+    drop_chain(move(x.c));
+    drop_chain(move(x.d));
+    del(x.a);
+}
+
+fn ctx_drop_made(ctx mut* own p) void {
+    ctx kept = move(*p);
+    del(p);
+    drop_ctx(move(kept));
+}
+
+fn del_form() void {
+    pair mut p = make_pair(1, 2);
+    defer {
+        del(p.a);
+        del(p.b);
+    }
+    println("del ", sum_pair(&p));
+}
+
+fn end_form() void {
+    chain mut c = chain{};
+    defer {
+        free_chain(&c);
+        while (c.head != null) {
+            free_chain(&c);
+        }
+    }
+    push(&c, 1);
+    push(&c, 2);
+    println("end ", count(&c));
+}
+
+fn order_form() void {
+    pair mut p = make_pair(2, 3);
+    defer {
+        del(p.a);
+        del(p.b);
+    }
+    chain mut c = chain{};
+    defer {
+        free_chain(&c);
+        while (c.head != null) {
+            free_chain(&c);
+        }
+    }
+    push(&c, 4);
+    println("order ", sum_pair(&p), " ", count(&c));
+}
+
+fn block_form() void {
+    {
+        chain mut c = chain{};
+        defer {
+            free_chain(&c);
+            while (c.head != null) {
+                free_chain(&c);
+            }
+        }
+        push(&c, 5);
+        print("block ", count(&c));
+    }
+    {
+        chain mut d = chain{};
+        defer {
+            free_chain(&d);
+            while (d.head != null) {
+                free_chain(&d);
+            }
+        }
+        push(&d, 6);
+        push(&d, 7);
+        println(" ", count(&d));
+    }
+}
+
+// Adds the count of a chain to the first leaf of `p`. The chain ends here, so its end runs before
+// the `return` of split_form moves the pair into the result.
+fn fill_split(pair mut* p) void {
+    chain mut c = chain{};
+    defer {
+        free_chain(&c);
+        while (c.head != null) {
+            free_chain(&c);
+        }
+    }
+    push(&c, 8);
+    push(&c, 9);
+    p->a->v += count(&c);
+}
+
+fn split_form() pair {
+    pair mut p = make_pair(3, 4);
+    fill_split(&p);
+    return p;
+}
+
+fn drop_form() void {
+    pair mut* own q = new(pair);
+    q->a = new(leaf);
+    q->b = new(leaf);
+    q->a->v = 5;
+    q->b->v = 6;
+    pair kept = move(*q);
+    del(q);
+    println("drop ", kept.a->v + kept.b->v);
+    drop_pair(move(kept));
+}
+
+fn allocation_form() void {
+    pair mut* own p = new(pair);
+    defer pair_drop_made(move(p));
+    p->a = new(leaf);
+    p->b = new(leaf);
+    p->a->v = 6;
+    p->b->v = 7;
+    println("allocation ", sum_pair(p));
+}
+
+fn composite_form() void {
+    ctx mut* own x = new(ctx);
+    defer ctx_drop_made(move(x));
+    x->a = new(leaf);
+    x->a->v = 5;
+    push(&x->c, 1);
+    push(&x->c, 2);
+    push(&x->d, 3);
+    println("composite ", count(&x->c), " ", count(&x->d), " ", x->a->v);
+}
+
+fn main() i32 {
+    del_form();
+    end_form();
+    order_form();
+    block_form();
+    pair mut s = split_form();
+    defer {
+        del(s.a);
+        del(s.b);
+    }
+    println("split ", sum_pair(&s));
+    drop_form();
+    allocation_form();
+    composite_form();
+    return 0;
+}

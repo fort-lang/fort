@@ -1,0 +1,45 @@
+//! fail
+// The analysis cannot prove the zero value of an owner of a local of an owning aggregate type that
+// holds an allocation on some paths only (D17.20). In `some`, `b.data` holds an allocation only
+// when `c` holds, so the closing brace is an error, though `b` starts as `buf{}`. A `del` after the
+// `if` fixes it, as in `each`, because `del` of a null owner does nothing (D17.9). In `picked` the
+// conditional moves `big` on one arm only. The `del` after it ends `small`, so the closing brace
+// is an error for `big` alone.
+struct buf {
+    i32 mut* own data;
+}
+
+fn take(buf b) void {
+    del(b.data);
+}
+
+fn some(bool c) void {
+    buf mut b = buf{};
+    if (c) {
+        b.data = new(i32);
+    }
+} //! error: cannot prove 'b.data' is empty at this exit
+
+fn each(bool c) void {
+    buf mut b = buf{};
+    if (c) {
+        b.data = new(i32);
+    }
+    del(b.data);
+}
+
+fn picked(bool c) void {
+    buf mut big = buf{};
+    big.data = new(i32);
+    buf mut small = buf{};
+    small.data = new(i32);
+    take(c ? move(small) : move(big));
+    del(small.data);
+} //! error: cannot prove 'big.data' is empty at this exit
+
+fn main() i32 {
+    some(false);
+    each(true);
+    picked(true);
+    return 0;
+}

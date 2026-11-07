@@ -736,7 +736,7 @@
 //| shapes aggregate: sites 0, rejected 0, with an event 0
 //| shapes aggregate: false accepts 0, false rejects 0, masked 0, masked with an event 0
 /// Tests rule (a), the overwrite check of D17.11 that owner.prover proves, parts 1 and 2 of rule
-/// (c), the leak rule of D17.20, the report of part 1 for the owning aggregate locals, and rule
+/// (c), the leak rule of D17.20, part 1 of it for the owning aggregate locals, and rule
 /// (b), a use after `move` or `del` of D17.21, against the oracle: the runs of fir.interpreter
 /// and the events of fir.shadow (spec/ownership-design.md 3.6). The hand cases of the design
 /// reviews run as programs, and the three families of
@@ -763,11 +763,13 @@
 // temporary of an owning aggregate type, and at other items count apart. False accepts and false
 // rejects count as for rule (a).
 //
-// The report of the owning aggregate locals has exit sites of its own (add_aggregates): each `dead`
-// of a local of an owning aggregate type outside an abort block, each `return` of a function with a
-// parameter or a temporary of such a type, and each exit of p->aggregates. The site is rejected
-// when the pass does not prove such an exit there, or an exit of an owner local at the same
-// `return`, because the `leak` event at a `return` does not say which owner leaked. Such a site,
+// Part 1 of the leak rule on the owning aggregate locals has exit sites of its own
+// (add_aggregates): each `dead` of a local of an owning aggregate type outside an abort block, each
+// `return` of a function with a parameter or a temporary of such a type, and each exit of
+// p->aggregates. The site is rejected when the pass does not prove such an exit there, which makes
+// the function an error (has_error), so the test holds the verdict of the error. An exit of an
+// owner local that the pass does not prove at the same `return` rejects the site too, because the
+// `leak` event at a `return` does not say which owner leaked. Such a site,
 // which only the owner local rejects, is masked: a wrong proof of an owning aggregate there gives
 // no false accept, so each set counts its masked sites and those of them with an event. Each `leak`
 // event marks the site at its location (mark_aggregate), and it keeps its count outside part 1. A
@@ -3079,12 +3081,12 @@ string[USE_COUNT] USE_NAMES = {
     "global_ptr",
 };
 
-// The hand cases of the report of the owning aggregate locals (D17.20, refinement R1): for each
+// The hand cases of part 1 of the leak rule on the owning aggregate locals (D17.20): for each
 // exit kind, a function whose exit a run reaches with an owner below a struct local that holds an
 // allocation and one whose exit frees it. `brace` leaves a block, `return` returns before its
 // `del`s with the parameter `q` live too, `loop` leaves a loop by `break` and by `continue`, and
 // `defer` frees at each exit. In `callee` a call that takes the address of the local frees it in
-// `free`, a false reject that an `empty` line of R1 can prove, and keeps it in `leak`. A deferred
+// `free`, a false reject because the pass reads no callee, and keeps it in `leak`. A deferred
 // `del` of one line each keeps the seeded family from a store into a deferred block, which expands
 // at two exits with one location, so its two checks would join. In `paths`
 // the owner holds an allocation on one path only. `array` holds the owners in a fixed array,
@@ -5238,8 +5240,9 @@ u32 DEAD_LINE = 1000000;
 // rule with no event at or after a `forged` event of their function (is_after_forged). `uses`
 // counts the sites of rule (b) as `leak` counts those of part 1, its false accepts by event, and
 // `use_callee` and `use_unnamed` the `use after move` events outside the scope of rule (b): of a
-// slot that a callee read, and of a slot of no local. `aggregate` counts the sites of the report of
-// the owning aggregate locals as `leak` counts those of part 1, `masked` those that only an exit of
+// slot that a callee read, and of a slot of no local. `aggregate` counts the sites of part 1 on
+// the owning aggregate locals as `leak` counts those of the owner locals, `masked` those that only
+// an exit of
 // an owner local rejects, and `masked_events` those of them with an event.
 struct counts {
     u64 items;
@@ -5274,7 +5277,7 @@ u64 LEAK_FALSE_ACCEPTS = 3;
 u64 LEAK_FALSE_REJECTS = 4;
 
 // The `leak` events outside the scope of rule (c) part 1, the fields of `counts.outside`: at the
-// `dead` of a local of an owning aggregate type, which waits for refinement R1; at a `dead` in an
+// `dead` of a local of an owning aggregate type, which counts in `aggregate`; at a `dead` in an
 // abort block, a path that ends in a runtime error (X3); at a `return` of a function with a
 // parameter or a temporary of an owning aggregate type, whose leak the event does not tell from
 // that of an owner local; and at any other item that is no `del` (mark_inner).
@@ -5290,7 +5293,7 @@ enum leak_kind {
 // the FIR text of a batch of FIR cases, whose item `k` is function `k` of the text.
 // `inners` holds the sites of rule (c) part 2 at a `del`, and `casts` those at a `cast`.
 // `forged` holds the location of each `forged` event of its runs.
-// `uses` holds the sites of rule (b), and `aggregates` the exit sites of the report of the owning
+// `uses` holds the sites of rule (b), and `aggregates` the exit sites of part 1 on the owning
 // aggregate locals.
 struct batch {
     family kind;
@@ -5749,15 +5752,17 @@ fn add_exits(batch mut* bt, fir.func* f, prover.proof* p) void {
     }
 }
 
-// Records an exit site of the report of the owning aggregate locals (D17.20, refinement R1) for
-// each `dead` of a local of an owning aggregate type outside an abort block, for each `return` of a
+// Records an exit site of part 1 of the leak rule on the owning aggregate locals (D17.20) for each
+// `dead` of a local of an owning aggregate type outside an abort block, for each `return` of a
 // function with a parameter or a temporary of such a type, and for each exit of p->aggregates:
-// rejected when the pass does not prove an exit of such a local there. The `leak` event at a
-// `return` does not tell an owning aggregate from an owner local, so an exit of an owner local
-// that the pass does not prove at the `return` of such a site rejects it too.
+// rejected when the pass does not prove an exit of such a local there, which gives the error of
+// D17.20 (has_error). The `leak` event at a `return` does not tell an owning aggregate from an
+// owner local, so an exit of an owner local that the pass does not prove at the `return` of such
+// a site rejects it too.
 fn add_aggregates(batch mut* bt, fir.func* f, prover.proof* p) void {
     u64 owner = item_of(bt, f->sym);
     bool returns = has_owning_aggregate(f);
+    bool error = prover.has_error(p);
     for (u32 mut b = 0; b < fir.block_count(f); b++) {
         fir.block* bl = fir.block_at(f, b);
         fir.terminator* t = &bl->term;
@@ -5784,8 +5789,8 @@ fn add_aggregates(batch mut* bt, fir.func* f, prover.proof* p) void {
         if (e->index < fir.block_statement_count(f, e->block)) {
             shown = bt->deads.items[cast(at.line - DEAD_LINE, u64)].at;
         }
-        add_exit(&bt->aggregates, exit_site{f->sym, at.line, at.col, shown, owner, !e->proved,
-                                            false, false});
+        add_exit(&bt->aggregates, exit_site{f->sym, at.line, at.col, shown, owner,
+                                            !e->proved && error, false, false});
     }
     for (u64 mut k = 0; k < p->exits.len; k++) {
         prover.exit* e = &p->exits[k];
@@ -5801,8 +5806,8 @@ fn add_aggregates(batch mut* bt, fir.func* f, prover.proof* p) void {
     }
 }
 
-// Marks the exit site of the report of the owning aggregate locals at the location of the `leak`
-// event `ev`, when one stands there.
+// Marks the exit site of part 1 on the owning aggregate locals at the location of the `leak` event
+// `ev`, when one stands there.
 fn mark_aggregate(batch mut* bt, shadow.event* ev) void {
     for (u64 mut i = 0; i < bt->aggregates.len; i++) {
         exit_site mut* t = &bt->aggregates.items[i];
@@ -6706,7 +6711,7 @@ fn main() i32 {
     }
     if (hand.aggregate[LEAK_FALSE_ACCEPTS] + exhaustive.aggregate[LEAK_FALSE_ACCEPTS]
         + seeded.aggregate[LEAK_FALSE_ACCEPTS] + shapes.aggregate[LEAK_FALSE_ACCEPTS] != 0) {
-        panic("oracle_test: the report of the owning aggregate locals has a false accept");
+        panic("oracle_test: part 1 on the owning aggregate locals has a false accept");
     }
     return 0;
 }
