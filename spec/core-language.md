@@ -322,7 +322,9 @@ discipline, not a linear check: whether every allocation is freed exactly once i
 exception. It covers a named local of `own` reference type or of an owning aggregate type at the
 end of its scope, or such a parameter or temporary at a `return`, that can hold an allocation in
 itself or in an owner of its fixed storage. It also covers a `del` or an
-`own` cast that frees an object whose owners can hold allocations (`memory-model.md` 2.5). An exit
+`own` cast that frees an object whose owners can hold allocations (`memory-model.md` 2.5). A span
+whose elements hold owners ends through `del(s, d)`, which moves each element into a drop
+first (8.2, D17.9). An exit
 of such a local, parameter or temporary that the compiler cannot prove is a compile error. The
 compiler first reports each such `del` and `cast` that it cannot prove and accepts the program; a
 later change makes each of them a compile error.
@@ -1431,6 +1433,36 @@ address, a literal and a `string` that is not `own` are compile errors, because 
 an `own` type. Allocations have no
 header, so `new`/`del` and C `malloc`/`free` are interchangeable, and C memory is owned when its
 `extern` says `own` (D17.13).
+
+`del(s, d)` frees a span of owners: an `own` span whose element type `E` holds an `own` place in
+its fixed storage, such as `node mut* own mut@ own kids` or a span of structs with an `own` field
+(D17.9). It moves the span out of `s`, which leaves the zero value there as `move` does, calls
+`d(move(e))` for each element `e` from index 0 to the last, and then frees the storage. `d` is
+the name of a fort function, `drop` or `m.drop`, of type `fn (E) void`; a function value, an
+`extern fn` and a function of another type are errors. A slot that holds the zero value goes
+into `d` too, so a drop accepts the zero value. `d` must be release-only: it stores no owner
+through memory, it calls no `extern fn` and no function value, and each fort function that it
+calls is release-only too. Otherwise `del(s, d)` is a compile error at `d`, whose notes name the
+statement that breaks the rule. `del(s, d)` of an operand that is no span of owners is an error.
+
+```fort
+struct set {
+    u64 mut@ own words;
+}
+
+fn set_drop(set mut s) void {
+    del(s.words);
+}
+
+fn free_sets(set mut@ own sets) void {
+    del(sets, set_drop);             // set_drop(move(sets[i])) for each i, then the storage
+}
+```
+
+`del(s)` with one operand of a span of owners frees only the storage. The compiler lists each such
+`del` under `--span-del-report` and accepts it for now; a later change makes it an error (D17.9).
+A `cast` that carries `own` from a span of owners to another element type is an error (D17.9,
+D3.14).
 
 `move(lv)` takes an lvalue of owning type, an `own` reference or an owning aggregate, yields its
 value and leaves the zero value behind (D17.6); the mutability rules are those of `del`. It is

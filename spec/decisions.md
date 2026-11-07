@@ -2352,7 +2352,9 @@ Sections:
 - owner: `core-language.md` (Builtins).
 - rule: Universe-scope functions with ordinary call syntax and special typing. They may be shadowed
   by a module-level or local declaration (D7.9) and cannot be used as values:
-  - `del(x)`: frees an `own` operand and empties it (D17.9);
+  - `del(x)`: frees an `own` operand and empties it (D17.9); `del(s, d)` frees a span of owners
+    after it moves each element into the drop `d`, which names a release-only fort function
+    (D17.9);
   - `move(lv)`: yields an owning lvalue's value and empties it (D17.6); the one universe
     function that yields a value, and that value must be used (`move(x);` as a statement is an
     error, D17.8);
@@ -2374,6 +2376,8 @@ Sections:
   only on the failing branch; `del` calls, and so do `panic` and every member of the print family.
 - history: Amended 2026-09-11 (T-088): the calls named the C runtime's `fort_rt_*` entry points, the
   runtime being C (D13.1 as amended).
+  Amended 2026-11-07: `del` takes a second operand, the drop of the elements of a span of owners
+  (D17.9, the user ruling "del(s, drop)"). Before, `del` took one operand.
 
 ## D13 Standard library scope
 
@@ -3122,6 +3126,57 @@ says ownership is "by convention", this section supersedes it.
   so `del(buf); del(buf);` frees once, and a use after `del` or `move` dereferences `null`. `del` of
   a view, a sub-span, a `.ptr`, a stack address or a literal is a compile error, because none of
   them has an `own` type. This supersedes the earlier "del does not null its argument".
+  A span of owners is an `own` span, of each mutability, whose element type `E` holds an `own`
+  place in its fixed storage, at any level: an `own` reference, or a struct or a fixed array that
+  holds one. `del` is shallow (D17.7), so after `del(s)` of a span of owners the elements can keep
+  allocations that nothing frees. `del(s, d)` frees a span of owners and the owners of its
+  elements. It evaluates `s` as `del(s)` does. It moves the span out of an lvalue `s` under the
+  rules of D17.6, which leaves the zero value there, or it takes the value of an rvalue `s`. Then
+  it calls `d(move(e))` for each element `e` of that span, from index 0 to the last, and then it
+  frees the storage. A slot that holds the zero value goes into `d` too, so a drop accepts the zero
+  value, as the drops of D13.5 do. The elements can be immutable: the moves out of them change
+  only storage that the `del` frees.
+  `d` names a fort function, as a name or as `m.f` with no parentheses, whose type is
+  `fn (E) void`, exactly. A function value, a name in parentheses, an `extern fn`, a builtin and a
+  value of another type are compile errors there, and so is a function of another type, a
+  `noreturn` one included. `del(s, d)` of an operand that
+  is no span of owners is a compile error: `'del' with a drop needs an own span whose elements
+  hold owners, not <type>`. `del` takes one or two operands.
+  `d` must be release-only. A function is release-only when three things are true. No statement
+  of it stores a value other than a constant into a place whose type holds owners and that the
+  statement reaches through memory: a global, a dereference, or an index into a span or a
+  `string`. A constant of such a type is its zero value, so its store frees nothing and keeps
+  nothing. It calls no `extern fn` and no function value, also when the call is harmless. Each
+  fort function that it calls is release-only. The release-only functions are the greatest set
+  that keeps the three conditions, so a cycle of calls with no break is release-only. A function
+  whose body the build does not have is not release-only: a function of a used library (D9.11)
+  among them, until its artifact holds the bit. When `d` is not release-only, `del(s, d)` is a
+  compile error at `d`: `cannot drop the elements with '<d>': it is not release-only`. The notes
+  name the statement that breaks the bit and the calls that reach it from `d`: `'<f>' calls '<g>'
+  here` at each call of a shortest chain, and then one of `'<f>' stores an owner through memory
+  here`, `'<f>' calls the extern '<x>' here`, `'<f>' calls a function value here` and `'<f>'
+  calls '<g>', which has no body in this build`. A `d` with no body takes the note `'<d>' has no
+  body in this build` at `d`. Checked and release builds give the same verdict, and `--check`
+  gives it too.
+  A `cast` that carries `own` from a span of owners to a span or a pointer of another element type
+  is a compile error. The rules of D3.14 refuse each such cast: a span casts only to a span whose
+  element type has the same shape, and a pointer place that carries a mark keeps its exact type.
+  A cast to a span of the same element type keeps the elements, and `del(s, d)` frees them.
+  `del(s)` with one operand of a span of owners leaks each allocation that an element holds. The
+  compiler first lists each such `del` under the option `--span-del-report`, at the name `del`,
+  with the text `cannot del a span of owners with one operand: name the drop of its elements,
+  del(s, <drop>)`, and accepts the program. A later change makes each such `del` a compile error
+  with that text and amends this entry, after the code that CI compiles uses `del(s, d)`.
+- rationale: a span of owners is the one owner whose elements no fact of D17.11 tracks, so no
+  rule of one function can prove them empty before the storage goes (D17.20). The compiler writes
+  the loop of the drain, and part 1 of D17.20 proves the parameter of `d` empty at each exit of
+  `d`. The bit keeps `d` from storing an owner back into memory, which a drain could not see: the
+  probe of the design wrote a new owner into element 0 through a global view of the span. So no
+  element holds an allocation when the storage goes, and the analysis needs no fact of its own.
+- history: Amended 2026-11-07: `del(s, d)`, the release-only bit and the rule of a `cast` of a span
+  of owners, from refinement R8 of `spec/ownership-design.md` 7 (the user ruling "del(s, drop)",
+  2026-11-07, over a ban of spans of owners and over a rule that proves a drain loop). Before,
+  `del` took one operand, and a `del` or a `cast` of a span of owners had no rule (D17.20).
 
 ### D17.10 Ownership in a range loop
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -3670,10 +3725,13 @@ says ownership is "by convention", this section supersedes it.
   of D17.11 for `p` (refinement R7 of `spec/ownership-design.md` 7): a `del` of the zero value frees
   nothing (D17.9), and a `cast` of it gives the zero value. When `p` is no pointer local that is not
   memory, D17.11 tracks no place through it, so the `del` or the `cast` is an error, unless the
-  analysis proves `p` empty. By the ruling on Q7 (`spec/ownership-design.md` 12), a span whose
-  elements hold owners, for which no element is tracked, waits for refinement R8 of
-  `spec/ownership-design.md` 7. Until then, a `del` or a `cast` of such a span has no obligation
-  of part 2, and its leak is outside the guarantee of this rule.
+  analysis proves `p` empty. Part 2 takes no span. A span of owners (D17.9) ends through
+  `del(s, d)`: part 1 proves at each exit of `d` that each owner of its parameter is empty, and
+  `d` is release-only, so it stores no owner through memory and no element holds an allocation
+  when the storage goes. The analysis adds no fact for it (refinement R8 of
+  `spec/ownership-design.md` 7). A `cast` of a span of owners to another element type is an error
+  (D17.9). Until a `del(s)` of a span of owners with one operand is an error (D17.9), such a `del`
+  has no obligation of part 2, and its leak is outside the guarantee of this rule.
   A leak through a cycle of owners, and a leak on a path that calls `exit` or ends in a runtime
   error, are outside the guarantee of this rule too (`spec/ownership-design.md` 5.2, X3).
   `<place>` is source text. For a named local or a parameter, it is the declared name. An owner
@@ -3708,7 +3766,7 @@ says ownership is "by convention", this section supersedes it.
   (D17.7), so a `del` of an object whose owners hold allocations leaks them. The order of the
   rules follows the ruling on Q1 (`spec/ownership-design.md` 12) and the ruling of 2026-11-01: the
   `own` locals and the shallow `del` came first, the owning aggregates followed the migration of
-  their exits, and a span of owners follows R8.
+  their exits, and a span of owners ends through `del(s, d)` of D17.9 (R8).
 - history: Amended 2026-10-24: the user approved parts 1 and 2 of spec/ownership-design.md 6.3
   (user, 2026-10-24). The coordinator ruled the position and the note of the error of part 2, the
   message of a `cast` and the text of `<place>`. The coordinator also ratified seven additions to
@@ -3744,6 +3802,9 @@ says ownership is "by convention", this section supersedes it.
   target, but two exits of a fail test, which now hold the error. The option went with the error.
   The entry takes the aggregate work, its limit and its note, which `fir.md` 11 held alone, and the
   text of `<place>` for such a local; the coordinator ratified both on 2026-10-31.
+  Amended 2026-11-07: a span of owners ends through `del(s, d)` of D17.9 (the user ruling
+  "del(s, drop)", 2026-11-07). Before, a `del` or a `cast` of such a span waited for refinement R8
+  with no obligation of part 2, by the ruling on Q7.
 
 ### D17.21 Use after move or del
 - owner: `memory-model.md` (`move`, `del`, transfer, lending, the overwrite check, the leak rule,

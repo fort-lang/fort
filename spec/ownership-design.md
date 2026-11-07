@@ -1185,6 +1185,11 @@ counts of its rules before and after it. A report count can change the order of 
   rule (a) and part 1 keep each site of those entries, and none of them changes its status or its
   errors.
 - **R8 the `del` of a span of owners**: a loop rule or a builtin that empties each element (Q7).
+  The user ruled "del(s, drop)" on 2026-11-07, over a ban of spans of owners and over a rule that
+  proves a drain loop: `del(s, d)` moves each element into the drop `d`, a release-only fort
+  function, and then frees the storage (D17.9). The lowering writes the drain, so the analysis
+  adds no fact. The bit reads the FIR of each function once, outside `src/fort/owner/`
+  (`src/fort/fir/release.ft`), so it adds no line to the cap of section 9.
 - **R9 privacy**: a memory local whose address only view locals hold keeps its facts at a call.
   The ruling of 2026-10-23 removed it from V1. It helps (c) for aggregates.
 - **R10 typed aliasing**: a place through a pointer can be only a memory place of a matching type.
@@ -1350,7 +1355,8 @@ The user ruled on each question on 2026-10-23, each as its recommendation says:
 - Q4: (a) the call of 4.6 step 3 stays; (b) what a callee keeps or writes out stays outside (X4).
 - Q5: (1), the list of 6.2, now in D17.21. Q6: (1), 8,000 lines for the analysis and 3,500
   for the oracle.
-- Q7: (1), a `del` or a `cast` of a span whose elements hold owners waits for R8.
+- Q7: (1), a `del` or a `cast` of a span whose elements hold owners waits for R8. R8 is
+  `del(s, d)` of D17.9 (the user, 2026-11-07).
 
 The user ruled on the route of the owning aggregate locals on 2026-10-31: "R1 first, then
 migrate". After the probe of R1 (section 7), the user ruled on 2026-11-01: "Drop R1, migrate all".
