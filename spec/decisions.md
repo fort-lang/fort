@@ -1549,17 +1549,18 @@ Sections:
 ### D9.8 Extern declarations
 - owner: `module-system.md`.
 - rule: `extern fn write(i32 fd, u8* buf, u64 n) i64;` declares a C function.
-  **Only a trusted module meets C.** Three kinds of module of the standard library are trusted: a
-  module that the compiler loads from its standard library directory (D9.2), a module of `<root>` in
-  `fort --lib std <root>`, the build of the library `std` (D9.11), and a section of the interface
-  file of a used library `std` (D9.11). The name does not make a module trusted: an entry file
-  `std.ft` is trusted only as each other module is. Another module is trusted when its first item is
-  `import extern;` (D9.3). That form imports no module. A **boundary function** is a fort function
-  of a trusted module with a parameter whose type reaches a pointer to `char`, `u8` or `void`, with
-  any marks: as the type of the parameter, as a pointee, as an element of a span or of a fixed
-  array, as a field of a struct, or as a parameter or the result of a function pointer type, at any
-  depth. So `str.from_cstr(char* p)` and `rt.args_init(i32 argc, char* mut* argv)` are boundary
-  functions, and so is `rt.print_enum`, whose parameter `enum_member@ table` holds a `char* name`.
+  **Only a trusted module meets C.** A module is trusted in four cases. Three are modules of the
+  standard library: a module that the compiler loads from its standard library directory (D9.2), a
+  module of `<root>` in `fort --lib std <root>`, the build of the library `std` (D9.11), and a
+  section of the interface file of a used library `std` (D9.11). The fourth is a module whose first
+  item is `import extern;` (D9.3). That form imports no module. The name does not make a module
+  trusted: an entry file `std.ft` is trusted only as each other module is. A **boundary function**
+  is a fort function of a trusted module with a parameter whose type reaches a pointer to `char`,
+  `u8` or `void`, with any marks: as the type of the parameter, as a pointee, as an element of a
+  span or of a fixed array, as a field of a struct, or as a parameter or the result of a function
+  pointer type, at any depth. So `str.from_cstr(char* p)` and
+  `rt.args_init(i32 argc, char* mut* argv)` are boundary functions, and so is `rt.print_enum`,
+  whose parameter `enum_member@ table` holds a `char* name`.
   So is a trusted `drain(fn (u8* mut*, u64 mut*) void fill)`, because the parameter types of `fill`
   reach `u8*`: through `fill`, C can get a pointer and a length from fort code. Reach reads the
   types alone. A `string` and a span of `u8` reach no such pointer, because each brings its length.
@@ -1578,29 +1579,43 @@ Sections:
   through functions of trusted modules that are no boundary functions, and a span or a string
   brings each length, which the checker checks (D10.6).
 
-  **The rows.** The rows of a declaration stand in its `//` lines directly above it, below its
-  `///` text when it has one (`notes/style.md` 1.2). Each `extern fn` of a trusted module has a
+  **The rows.** The rows of a declaration stand in its `//` lines directly above it, below its `///`
+  text when it has one (`notes/style.md` 1.2). Each `extern fn` of a trusted module has a
   declaration row. Its first line is `// C: <the symbol>, <the source of its contract>.`, and it
-  gives the five points of A7 of `ownership-design.md` 5.1, each once and after its word:
-  `gives:`, `writes:`, `keeps:`, `calls:` and `frees:`. A function of a trusted module that calls
-  an `extern fn`, a boundary function or a function pointer that C gave has a call row for each
-  such call: `// C call <the callee>: ...`. One row `// C call <the callee> x<N>: ...` covers N
-  calls of one callee that hold for one reason. The row names one source for each pointer and
-  each length that C reads or writes in the call, at any depth: in an argument, in storage that C
-  reads through an argument, in a callback result, or in a value that a callback stores. It names
-  the NUL of each C string that C reads. It says why each length fits, in bytes: a length that C
-  reads or writes with a pointer fits the bound of the source of that pointer, and a length that
-  C uses with more than one pointer, as `memmove` uses `n` with `dst` and with `src`, fits the
-  bound of each. A bound of `n` elements of a type `T` is `n * sizeof(T)` bytes (D3.15). So
-  `mem.copy` checks `src.len <= dst.len` before it calls `memmove(dst.ptr, src.ptr, src.len)`.
-  The first rule in this order that fits gives the source:
-  1. A parameter source: a pointer to `char`, `u8` or `void`, a length or a NUL that comes from a
-     parameter of the function, from a place that the function reaches through a parameter (a
-     field, an element or a pointee), from a function that a parameter gives (its result, or a
-     value that it stores), or from a `mut` global. A span, a string and a typed pointer to
-     another type that come from there keep their own bound by rule 2, and they are no parameter
-     source. A call row names a parameter source only in a boundary function, whose callers are
-     trusted.
+  gives the five points of A7 of `ownership-design.md` 5.1, each once and after its word: `gives:`,
+  `writes:`, `keeps:`, `calls:` and `frees:`. A function of a trusted module that calls an
+  `extern fn`, a boundary function or a function value has a call row for each such call:
+  `// C call <the callee>: ...`. A function value is a function pointer that C gave or one of fort
+  code, and its row says which it is. A row for a value that a caller gives can hold for both kinds:
+  then it gives the sources of C for the call, and the call gives no boundary function, as
+  `std.sort` gives each comparator the addresses of two elements. The callee is the call as the body
+  spells it, with its module path: `libc.write`, `str.from_cstr`, `cmp`, or the place of a function
+  pointer that C gave, as `z->introspect->enumerator` or `table[0]`. One row
+  `// C call <the callee> x<N>: ...` covers N calls of one callee that hold for one reason. The row
+  names one source for each pointer and each length that C reads or writes in the call, at any
+  depth: in an argument, in storage that C reads through an argument, in a callback result, or in a
+  value that a callback stores. It names the NUL of each C string that C reads. It says why each
+  length fits, in bytes: a length that C reads or writes with a pointer fits the bound of the source
+  of that pointer, and a length that C uses with more than one pointer, as `memmove` uses `n` with
+  `dst` and with `src`, fits the bound of each. A bound of `n` elements of a type `T` is
+  `n * sizeof(T)` bytes (D3.15). So `mem.copy` checks `src.len <= dst.len` before it calls
+  `memmove(dst.ptr, src.ptr, src.len)`.
+  A rule reads a value where it is made: in the function, or in a fort function of the same module
+  that the function calls and that gives the value in its result or in storage that it fills. The
+  storage that the value names lives until the call, and no store changes it before the call: a
+  local of the fort function that makes it ends when that function returns, and a `del` ends an
+  allocation. So `sys.run` gives `execvp` the pointers that `c_strings_of` makes as
+  `&c.bytes[at]`, with the bound of rule 2, and `run` dels `c.bytes` after the call. The first
+  rule in this order that fits gives the source:
+  1. A parameter source: a value that comes from a parameter of the function, from a place that
+     the function reaches through a parameter (a field, an element or a pointee), from a function
+     that a parameter gives (its result, or a value that it stores), or from a `mut` global, when
+     it is a pointer to `char`, `u8` or `void` there, a length or a NUL. A span and a string from
+     there, with their `.ptr` and their `.len`, and a typed pointer to another type from there,
+     also through a cast to a pointer to `char`, `u8` or `void`, keep their own bound by rule 2,
+     and they are no parameter source: `io.write(i32 fd, u8@ buf)` gives `write` the pointer
+     `buf.ptr` with the bound `buf.len`. A call row names a parameter source only in a boundary
+     function, whose callers are trusted.
   2. An own bound, for a value that no call of C in the function gave: a span or a string, `.len`
      elements from its `.ptr`; the address `&e[i]` of an element of a fixed array, a span or a
      string `e`, the elements from `i` to the end, `e.len - i`; the address `&x` of another place,
@@ -1614,8 +1629,14 @@ Sections:
      declaration row of that call states. By A7 that size is never less than the pointee of the
      type that the declaration gives.
   4. A NUL: the NUL of a string literal (D3.7), also through a global that is no `mut` global and
-     that a literal initializes, of a buffer that `str.to_cstr` gave, or of a fixed array whose
-     last element the function sets to the NUL. Another `string` has no NUL.
+     that a literal initializes; the NUL of a buffer that `str.to_cstr` gave; or a NUL that the
+     function, or a fort function of the same module that it calls, stores by a checked index
+     (D10.6) into the fixed array or the span that the pointer comes from, at or after the element
+     that the pointer names, and that no store changes before the call. The last element of a
+     fixed array is such a place, and so is `text[n]`, where `decimal_text` of `std.rt` ends the
+     text that `strtod` reads. A null pointer that is stored the same way as the last item of an
+     array of pointers that C reads to its null item, as the `argv` of `execvp`, is the NUL of
+     that array. Another `string` has no NUL.
 
   So a function that takes a bound or a NUL from its caller types its data `u8*` or `void*`, and
   it is a boundary function. A trusted function that gives C a parameter `iov32* v`, for a
@@ -1629,23 +1650,28 @@ Sections:
   there.
 
   **The lint.** `tools/fort_lint.py` reads the `.ft` files of `std`, `src/fort`, `src/lsp`,
-  `test/fort`, `test/lsp`, `test/library`, `test/tty`, `test/lang/run` and `test/lang/programs`.
-  It reports a trusted declaration with no row, a declaration row whose first line names another
-  symbol or that does not give each of the five words once, and a function whose call rows do not
-  count each call of an `extern fn` and of a boundary function in its body. It reports a name of
-  a boundary function that stands neither as the callee of a call nor as an argument of a call
-  whose callee is an `extern fn` or a function pointer. A boundary function as a value, and a
-  function pointer that C gave, go only to C, as the callee or as an argument of such a call. The
-  call row says so, and a reviewer checks it, because the lint does not tell a function pointer
-  that C gave from a function pointer of fort code. A program of `test/lang/fail` does not run,
-  and a program that a test suite holds as text is outside the files of the lint, so they need no
-  row. The interface file of a library writes `import extern;` first in the section of each
-  trusted module that is not of `std` (D9.11). The reason: no rule can check C, so each compile
-  rule on a declaration checked a part of A7, and each review found one more route past it. A
-  call outside the trusted set kept the same unchecked condition one step further out: a length
-  that fits its buffer, a NUL inside its storage. A small trusted set, with a row for each
-  declaration and for each call, makes A7 a question that a reviewer answers for one row at a
-  time.
+  `test/fort`, `test/lsp`, `test/library` and `test/tty`. `test/lang/run` and `test/lang/programs`
+  join it when a later change writes their rows. It reports a trusted declaration with no row, a
+  declaration row whose first line names another symbol or that does not give each of the five words
+  once, and a function whose call rows do not count each call of an `extern fn`, of a boundary
+  function and through a function value in its body, or count a call that the body does not hold. A
+  row counts the calls that the body spells with its callee, and the count of the index is the
+  authority: a callee whose calls the index counts more often than the text is an error. It reports
+  a name of a boundary function, outside an import, that stands neither as the callee of a call nor
+  as an argument of a call whose callee is an `extern fn` or a function pointer. A boundary function
+  as a value, and a function pointer that C gave, go only to C, as the callee or as an argument of
+  such a call. The call row says so, and a reviewer checks it, because the lint does not tell a
+  function pointer that C gave from a function pointer of fort code. So each call through a function
+  value in a trusted module has a row: a trusted module that gives a boundary function to a function
+  value of fort code, through a local or an element of a table, gives a module that is not trusted a
+  function that trusts its caller. A program of `test/lang/fail` does not run, and a program that a
+  test suite holds as text is outside the files of the lint, so they need no row. The interface file
+  of a library writes `import extern;` first in the section of each trusted module that is not of
+  `std` (D9.11). The reason: no rule can check C, so each compile rule on a declaration checked a
+  part of A7, and each review found one more route past it. A call outside the trusted set kept the
+  same unchecked condition one step further out: a length that fits its buffer, a NUL inside its
+  storage. A small trusted set, with a row for each declaration and for each call, makes A7 a
+  question that a reviewer answers for one row at a time.
   Linux x86-64 uses the System V C ABI. Mac arm64 uses the Apple arm64 C ABI.
   The signature may use integers, floats, `bool`, `char`, enums, pointers and function pointers.
   The signature excludes spans, strings, structs and arrays by value.
@@ -1796,6 +1822,33 @@ Sections:
   comes first in the order; and the modules of `fort --lib std <root>` are trusted. The source
   list is a checklist for review: the ticket that writes the rows of `std` corrects it where a
   true row cannot be written.
+  Amended 2026-11-06: the rows of `std` and of `test/fort/support/heap.ft`, written against the
+  calls, tested the source list (read). Rule 1 took the `.ptr` and the `.len` of a span parameter,
+  and a byte pointer cast from a typed parameter pointer, as parameter sources, so the row of
+  `io.write`, which is no boundary function, could not stand, and rule 2 said the opposite for the
+  cast. Rule 4 named no NUL that a fort function stores, so the rows of `rt.reads_back_f64`, whose
+  NUL `decimal_text` stores, and of `sys.run`, whose `setenv` and `execvp` read the strings and the
+  null item that `c_strings_of` stores, could not stand. Rule 1 now leaves a span, a string, their
+  `.ptr` and `.len`, and a typed pointer to rule 2, also through a cast; rule 4 takes a NUL that the
+  function or a fort function of its module stores by a checked index, a null item included; a rule
+  reads a value where a fort function of the module makes it, while its storage lives; the callee of
+  a call row is the call as the body spells it; and the lint lets a boundary function stand in an
+  import. A trusted module gave `str.from_cstr` through a local function value, and through an
+  element of a table, to a function of a module that is not trusted, which called it with a buffer
+  that has no NUL, and the lint found nothing, because it took each function value for a pointer
+  that C gave (probed). So each call through a function value in a trusted module has a call row: 4
+  calls on Linux and 5 on Darwin in the trees of the lint (the comparators of `std.sort`, and the
+  enumerator of C in `test/fort/support/heap.ft`). A callee that the text wrote with white space,
+  `table[i + 1]`, counted no call, and a second call `table[i+1]` with another argument took its row
+  (probed), so the count of the index is the authority over the count of the text. The trusted
+  modules were "three kinds" and one more; they are four cases. A count at f1b9499f (the records of
+  `fort --index` on each target) found 61 declarations in `std` on Linux and 62 on Darwin, 94 calls
+  of an extern and 28 calls of a boundary function in `std` on each target, 22 boundary functions in
+  `std`, and in `test/fort/support/heap.ft` 1 declaration and 1 call on Linux, and 3 declarations, 4
+  calls and 1 boundary function that goes to C on Darwin. `src/fort`, `src/lsp`, `test/lsp`,
+  `test/library`, `test/tty` and the other files of `test/fort` declare no extern, call none and
+  name no boundary function. `rt.buffer_append` called `memcpy` with a span that a module can make
+  of the buffer itself, so it calls `memmove` now.
 
 ### D9.9 The internal calling convention
 - owner: `module-system.md`.
