@@ -927,15 +927,30 @@ changes the function, and the verifier runs after it. The passes run in this ord
      local, because the `addr` ended no freshness.
    - **Values.** A store writes a fresh `new` when its rvalue is `alloc<T>(c)`, or `move _t`
      where `_t` is a temporary that exactly one assignment writes, with an `alloc`, and that only
-     this `move` reads. A store writes the zero value when its rvalue is `const zero T`, `null T`,
-     an `aggregate` or `aggregate zeroed` whose operands are all such constants, or `move _t` where
-     `_t` is a temporary that exactly one assignment writes, with one of these rvalues, and that
-     only this `move` reads.
+     this `move` reads. An operand is a zero value when it is `const zero T` or `null T`, or `move
+     _t` where `_t` is a temporary that is no memory, that exactly one assignment writes and that
+     only this `move` reads, and that assignment writes the zero value. A store writes the zero
+     value when its rvalue is a `use`, an `aggregate` or an `aggregate zeroed` whose operands are
+     each a zero value, so a nested literal, which the lowering puts into a temporary, is one at
+     any depth. `_t` holds the value of its assignment at the `move`: no pointer names its storage,
+     no call writes it, and V13 puts the assignment before the read on each path from `bb0`. The
+     pass marks each temporary once, and a temporary that the walk of its own assignment reaches
+     again holds no zero value; such a chain stands only in a block that no edge reaches. A store
+     writes a literal when its rvalue is an `aggregate`, `zeroed` or not, or `move _t` of such a
+     temporary whose assignment writes an `aggregate`.
    - **Gen.** The store `_n = const zero T` of the entry block (9.2) and every other store of
-     the zero value into `p` make `p` and each tracked place below `p` empty. `del(move p)`
-     makes `p` empty. Each `move p` operand makes `p` and each tracked place below `p` empty
-     when it reads `p`. A store of a fresh `new` into `_n` makes each tracked place through `_n`
-     empty. A test against null makes its place empty on one edge (**Tests**).
+     the zero value into `p` make `p` and each tracked place below `p` empty. A store of a literal
+     into `p` that is no zero value makes each tracked place below `p` empty whose member the
+     literal writes with a zero value (gen rule 7 of D17.11): the path of the place after `p` takes
+     the operand of a `field` step or of an `index` step on a fixed array with a constant key, and
+     the place is empty when that operand is a zero value, or when it is the `move` of a temporary
+     that writes a literal and the next step of the path finds a zero value in that literal. An
+     `aggregate zeroed` gives each field that a designated literal leaves out `const zero` (9.4).
+     A store through the address `_a` of a whole store reads its place as a place through `_a`
+     (**Whole stores**), so its literal makes no place below `p` empty.
+     `del(move p)` makes `p` empty. Each `move p` operand makes `p` and each tracked place below `p`
+     empty when it reads `p`. A store of a fresh `new` into `_n` makes each tracked place through
+     `_n` empty. A test against null makes its place empty on one edge (**Tests**).
    - **Tests.** A test against null gives facts on one edge, gen rule 6 of D17.11 (refinement R7 of
      `spec/ownership-design.md` 7). A flag is a whole temporary of type `bool` that is not memory.
      A named local or a parameter is no flag, because gen rule 6 names a branch on the test itself

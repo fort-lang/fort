@@ -93,7 +93,8 @@ struct path {
 // index temporary before the stale test, `next_source` the next temporary with the same source
 // local, and `sourced` the count of the temporaries whose source is the local. `whole` says that
 // the local is the address of a whole store (is_whole_address), which only the test of that store
-// reads as its place (whole_place).
+// reads as its place (whole_place). `value` is the mark of mark_values: the value that a temporary
+// holds at its one read.
 struct local_info {
     u32 assigns;
     u32 reads;
@@ -105,6 +106,7 @@ struct local_info {
     bool memory;
     bool held;
     bool whole;
+    temp_value value;
     key source;
     u32 next_source;
     u32 sourced;
@@ -576,6 +578,177 @@ fn writes_memory(survey* c, fir.statement* s) bool {
         return true;
     }
     return c->locals[cast(s->place.local, u64)].memory;
+}
+
+// ---- the values of the temporaries -------------------------------------------------------------
+
+// What mark_values knows of the value that a temporary holds at its one read (spec/fir.md 11,
+// Values). `tv_unseen` is a local that mark_values has not read yet. `tv_zero` is a temporary that
+// holds a zero value, and `tv_literal` one that holds the value of an `aggregate` that is no zero
+// value. `tv_other` is each other local, and a local that the walk of mark_values reaches again
+// before its mark ends: a chain of temporaries that reads itself stands only in a block that no
+// edge reaches, because V13 needs the store of a temporary before each read of it.
+enum temp_value {
+    tv_unseen,
+    tv_other,
+    tv_zero,
+    tv_literal,
+}
+
+/// Marks the value of each local (spec/fir.md 11, Values) after count_uses and mark_memory: a
+/// temporary that is no memory, that one store writes and that one `move` reads holds the value of
+/// that store at the `move`. No pointer names its storage and no call writes it, and V13 puts the
+/// store before the read on each path from `bb0`. Each local takes one mark, so the work is the
+/// locals and the operands of their stores.
+fn mark_values(survey mut* c) void {
+    u32 mut k = 0;
+    while (k < fir.local_count(c->f)) {
+        value_of(c, k);
+        k += 1;
+    }
+}
+
+// The mark of the local `t` for mark_values: tv_zero when its store writes a `use` or an
+// `aggregate` whose operands are each a zero value (marks_zero), tv_literal for each other
+// `aggregate`, and tv_other else. The mark is tv_other while the walk reads the store, so a chain
+// that reads itself takes no zero value.
+fn value_of(survey mut* c, u32 t) temp_value {
+    u64 at = cast(t, u64);
+    if (c->locals[at].value != temp_value.tv_unseen) {
+        return c->locals[at].value;
+    }
+    c->locals[at].value = temp_value.tv_other;
+    if (!is_moved_once(c, t)) {
+        return temp_value.tv_other;
+    }
+    fir.rvalue r = store_of(c, t)->value;
+    if (r.kind != fir.rvalue_kind.rv_use && r.kind != fir.rvalue_kind.rv_aggregate) {
+        return temp_value.tv_other;
+    }
+    temp_value mut v = temp_value.tv_zero;
+    u32 mut i = 0;
+    while (i < r.ops_len && v == temp_value.tv_zero) {
+        if (!marks_zero(c, fir.rvalue_operand(c->f, r, i))) {
+            v = temp_value.tv_other;
+        }
+        i += 1;
+    }
+    if (v != temp_value.tv_zero && r.kind == fir.rvalue_kind.rv_aggregate) {
+        v = temp_value.tv_literal;
+    }
+    c->locals[at].value = v;
+    return v;
+}
+
+// Whether the operand `o` is a zero value for mark_values, which marks the temporary that it moves.
+fn marks_zero(survey mut* c, fir.operand o) bool {
+    if (o.kind != fir.operand_kind.ok_move || !is_local(o.place)) {
+        return is_zero_constant(o);
+    }
+    return value_of(c, o.place.local) == temp_value.tv_zero;
+}
+
+// Whether the local `t` is a temporary that is no memory, that one store writes and that one read
+// reads, as a whole local.
+fn is_moved_once(survey* c, u32 t) bool {
+    return fir.local_at(c->f, t)->kind == fir.local_kind.lk_temp && is_single(c, t)
+        && c->locals[cast(t, u64)].reads == 1;
+}
+
+/// Whether the operand `o` is a zero value (spec/fir.md 11, Values): `const zero T`, `null T`, or
+/// the `move` of a temporary that mark_values marks tv_zero.
+fn is_zero_operand(survey* c, fir.operand o) bool {
+    if (o.kind == fir.operand_kind.ok_move && is_local(o.place)) {
+        return c->locals[cast(o.place.local, u64)].value == temp_value.tv_zero;
+    }
+    return is_zero_constant(o);
+}
+
+/// Whether a store of the rvalue `r` writes the zero value (spec/fir.md 11, Values): a `use` or an
+/// `aggregate`, `zeroed` or not, whose operands are each a zero value (is_zero_operand), at any
+/// depth of the temporaries of the nested literals. mark_values comes first.
+fn is_zero_rvalue(survey* c, fir.rvalue r) bool {
+    if (r.kind != fir.rvalue_kind.rv_use && r.kind != fir.rvalue_kind.rv_aggregate) {
+        return false;
+    }
+    u32 mut i = 0;
+    while (i < r.ops_len) {
+        if (!is_zero_operand(c, fir.rvalue_operand(c->f, r, i))) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+/// Whether a store of the rvalue `r` into a place `d` writes the zero value into the member of `d`
+/// that the steps of the path `q` from step `from` on name (spec/fir.md 11, Gen): `r` is an
+/// `aggregate`, or the `move` of a temporary that mark_values marks tv_literal, and the operand of
+/// that member is a zero value (is_zero_operand), or the `move` of such a temporary whose own
+/// member of the next step is one, at any depth. A field step names its operand, and an index step
+/// on a fixed array with a constant key names the operand of that element. An aggregate writes
+/// each operand into its member, and `aggregate zeroed` writes `const zero` into each field that a
+/// designated literal leaves out (fir.md 6, 9.4). The walk takes one step of `q` for each operand.
+fn is_zero_member(survey* c, fir.rvalue r, path q, u32 from) bool {
+    fir.rvalue mut at = r;
+    u32 mut t = 0;
+    if (literal_of(c, at, &t)) {
+        at = store_of(c, t)->value;
+    }
+    u32 mut i = from;
+    while (i < q.len && at.kind == fir.rvalue_kind.rv_aggregate) {
+        u64 mut m = 0;
+        if (!member_of(step_at(c, q, i), &m) || m >= cast(at.ops_len, u64)) {
+            return false;
+        }
+        fir.operand o = fir.rvalue_operand(c->f, at, cast(m, u32));
+        if (is_zero_operand(c, o)) {
+            return true;
+        }
+        if (o.kind != fir.operand_kind.ok_move || !is_local(o.place)
+            || c->locals[cast(o.place.local, u64)].value != temp_value.tv_literal) {
+            return false;
+        }
+        at = store_of(c, o.place.local)->value;
+        i += 1;
+    }
+    return false;
+}
+
+/// Whether the rvalue `r` writes the value of a literal: an `aggregate`, or the `move` of a
+/// temporary that mark_values marks tv_literal. Only such a store can write a zero value into a
+/// member of its place and another value into its place (is_zero_member).
+fn is_literal(survey* c, fir.rvalue r) bool {
+    u32 mut t = 0;
+    return r.kind == fir.rvalue_kind.rv_aggregate || literal_of(c, r, &t);
+}
+
+// Whether the rvalue `r` is the `move` of a temporary that mark_values marks tv_literal, and which
+// one in *out.
+fn literal_of(survey* c, fir.rvalue r, u32 mut* out) bool {
+    if (r.kind != fir.rvalue_kind.rv_use || r.ops_len != 1) {
+        return false;
+    }
+    fir.operand o = fir.rvalue_operand(c->f, r, 0);
+    if (o.kind != fir.operand_kind.ok_move || !is_local(o.place)
+        || c->locals[cast(o.place.local, u64)].value != temp_value.tv_literal) {
+        return false;
+    }
+    *out = o.place.local;
+    return true;
+}
+
+// The number of the member that the step `s` names in *out: the field of a field step, or the
+// element of an index step on a fixed array whose key is a constant. False for each other step.
+fn member_of(step s, u64 mut* out) bool {
+    if (s.kind == step_kind.sk_field) {
+        *out = cast(s.field, u64);
+        return true;
+    }
+    if (s.kind != step_kind.sk_index || s.header || s.key.kind != key_kind.kk_constant) {
+        return false;
+    }
+    return consts.cv_to_u64(s.key.value, out);
 }
 
 // ---- the fresh pointer locals ------------------------------------------------------------------

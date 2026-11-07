@@ -496,9 +496,10 @@ fn is_apart(context* c, fir_flow.bits* aliased, place.path through, place.path f
     return !alias.can_be(&c->aliases, aliased, through, fixed.local);
 }
 
-// Whether the rvalue `r` is a zero value of its own: `const zero T`, `null T`, or an `aggregate`
-// whose operands are all such constants.
-fn is_zero_rvalue(fir.func* f, fir.rvalue r) bool {
+// Whether the rvalue `r` is a zero value of constants alone: `const zero T`, `null T`, or an
+// `aggregate` whose operands are all such constants. The entry zeroing reads it before the survey
+// of the places.
+fn is_zero_constants(fir.func* f, fir.rvalue r) bool {
     if (r.kind != fir.rvalue_kind.rv_use && r.kind != fir.rvalue_kind.rv_aggregate) {
         return false;
     }
@@ -515,17 +516,24 @@ fn is_zero_rvalue(fir.func* f, fir.rvalue r) bool {
     return true;
 }
 
-// Whether the store of the rvalue `r` writes the zero value: a zero rvalue, or the `move` of a
-// temporary that one store writes with a zero rvalue and that only this `move` reads.
-fn is_zero_value(context* c, fir.rvalue r) bool {
-    if (is_zero_rvalue(c->places.f, r)) {
-        return true;
+// The gen rule of the members of a literal (gen rule 7 of D17.11): a store of the rvalue `r` into
+// the path `d` makes each tracked place below `d` empty whose member the literal writes with a zero
+// value, at any depth of the nested literals (place.is_zero_member). The kill rules of the store
+// come first. Each fact takes at most one operand for each step of its path, so the walk takes
+// the facts times their steps, as gen_below does.
+fn gen_members(context* c, place.path d, fir.rvalue r, probes mut* pr) void {
+    if (!place.is_literal(&c->places, r)) {
+        return;
     }
-    u32 mut t = 0;
-    if (!place.find_moved_temp(&c->places, r, &t)) {
-        return false;
+    u64 mut k = 0;
+    while (k < c->fact_count) {
+        place.path q = c->facts[k];
+        if (q.len > d.len && place.is_below(&c->places, q, d)
+            && place.is_zero_member(&c->places, r, q, d.len)) {
+            gen(pr, cast(k, u32));
+        }
+        k += 1;
     }
-    return is_zero_rvalue(c->places.f, place.store_of(&c->places, t)->value);
 }
 
 // The gen rule of each `move` operand of `s`, in operand order: it makes its place and each
@@ -611,8 +619,10 @@ fn apply_store(context mut* c, fir.statement* s, fir_flow.bits mut* stale,
         u64 mark = c->places.steps_len;
         place.path d = place.trace(&c->places, s->place, stale);
         apply_kills(c, s, d, stale, fresh, aliased, pr);
-        if (is_zero_value(c, s->value)) {
+        if (place.is_zero_rvalue(&c->places, s->value)) {
             gen_below(c, d, pr);
+        } else {
+            gen_members(c, d, s->value, pr);
         }
         bool pointer = d.len == 0 && d.base == fir.base_kind.bk_local
             && fir.local_at(c->places.f, d.local)->ty->kind == types.type_kind.k_ptr;
@@ -943,7 +953,7 @@ fn is_entry_zeroing(fir.func* f, fir.statement* s) bool {
     }
     fir.local* l = fir.local_at(f, s->place.local);
     return l->kind == fir.local_kind.lk_named && is_own_reference(l->ty)
-        && is_zero_rvalue(f, s->value);
+        && is_zero_constants(f, s->value);
 }
 
 // Marks in `written` the local of the place that the statement `s` writes, and the local of the
@@ -1214,6 +1224,8 @@ fn prove_into(fir.func* f, u64 limit, u64 use_limit, proof mut* out) void {
         prove_uses_alone(c, out);
         return;
     }
+    // the values of the temporaries, which the zero values and the members of the literals read
+    place.mark_values(&c->places);
     u64 checked = cast(out->checks, u64) + count_alone(c, check_of, out);
     u64 sets = cast(n, u64) * locals + place.stale_steps(&c->places);
     // a function with no check and no store that needs a proof has no work (D17.11)
@@ -1519,7 +1531,7 @@ fn apply_scratch_store(context* c, fir.statement* s, fir_flow.bits mut* set) voi
         || !place.is_scratch(&c->places, s->place.local)) {
         return;
     }
-    if (s->place.proj_len == 0 && is_zero_value(c, s->value)) {
+    if (s->place.proj_len == 0 && place.is_zero_rvalue(&c->places, s->value)) {
         fir_flow.bits_set(set, s->place.local);
     } else {
         fir_flow.bits_clear(set, s->place.local);
@@ -2333,7 +2345,7 @@ fn apply_ended(context* c, fir.statement* s, fir_flow.bits mut* set) void {
         fir_flow.bits_clear(set, taken);
     }
     bool fixed = s->kind == fir.stmt_kind.st_assign && fir.place_fixed(c->places.f, s->place);
-    if (fixed && !is_zero_value(c, s->value)) {
+    if (fixed && !place.is_zero_rvalue(&c->places, s->value)) {
         fir_flow.bits_clear(set, s->place.local);
     }
 }
