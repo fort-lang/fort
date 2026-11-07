@@ -1,0 +1,158 @@
+//! run
+//! stdout:
+//| local 1 2 len 0
+//| rvalue 10 11 12
+//| moved 20
+//| deferred early 30 31
+//| deferred late 40 41
+//| pointer 50 51
+//| cleared 55
+//| field 60
+//| frozen 70 71
+//| tree 1 2 3 4 5
+//| owners 2
+//| loop 3 exits 1 2
+// Each form of `del(s, d)` (D17.9): a local span, which holds the zero value after the `del`, an
+// rvalue, `move(x)`, a deferred `del` that two exits expand, a span field through a pointer, which
+// leaves the zero value in the field, a
+// span field of a local struct, a span parameter whose elements are immutable, a drop that drains
+// the span of its element with itself, a span of `own` pointers, and a `del` in a loop. Each drop
+// writes the number of each element that it takes into a global, which stores no owner, so each
+// drop is release-only. The drop of `owners` calls a drop of its own, which is release-only too.
+// The run under fir.interpreter makes no ownership event.
+struct node {
+    i32 id;
+    node mut@ own kids;
+}
+
+struct holder {
+    node mut@ own items;
+}
+
+i32[16] mut SEEN = {};
+u64 mut COUNT = 0;
+
+// Writes the numbers that the drops took since the last call after `what`, and starts again.
+fn report(string what) void {
+    print(what);
+    for (u64 mut i = 0; i < COUNT; i += 1) {
+        print(" ", SEEN[i]);
+    }
+    println();
+    COUNT = 0;
+}
+
+fn note(i32 id) void {
+    SEEN[COUNT] = id;
+    COUNT += 1;
+}
+
+fn node_drop(node mut n) void {
+    note(n.id);
+    del(n.kids, node_drop);
+}
+
+fn leaf(i32 id) node {
+    return node{.id = id};
+}
+
+fn made(u64 n, i32 base) node mut@ own {
+    node mut@ own s = new(node, n);
+    for (u64 mut i = 0; i < n; i += 1) {
+        s[i] = leaf(base + cast(i, i32));
+    }
+    return s;
+}
+
+// The deferred `del` expands at the `return` and at the closing brace.
+fn deferred(bool early, i32 base) i32 {
+    node mut@ own s = made(2, base);
+    defer del(s, node_drop);
+    if (early) {
+        return 1;
+    }
+    return 2;
+}
+
+// The span moves out of the object first, so part 2 of the leak rule proves the `del` of `h`: the
+// calls of the drain come after it.
+fn holder_drop(holder mut* own h) void {
+    node mut@ own items = move(h->items);
+    del(h);
+    del(items, node_drop);
+}
+
+// A drain of a field through a pointer that the caller keeps.
+fn box_clear(holder mut* b) void {
+    del(b->items, node_drop);
+}
+
+fn frozen(node@ own s) void {
+    del(s, node_drop);
+}
+
+// The second element of `owners` holds the zero value, so the drop tests it first.
+fn i32_drop(i32 mut* own p) void {
+    if (p != null) {
+        note(*p);
+    }
+    del(p);
+}
+
+fn slot_drop(i32 mut* own p) void {
+    i32_drop(move(p));
+}
+
+fn main() i32 {
+    node mut@ own s = made(2, 1);
+    del(s, node_drop);
+    print("local");
+    for (u64 mut i = 0; i < COUNT; i += 1) {
+        print(" ", SEEN[i]);
+    }
+    println(" len ", s.len);
+    COUNT = 0;
+    del(made(3, 10), node_drop);
+    report("rvalue");
+    node mut@ own t = made(1, 20);
+    del(move(t), node_drop);
+    report("moved");
+    i32 first = deferred(true, 30);
+    report("deferred early");
+    i32 second = deferred(false, 40);
+    report("deferred late");
+    node mut@ own items = made(2, 50);
+    holder mut* own h = new(holder);
+    h->items = move(items);
+    holder_drop(move(h));
+    report("pointer");
+    node mut@ own more = made(1, 55);
+    holder mut* own kept = new(holder);
+    kept->items = move(more);
+    box_clear(kept);
+    report("cleared");
+    holder_drop(move(kept));
+    holder mut local = holder{.items = made(1, 60)};
+    del(local.items, node_drop);
+    report("field");
+    frozen(made(2, 70));
+    report("frozen");
+    node mut@ own tree = new(node, 2);
+    tree[0] = node{.id = 1, .kids = made(2, 2)};
+    tree[1] = node{.id = 4, .kids = made(1, 5)};
+    del(tree, node_drop);
+    report("tree");
+    i32 mut* own mut@ own owners = new(i32 mut* own, 2);
+    i32 mut* own one = new(i32);
+    *one = 2;
+    del(owners[0]);
+    owners[0] = move(one);
+    del(owners, slot_drop);
+    report("owners");
+    for (i32 mut k = 0; k < 3; k += 1) {
+        node mut@ own each = made(1, k);
+        del(each, node_drop);
+    }
+    println("loop ", COUNT, " exits ", first, " ", second);
+    return 0;
+}

@@ -1,0 +1,49 @@
+//! fail
+// The drop of `del(s, d)` must be release-only (D17.9). `drop_back` frees its element and then
+// stores a new owner into element 0 of the span through a global view of its storage, so the
+// storage would go with that owner in it: the probe of the design of `del(s, drop)`, in the form
+// itself. A drop that calls such a function breaks the bit too, through each call of the chain.
+// A store of the zero value through memory breaks nothing.
+struct leaf {
+    i32 v;
+}
+
+struct in1 {
+    leaf mut* own p;
+}
+
+in1 mut@ mut BACK = {};
+
+fn drop_back(in1 mut x) void {
+    del(x.p);
+    in1 mut@ back = BACK;
+    del(back[0].p);
+    back[0].p = new(leaf);
+}
+
+fn helper(in1 mut x) void {
+    drop_back(move(x));
+}
+
+fn through_helper(in1 mut x) void {
+    helper(move(x));
+}
+
+in1 mut ONE = {};
+
+fn zeroes(in1 mut x) void {
+    del(x.p);
+    in1 mut* at = &ONE;
+    *at = in1{};
+}
+
+fn main() i32 {
+    in1 mut@ own s = new(in1, 2);
+    BACK = s;
+    del(s, drop_back); //! error: cannot drop the elements with 'drop_back': it is not release-only
+    in1 mut@ own t = new(in1, 2);
+    del(t, through_helper); //! error: cannot drop the elements with 'through_helper': it is not release-only
+    in1 mut@ own u = new(in1, 2);
+    del(u, zeroes);
+    return 0;
+}

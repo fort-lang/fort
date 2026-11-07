@@ -142,6 +142,12 @@ struct sized_check {
     diag.loc at;
 }
 
+// The call nodes of one kind, in the order of the walk. `items.len` is the capacity.
+struct call_list {
+    ast.node* mut@ own items;
+    u64 len;
+}
+
 // ---- the context -------------------------------------------------------------------
 
 /// Holds the state for one closure analysis.
@@ -217,6 +223,10 @@ struct checker {
     sized_check mut@ own sized;
     u64 sized_len;
     bool sized_draining; // sized_drain is active
+
+    // ---- the `del` calls that a pass after the checker reads (D17.9) ----
+    call_list drains; // each `del(s, d)` that checks, for the release-only check of fir.release
+    call_list span_dels; // each `del` of a span of owners with one operand, for --span-del-report
 }
 
 /// Gives the checker the module set whose modules its module bindings name. check_stmt's
@@ -247,8 +257,8 @@ fn check_free(checker mut* ck) void {
 }
 
 // Frees a checker that the caller moves in: each symbol record, the folded values, the two maps,
-// the externs, the message, the type table, the suffixes and the sized checks. No part of it
-// reads the session or the set that the checker points to.
+// the externs, the message, the type table, the suffixes, the sized checks and the two lists of
+// `del` calls. No part of it reads the session or the set that the checker points to.
 fn drop(checker mut ck) void {
     u64 mut i = 0;
     while (i < ck.syms_len) {
@@ -265,6 +275,8 @@ fn drop(checker mut ck) void {
     types.table_drop(move(ck.types));
     del(ck.suffixes);
     del(ck.sized);
+    del(ck.drains.items);
+    del(ck.span_dels.items);
 }
 
 // An empty checker in an allocation of its own, for a function that lends the checker to calls.
@@ -351,6 +363,42 @@ fn sized_reserve(checker mut* ck) void {
     }
     del(ck->sized);
     ck->sized = move(bigger);
+}
+
+// Appends the call `n` to `v`, which grows as sized_capacity says.
+fn push_call(call_list mut* v, ast.node* n) void {
+    if (v->len == v->items.len) {
+        ast.node* mut@ own bigger = new(ast.node*, sized_capacity(v->items.len));
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = n;
+    v->len += 1;
+}
+
+/// The count of the calls `del(s, d)` that checked (D17.9), in the order of the walk.
+fn drain_count(checker* ck) u64 {
+    return ck->drains.len;
+}
+
+/// The call `del(s, d)` at `i`, below drain_count.
+fn drain_at(checker* ck, u64 i) ast.node* {
+    return ck->drains.items[..ck->drains.len][i];
+}
+
+/// The count of the calls `del(s)` of a span of owners with one operand that checked (D17.9).
+fn span_del_count(checker* ck) u64 {
+    return ck->span_dels.len;
+}
+
+/// The call `del(s)` of a span of owners at `i`, below span_del_count.
+fn span_del_at(checker* ck, u64 i) ast.node* {
+    return ck->span_dels.items[..ck->span_dels.len][i];
 }
 
 fn externs_reserve(checker mut* ck) void {
@@ -4613,6 +4661,121 @@ fn check_emptiable(checker mut* ck, ast.node* arg, string verb) bool {
     return false;
 }
 
+/// Whether `t` is a span of owners (D17.9): an `own` span whose element type holds an `own` place
+/// in its fixed storage, at any level. An element struct still without a layout answers false.
+fn is_span_of_owners(types.node* t) bool {
+    return t->kind == types.type_kind.k_span && t->is_own
+        && types.type_layout_pending(t->elem) == null && types.type_owner_count(t->elem) > 0;
+}
+
+// `del(x)` and `del(s, d)` (D17.9). The operand is an `own` reference, and `del` empties an
+// lvalue as `move` does. A one-operand `del` of a span of owners joins `span_dels`, and each
+// `del(s, d)` whose operands check joins `drains`.
+fn check_del(checker mut* ck, ast.node mut* n, ast.sym* s) void {
+    u64 count = ast.ast_len(n);
+    if (count == 0 || count > 2) {
+        check_msg_begin(ck);
+        msg_quote(ck, s->name);
+        msg_str(ck, " takes 1 or 2 arguments, ");
+        msg_uint(ck, count);
+        msg_str(ck, " given");
+        check_msg_end(ck, n->loc);
+        return;
+    }
+    ast.node mut* arg = ast_child_mut(n, 0);
+    expr mut e = expr{};
+    check_operand(ck, arg, &e);
+    expr mut d = expr{};
+    if (count == 2) {
+        check_operand(ck, ast_child_mut(n, 1), &d);
+    }
+    if (e.untyped && e.value.kind == consts.cval_kind.cv_null) {
+        // `del(null)` is a no-op
+        convert(ck, arg, &e, types.type_voidptr(&ck->types, true, false), "'del'");
+        if (count == 2) {
+            check_drop(ck, n, &e, &d);
+        }
+        return;
+    }
+    if (check_poisoned(e.ty)) {
+        return;
+    }
+    if (!types.type_is_reference(e.ty) || !e.ty->is_own) {
+        check_msg_begin(ck);
+        msg_quote(ck, s->name);
+        if (types.type_is_reference(e.ty)) {
+            msg_str(ck, " needs an owning operand, not ");
+        } else {
+            msg_str(ck, " takes a reference, not ");
+        }
+        check_msg_type(ck, e.ty);
+        check_msg_end(ck, arg->loc);
+        return;
+    }
+    // on an rvalue `del` only frees
+    if (e.lvalue && !check_emptiable(ck, arg, s->name)) {
+        return;
+    }
+    if (count == 2) {
+        check_drop(ck, n, &e, &d);
+    } else if (is_span_of_owners(e.ty)) {
+        push_call(&ck->span_dels, n);
+    }
+}
+
+// The drop `d` of `del(s, d)`, whose operands checked as `e` and `d` (D17.9): `s` is a span of
+// owners, and `d` names a fort function of type `fn (E) void`, where `E` is the element type of
+// `s`. A function value, a name in parentheses, an `extern fn` and a builtin are no such name;
+// check_operand reports the last two. The call joins `drains` when both operands hold.
+fn check_drop(checker mut* ck, ast.node mut* n, expr* e, expr* d) void {
+    ast.node* arg = ast.ast_child(n, 0);
+    ast.node* dn = ast.ast_child(n, 1);
+    bool spans = is_span_of_owners(e->ty);
+    if (!spans) {
+        check_msg_begin(ck);
+        msg_str(ck, "'del' with a drop needs an own span whose elements hold owners, not ");
+        check_msg_type(ck, e->ty);
+        check_msg_end(ck, arg->loc);
+    }
+    if (check_poisoned(d->ty)) {
+        return;
+    }
+    bool grouped = (dn->flags & ast.FLAG_GROUPED) != 0;
+    bool named = (dn->kind == ast.ast_kind.k_ident || dn->kind == ast.ast_kind.k_field)
+        && !grouped && d->sym != null && d->sym->kind == ast.sym_kind.s_fn;
+    if (!named) {
+        check_msg_begin(ck);
+        msg_str(ck, "the drop of 'del' must name a fort function, not ");
+        if (grouped) {
+            msg_str(ck, "an expression in parentheses");
+        } else if (d->ty->kind == types.type_kind.k_fn) {
+            msg_str(ck, "a function value");
+        } else {
+            msg_str(ck, "a value of type ");
+            check_msg_type(ck, d->ty);
+        }
+        check_msg_end(ck, dn->loc);
+        return;
+    }
+    if (!spans) {
+        return;
+    }
+    types.node*[1] param = {e->ty->elem};
+    types.node* want = types.type_fn(&ck->types, types.type_void(&ck->types), param[..], false);
+    if (!types.type_equal(d->ty, want)) {
+        check_msg_begin(ck);
+        msg_str(ck, "the drop ");
+        msg_quote(ck, d->sym->name);
+        msg_str(ck, " has type ");
+        check_msg_type(ck, d->ty);
+        msg_str(ck, ", and 'del' needs ");
+        check_msg_type(ck, want);
+        check_msg_end(ck, dn->loc);
+        return;
+    }
+    push_call(&ck->drains, n);
+}
+
 fn check_builtin_call(checker mut* ck, ast.node mut* n, ast.sym* s, expr mut* out) void {
     out->sym = s;
     out->ty = types.type_void(&ck->types);
@@ -4652,36 +4815,7 @@ fn check_builtin_call(checker mut* ck, ast.node mut* n, ast.sym* s, expr mut* ou
         return;
     }
     if (is_builtin(s, "del")) {
-        if (!check_arity(ck, n, s->name, 1)) {
-            return;
-        }
-        ast.node mut* arg = ast_child_mut(n, 0);
-        expr mut e = expr{};
-        check_operand(ck, arg, &e);
-        if (e.untyped && e.value.kind == consts.cval_kind.cv_null) {
-            // `del(null)` is a no-op
-            convert(ck, arg, &e, types.type_voidptr(&ck->types, true, false), "'del'");
-            return;
-        }
-        if (check_poisoned(e.ty)) {
-            return;
-        }
-        if (!types.type_is_reference(e.ty) || !e.ty->is_own) {
-            check_msg_begin(ck);
-            msg_quote(ck, s->name);
-            if (types.type_is_reference(e.ty)) {
-                msg_str(ck, " needs an owning operand, not ");
-            } else {
-                msg_str(ck, " takes a reference, not ");
-            }
-            check_msg_type(ck, e.ty);
-            check_msg_end(ck, arg->loc);
-            return;
-        }
-        if (e.lvalue) {
-            // on an rvalue `del` only frees
-            check_emptiable(ck, arg, s->name);
-        }
+        check_del(ck, n, s);
         return;
     }
     if (is_builtin(s, "move")) {

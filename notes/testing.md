@@ -760,7 +760,8 @@ bullet at a time and without a rewrite.
   owners, and it marks the `cast` sites of its function, or of the batch when its function has
   none; with no `cast` site the test counts a false accept. So a hand case with two `cast` sites
   of one function cannot tell them apart. A `leak` at a `del` of a span counts apart (`span
-  leaks`): a span whose elements hold owners waits for refinement R8. So the `other` count of
+  leaks`): a one-operand `del` of a span whose elements hold owners is no error until the code
+  that CI compiles uses `del(s, d)` (D17.9, `--span-del-report`). So the `other` count of
   part 1 holds no `leak` at a `del`. The cases of part 2 (`DEL_CASES`) give each kind of site, and
   the seeded family inserts into them. The exhaustive family reaches part 2 through the local `r`
   of `generator.LOCAL_DECL`, an owning pointer to a `pair` with a deferred `del`, and four

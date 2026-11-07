@@ -980,6 +980,25 @@ came here.
   whose name stands at the location of the FIR `del`, or the `cast` that starts there. To count the
   sites, run `--leak-report` over each entry of the corpora and group the lines by the directory of
   their file; the counts stand in the ticket of the change.
+- **`del(s, d)` drains a span of owners, and `fir.release` decides each drop** (D17.9, `spec/fir.md`
+  9.4). `check.check_del` takes one or two operands. A `del(s, d)` whose operands hold joins
+  `check.drain_count`, and a one-operand `del` of a span of owners (`check.is_span_of_owners`)
+  joins `check.span_del_count`, which `--span-del-report` writes (`driver.write_span_dels`).
+  `fir_lower.drained` writes the drain as ordinary FIR, so the verifier, the emptiness pass, the
+  interpreter and the translator need no case for it. When the closure holds a drain,
+  `gen_fir.emit_program` and `driver.overwrite_entry` scan the FIR of each lowered function into a
+  `release.table`, solve it after the last function and report each drop that is not
+  release-only; a closure with no drain scans nothing. The bit reads FIR and not the tree, so the
+  print family breaks it through `std.rt` and `write`, and the `null` and `{}` of an `own`
+  reference count as constants through the one temporary that holds each (`release.fills_of`).
+  The table holds the functions of the unit only, so a drop that calls a function of a used
+  library is not release-only (D9.11). `src/fort/fir/release.ft` stands outside
+  `src/fort/owner/`, whose cap is 8,000 lines (`spec/ownership-design.md` 9). A drain through a
+  pointer, `del(p->items, d); del(p);`, leaves part 2 unproved at `del(p)`: the calls of the drain
+  kill the fact of `p->items`, which is reached through memory. Move the span into a local first,
+  as for each other inner owner. For the same reason a drain of a field of a memory local leaves
+  the field unproved at the exit of the local: keep such a value in an allocation that a
+  `drop_made` ends, as for each other memory owner (`run/ownership/076`, `holder_drop`).
 - **The emptiness pass proves part 1 for the locals of an owning aggregate type, and each exit
   that it does not prove is an error** (D17.20; `spec/fir.md` 11, Aggregates). `owner.prover` lists
   their exits in `proof.aggregates` with the scan of the owner locals (`scan_exits` with
@@ -1137,12 +1156,12 @@ came here.
   `m`, which holds an allocation (`memory_free` in `release_test.ft`). A vector of objects with
   owners keeps a chain of owners (`made_before`, `last`) beside a span of views (`ast.arena`,
   `types.table`, `modules.owned_modules`, `lsp.json.doc`), and the first form frees it: a slot of a
-  new span of owners is null, but no rule proves it until refinement R8, so its `del` before a
-  store is a site. Link a new object into the chain before any call, because a call kills the facts
-  through the new pointer (D17.11). A chain frees its objects from the newest. With the chains of
-  the AST arena, the type table and the module vectors together, a heap probe of repeated runs
-  reaches its steady size later: take its early sample after that
-  (`driver_lifetime_emitter_test.ft`, `notes/testing.md`).
+  new span of owners is null, but no rule proves it, and refinement R8 (`del(s, d)` of D17.9) adds
+  no fact, so its `del` before a store is a site. Link a new object into the chain before any
+  call, because a call kills the facts through the new pointer (D17.11). A chain frees its objects
+  from the newest. With the chains of the AST arena, the type table and the module vectors
+  together, a heap probe of repeated runs reaches its steady size later: take its early sample
+  after that (`driver_lifetime_emitter_test.ft`, `notes/testing.md`).
 - **Write a read after a call in a form that rule (b) proves** (D17.21,
   `test/fort/owner/prover_use_source_test.ft`, the pairs `*_before` and `*_after`). The proof
   takes each call as a change of each memory owner, and of each owner of an aggregate `_0` before

@@ -4,9 +4,11 @@
 //| declarations ok
 //| new ok
 //| del ok
+//| drain ok
 //| stores ok
 /// Checks the lowering of ownership (spec/fir.md 9.2, 9.3, 9.4): the zeroing of the entry block,
-/// `new(T)` and `new(T, n)` with the count check, `del` of a place and of an rvalue, `move`, and
+/// `new(T)` and `new(T, n)` with the count check, `del` of a place and of an rvalue, the drain of
+/// `del(s, d)`, `move`, and
 /// the overwrite check of a declaration and of an assignment into an `own` reference. Each case
 /// lowers one function of a checked source, holds that the result keeps every rule of the
 /// verifier, and compares its text.
@@ -471,6 +473,132 @@ fn an_owning_aggregate_store_takes_no_check() void {
     lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
 }
 
+// ---- the drain of `del(s, d)` ---------------------------------------------------------------
+
+// `del(s, d)` of a place (spec/fir.md 9.4, D17.9): `_t = move p` first, which leaves the zero
+// value at `p` and reads a place through memory once, then the counter `_i` from `const u64 0`, the
+// head that compares it with the length of `_t`, the body that calls the drop with `move _t[_i]`
+// at the name of the drop and adds 1 with no check, and the `del` of `_t` after the loop. Each
+// other statement stands at the name `del`, with the index of its source statement.
+string[13] DRAIN = {
+    "struct cell {",
+    "    i32 mut* own p;",
+    "}",
+    "struct box {",
+    "    cell mut@ own items;",
+    "}",
+    "fn cell_drop(cell mut c) void {",
+    "    del(c.p);",
+    "}",
+    "fn f(cell mut@ own s, box mut* b) void {",
+    "    del(s, cell_drop);",
+    "    del(b->items, cell_drop);",
+    "}",
+};
+
+string[45] DRAIN_FIR = {
+    "fn main.f(_1 (s): cell mut@ own, _2 (b): box mut*) -> void {",
+    "    let _0: void;",
+    "    let _3: cell mut@ own #11:5;",
+    "    let _4: u64 #11:5;",
+    "    let _5: bool #11:5;",
+    "    let _6: void #11:12;",
+    "    let _7: cell mut@ own #12:5;",
+    "    let _8: u64 #12:5;",
+    "    let _9: bool #12:5;",
+    "    let _10: void #12:19;",
+    "",
+    "    bb0: {",
+    "        _3 = move _1 #11:5 s1;",
+    "        _4 = const u64 0 #11:5 s1;",
+    "        goto bb1 #11:5 s1;",
+    "    }",
+    "    bb1: {",
+    "        _5 = lt(copy _4, copy _3.1) #11:5 s1;",
+    "        switch(copy _5) -> [true: bb2, otherwise: bb3] #11:5 s1;",
+    "    }",
+    "    bb2: {",
+    "        _6 = call fn main.cell_drop(move _3[_4]) #11:12 s1;",
+    "        _4 = add(copy _4, const u64 1) #11:5 s1;",
+    "        goto bb1 #11:5 s1;",
+    "    }",
+    "    bb3: {",
+    "        del(move _3) #11:5 s1;",
+    "        _7 = move (*_2).0 #12:5 s2;",
+    "        _8 = const u64 0 #12:5 s2;",
+    "        goto bb4 #12:5 s2;",
+    "    }",
+    "    bb4: {",
+    "        _9 = lt(copy _8, copy _7.1) #12:5 s2;",
+    "        switch(copy _9) -> [true: bb5, otherwise: bb6] #12:5 s2;",
+    "    }",
+    "    bb5: {",
+    "        _10 = call fn main.cell_drop(move _7[_8]) #12:19 s2;",
+    "        _8 = add(copy _8, const u64 1) #12:5 s2;",
+    "        goto bb4 #12:5 s2;",
+    "    }",
+    "    bb6: {",
+    "        del(move _7) #12:5 s2;",
+    "        return #13:1 s0;",
+    "    }",
+    "}",
+};
+
+fn a_drain_moves_each_element_into_the_drop_and_then_frees() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.expect(lower_env.lower(e, DRAIN[..], "f"), DRAIN_FIR[..]);
+}
+
+// `del(e, d)` of an rvalue drains the temporary that the lowering of `e` made for the call, with no
+// second move, and the drop of an element that is an `own` pointer takes `move _1[_2]`.
+string[9] DRAIN_RVALUE = {
+    "fn make() i32 mut* own mut@ own {",
+    "    return new(i32 mut* own, 1);",
+    "}",
+    "fn int_drop(i32 mut* own p) void {",
+    "    del(p);",
+    "}",
+    "fn g() void {",
+    "    del(make(), int_drop);",
+    "}",
+};
+
+string[26] DRAIN_RVALUE_FIR = {
+    "fn main.g() -> void {",
+    "    let _0: void;",
+    "    let _1: i32 mut* own mut@ own #8:13;",
+    "    let _2: u64 #8:5;",
+    "    let _3: bool #8:5;",
+    "    let _4: void #8:17;",
+    "",
+    "    bb0: {",
+    "        _1 = call fn main.make() #8:13 s1;",
+    "        _2 = const u64 0 #8:5 s1;",
+    "        goto bb1 #8:5 s1;",
+    "    }",
+    "    bb1: {",
+    "        _3 = lt(copy _2, copy _1.1) #8:5 s1;",
+    "        switch(copy _3) -> [true: bb2, otherwise: bb3] #8:5 s1;",
+    "    }",
+    "    bb2: {",
+    "        _4 = call fn main.int_drop(move _1[_2]) #8:17 s1;",
+    "        _2 = add(copy _2, const u64 1) #8:5 s1;",
+    "        goto bb1 #8:5 s1;",
+    "    }",
+    "    bb3: {",
+    "        del(move _1) #8:5 s1;",
+    "        return #9:1 s0;",
+    "    }",
+    "}",
+};
+
+fn a_drain_of_an_rvalue_reads_its_temporary() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.expect(lower_env.lower(e, DRAIN_RVALUE[..], "g"), DRAIN_RVALUE_FIR[..]);
+}
+
 fn main() i32 {
     an_owning_declaration_checks_its_local_after_the_zeroing();
     a_constant_and_a_cast_enter_an_owning_declaration_through_a_temporary();
@@ -480,6 +608,9 @@ fn main() i32 {
     println("new ok");
     del_empties_a_place_and_frees_an_rvalue();
     println("del ok");
+    a_drain_moves_each_element_into_the_drop_and_then_frees();
+    a_drain_of_an_rvalue_reads_its_temporary();
+    println("drain ok");
     a_moving_store_checks_after_its_right_side();
     an_owning_store_through_memory_holds_its_target();
     an_owning_aggregate_store_takes_no_check();

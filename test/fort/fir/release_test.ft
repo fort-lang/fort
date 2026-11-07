@@ -1,0 +1,688 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| stores ok
+//| reads ok
+//| globals ok
+//| calls ok
+//| chains ok
+//| cycles ok
+//| absent ok
+//| drains ok
+//| solve ok
+//| report ok
+//| order ok
+//| no body ok
+/// Checks src/fort/fir/release.ft, the release-only bit of D17.9: each break of the bit in the
+/// FIR of a function, the bit of a caller through each chain of direct calls, the greatest set
+/// over a cycle of calls, a callee whose body the table does not hold, and the errors and the
+/// notes of report for each `del(s, d)` whose drop is not release-only, with their count.
+import check_env;
+import fort.fir;
+import fort.fir.release;
+import fort.fir_lower;
+import fort.session;
+import lower_env;
+import pass_env;
+import std.strbuf;
+
+// The functions of the bit, after the runtime of lower_env. A name says what the function does:
+// each `breaks_*` function breaks the bit itself, and each `keeps_*` function keeps it.
+string[117] SOURCE = {
+    "import extern;",
+    "extern fn abs(i32 x) i32;",
+    "struct cell {",
+    "    i32 mut* own p;",
+    "    i32 k;",
+    "}",
+    "cell mut GLOBAL = {};",
+    "i32 mut COUNT = 0;",
+    "fn noop(i32 v) void {",
+    "}",
+    "fn (i32) void HOOK = noop;",
+    // the drop of a cell: a `del` writes the zero value
+    "fn keeps_del(cell mut c) void {",
+    "    del(c.p);",
+    "}",
+    // a store into a global of a type with no owner
+    "fn keeps_count(cell mut c) void {",
+    "    COUNT += 1;",
+    "    del(c.p);",
+    "}",
+    // a store of an owner into a local
+    "fn keeps_local(cell mut c) void {",
+    "    cell mut k = move(c);",
+    "    del(k.p);",
+    "}",
+    // a store through a pointer of a type with no owner
+    "fn keeps_plain(i32 mut* at) void {",
+    "    *at = 3;",
+    "}",
+    // a store of the zero value through a pointer: `null` and `{}`
+    "fn keeps_null(i32 mut* own mut* at) void {",
+    "    del(*at);",
+    "    *at = null;",
+    "}",
+    "fn keeps_zero(cell mut* at) void {",
+    "    *at = cell{};",
+    "}",
+    // a named local that one statement fills with `{}` and a store into its field fills again: no
+    // constant, so its store through a pointer breaks the bit
+    "fn breaks_named(cell mut* at, cell mut c) void {",
+    "    cell mut z = {};",
+    "    z.p = move(c.p);",
+    "    del(at->p);",
+    "    *at = move(z);",
+    "}",
+    // a temporary that a ternary fills with an owner and then with `null`: the first fill is no
+    // constant, so the store of the temporary breaks the bit
+    "fn breaks_ternary(bool k, i32 mut* own mut* pp, i32 mut* own p) void {",
+    "    del(*pp);",
+    "    *pp = k ? move(p) : null;",
+    "    del(p);",
+    "}",
+    // a literal with members is an aggregate and no constant, though it holds no owner
+    "fn breaks_literal(cell mut* at) void {",
+    "    *at = cell{.k = 3};",
+    "}",
+    // a store of an owner through a pointer
+    "fn breaks_deref(cell mut* at, cell mut c) void {",
+    "    *at = move(c);",
+    "}",
+    // a store of an owner through an index into a span
+    "fn breaks_index(i32 mut* own mut@ s, i32 mut* own p) void {",
+    "    del(s[0]);",
+    "    s[0] = move(p);",
+    "}",
+    // a store of an owner into a global
+    "fn breaks_global(cell mut c) void {",
+    "    del(GLOBAL.p);",
+    "    GLOBAL.p = move(c.p);",
+    "}",
+    // calls of an extern and of a function value
+    "fn breaks_extern() void {",
+    "    i32 v = abs(-2);",
+    "}",
+    "fn breaks_value() void {",
+    "    HOOK(1);",
+    "}",
+    // a chain of calls to an extern, and a chain of calls that keeps the bit
+    "fn chain_top() void {",
+    "    chain_mid();",
+    "}",
+    "fn chain_mid() void {",
+    "    breaks_extern();",
+    "}",
+    "fn chain_kept() void {",
+    "    i32 mut n = 0;",
+    "    keeps_plain(&n);",
+    "}",
+    // a cycle of calls with no break, a cycle with one, and a function that calls itself
+    "fn cycle_a(i32 n) void {",
+    "    if (n > 0) {",
+    "        cycle_b(n - 1);",
+    "    }",
+    "}",
+    "fn cycle_b(i32 n) void {",
+    "    cycle_a(n);",
+    "}",
+    "fn bad_a(i32 n) void {",
+    "    if (n > 0) {",
+    "        bad_b(n - 1);",
+    "    }",
+    "}",
+    "fn bad_b(i32 n) void {",
+    "    bad_a(n);",
+    "    breaks_value();",
+    "}",
+    "fn self_call(i32 n) void {",
+    "    if (n > 0) {",
+    "        self_call(n - 1);",
+    "    }",
+    "}",
+    // a drain with a release-only drop, and one with a drop that is not
+    "fn drains_kept(cell mut@ own s) void {",
+    "    del(s, keeps_del);",
+    "}",
+    "fn drains_broken(cell mut@ own s) void {",
+    "    del(s, breaks_global);",
+    "}",
+    // a function value that no call reads, a `del` and a `move` through a pointer, which write only
+    // the zero value, and a store of an owner into a field through a pointer
+    "fn keeps_unread_value(i32 v) void {",
+    "    fn (i32) void f = noop;",
+    "}",
+    "fn keeps_moves(cell mut* at) void {",
+    "    del(at->p);",
+    "    keeps_del(move(*at));",
+    "}",
+    "fn breaks_field(cell mut* at, i32 mut* own p) void {",
+    "    del(at->p);",
+    "    at->p = move(p);",
+    "}",
+    // a function whose callee a test leaves out of the table
+    "fn absent_caller() void {",
+    "    absent_callee();",
+    "}",
+    "fn absent_callee() void {",
+    "}",
+};
+
+// Lowers the function `name` of the checked source and adds it to `t`.
+fn scan_one(lower_env.env mut* e, string name, release.table mut* t) void {
+    fir.func mut* own f = fir.func_make();
+    defer fir.func_drop_made(move(f));
+    fir_lower.report mut why = fir_lower.report{};
+    if (!fir_lower.lower_function(&e->c.ck, lower_env.decl(e, name), f, &why)) {
+        panic("release_test: the lowering refuses the function");
+    }
+    release.scan(t, f);
+}
+
+// Lowers each function of `names` in order, adds it to `t`, and solves `t`.
+fn scan_all(lower_env.env mut* e, string@ names, release.table mut* t) void {
+    u64 mut i = 0;
+    while (i < names.len) {
+        scan_one(e, names[i], t);
+        i += 1;
+    }
+    release.solve(t);
+}
+
+// Whether the function `name` of the checked source is release-only in `t`.
+fn kept(lower_env.env mut* e, release.table* t, string name) bool {
+    return release.is_release_only(t, lower_env.decl(e, name)->sym);
+}
+
+// Every function of SOURCE.
+string[30] ALL = {
+    "noop",
+    "keeps_del",
+    "keeps_count",
+    "keeps_local",
+    "keeps_plain",
+    "keeps_null",
+    "keeps_zero",
+    "breaks_named",
+    "breaks_ternary",
+    "breaks_literal",
+    "breaks_deref",
+    "breaks_index",
+    "breaks_global",
+    "breaks_extern",
+    "breaks_value",
+    "chain_top",
+    "chain_mid",
+    "chain_kept",
+    "cycle_a",
+    "cycle_b",
+    "bad_a",
+    "bad_b",
+    "self_call",
+    "drains_kept",
+    "drains_broken",
+    "absent_caller",
+    "absent_callee",
+    "keeps_unread_value",
+    "keeps_moves",
+    "breaks_field",
+};
+
+// A store breaks the bit only when it stores a value that is no constant into a place whose type
+// holds owners through memory: a dereference, an index into a span, or a global. A store of a
+// type with no owner, a store into a local and a store of the zero value keep it. A constant is a
+// `const` operand or a temporary that its one fill, the first, makes constant: a named local, a
+// temporary whose first fill is an owner, and a literal with members are no constant.
+fn a_store_of_an_owner_through_memory_breaks_the_bit() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, SOURCE[..], true);
+    release.table mut* own t = release.make();
+    defer release.drop_made(move(t));
+    scan_all(e, ALL[..], t);
+    assert(kept(e, t, "keeps_del"));
+    assert(kept(e, t, "keeps_count"));
+    assert(kept(e, t, "keeps_local"));
+    assert(kept(e, t, "keeps_plain"));
+    assert(kept(e, t, "keeps_null"));
+    assert(kept(e, t, "keeps_zero"));
+    assert(!kept(e, t, "breaks_named"));
+    assert(!kept(e, t, "breaks_ternary"));
+    assert(!kept(e, t, "breaks_literal"));
+    assert(!kept(e, t, "breaks_deref"));
+    assert(!kept(e, t, "breaks_index"));
+    assert(!kept(e, t, "breaks_global"));
+    println("stores ok");
+}
+
+// Only a store and a call break the bit: a function value that no call reads keeps it, and so do
+// a `del` and a `move` through a pointer, which write the zero value. A store of an owner into a
+// field through a pointer breaks it, as a store through the pointer itself does.
+fn only_a_store_or_a_call_breaks_the_bit() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, SOURCE[..], true);
+    release.table mut* own t = release.make();
+    defer release.drop_made(move(t));
+    scan_all(e, ALL[..], t);
+    assert(kept(e, t, "keeps_unread_value"));
+    assert(kept(e, t, "keeps_moves"));
+    assert(!kept(e, t, "breaks_field"));
+    println("reads ok");
+}
+
+// FIR text can store into a global place with no address before it, and through a pointer and
+// then a field in one place, which the lowering does not write: it takes an address first. A store
+// of an owner there breaks the bit, and a store of a number or of `null` there keeps it.
+string[7] GLOBALS = {
+    "struct cell {",
+    "    i32 mut* own p;",
+    "}",
+    "cell mut G = {};",
+    "i32 mut N = 0;",
+    "fn keep() void {",
+    "}",
+};
+
+string[24] GLOBAL_STORES = {
+    "fn main.into_global(_1: cell) -> void {",
+    "    bb0: {",
+    "        global main.G = move _1;",
+    "        return;",
+    "    }",
+    "}",
+    "fn main.count_global() -> void {",
+    "    bb0: {",
+    "        global main.N = const i32 1;",
+    "        return;",
+    "    }",
+    "}",
+    "fn main.into_field(_1: cell mut*, _2: i32 mut* own) -> void {",
+    "    bb0: {",
+    "        (*_1).0 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    "fn main.null_field(_1: cell mut*) -> void {",
+    "    bb0: {",
+    "        (*_1).0 = const null i32 mut* own;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+fn a_store_into_a_global_place_breaks_the_bit() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = pass_env.parse_made(e, GLOBALS[..], GLOBAL_STORES[..]);
+    defer fir.module_drop_made(move(m));
+    release.table mut* own t = release.make();
+    defer release.drop_made(move(t));
+    u64 mut i = 0;
+    while (i < 4) {
+        release.scan(t, fir.module_function_at(m, i));
+        i += 1;
+    }
+    release.solve(t);
+    assert(!release.is_release_only(t, fir.module_function_at(m, 0)->sym));
+    assert(release.is_release_only(t, fir.module_function_at(m, 1)->sym));
+    assert(!release.is_release_only(t, fir.module_function_at(m, 2)->sym));
+    assert(release.is_release_only(t, fir.module_function_at(m, 3)->sym));
+    println("globals ok");
+}
+
+// A call of an `extern fn` and a call through a function value break the bit; a direct call of a
+// fort function with no break keeps it.
+fn a_call_of_an_extern_or_of_a_value_breaks_the_bit() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, SOURCE[..], true);
+    release.table mut* own t = release.make();
+    defer release.drop_made(move(t));
+    scan_all(e, ALL[..], t);
+    assert(!kept(e, t, "breaks_extern"));
+    assert(!kept(e, t, "breaks_value"));
+    assert(kept(e, t, "noop"));
+    println("calls ok");
+}
+
+// A function that calls a function that is not release-only is not release-only either, through
+// each step of a chain; a chain of functions with no break keeps the bit.
+fn a_caller_of_a_broken_function_is_broken() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, SOURCE[..], true);
+    release.table mut* own t = release.make();
+    defer release.drop_made(move(t));
+    scan_all(e, ALL[..], t);
+    assert(!kept(e, t, "chain_mid"));
+    assert(!kept(e, t, "chain_top"));
+    assert(kept(e, t, "chain_kept"));
+    println("chains ok");
+}
+
+// The bit is the greatest set: a cycle of calls with no break keeps it, and so does a function
+// that calls itself, but a break in one member of a cycle breaks each member.
+fn a_cycle_keeps_the_bit_unless_a_member_breaks_it() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, SOURCE[..], true);
+    release.table mut* own t = release.make();
+    defer release.drop_made(move(t));
+    scan_all(e, ALL[..], t);
+    assert(kept(e, t, "cycle_a"));
+    assert(kept(e, t, "cycle_b"));
+    assert(kept(e, t, "self_call"));
+    assert(!kept(e, t, "bad_a"));
+    assert(!kept(e, t, "bad_b"));
+    println("cycles ok");
+}
+
+// A function that the table does not hold has no body in the build, so it is not release-only,
+// and neither is a function that calls it. The order of the scan does not change the answer: a
+// callee scanned after its caller is found all the same.
+string[2] WITHOUT_CALLEE = {"absent_caller", "noop"};
+string[2] CALLEE_LAST = {"absent_caller", "absent_callee"};
+
+fn a_function_with_no_body_breaks_the_bit() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, SOURCE[..], true);
+    release.table mut* own t = release.make();
+    defer release.drop_made(move(t));
+    scan_all(e, WITHOUT_CALLEE[..], t);
+    assert(!kept(e, t, "absent_caller"));
+    assert(!kept(e, t, "absent_callee"));
+    assert(kept(e, t, "noop"));
+    release.table mut* own u = release.make();
+    defer release.drop_made(move(u));
+    scan_all(e, CALLEE_LAST[..], u);
+    assert(kept(e, u, "absent_caller"));
+    assert(kept(e, u, "absent_callee"));
+    println("absent ok");
+}
+
+// A drain calls its drop, so the function of `del(s, d)` takes the bit of `d`.
+fn a_drain_takes_the_bit_of_its_drop() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, SOURCE[..], true);
+    release.table mut* own t = release.make();
+    defer release.drop_made(move(t));
+    scan_all(e, ALL[..], t);
+    assert(kept(e, t, "drains_kept"));
+    assert(!kept(e, t, "drains_broken"));
+    println("drains ok");
+}
+
+// A second solve gives the same answer, and so does a table that scanned the same functions in
+// the reverse order. A free table is empty and usable again.
+fn solve_is_a_function_of_the_scanned_functions() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, SOURCE[..], true);
+    release.table mut* own t = release.make();
+    defer release.drop_made(move(t));
+    scan_all(e, ALL[..], t);
+    release.solve(t);
+    release.table mut* own r = release.make();
+    defer release.drop_made(move(r));
+    u64 mut i = ALL.len;
+    while (i > 0) {
+        i -= 1;
+        scan_one(e, ALL[i], r);
+    }
+    release.solve(r);
+    u64 mut k = 0;
+    while (k < ALL.len) {
+        bool first = kept(e, t, ALL[k]);
+        assert(first == kept(e, r, ALL[k]));
+        assert(first == (ALL[k] == "noop" || is_kept_name(ALL[k])));
+        k += 1;
+    }
+    release.free(t);
+    assert(!kept(e, t, "noop"));
+    scan_all(e, ALL[..1], t);
+    assert(kept(e, t, "noop"));
+    println("solve ok");
+}
+
+// The names of ALL that keep the bit, besides `noop`.
+fn is_kept_name(string name) bool {
+    return name == "keeps_del" || name == "keeps_count" || name == "keeps_local"
+        || name == "keeps_plain" || name == "keeps_null" || name == "keeps_zero"
+        || name == "chain_kept" || name == "cycle_a" || name == "cycle_b" || name == "self_call"
+        || name == "drains_kept" || name == "absent_caller" || name == "absent_callee"
+        || name == "keeps_unread_value" || name == "keeps_moves";
+}
+
+// ---- report --------------------------------------------------------------------------------
+
+// The drains of `main` for report: a drop that keeps the bit, one that stores an owner through
+// memory, one that reaches an extern through a chain of calls, and one that reaches two breaks,
+// the nearer through `short_way`. The first break of a function in the order of its statements
+// is the one that report names: `two_breaks` stores before it calls.
+string[57] DRAINS = {
+    "import extern;",
+    "extern fn abs(i32 x) i32;",
+    "struct cell {",
+    "    i32 mut* own p;",
+    "}",
+    "cell mut GLOBAL = {};",
+    "fn d_kept(cell mut c) void {",
+    "    del(c.p);",
+    "}",
+    "fn d_store(cell mut c) void {",
+    "    del(GLOBAL.p);",
+    "    GLOBAL.p = move(c.p);",
+    "}",
+    "fn d_chain(cell mut c) void {",
+    "    del(c.p);",
+    "    middle();",
+    "}",
+    "fn middle() void {",
+    "    i32 v = abs(1);",
+    "}",
+    "fn d_near(cell mut c) void {",
+    "    del(c.p);",
+    "    long_way();",
+    "    short_way();",
+    "}",
+    "fn long_way() void {",
+    "    longer_way();",
+    "}",
+    "fn longer_way() void {",
+    "    i32 v = abs(2);",
+    "}",
+    "fn short_way() void {",
+    "    i32 v = abs(3);",
+    "}",
+    "fn two_breaks(cell mut c) void {",
+    "    del(GLOBAL.p);",
+    "    GLOBAL.p = move(c.p);",
+    "    i32 v = abs(4);",
+    "}",
+    "fn main() i32 {",
+    "    cell mut@ own a = new(cell, 1);",
+    "    del(a, d_kept);",
+    "    cell mut@ own b = new(cell, 1);",
+    "    del(b, d_store);",
+    "    cell mut@ own c = new(cell, 1);",
+    "    del(c, d_chain);",
+    "    cell mut@ own d = new(cell, 1);",
+    "    del(d, d_near);",
+    "    cell mut@ own f = new(cell, 1);",
+    "    del(f, two_breaks);",
+    "    cell mut@ own g = new(cell, 1);",
+    "    del(g, d_store);",
+    "    return 0;",
+    "}",
+    "fn unused() void {",
+    "    middle();",
+    "}",
+};
+
+string[11] DRAIN_FUNCTIONS = {
+    "d_kept",
+    "d_store",
+    "d_chain",
+    "middle",
+    "d_near",
+    "long_way",
+    "longer_way",
+    "short_way",
+    "two_breaks",
+    "main",
+    "unused",
+};
+
+// Reports the drains of DRAINS after a scan of `names` and gives the count of the errors.
+fn report_drains(lower_env.env mut* e, string@ names) u64 {
+    release.table mut* own t = release.make();
+    defer release.drop_made(move(t));
+    scan_all(e, names, t);
+    return release.report(t, &e->c.ck, session.diags(&e->c.m.s));
+}
+
+// The diagnostic `i` of the session of `e` as `<line>:<col>: <message>`, after its severity.
+fn line(lower_env.env mut* e, u64 i, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    strbuf.append(out, check_env.report_severity(&e->c, i));
+    strbuf.push(out, ' ');
+    strbuf.append(out, check_env.report_text(&e->c, i));
+    return strbuf.view(out);
+}
+
+// The diagnostics that report gives for DRAINS, in order: one error for each drain whose drop is
+// not release-only, five, at the name of the drop, with a note for each call of a shortest chain
+// and a note at the break.
+string[12] REPORTED = {
+    "error 44:12: cannot drop the elements with 'd_store': it is not release-only",
+    "note 12:14: 'd_store' stores an owner through memory here",
+    "error 46:12: cannot drop the elements with 'd_chain': it is not release-only",
+    "note 16:11: 'd_chain' calls 'middle' here",
+    "note 19:16: 'middle' calls the extern 'abs' here",
+    "error 48:12: cannot drop the elements with 'd_near': it is not release-only",
+    "note 24:14: 'd_near' calls 'short_way' here",
+    "note 33:16: 'short_way' calls the extern 'abs' here",
+    "error 50:12: cannot drop the elements with 'two_breaks': it is not release-only",
+    "note 37:14: 'two_breaks' stores an owner through memory here",
+    "error 52:12: cannot drop the elements with 'd_store': it is not release-only",
+    "note 12:14: 'd_store' stores an owner through memory here",
+};
+
+fn report_names_each_drop_that_is_not_release_only() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, DRAINS[..], true);
+    assert(check_env.reports(&e->c) == 0);
+    assert(report_drains(e, DRAIN_FUNCTIONS[..]) == 5);
+    assert(check_env.errors(&e->c) == 5);
+    assert(check_env.reports(&e->c) == 12);
+    holds_lines(e, REPORTED[..]);
+    println("report ok");
+}
+
+// Holds each diagnostic of the session of `e` against `want`, in order.
+fn holds_lines(lower_env.env mut* e, string@ want) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    expect_lines(e, want, &b);
+}
+
+// Whether the diagnostic `i` of the session of `e` is `want`, as line gives it.
+fn holds_line(lower_env.env mut* e, u64 i, string want) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    return line(e, i, &b) == want;
+}
+
+// holds_lines with the scratch buffer `b`. The caller keeps `b`, so it is no local owner here.
+fn expect_lines(lower_env.env mut* e, string@ want, strbuf.str_buf mut* b) void {
+    u64 mut i = 0;
+    while (i < want.len) {
+        if (line(e, i, b) != want[i]) {
+            eprintln("diagnostic ", i, ": ", strbuf.view(b), "\nand not ", want[i]);
+            assert(false);
+        }
+        i += 1;
+    }
+}
+
+// The chain of notes follows the order of the drains, and a drop with no break gives no error: a
+// second report over the same table gives the same diagnostics again.
+fn report_follows_the_order_of_the_drains() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, DRAINS[..], true);
+    release.table mut* own t = release.make();
+    defer release.drop_made(move(t));
+    scan_all(e, DRAIN_FUNCTIONS[..], t);
+    assert(release.report(t, &e->c.ck, session.diags(&e->c.m.s)) == 5);
+    assert(release.report(t, &e->c.ck, session.diags(&e->c.m.s)) == 5);
+    assert(check_env.reports(&e->c) == 24);
+    assert(holds_line(e, 12, REPORTED[0]));
+    assert(holds_line(e, 23, REPORTED[11]));
+    println("order ok");
+}
+
+// A drop whose body the table does not hold is not release-only: one error and one note at the
+// name of the drop. A function that calls a function with no body takes the note at the call.
+string[8] WITHOUT_DROPS = {
+    "middle",
+    "d_near",
+    "long_way",
+    "longer_way",
+    "short_way",
+    "two_breaks",
+    "main",
+    "unused",
+};
+
+string[6] NO_BODY = {
+    "error 42:12: cannot drop the elements with 'd_kept': it is not release-only",
+    "note 42:12: 'd_kept' has no body in this build",
+    "error 44:12: cannot drop the elements with 'd_store': it is not release-only",
+    "note 44:12: 'd_store' has no body in this build",
+    "error 46:12: cannot drop the elements with 'd_chain': it is not release-only",
+    "note 46:12: 'd_chain' has no body in this build",
+};
+
+string[3] CHAIN_WITHOUT_MIDDLE = {"d_kept", "d_chain", "main"};
+
+string[2] CALLS_NO_BODY = {
+    "error 46:12: cannot drop the elements with 'd_chain': it is not release-only",
+    "note 16:11: 'd_chain' calls 'middle', which has no body in this build",
+};
+
+fn a_drop_with_no_body_is_not_release_only() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, DRAINS[..], true);
+    // d_kept, d_store and d_chain have no body, and d_store is named twice
+    assert(report_drains(e, WITHOUT_DROPS[..]) == 6);
+    holds_lines(e, NO_BODY[..]);
+    lower_env.check_lines(e, DRAINS[..], true);
+    // only d_kept and d_chain are in the table, and d_chain calls `middle`, so each drop but
+    // d_kept is not release-only
+    assert(report_drains(e, CHAIN_WITHOUT_MIDDLE[..]) == 5);
+    assert(holds_line(e, 2, CALLS_NO_BODY[0]));
+    assert(holds_line(e, 3, CALLS_NO_BODY[1]));
+    println("no body ok");
+}
+
+fn main() i32 {
+    a_store_of_an_owner_through_memory_breaks_the_bit();
+    only_a_store_or_a_call_breaks_the_bit();
+    a_store_into_a_global_place_breaks_the_bit();
+    a_call_of_an_extern_or_of_a_value_breaks_the_bit();
+    a_caller_of_a_broken_function_is_broken();
+    a_cycle_keeps_the_bit_unless_a_member_breaks_it();
+    a_function_with_no_body_breaks_the_bit();
+    a_drain_takes_the_bit_of_its_drop();
+    solve_is_a_function_of_the_scanned_functions();
+    report_names_each_drop_that_is_not_release_only();
+    report_follows_the_order_of_the_drains();
+    a_drop_with_no_body_is_not_release_only();
+    return 0;
+}
