@@ -622,7 +622,7 @@ fn the_address_of_a_whole_store_is_marked_and_turns_stale() void {
     defer place.drop_made(move(c));
     // before the marks, no local is the address of a whole store
     assert(c->held.len == 0 && !info_at(c, 6).whole && !info_at(c, 7).whole);
-    place.mark_whole_addresses(c);
+    place.mark_whole_addresses(c, true);
     assert(info_at(c, 6).whole && info_at(c, 7).whole && !info_at(c, 6).held);
     assert(!info_at(c, 9).whole && !info_at(c, 10).whole && !info_at(c, 11).whole);
     assert(!info_at(c, 12).whole && c->held.len == 2);
@@ -634,7 +634,46 @@ fn the_address_of_a_whole_store_is_marked_and_turns_stale() void {
                              place_of(f, 2, "*.0[8].0")));
     expect_stale(c, f);
     expect_keyless(c, f);
+    expect_fresh(c, f);
+    expect_no_readers(f);
     println("whole addresses ok");
+}
+
+// The freshness around the addresses of the whole stores of WHOLE: the `addr` of `_6` keeps the
+// freshness of `_1`, and the `addr` of `_9`, which a copy reads, ends it. The store through `_6`
+// ends the freshness of `_1`, the local of its place, and the store through `_7` that of `_2`; a
+// store through `_9`, which is no such address, ends none.
+fn expect_fresh(place.survey* c, fir.func* f) void {
+    fir_flow.bits mut fresh = fir_flow.bits_new(fir.local_count(f));
+    defer del(fresh.words);
+    fir_flow.bits_fill(&fresh);
+    place.apply_fresh_reads(c, fir.block_statement(f, 0, 0), &fresh);
+    place.apply_fresh_reads(c, fir.block_statement(f, 0, 2), &fresh);
+    assert(fir_flow.bits_get(&fresh, 1) && fir_flow.bits_get(&fresh, 2));
+    place.apply_fresh_end(c, fir.block_statement(f, 0, 0), &fresh);
+    place.apply_fresh_end(c, fir.block_statement(f, 0, 7), &fresh);
+    assert(fir_flow.bits_get(&fresh, 1) && fir_flow.bits_get(&fresh, 2));
+    place.apply_fresh_end(c, fir.block_statement(f, 0, 4), &fresh);
+    assert(!fir_flow.bits_get(&fresh, 1) && fir_flow.bits_get(&fresh, 2));
+    place.apply_fresh_end(c, fir.block_statement(f, 0, 3), &fresh);
+    assert(!fir_flow.bits_get(&fresh, 2));
+    fir_flow.bits_fill(&fresh);
+    place.apply_fresh_reads(c, fir.block_statement(f, 0, 5), &fresh);
+    assert(!fir_flow.bits_get(&fresh, 1) && fir_flow.bits_get(&fresh, 2));
+}
+
+// Past the whole-store work, the marks set the flags, which the freshness reads, and list no
+// reader, so the stale dataflow keeps no bit of an address of a whole store.
+fn expect_no_readers(fir.func* f) void {
+    // before the survey: its drop is a call, and it must come before the `del` of the set
+    fir_flow.bits mut stale = fir_flow.bits_new(fir.local_count(f));
+    defer del(stale.words);
+    place.survey mut* own c = survey_of(f);
+    defer place.drop_made(move(c));
+    place.mark_whole_addresses(c, false);
+    assert(info_at(c, 6).whole && info_at(c, 7).whole && c->held.len == 0);
+    place.apply_stale(c, fir.block_statement(f, 0, 3), &stale);
+    assert(!fir_flow.bits_get(&stale, 6) && !fir_flow.bits_get(&stale, 7));
 }
 
 // The stale bits of the addresses of the whole stores of WHOLE.

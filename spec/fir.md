@@ -893,9 +893,12 @@ changes the function, and the verifier runs after it. The passes run in this ord
    - **Fresh.** A pointer local `_n` is fresh at a point when, on each path to that point, the
      last store into `_n` writes a fresh `new`, and after that store no `copy` or `move` operand
      whose place is `_n` itself reads it and no `addr` or `slice` names a place whose base is
-     `_n`. The analysis computes freshness with the facts, by the same join. A place through a
-     fresh `_n` is `(*_n)` followed by `field` projections and `index` projections on fixed
-     arrays only. The rule assumes no access through a dangling pointer (D17.11).
+     `_n`, but the `addr` of a held address (**Held address**) and of the address of a whole
+     store (**Whole stores**). Each store through the address of a whole store ends the freshness
+     of the local of the place of its `addr`, after the test of the store and before its kill
+     rules (**Order**). The analysis computes freshness with the facts, by the same join. A place
+     through a fresh `_n` is `(*_n)` followed by `field` projections and `index` projections on
+     fixed arrays only. The rule assumes no access through a dangling pointer (D17.11).
    - **Held address.** When the right side of `lv = e` has a writer, the lowering holds
      `_a = addr mut(p)` and writes `(*_a)` in place of `p` (9.3). The pass reads the place
      `(*_a)` of that `check(overwrite: (*_a))` and of that store as `p`, for the fact, the kill
@@ -1015,7 +1018,12 @@ changes the function, and the verifier runs after it. The passes run in this ord
      about a place that cannot be a place of `_x` (**Alias**). A pointer can hold the address of
      that local or global. It writes no byte of another local or another global, so it keeps their
      facts. A `call` rvalue kills each fact except the facts about a local that is not memory and
-     about its places that are not reached through memory. `alloc` and `del` are no calls.
+     about its places that are not reached through memory, and the facts about a place through a
+     fresh pointer local. The reads of its operands come before its kill (**Order**), so an
+     operand that copies or moves `_n` ends the freshness of `_n` first. No pointer but `_n` names
+     the object of a fresh `_n`, but a held address and the address of a whole store, temporaries
+     that are no memory and that only their check and their stores read. So the callee reaches no
+     byte of the object (D10.7). `alloc` and `del` are no calls.
    - **Alias.** The borrows of refinement R6 of `spec/ownership-design.md` 7 (D17.11, Borrows),
      which the module `owner.alias` holds. A borrow local is a local that is not memory. An origin
      is the frame of a memory local, but of `_0` of an aggregate type, or `exposed`. The state at a
@@ -1127,8 +1135,9 @@ changes the function, and the verifier runs after it. The passes run in this ord
      the store into `n->next` keeps the fact of `(*_1).0` (`l->head`) that the `move` made.
    - **Order.** Within a statement, the pass applies the reads of its operands first, in operand
      order, then the exposures and the kill of a `call`, then the test of a store that needs a proof
-     (**Proof**), then the kill rules of the store, then its gen rule, and last the borrows of the
-     store (**Alias**). `live` and `dead` change no fact.
+     (**Proof**) or of a whole store (**Whole stores**), then the end of the freshness that a store
+     through the address of a whole store gives (**Fresh**), then the kill rules of the store, then
+     its gen rule, and last the borrows of the store (**Alias**). `live` and `dead` change no fact.
    - **Join.** A block starts with the intersection of the facts at the end of its predecessors,
      where the facts at the end of a block on the edge of its test also hold the facts of that edge
      (**Tests**).
@@ -1343,14 +1352,22 @@ changes the function, and the verifier runs after it. The passes run in this ord
      type, `_a` is no memory, and only the store into `(*_a)` reads `_a`. The test reads `(*_a)` as
      `p` while `_a` is not stale, and a stale `_a` gives no tracked place. `_a` turns stale as a
      held address does (**Held address**), and the stale dataflow keeps its bit. Only the test reads
-     such an address as `p`: the kill rules and the gen rule of the store, the freshness of the
-     locals and the memory locals read `(*_a)` as a place through `_a`, as before, so no other
-     verdict changes. The reading holds for the reason of **Held address**: while `_a` is not stale,
-     no statement since the `addr` stored into a local that the address of `p` reads or wrote
-     memory, so `p` names the storage that `_a` points to. A `call` of the right side can write
-     memory after the `addr`, but its kill comes before the test, and each owner below `p` is
-     reached through memory, because `p` is a place of a global or has a `deref` or an `index` on a
-     span or a `string`.
+     such an address as `p`: the kill rules and the gen rule of the store and the memory locals read
+     `(*_a)` as a place through `_a`, as before. The `addr` of `_a` ends no freshness, and each
+     store through `(*_a)` ends the freshness of the local of the place of the `addr`, before its
+     kill rules (**Fresh**). So those kill rules kill each fact through that local, as when the
+     `addr` ended the freshness, and the call of the right side keeps them (kill rule 5 of D17.11).
+     The pass marks such an address in each function, also past the whole-store work, so the
+     freshness and each verdict but those of the whole stores do not depend on that limit; only
+     within it does the stale dataflow keep the bit of `_a`. The reading holds for the reason of
+     **Held address**: while `_a` is not stale, no statement since the `addr` stored into a local
+     that the address of `p` reads or wrote memory, so `p` names the storage that `_a` points to.
+     A `call` of the right side can write memory after the `addr`, but its kill comes before the
+     test. It keeps the fact of an owner below `p` only when `p` is a place through a fresh pointer
+     local `_n`: no callee reaches the object of `_n`, `_n` is no memory, and each key of `p` is a
+     constant or a local that is no memory, so the call does not change the storage that `p`
+     names. Each other owner below `p` is reached through memory, because `p` is a place of a global
+     or has a `deref` or an `index` on a span or a `string`, so the kill ends its fact.
      A whole store into fixed storage of a named local is also proved when the bit of the local in
      the fifth dataflow of **Exits** holds right before the store: on each path, no store into its
      fixed storage that writes no zero value by **Values**, and no `addr` or `slice` of that

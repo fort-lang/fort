@@ -25,7 +25,7 @@ import std.strbuf;
 // `outer` holds a `box` and a fixed array of two after an integer, three owners. A `link` holds a
 // pointer that does not own before a `box`. `fill` gives a box whose owner holds an allocation, and
 // `take` frees the owner of a box. `G` is a global box.
-string[44] PRELUDE = {
+string[48] PRELUDE = {
     "struct box {",
     "    u8 mut* own data;",
     "}",
@@ -67,6 +67,10 @@ string[44] PRELUDE = {
     "struct holder {",
     "    box mut* own inner;",
     "}",
+    "box mut* mut GP = null;",
+    "fn refill(box mut* b) box {",
+    "    return box{};",
+    "}",
     "fn main() i32 {",
     "    return 0;",
     "}",
@@ -74,7 +78,7 @@ string[44] PRELUDE = {
 
 // Each case is a FIR function and the verdicts of its whole stores (write_verdicts), which its
 // comment gives. Each owner below the destination must hold the zero value at the store.
-string[473] CASES = {
+string[683] CASES = {
     // a fresh `new` makes the owner of its object empty (gen rule 5): P
     "fn main.c1(_1 (b): box) -> void {",
     "    let _2 (p): box mut* own;",
@@ -105,7 +109,8 @@ string[473] CASES = {
     "        return;",
     "    }",
     "}",
-    // the call of the right side kills the fact of the fresh `new` (kill rule 5): U0:3
+    // the call of the right side keeps the fact through the fresh `p` (kill rule 5): the
+    // address of the whole store ends no freshness, and its store ends it after the test: P
     "fn main.c3() -> void {",
     "    let _1 (p): box mut* own;",
     "    let _2: box mut*;",
@@ -602,13 +607,242 @@ string[473] CASES = {
     "        return;",
     "    }",
     "}",
+    // a call between the fresh `new` and the store keeps the fact through `p` (kill rule 5): P
+    "fn main.c41(_1 (b): box) -> void {",
+    "    let _2 (p): box mut* own;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        _2 = const zero box mut* own;",
+    "        live(_2);",
+    "        _2 = alloc<box>(const u64 1);",
+    "        _3 = call fn main.g();",
+    "        (*_2) = move _1;",
+    "        del(move (*_2).0);",
+    "        del(move _2);",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
+    // the call of the right side reads `p`, which ends its freshness before the kill: U0:3
+    "fn main.c42() -> void {",
+    "    let _1 (p): box mut* own;",
+    "    let _2: box mut*;",
+    "    bb0: {",
+    "        _1 = const zero box mut* own;",
+    "        live(_1);",
+    "        _1 = alloc<box>(const u64 1);",
+    "        _2 = addr mut((*_1));",
+    "        (*_2) = call fn main.refill(copy _1);",
+    "        del(move (*_1).0);",
+    "        del(move _1);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a copy of `p` into a second local ends its freshness, so the call kills the fact: U0:3
+    "fn main.c43() -> void {",
+    "    let _1 (p): box mut* own;",
+    "    let _2: box mut*;",
+    "    let _3 (q): box mut*;",
+    "    bb0: {",
+    "        _1 = const zero box mut* own;",
+    "        live(_1);",
+    "        _1 = alloc<box>(const u64 1);",
+    "        _3 = copy _1;",
+    "        _2 = addr mut((*_1));",
+    "        (*_2) = call fn main.fill();",
+    "        del(move (*_1).0);",
+    "        del(move _1);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a store of `p` into a global ends its freshness, and kill rule 4 kills the fact: U0:4
+    "fn main.c44(_1 (b): box) -> void {",
+    "    let _2 (p): box mut* own;",
+    "    bb0: {",
+    "        _2 = const zero box mut* own;",
+    "        live(_2);",
+    "        _2 = alloc<box>(const u64 1);",
+    "        global main.GP = copy _2;",
+    "        (*_2) = move _1;",
+    "        del(move (*_2).0);",
+    "        del(move _2);",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
+    // an address of the owner through `p` ends its freshness, so the call kills the fact: U0:3
+    "fn main.c45() -> void {",
+    "    let _1 (p): box mut* own;",
+    "    let _2: box mut*;",
+    "    let _3: u8 mut* own mut*;",
+    "    bb0: {",
+    "        _1 = const zero box mut* own;",
+    "        live(_1);",
+    "        _1 = alloc<box>(const u64 1);",
+    "        _3 = addr mut((*_1).0);",
+    "        _2 = addr mut((*_1));",
+    "        (*_2) = call fn main.fill();",
+    "        del(move (*_1).0);",
+    "        del(move _1);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // an address of `p` makes it memory, so no place through it is tracked: U0:2
+    "fn main.c46() -> void {",
+    "    let _1 (p): box mut* own;",
+    "    let _2: box mut*;",
+    "    let _3: box mut* own mut*;",
+    "    bb0: {",
+    "        _1 = const zero box mut* own;",
+    "        live(_1);",
+    "        _1 = alloc<box>(const u64 1);",
+    "        _3 = addr mut(_1);",
+    "        _2 = addr mut((*_1));",
+    "        (*_2) = call fn main.fill();",
+    "        del(move (*_1).0);",
+    "        del(move _1);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // the store ends the freshness of `p` and kills the fact, so the back edge brings no fact to
+    // the store of the next round: U0:4
+    "fn main.c47(_1 (c): bool) -> void {",
+    "    let _2 (p): box mut* own;",
+    "    let _3: box mut*;",
+    "    bb0: {",
+    "        _2 = const zero box mut* own;",
+    "        live(_2);",
+    "        _2 = alloc<box>(const u64 1);",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        _3 = addr mut((*_2));",
+    "        (*_3) = call fn main.fill();",
+    "        goto bb1;",
+    "    }",
+    "    bb3: {",
+    "        del(move (*_2).0);",
+    "        del(move _2);",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
+    // the first store through an address ends the freshness of `p`, so its kill rules end the
+    // fact, and the second store finds the owner that the first put there: P U0:4
+    "fn main.c48(_1 (b): box) -> void {",
+    "    let _2 (p): box mut* own;",
+    "    let _3: box mut*;",
+    "    let _4: box mut*;",
+    "    bb0: {",
+    "        _2 = const zero box mut* own;",
+    "        live(_2);",
+    "        _2 = alloc<box>(const u64 1);",
+    "        _3 = addr mut((*_2));",
+    "        (*_3) = call fn main.fill();",
+    "        _4 = addr mut((*_2));",
+    "        (*_4) = move _1;",
+    "        del(move (*_2).0);",
+    "        del(move _2);",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
+    // the store through the address of `p` ends only the freshness of `p`, so the fact through
+    // the fresh `q` survives it and the call of the second store: P P
+    "fn main.c49(_1 (b): box) -> void {",
+    "    let _2 (p): box mut* own;",
+    "    let _3 (q): box mut* own;",
+    "    let _4: box mut*;",
+    "    let _5: box mut*;",
+    "    bb0: {",
+    "        _2 = const zero box mut* own;",
+    "        _3 = const zero box mut* own;",
+    "        live(_2);",
+    "        live(_3);",
+    "        _2 = alloc<box>(const u64 1);",
+    "        _3 = alloc<box>(const u64 1);",
+    "        _4 = addr mut((*_2));",
+    "        (*_4) = move _1;",
+    "        _5 = addr mut((*_3));",
+    "        (*_5) = call fn main.fill();",
+    "        del(move (*_2).0);",
+    "        del(move _2);",
+    "        del(move (*_3).0);",
+    "        del(move _3);",
+    "        dead(_2);",
+    "        dead(_3);",
+    "        return;",
+    "    }",
+    "}",
+    // the store through the address ends the freshness of `p`, and the fresh dataflow carries the
+    // end into the next block, so the call there kills the fact that the `del` made: P U0:4
+    "fn main.c50(_1 (b): box, _2 (c): box) -> void {",
+    "    let _3 (p): box mut* own;",
+    "    let _4: box mut*;",
+    "    let _5: void;",
+    "    bb0: {",
+    "        _3 = const zero box mut* own;",
+    "        live(_3);",
+    "        _3 = alloc<box>(const u64 1);",
+    "        _4 = addr mut((*_3));",
+    "        (*_4) = move _1;",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move (*_3).0);",
+    "        _5 = call fn main.g();",
+    "        (*_3) = move _2;",
+    "        del(move (*_3).0);",
+    "        del(move _3);",
+    "        dead(_3);",
+    "        return;",
+    "    }",
+    "}",
+    // the `addr` of the address of a whole store keeps the freshness of `p` within the
+    // whole-store work and past it, so the call after it keeps the fact that the check of another
+    // owner reads, and the check has one verdict in both proofs; the call makes the address
+    // stale: U0:2
+    "fn main.c51(_1 (b): box) -> void {",
+    "    let _2 (p): outer mut* own;",
+    "    let _3: box mut*;",
+    "    let _4: void;",
+    "    let _5: u64;",
+    "    let _6: u8 mut* own;",
+    "    bb0: {",
+    "        _2 = const zero outer mut* own;",
+    "        live(_2);",
+    "        _2 = alloc<outer>(const u64 1);",
+    "        _3 = addr mut((*_2).1);",
+    "        _4 = call fn main.g();",
+    "        _5 = const u64 0;",
+    "        _6 = alloc<u8>(const u64 1);",
+    "        check(overwrite: (*_2).2[_5].0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2).2[_5].0 = move _6;",
+    "        (*_3) = move _1;",
+    "        del(move (*_2).1.0);",
+    "        del(move (*_2).2[_5].0);",
+    "        del(move _2);",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
 };
 
-string[40] VERDICTS = {
-    "P", "P", "U0:3", "U0:4", "U0:4", "U0:4 P", "U1:4", "P", "P", "U0:1", "U0:4 P", "U0:2",
+string[51] VERDICTS = {
+    "P", "P", "P", "U0:4", "U0:4", "U0:4 P", "U1:4", "P", "P", "U0:1", "U0:4 P", "U0:2",
     "U0:2", "U0:2", "U0:4", "P P", "U0:4", "P", "P U0:4", "P", "P U0:4", "P U0:4", "", "U0:4 P",
     "U0:3", "U0:4", "P", "P U1:4", "P P", "P", "U0:2", "P P", "U0:4 P", "U2:4", "P", "U4:4",
-    "P", "P U0:4", "U0:4", "U0:2",
+    "P", "P U0:4", "U0:4", "U0:2", "P", "U0:3", "U0:3", "U0:4", "U0:3", "U0:2", "U0:4", "P U0:4",
+    "P P", "P U0:4", "U0:2",
 };
 
 // Writes the verdict of each whole store of p->wholes into `out`, in order, with a space between
@@ -782,7 +1016,7 @@ fn expect_module(lower_env.env mut* e, fir.module* m, string@ want) void {
 
 // Fort sources whose whole stores the pass proves and does not prove, of each cause. A comment
 // gives the verdicts of each function (write_verdicts).
-string[108] SOURCE = {
+string[121] SOURCE = {
     "struct box {",
     "    u8 mut* own data;",
     "}",
@@ -824,7 +1058,7 @@ string[108] SOURCE = {
     "    del(p->data);",
     "    del(p);",
     "}",
-    // a fresh `new` and a call of the right side: U0:3
+    // a fresh `new` and a call of the right side, which keeps the fact (kill rule 5): P
     "fn fresh_call() void {",
     "    box mut* own p = new(box);",
     "    *p = fill();",
@@ -909,17 +1143,32 @@ string[108] SOURCE = {
     "    del(p->data);",
     "    del(p);",
     "}",
+    // a call between the fresh `new` and the store keeps the fact (kill rule 5): P
+    "fn g() void {",
+    "}",
+    "fn call_first(box mut b) void {",
+    "    box mut* own p = new(box);",
+    "    g();",
+    "    *p = move(b);",
+    "    del(p->data);",
+    "    del(p);",
+    "}",
+    // the call of the right side kills the fact that the `del` made through a parameter: U0:3
+    "fn param_call(box mut* q) void {",
+    "    del(q->data);",
+    "    *q = fill();",
+    "}",
 };
 
-string[18] SOURCE_NAMES = {
+string[20] SOURCE_NAMES = {
     "make", "fill", "probe", "fresh_move", "fresh_call", "fresh_lit", "field_first", "nested",
     "element", "element_field", "through", "local_reassign", "loop_decl", "deferred",
-    "global_store", "cond", "cond_live", "twice",
+    "global_store", "cond", "cond_live", "twice", "call_first", "param_call",
 };
 
-string[18] SOURCE_VERDICTS = {
-    "", "P", "U0:4", "P", "U0:3", "P", "P", "U0:4 P", "P", "U0:1", "U0:2", "P P U0:4", "P",
-    "P P", "U0:4", "P P", "U0:4 U0:4", "P U0:4",
+string[20] SOURCE_VERDICTS = {
+    "", "P", "U0:4", "P", "P", "P", "P", "U0:4 P", "P", "U0:1", "U0:2", "P P U0:4", "P",
+    "P P", "U0:4", "P P", "U0:4 U0:4", "P U0:4", "P", "U0:3",
 };
 
 // Lowers the function `name` of the checked source of `e` and holds that the verifier accepts it.
@@ -1005,9 +1254,6 @@ string[27] REPORTED = {
     ":28:8: overwriting owned value: cannot prove '(*p).data' is empty here",
     ":28:8: note: del or move '(*p).data' before this store",
     ":28:8: note: cause 4: no fact proves that the owner is empty",
-    ":40:8: overwriting owned value: cannot prove '(*p).data' is empty here",
-    ":40:8: note: del or move '(*p).data' before this store",
-    ":40:8: note: cause 3: the call of the right side kills the fact of the owner",
     ":55:14: overwriting owned value: cannot prove 'o->inner.data' is empty here",
     ":55:14: note: del or move 'o->inner.data' before this store",
     ":55:14: note: cause 4: no fact proves that the owner is empty",
@@ -1029,6 +1275,9 @@ string[27] REPORTED = {
     ":105:8: overwriting owned value: cannot prove '(*p).data' is empty here",
     ":105:8: note: del or move '(*p).data' before this store",
     ":105:8: note: cause 4: no fact proves that the owner is empty",
+    ":120:8: overwriting owned value: cannot prove '(*q).data' is empty here",
+    ":120:8: note: del or move '(*q).data' before this store",
+    ":120:8: note: cause 3: the call of the right side kills the fact of the owner",
 };
 
 // Holds that `got` holds the lines of `want`, each after `file` and with a line feed.
