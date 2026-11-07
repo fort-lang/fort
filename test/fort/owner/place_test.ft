@@ -8,11 +8,14 @@
 //| parts ok
 //| stores ok
 //| tests ok
+//| whole addresses ok
 /// Checks the helpers of owner.place that rule (b) of D17.21 reads: the owners in fixed storage of
 /// a local and below a place, the local keys of a path and the rank of a key, the number of an
 /// owner in a type, the owners that a read in fixed storage reads, the parts of a place, the count
-/// of the stores of a light survey, and the edge of the other value of a test against null. Each
-/// expected value comes from the types of PRELUDE and the order of next_owner_step.
+/// of the stores of a light survey, and the edge of the other value of a test against null. It also
+/// checks the addresses of the whole stores of D17.11 and their stale bits, and the index of a path
+/// with no key. Each expected value comes from the types of PRELUDE and the order of
+/// next_owner_step.
 import fort.consts;
 import fort.fir;
 import fir_env;
@@ -564,6 +567,117 @@ fn a_test_gives_the_edge_of_each_value() void {
     println("tests ok");
 }
 
+// The addresses of the whole stores (spec/fir.md 11, Whole stores). `_6` holds the address of the
+// object of `b` and `_7` the address of the pair of an element of `s` whose index `_8` copies `k`;
+// one store through each reads it, so both are addresses of a whole store. A copy reads `_9` too,
+// `_11` is the address of an integer, which holds no owner, and two stores write `_12`, so none of
+// the three is one. `_13` copies a constant, and two stores write `_14`, so it has no key.
+string[31] WHOLE = {
+    "fn main.a1(_1 (b): box mut*, _2 (s): shelf mut*, _3 (x): box, _4 (y): pair,",
+    "           _5 (k): u64) -> void {",
+    "    let _6: box mut*;",
+    "    let _7: pair mut*;",
+    "    let _8: u64;",
+    "    let _9: box mut*;",
+    "    let _10: box mut*;",
+    "    let _11: i32 mut*;",
+    "    let _12: box mut*;",
+    "    let _13: u64;",
+    "    let _14: u64;",
+    "    bb0: {",
+    "        _6 = addr mut((*_1));",
+    "        _8 = copy _5;",
+    "        _7 = addr mut((*_2).0[_8].0);",
+    "        (*_7) = move _4;",
+    "        (*_6) = move _3;",
+    "        _9 = addr mut((*_1));",
+    "        _10 = copy _9;",
+    "        (*_9) = const zero box;",
+    "        _11 = addr mut((*_2).1);",
+    "        (*_11) = const i32 0;",
+    "        _12 = addr mut((*_1));",
+    "        _12 = addr mut((*_1));",
+    "        (*_12) = const zero box;",
+    "        _13 = const u64 0;",
+    "        _14 = const u64 0;",
+    "        _14 = const u64 1;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// The address of a whole store is a temporary that one `addr mut` of a place that is no fixed
+// storage and has an owning aggregate type writes, and that one store through it reads. The marks
+// list it with the held addresses, so a store into a local that its place reads, and a statement
+// that writes memory, make it stale, and its own store makes it fresh again. Only the test of its
+// store reads `(*_a)` as the place of the `addr` (whole_source). An index whose temporary is stale
+// has no key, and so has a temporary that two stores write.
+fn the_address_of_a_whole_store_is_marked_and_turns_stale() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], WHOLE[..]);
+    defer fir.module_drop_made(move(m));
+    fir.func mut* f = &m->funcs.items[0];
+    place.survey mut* own c = survey_of(f);
+    defer place.drop_made(move(c));
+    // before the marks, no local is the address of a whole store
+    assert(c->held.len == 0 && !info_at(c, 6).whole && !info_at(c, 7).whole);
+    place.mark_whole_addresses(c);
+    assert(info_at(c, 6).whole && info_at(c, 7).whole && !info_at(c, 6).held);
+    assert(!info_at(c, 9).whole && !info_at(c, 10).whole && !info_at(c, 11).whole);
+    assert(!info_at(c, 12).whole && c->held.len == 2);
+    assert(place.is_whole_place(c, place_of(f, 6, "*")));
+    assert(!place.is_whole_place(c, place_of(f, 6, "")));
+    assert(!place.is_whole_place(c, place_of(f, 9, "*")));
+    assert(fir.is_same_place(f, place.whole_source(c, place_of(f, 6, "*")), place_of(f, 1, "*")));
+    assert(fir.is_same_place(f, place.whole_source(c, place_of(f, 7, "*")),
+                             place_of(f, 2, "*.0[8].0")));
+    expect_stale(c, f);
+    expect_keyless(c, f);
+    println("whole addresses ok");
+}
+
+// The stale bits of the addresses of the whole stores of WHOLE.
+fn expect_stale(place.survey* c, fir.func* f) void {
+    fir_flow.bits mut stale = fir_flow.bits_new(fir.local_count(f));
+    defer del(stale.words);
+    // the store of each address makes it fresh
+    fir_flow.bits_fill(&stale);
+    place.apply_stale(c, fir.block_statement(f, 0, 0), &stale);
+    place.apply_stale(c, fir.block_statement(f, 0, 2), &stale);
+    assert(!fir_flow.bits_get(&stale, 6) && !fir_flow.bits_get(&stale, 7));
+    // a store into the index local of the place of `_7` makes it stale, and not `_6`
+    fir_flow.bits_clear_all(&stale);
+    place.apply_stale(c, fir.block_statement(f, 0, 1), &stale);
+    assert(fir_flow.bits_get(&stale, 7) && !fir_flow.bits_get(&stale, 6));
+    // a store through a pointer writes memory, so it makes each address stale
+    fir_flow.bits_clear_all(&stale);
+    place.apply_stale(c, fir.block_statement(f, 0, 3), &stale);
+    assert(fir_flow.bits_get(&stale, 7) && fir_flow.bits_get(&stale, 6));
+    // a store into a temporary that is no memory writes no memory
+    fir_flow.bits_clear_all(&stale);
+    place.apply_stale(c, fir.block_statement(f, 0, 13), &stale);
+    assert(!fir_flow.bits_get(&stale, 7) && !fir_flow.bits_get(&stale, 6));
+}
+
+// The index of a path has no key when its temporary is stale or when two stores write it.
+fn expect_keyless(place.survey mut* c, fir.func mut* f) void {
+    fir_flow.bits mut stale = fir_flow.bits_new(fir.local_count(f));
+    defer del(stale.words);
+    place.path keyed = place.trace(c, place_of(f, 2, "*.0[8]"), &stale);
+    assert(keyed.tracked && !place.has_keyless_index(c, keyed));
+    place.path constant = place.trace(c, place_of(f, 2, "*.0[13]"), &stale);
+    assert(constant.tracked && !place.has_keyless_index(c, constant));
+    place.path twice = place.trace(c, place_of(f, 2, "*.0[14]"), &stale);
+    assert(!twice.tracked && place.has_keyless_index(c, twice));
+    fir_flow.bits_set(&stale, 8);
+    place.path old = place.trace(c, place_of(f, 2, "*.0[8]"), &stale);
+    assert(!old.tracked && place.has_keyless_index(c, old));
+    // a place with no index has no index with no key
+    place.path whole = place.trace(c, place_of(f, 6, "*"), &stale);
+    assert(whole.tracked && !place.has_keyless_index(c, whole));
+}
+
 fn main() i32 {
     the_owners_follow_the_order_of_the_type();
     the_keys_of_a_path_count_and_rank_their_locals();
@@ -572,5 +686,6 @@ fn main() i32 {
     a_part_is_a_longer_place_below();
     a_light_survey_counts_the_stores();
     a_test_gives_the_edge_of_each_value();
+    the_address_of_a_whole_store_is_marked_and_turns_stale();
     return 0;
 }

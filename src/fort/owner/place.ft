@@ -91,7 +91,9 @@ struct path {
 // `checks` counts the checks of `(*_n)`, and `stores` the stores into `(*_n)`. `based` counts the
 // stores whose place has the local as its base, through a deref too. `source` is the key of an
 // index temporary before the stale test, `next_source` the next temporary with the same source
-// local, and `sourced` the count of the temporaries whose source is the local.
+// local, and `sourced` the count of the temporaries whose source is the local. `whole` says that
+// the local is the address of a whole store (is_whole_address), which only the test of that store
+// reads as its place (whole_place).
 struct local_info {
     u32 assigns;
     u32 reads;
@@ -102,12 +104,14 @@ struct local_info {
     u32 based;
     bool memory;
     bool held;
+    bool whole;
     key source;
     u32 next_source;
     u32 sourced;
 }
 
-// A held address whose place reads a local, and the next reader of that local, or NO_LOCAL.
+// A held address or the address of a whole store whose place reads a local, and the next reader
+// of that local, or NO_LOCAL.
 struct reader {
     u32 held;
     u32 next;
@@ -116,9 +120,10 @@ struct reader {
 /// What the analysis knows of the places of one function: each local, the sources of the index
 /// temporaries, the held addresses and their readers, and the steps of the paths in use.
 /// `first_source[k]` is the first index temporary whose source is the local `k`, and
-/// `first_reader[k]` the first entry of `readers` for a held address whose place reads the local
-/// `k`. `held` lists the held addresses. `steps[..steps_len]` holds the steps of each path that
-/// the caller keeps and of the path in use.
+/// `first_reader[k]` the first entry of `readers` for a held address or an address of a whole
+/// store whose place reads the local `k`. `held` lists the held addresses and the addresses of the
+/// whole stores, whose stale bits apply_stale keeps. `steps[..steps_len]` holds the steps of each
+/// path that the caller keeps and of the path in use.
 struct survey {
     fir.func* f;
     local_info mut@ own locals;
@@ -293,6 +298,43 @@ fn is_held_address(survey* c, u32 a) bool {
         && l->reads == 2 && l->checks == 1 && l->stores == 1;
 }
 
+// Whether the local `a` is the address of a whole store (spec/fir.md 11, Whole stores): a temporary
+// that is no memory and no held address, that one store writes with `addr mut(p)`, where `p` is no
+// fixed storage and has an owning aggregate type, and that one store into `(*_a)` reads, with no
+// check and nothing else. The lowering holds such an address when the right side of a store of a
+// whole owning aggregate has a writer (spec/fir.md 9.3).
+fn is_whole_address(survey* c, u32 a) bool {
+    local_info* l = &c->locals[cast(a, u64)];
+    bool temp = fir.local_at(c->f, a)->kind == fir.local_kind.lk_temp;
+    if (!temp || l->assigns != 1 || l->memory || l->held) {
+        return false;
+    }
+    fir.rvalue r = store_of(c, a)->value;
+    if (r.kind != fir.rvalue_kind.rv_addr || !r.is_mut || fir.place_fixed(c->f, r.place)) {
+        return false;
+    }
+    bool owning = types.type_is_owning_aggregate(fir.place_type(c->f, r.place));
+    return owning && l->reads == 1 && l->checks == 0 && l->stores == 1;
+}
+
+/// Marks the addresses of the whole stores (is_whole_address) after mark_memory, and lists them
+/// with the held addresses as readers of the locals that the address of their place reads, so that
+/// the stale dataflow keeps their bits. No other reading of the analysis changes: trace, the
+/// freshness and the kill rules read no such address as its place.
+fn mark_whole_addresses(survey mut* c) void {
+    bool mut any = false;
+    u32 mut k = 0;
+    while (k < fir.local_count(c->f)) {
+        local_info mut* l = &c->locals[cast(k, u64)];
+        l->whole = is_whole_address(c, k);
+        any = any || l->whole;
+        k += 1;
+    }
+    if (any) {
+        mark_readers(c);
+    }
+}
+
 // Whether the statement `s` takes the address of the storage of a local, and which one in *out:
 // an `addr` or a `slice` of a fixed array whose place is fixed storage of a local. A place that
 // passes through a deref or an index on a span or a `string` names no byte of the local.
@@ -343,8 +385,8 @@ fn mark_memory(survey mut* c) void {
     mark_readers(c);
 }
 
-// Lists the held addresses, and records each one as a reader of the locals that the address of
-// its place reads: the base of the place and each index local.
+// Lists the held addresses and the addresses of the whole stores, and records each one as a reader
+// of the locals that the address of its place reads: the base of the place and each index local.
 fn mark_readers(survey mut* c) void {
     fir.func* f = c->f;
     u32 n = fir.local_count(f);
@@ -352,7 +394,7 @@ fn mark_readers(survey mut* c) void {
     u64 mut held = 0;
     u32 mut k = 0;
     while (k < n) {
-        if (c->locals[cast(k, u64)].held) {
+        if (c->locals[cast(k, u64)].held || c->locals[cast(k, u64)].whole) {
             count += 1 + cast(store_of(c, k)->value.place.proj_len, u64);
             held += 1;
         }
@@ -373,7 +415,7 @@ fn mark_readers(survey mut* c) void {
     held = 0;
     k = 0;
     while (k < n) {
-        if (c->locals[cast(k, u64)].held) {
+        if (c->locals[cast(k, u64)].held || c->locals[cast(k, u64)].whole) {
             c->held[held] = k;
             held += 1;
             fir.place p = store_of(c, k)->value.place;
@@ -483,7 +525,8 @@ fn stale_steps(survey* c) u64 {
 // write memory makes each held address stale, because its place can read a span or `string`
 // header in memory. The store of such a temporary or held address makes it fresh again. A held
 // address has one check, so its steps here stay within a small multiple of the statements times
-// the checks of the work.
+// the checks of the work. The address of a whole store takes the same steps, and it has one whole
+// store, which the whole-store work counts (owner.prover, count_whole_steps).
 fn apply_stale(survey* c, fir.statement* s, fir_flow.bits mut* stale) void {
     if (s->kind != fir.stmt_kind.st_assign) {
         return;
@@ -509,7 +552,8 @@ fn apply_stale(survey* c, fir.statement* s, fir_flow.bits mut* stale) void {
         r = c->readers[cast(r, u64)].next;
     }
     local_info* l = &c->locals[cast(s->place.local, u64)];
-    if (s->place.proj_len == 0 && (l->source.kind == key_kind.kk_local || l->held)) {
+    bool address = l->held || l->whole;
+    if (s->place.proj_len == 0 && (l->source.kind == key_kind.kk_local || address)) {
         fir_flow.bits_clear(stale, s->place.local);
     }
 }
@@ -625,6 +669,31 @@ fn is_held_place(survey* c, fir.place p) bool {
 // Whether `p` is `(*_a)` for a held address `_a` that is stale in `stale`.
 fn is_stale_held(survey* c, fir.place p, fir_flow.bits* stale) bool {
     return is_held_place(c, p) && fir_flow.bits_get(stale, p.local);
+}
+
+/// Whether `p` is `(*_a)` for the address `_a` of a whole store (is_whole_address). While `_a` is
+/// not stale, the test of that store reads its destination as the place of the `addr mut` of `_a`
+/// (whole_source), and a stale `_a` gives no tracked place (spec/fir.md 11, Whole stores).
+fn is_whole_place(survey* c, fir.place p) bool {
+    return is_deref_local(c->f, p) && c->locals[cast(p.local, u64)].whole;
+}
+
+/// The place of the `addr mut` of the address `_a` of a whole store, for `(*_a)` of is_whole_place.
+fn whole_source(survey* c, fir.place p) fir.place {
+    return store_of(c, p.local)->value.place;
+}
+
+/// Whether an index step of `q` has no key, which makes `q` no tracked place (trace).
+fn has_keyless_index(survey* c, path q) bool {
+    u32 mut i = 0;
+    while (i < q.len) {
+        step s = step_at(c, q, i);
+        if (s.kind == step_kind.sk_index && s.key.kind == key_kind.kk_none) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
 }
 
 // The key of the index local `i` at a point whose stale set is `stale`. A temporary has the key
@@ -867,7 +936,8 @@ fn is_indirect(survey* c, path q) bool {
 /// or of `_0` when its type is no aggregate. The frame of the call gives that storage, and no
 /// store wrote it before, so its places start empty: the state `S = {null}` of
 /// spec/ownership-design.md 4.4. The storage of an aggregate `_0` is the destination of the
-/// caller, which can hold owners, because D17.11 checks no store of an owning aggregate.
+/// caller, which can hold owners: until the migration of the whole stores ends, D17.11 only
+/// reports a store of an owning aggregate over a live owner.
 fn is_empty_at_entry(survey* c, path q) bool {
     if (q.base != fir.base_kind.bk_local || is_indirect(c, q)) {
         return false;
@@ -1175,11 +1245,13 @@ fn walk_owners(survey mut* c, u32 n, types.node* t, step mut@ prefix, u64 depth,
 // ---- the owners of a local ---------------------------------------------------------------------
 
 /// Writes into `out` the path of each inner owner of the type `t` below the path `b`, a tracked
-/// place in fixed storage whose type is `t`, in the order of next_owner_step: the steps of `b`,
-/// then a field step for a field and an index step with a constant key for an element. A fixed
-/// array of owners has an owner at each constant index in its bounds (D17.21). Each path is a
-/// tracked place in fixed storage, and its steps stand at the end of the steps of `c`. `out` has
-/// room for count_owners(t) paths, and the walk writes no more.
+/// place whose type is `t`, in the order of next_owner_step: the steps of `b`, then a field step
+/// for a field and an index step with a constant key for an element. A fixed array of owners has
+/// an owner at each constant index in its bounds (D17.21). Each path is a tracked place below `b`
+/// (is_below), in fixed storage when `b` is, and its steps stand at the end of the steps of `c`.
+/// `out` has room for count_owners(t) paths, and the walk writes no more. The walk enters only the
+/// fields of a struct and the elements of a fixed array, which hold their types by value, so it
+/// ends: a struct that holds itself by value has an infinite size, which D3.8 refuses.
 fn put_owners_below(survey mut* c, path b, types.node* t, path mut@ out) void {
     step mut@ own prefix = new(step, depth_to_owners(t));
     defer del(prefix);

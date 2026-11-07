@@ -1009,10 +1009,11 @@ would strand the rest (D17.8). `del` of an aggregate is an error, because `del` 
 struct frees its own fields, one `del` per `own` field, and a container exposes a `free`
 function that does so (D13.5). Functions therefore take an owning struct by pointer, `vec*` or
 `vec mut*`, and a range `for` over owning elements is an error (`core-language.md` 6.4).
-An owning aggregate assignment has no fieldwise overwrite check (D17.11). The leak rule of D17.20
-checks each owner in the fixed storage of an owning aggregate local at each exit of its scope: an
-owner that the compiler cannot prove empty there is a compile error that names it, such as
-`p.a`.
+A store of a whole owning aggregate needs each `own` reference in the fixed storage of its
+destination empty. The compiler reports such a store that it cannot prove, and a later change
+makes it a compile error (D17.11). The leak rule of D17.20 checks each owner in the fixed storage
+of an owning aggregate local at each exit of its scope: an owner that the compiler cannot prove
+empty there is a compile error that names it, such as `p.a`.
 
 ```fort
 struct vec { i32 mut@ own data; u64 len; }

@@ -841,7 +841,10 @@ changes the function, and the verifier runs after it. The passes run in this ord
    prove, and such a site is no error, so no build and no `--check` changes its verdict. Part 1
    adds no line to the report. The pass also proves part 1 for each owner below a local of an
    owning aggregate type (**Aggregates**), and it reports the error of D17.20 for each such exit
-   that it cannot prove, as for an owner local.
+   that it cannot prove, as for an owner local. It proves each store of a whole value of an owning
+   aggregate of D17.11 (**Whole stores**), as a report until the migration of those stores ends:
+   `--whole-store-report` lists each such store that the pass cannot prove, and such a store is no
+   error.
    Rule (b) of D17.21, a use after `move` or `del`, reads the places of this pass, its tests against
    null and its borrows, and adds a state of its own (**Uses**). The pass reports the error of
    D17.21 for each use that it cannot prove, in every build mode, under `--check` and under
@@ -1197,14 +1200,15 @@ changes the function, and the verifier runs after it. The passes run in this ord
        an abort block has none: a runtime error runs no deferred code (D7.8, D11.4), so a leak
        there is outside the guarantee. A `dead` that no run reaches keeps its obligation (**Join**);
      - each `return`, for each parameter and each temporary that is an owner local;
-     - each `return`, for each named owner local whose scope can be open there. A fifth dataflow,
-       an intersection, gives one bit for each named owner local: its scope has ended. `bb0` starts
+     - each `return`, for each named owner local whose scope can be open there. A fifth dataflow, an
+       intersection, gives one bit for each named owner local: its scope has ended. `bb0` starts
        with each bit set, because the frame of a call holds no allocation of the call. `dead(_n)`
-       sets the bit of `_n`. A store into fixed storage of `_n` of a value that is not the zero
-       value, and an `addr` or a `slice` of that storage, clear it. A later store through a pointer
-       goes through such an address, or through an address from before the `dead`, which dangles
-       (D17.11). The lowering writes the `dead` of each named local of each scope that a `return`
-       leaves (9.5), so only FIR text has such an exit with its bit clear.
+       sets the bit of `_n`. A store into fixed storage of `_n` that writes no zero value by
+       **Values**, whatever value it writes, and an `addr` or a `slice` of that storage, clear it. A
+       later store through a pointer goes through such an address, or through an address from before
+       the `dead`, which dangles (D17.11). The lowering writes the `dead` of each named local of
+       each scope that a `return` leaves (9.5), so only FIR text has such an exit with its bit
+       clear.
      The fact of an exit is the fact of the whole local, a tracked place; it joins the facts of
      **Facts**. A `dead` changes no fact, and a `return` reads `_0`, so each exit tests the fact or
      the bit after the statements before it in its block. The leak work of a function adds its
@@ -1309,6 +1313,71 @@ changes the function, and the verifier runs after it. The passes run in this ord
      split it`, which names no other limit. Before part 1 covered these locals, the option
      `--aggregate-report` listed each such exit with the cause where the proof failed
      (`spec/ownership-design.md` 6.3).
+   - **Whole stores.** A whole store is an assignment whose place has an owning aggregate type
+     (D17.7), but a store into fixed storage of an aggregate `_0`, which no lvalue names
+     (**Stores**). D17.11 checks it, and until the migration of the whole stores ends it only
+     reports, so no build and no `--check` changes its verdict. The obligation of a whole store is
+     the fact of each owner below its destination: the tracked places below it whose type is an
+     `own` reference, in the order of the inner owners of **Inner owners**, with each field and each
+     element at each constant index of a fixed array. The test stands where the test of a store into
+     an `own` reference stands (**Order**): after the reads of its operands and the kill of its
+     `call`, before the kill rules of the store. Each owner of each whole store takes a fact of its
+     own, the path of the owner after the path of the destination, read with the stale set before
+     the store. The facts join the facts of **Facts**, and no gen rule and no kill rule changes. A
+     destination that is no tracked place takes no fact, so only the scope bit below can prove its
+     store.
+     When the right side has a writer, the lowering holds `_a = addr mut(p)` before it and stores
+     into `(*_a)` (9.3), with no check. `_a` is the address of a whole store when it is a temporary
+     that exactly one assignment writes, `p` designates no fixed storage and has an owning aggregate
+     type, `_a` is no memory, and only the store into `(*_a)` reads `_a`. The test reads `(*_a)` as
+     `p` while `_a` is not stale, and a stale `_a` gives no tracked place. `_a` turns stale as a
+     held address does (**Held address**), and the stale dataflow keeps its bit. Only the test reads
+     such an address as `p`: the kill rules and the gen rule of the store, the freshness of the
+     locals and the memory locals read `(*_a)` as a place through `_a`, as before, so no other
+     verdict changes. The reading holds for the reason of **Held address**: while `_a` is not stale,
+     no statement since the `addr` stored into a local that the address of `p` reads or wrote
+     memory, so `p` names the storage that `_a` points to. A `call` of the right side can write
+     memory after the `addr`, but its kill comes before the test, and each owner below `p` is
+     reached through memory, because `p` is a place of a global or has a `deref` or an `index` on a
+     span or a `string`.
+     A whole store into fixed storage of a named local is also proved when the bit of the local in
+     the fifth dataflow of **Exits** holds right before the store: on each path, no store into its
+     fixed storage that writes no zero value by **Values**, and no `addr` or `slice` of that
+     storage, stands after the entry or after its last `dead`. The bit reads the form of the rvalue
+     and not its value, so `_1 = aggregate counted(const i32 0, const false, const zero box)` clears
+     it. The frame of a call holds no allocation of the call, and a value that the local holds at
+     its `dead` is the leak of that exit, which **Aggregates** reports (D17.20). A pointer to the
+     local from before the `dead` or from an earlier entry of its block dangles, so a store through
+     it is undefined (D10.7), and the rule assumes none. So the pass proves a declaration: the
+     lowering writes `live(_x)` and then the store (9.3), and each exit of the scope writes
+     `dead(_x)` (9.5). A later store into the local after a store of another value takes the facts.
+     The fifth dataflow runs in each function with a named local of an owning aggregate type within
+     the leak limit, and the local of such a store is one. Past the leak limit, the whole-store
+     work, which holds the leak work, passes its limit too.
+     The whole-store work adds the statements and terminators times the steps of the owners of each
+     whole store to the aggregate work: for each owner, 1 more than the most steps from the type of
+     the destination to an owner, plus the projections of the destination, or of the place of the
+     `addr` of `_a` when they are more. When it passes 1048576, the pass proves no whole store of
+     the function. The work of D17.11, the leak work, the inner work and the aggregate work keep
+     their own limits, so no other verdict changes.
+     `--whole-store-report` writes three lines for each position of a whole store that the pass does
+     not prove, in the order of the stores, for the first store at that position:
+     `<file>:<line>:<col>: overwriting owned value: cannot prove '<place>' is empty here`,
+     `<file>:<line>:<col>: note: del or move '<place>' before this store` and `<file>:<line>:<col>:
+     note: cause <n>: <text>`. The position is the `=` of the assignment whose right side holds the
+     node at the location of the store (9.3), or else the location of the store. So a deferred store
+     that expands at two exits, and the stores of the two arms of a conditional, give their lines
+     once. `<place>` names the first owner that the pass does not prove: the source text of the
+     target of the assignment, in a parenthesis unless it is a name, a call, a `cast`, an index, a
+     field, `new` or `sizeof`, then `.` and the name of each field and `[n]` for element `n`. With
+     no such assignment, it starts with the declared name of a whole named local or parameter, or
+     else the FIR place of the destination with the number of each field (`(*_3).0`). The cause
+     tells where the proof fails, and it changes no verdict. Cause 1: an index of the destination
+     has no key. Cause 2: the destination is no tracked place for another reason, such as a `deref`
+     after the first projection, a `deref` of a memory local, or a stale address of a whole store.
+     Cause 3: the fact of each owner held after the reads of the right side, and the kill of its
+     `call` ended one. Cause 4: each other store that the facts do not prove. Cause 5: the function
+     passed the whole-store work limit.
    - **Uses.** Rule (b) of D17.21 runs after the facts, apart from them, so it changes no fact of
      D17.11 or of D17.20. It runs for each function with a local whose type holds an owner (D17.20),
      `_0` included. A walk of each block, with the stale set of **Keys**, turns its items into acts
@@ -1416,20 +1485,21 @@ writes it (section 12), and it starts a program as `toolchain.md` 6 item 22 star
 - A run ends with the return of the function that it runs, an `exit`, an `abort`, a `trap`, an
   `outside`, or a fault: an operation with no defined result, such as a load through null or
   outside each live range.
-- The shadow state `fir.shadow` (`src/fort/fir/shadow.ft`) observes each run and changes none of
-  its outcome. It keeps the owner slots, the tags and the events of `spec/ownership-design.md`
-  3.3 and 3.4. A run reports each event once, as the line `event <kind> in <function> at
-  <line>:<col>`, where `<kind>` is a name of the table of 3.4 and the location is that of the
-  statement or the terminator that runs. The line ends with the tags of the value of the access
-  or of the `del` that name a local `_<n>`: ` through owner <function> _<n>`, then ` through frame
-  <function> _<n>` or ` through moved <function> _<n>`. A frame tag that a callee kept adds
-  ` kept`, and a vacated slot that a callee read adds ` by a callee`. An extern reaches memory
-  through the tags of an argument whose value starts the access: of such arguments, the one with
-  the lowest index that has a tag. A `leak` stands at the item where the owner count became 0,
-  and an event inside the `std.rt.free` of a `del` stands at the `del`. A `use after release`,
-  `use after scope` of a frame that returned, `double release` and `invalid release` stand
-  before the fault that ends the run, and a `use after move` before the fault
-  `null dereference`.
+- The shadow state `fir.shadow` (`src/fort/fir/shadow.ft`) observes each run and changes none of its
+  outcome. It keeps the owner slots, the tags and the events of `spec/ownership-design.md` 3.3 and
+  3.4. A run reports each event once, as the line `event <kind> in <function> at <line>:<col>`,
+  where `<kind>` is a name of the table of 3.4 and the location is that of the statement or the
+  terminator that runs. An `overwrite` at a statement that the expansion of a deferred statement
+  made adds ` exit <line>:<col>`, the location of the exit that expanded it (9.5), so the expansions
+  of one deferred store at two exits give two events. The line ends with the tags of the value of
+  the access or of the `del` that name a local `_<n>`: ` through owner <function> _<n>`, then `
+  through frame <function> _<n>` or ` through moved <function> _<n>`. A frame tag that a callee kept
+  adds ` kept`, and a vacated slot that a callee read adds ` by a callee`. An extern reaches memory
+  through the tags of an argument whose value starts the access: of such arguments, the one with the
+  lowest index that has a tag. A `leak` stands at the item where the owner count became 0, and an
+  event inside the `std.rt.free` of a `del` stands at the `del`. A `use after release`, `use after
+  scope` of a frame that returned, `double release` and `invalid release` stand before the fault
+  that ends the run, and a `use after move` before the fault `null dereference`.
 
 `fort --fir-run` runs a program with it, and the pass `run` of a FIR test runs a function or a
 program (`toolchain.md` 1, 16.3). `fort --fir-run --fir-events` writes the events to stderr after

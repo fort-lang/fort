@@ -3165,8 +3165,49 @@ says ownership is "by convention", this section supersedes it.
   same proof.
   Checked and release builds give the same verdict, and `--check` gives it too (D20.1). No build
   emits a runtime check for a store.
-  The rule covers only a store whose destination type is an `own` reference. Assignments of owning
-  aggregates are not checked field by field.
+  The rule covers a store whose destination type is an `own` reference, and a whole store. A whole
+  store is a store of a whole value of an owning aggregate (D17.7): its destination is a struct or
+  a fixed array that holds an `own` reference in its fixed storage, at any depth. A whole store is
+  legal only when the compiler proves, inside the function, that each owner below its destination
+  holds the zero value at the store. The owners below a place `p` are the tracked places below `p`
+  whose type is an `own` reference: each field of a struct and each element of a fixed array at
+  each constant index, down to the `own` references (`fir.md` 11, Inner owners). The walk enters
+  no pointer, no span and no `string`, so it ends: a struct that holds itself by value has an
+  infinite size (D3.8). The test of a whole store is the test of a store into an `own` reference:
+  the fact of each owner after the right-hand side and before the kill rules of the store. So a
+  store of the zero value needs the proof too.
+  Two kinds of whole store need no proof. The first is a store into an aggregate result, or into a
+  part of it that the place reaches through no pointer and no span, as for an `own` reference
+  below. The second is a store into the fixed storage of a named local when, on each path to the
+  store, no store into the fixed storage of the local but a store of a zero form, and no address of
+  that storage, stands after the start of the function or after the last end of the scope of the
+  local (`fir.md` 11, Whole stores). A zero form is `{}`, `null`, or a literal whose members are
+  each `{}` or `null`; it is the form of a store of the zero value that gen rule 4 reads (`fir.md`
+  11, Values). The rule reads the form and not the value. For `struct counted { i32 n; bool on; box
+  b; }`, `c = counted{0, false, box{}};` writes the zero value and still ends the proof by this
+  rule, because `0` and `false` are no such members. For `struct inner { u8 mut* own p; }` and
+  `struct outer { inner i; u8 mut* own q; }`, `o = outer{inner{null}, null};` ends it too, because a
+  member that is itself a literal is no such member: the lowering puts it into a temporary. The
+  local then holds no allocation of its scope: the frame of a call holds no allocation of the call,
+  a store of a zero form gives it none, and D17.20 reports a value that the local still holds at the
+  end of its scope. A declaration is such a store, and so is `b = T{};` after `b.f = null;` that
+  follows the declaration of `b`. This rule assumes that no operation writes the storage of the
+  local through a pointer to the local of an earlier entry of its block, or of an earlier scope:
+  such a pointer dangles, and a store through it is undefined (D10.7). A destination of any other
+  whole store that is no tracked place has no fact, so the compiler never proves its store: an
+  element whose index is no key, and a place through a pointer that is not tracked.
+  For a local `b` of type `box`, whose field `data` is an `own` reference, `box mut* own p =
+  new(box); *p = move(b);` passes, because `new` fills `*p` with zero (gen rule 5). For a function
+  `make` that returns a `box mut* own`, `p = make(); *p = move(b);` does not pass: the facts of a
+  function say nothing about the result of another function. `p = new(box); *p = fill();` does not
+  pass either, because the call `fill()` kills the fact of `p->data` (kill rule 5). For a parameter
+  `q` of type `box mut*`, `del(q->data); *q = box{};` passes.
+  Until the migration of the whole stores of the trees ends, a whole store that the compiler cannot
+  prove is no error. `fort --whole-store-report` implies `--check` and lists each such store, and
+  no build and no `--check` changes its verdict. The proof of the whole stores of one function has
+  a work limit of its own (`fir.md` 11, Whole stores), and past it the compiler proves no whole
+  store of the function and keeps each other verdict. A later change makes each whole store that
+  the compiler cannot prove a compile error, and amends this entry.
   The proof is a forward must-empty analysis over the FIR of one function (`fir.md` 11). A fact
   says that a tracked place holds the zero value. The analysis joins facts by intersection: a fact
   holds at the start of a block only when it holds at the end of each predecessor, on the edge from
@@ -3447,6 +3488,12 @@ says ownership is "by convention", this section supersedes it.
   the language tests. Before, the entry gave the maxima of 2026-10-24, 11872 and 23608. Later
   changes of the compiler and of the language tests made the functions longer; the limit and each
   verdict stay.
+  Amended 2026-11-06: the user ruled "Check whole stores" (user, 2026-11-06), and the rule covers
+  the whole stores. Before, it covered only a store whose destination type is an `own` reference,
+  and it did not check an assignment of an owning aggregate field by field. So `box mut* own p =
+  make(); *p = fill();` compiled and lost the allocation that `make` stored in `p->data`. The whole
+  stores start as a report, as the overwrite check went from a report (5152c9fd) to an error
+  (d8a9e096).
 
 ### D17.12 Owned strings
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

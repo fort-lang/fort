@@ -354,7 +354,7 @@ fn help_prints_the_usage_line_and_the_option_table() void {
     assert(str.starts_with(out, "usage: fort [options] entry.ft\noptions:\n"));
     // One line per option follows the usage line and the
     // `options:` header.
-    assert(capture.line_count(out) == 39);
+    assert(capture.line_count(out) == 41);
     assert(str.find(out, "--overwrite-report") < 0);
     string leak =
         "  --leak-report      as --check, and write each leak site that is no error yet\n";
@@ -362,6 +362,10 @@ fn help_prints_the_usage_line_and_the_option_table() void {
     // part 1 of the leak rule is an error on the owning aggregates too, so their report option is
     // gone (D17.20)
     assert(str.find(out, "--aggregate-report") < 0);
+    assert(str.find(out, "  --whole-store-report\n") >= 0);
+    string whole =
+        "                     as --check, and write each whole store that is no error yet\n";
+    assert(str.find(out, whole) >= 0);
     // rule (b) is an error, so its report option is gone (D17.21)
     assert(str.find(out, "--move-report") < 0);
     string ar = "  --ar <path>        the archiver that writes the lib.a of --lib (default ar)\n";
@@ -2151,6 +2155,87 @@ fn aggregate_report_is_an_unknown_option() void {
     assert(err_has("fort: error: unknown option '--aggregate-report'\n"));
 }
 
+// A program with one store of a whole value of an owning aggregate that the pass does not prove:
+// `make` leaves an allocation in `p->data`, and the store of the result of `fill` over `*p` loses
+// it. The pass proves the declaration of `kept`, a local whose scope starts there.
+string[20] WHOLE_SITE = {
+    "struct box {",
+    "    u8 mut* own data;",
+    "}",
+    "fn make() box mut* own {",
+    "    box mut* own p = new(box);",
+    "    p->data = new(u8);",
+    "    return p;",
+    "}",
+    "fn fill() box {",
+    "    box mut b = box{};",
+    "    return b;",
+    "}",
+    "fn main() i32 {",
+    "    box mut* own p = make();",
+    "    *p = fill();",
+    "    box kept = move(*p);",
+    "    del(p);",
+    "    del(kept.data);",
+    "    return 0;",
+    "}",
+};
+
+// The lines of --whole-store-report for WHOLE_SITE: the store at the `=`, with its cause.
+string[3] WHOLE_SITE_LISTED = {
+    "whole.ft:15:8: overwriting owned value: cannot prove '(*p).data' is empty here\n",
+    "whole.ft:15:8: note: del or move '(*p).data' before this store\n",
+    "whole.ft:15:8: note: cause 4: no fact proves that the owner is empty\n",
+};
+
+// --whole-store-report implies --check, and it lists on stdout each store of a whole value of an
+// owning aggregate that the pass does not prove, with the message and the note of D17.11 and a
+// line of its cause. Such a store is no error until the migration of the whole stores ends, so
+// the run exits 0 with no diagnostic, as --check does, and no build runs. With --leak-report the
+// run lists the lines of both reports in one print, and the leak report gives no line for
+// WHOLE_SITE.
+fn the_whole_store_report_lists_each_unproved_store() void {
+    write_runtime();
+    write_lines("whole.ft", WHOLE_SITE[..]);
+    remove_file("a.out");
+    string[3] mut report = {"fort", "--whole-store-report", "whole.ft"};
+    assert(run(report[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    assert(listed(WHOLE_SITE_LISTED[..]));
+    assert(!file_exists("a.out"));
+    string[3] mut check = {"fort", "--check", "whole.ft"};
+    assert(run(check[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    assert(listed(WHOLE_SITE_LISTED[..0]));
+    string[4] mut both = {"fort", "--leak-report", "--whole-store-report", "whole.ft"};
+    assert(run(both[0..4]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    assert(listed(WHOLE_SITE_LISTED[..]));
+    string[4] mut moded = {"fort", "--whole-store-report", "-S", "whole.ft"};
+    for (string mode : MODES) {
+        moded[2] = mode;
+        assert(run(moded[0..4]) == EXIT_OK);
+        assert(listed(WHOLE_SITE_LISTED[..]));
+    }
+    // a program with an error keeps its status and its diagnostics
+    write_lines("leak_sites.ft", LEAK_SITES[..]);
+    string[3] mut errors = {"fort", "--whole-store-report", "leak_sites.ft"};
+    assert(run(errors[0..3]) == EXIT_COMPILE_ERROR);
+    assert(reported_leak_sites());
+    assert(listed(WHOLE_SITE_LISTED[..0]));
+}
+
+// The report and the document of --json both go to stdout, so the two do not combine, and
+// --index sets --json.
+fn the_whole_store_report_refuses_the_document() void {
+    string[4] mut json = {"fort", "--whole-store-report", "--json", "entry.ft"};
+    assert(run(json[0..4]) == EXIT_USAGE);
+    assert(err_has("fort: error: --whole-store-report does not combine with --json or --index\n"));
+    string[4] mut index = {"fort", "--index", "--whole-store-report", "entry.ft"};
+    assert(run(index[0..4]) == EXIT_USAGE);
+    assert(err_has("fort: error: --whole-store-report does not combine with --json or --index\n"));
+}
+
 // A program whose one use of rule (b) is the load through `p` after its `move` (D17.21). The
 // `move` empties `p` and `q` takes the `del`, so D17.11 and the leak rule hold.
 string[7] USE_SITE = {
@@ -2872,6 +2957,8 @@ fn main() i32 {
     the_leak_report_refuses_the_document();
     each_unproved_aggregate_exit_is_an_error_in_every_mode();
     aggregate_report_is_an_unknown_option();
+    the_whole_store_report_lists_each_unproved_store();
+    the_whole_store_report_refuses_the_document();
     each_unproved_use_is_an_error_in_every_mode();
     the_use_error_is_the_same_in_each_mode();
     the_errors_of_one_function_stand_in_the_order_of_the_rules();

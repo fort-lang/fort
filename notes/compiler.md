@@ -1010,6 +1010,34 @@ came here.
   component of the function against `summary.WORK_LIMIT`; V1 gives no line, so the summaries of the
   libraries `std` and `fort` do not change (measured with `--emit-summaries`), but a refinement that
   gives lines, such as R2, reads the larger charge.
+- **The emptiness pass proves the stores of a whole value of an owning aggregate, and only reports
+  them** (D17.11, `spec/fir.md` 11, Whole stores). `owner.prover.find_wholes` lists in
+  `proof.wholes` each assignment whose place has an owning aggregate type, but a store into fixed
+  storage of an aggregate `_0`. `collect_whole_facts` gives each owner below each destination a
+  fact of its own (`place.put_owners_below`), and `judge_wholes` tests them where the test of a
+  store into an `own` reference stands: `apply_facts` is three steps (`apply_reads`, `apply_call`,
+  `apply_store`), so the walk tests the owners after the reads and again after the kill of the
+  `call`, which gives cause 3. `proof.whole_leaks` counts the stores that the pass does not prove,
+  and `prover.has_error` does not read it, so no verdict changes; `driver.overwrite_entry` writes
+  the lines of `report.write_wholes` under `--whole-store-report` alone. The lowering writes a whole
+  store through `(*_a)` of `_a = addr mut(p)` when the right side has a writer, with no check, so
+  `place.is_whole_address` marks such an `_a`, and only the test reads it as `p`
+  (`place.whole_source`); the stale dataflow keeps its bit (`mark_whole_addresses` lists it with
+  the held addresses), and no other reading changes. Without that reading `p = new(box); *p =
+  move(b);` was unproved, because no gen rule makes a place through `_a` empty. A declaration is a
+  store into a named local whose bit in the ended dataflow is set (`mark_ended_wholes`), so the
+  facts, which give a named local no entry fact, do not decide it. Three shapes give most sites. A
+  call in the right side kills each fact reached through memory, a place through a fresh pointer
+  local too (kill rule 5 of D17.11), so `*pr = make_probes(count)` after `pr = new(probes)` is a
+  site of cause 3. The grow loop of a vector, `bigger[i] = move(v->items[i])`, has no fact, because
+  no gen rule makes an element of a fresh span empty. A literal with an omitted owner field, such as
+  `dataflow{.count = n}`, is no zero value, so the owners that it leaves zero take no fact.
+  `test/fort/owner/whole_oracle_test.ft` holds each verdict against a run of `fir.interpreter`: a
+  store that the pass proves and whose run gives an `overwrite` event at its location fails it.
+  `fir.shadow` gives an `overwrite` the exit location of its statement (` exit <line>:<col>`), so
+  each expansion of a deferred store is a site of its own, and no event of one expansion marks
+  another (`mixed` in that test). The ticket of the change holds the count of the sites by directory
+  and by cause, and the command that measures it.
 - **The emptiness pass proves rule (b) of D17.21, and each use that it does not prove is an error**
   (`spec/fir.md` 11, Uses). `owner.prover.prove_uses` runs after the facts, in the same context, so
   it reuses the survey of the places, the stale dataflow, the tests against null and the map of
@@ -1205,8 +1233,9 @@ came here.
   `src/fort` and `src/lsp` held at c04d6836. Before it, 44 of 78 deletions of a release of the frees
   and drops of those ends turned a test red; after it, each of 103 did
   (`test/fort/support/lifetime.ft` gives the run).
-  No form stores the zero value over a live aggregate: D17.11 checks no aggregate store field by
-  field, so `x = T{}` would quiet the error and leak.
+  No form stores the zero value over a live aggregate: `x = T{}` quiets the error of the leak rule
+  and leaks, and until the migration of the whole stores ends, D17.11 only reports such a store
+  (`--whole-store-report`).
 - **The ownership summaries come from the call graph of the proved functions**
   (`spec/ownership-design.md` 8, `src/fort/owner/summary.ft`). `summary.add` takes each function
   that the emptiness pass proves with no error, with `proof.inner_work` (the largest of the three
