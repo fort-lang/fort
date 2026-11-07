@@ -1,0 +1,75 @@
+//! fail
+import extern;
+// A `.ptr` stands as each argument of an `extern fn`, as it stands, whatever the declaration gives
+// back (D3.5): a result, a pointer that C stores in a level marked `mut`, an argument of a
+// callback, a field of a struct that C writes, a function pointer, a result that says `own`, and
+// each argument of the variable tail. A `.ptr` that `->` reaches stands there too. Only a trusted
+// module declares or calls an extern (D9.8). The row of each declaration says where a pointer that
+// C gives back lies, and the row of each call gives the bound of each `.ptr`. A program of
+// test/lang/fail runs nothing and needs no row. No other position takes a `.ptr`: an operand of a
+// cast, of `?:`, an argument of a fort function and an argument of a call through a function
+// pointer are each an error. A field of a struct named `ptr` is no `.ptr`.
+struct holder {
+    char* p;
+}
+
+struct named {
+    char* ptr;
+}
+
+extern fn keep(char* p) char*;
+extern fn keep_any(void* p) void*;
+extern fn keep_out(char* s, char* mut* end) void;
+extern fn keep_back(char* s, fn (char*) void cb) void;
+extern fn keep_later(char* p) fn () char*;
+extern fn stash(char* s, holder mut* h) void;
+extern fn narrow(u8[8]* p) u8[4]*;
+extern fn fresh(char* p) char* mut* own;
+extern fn keep_tail(i32 n, ...) i32;
+extern fn save(char* s) void;
+extern fn load() char*;
+
+fn seen(char* p) void {
+}
+
+fn take(char* p) char* {
+    return p;
+}
+
+fn main() i32 {
+    string s = "abc";
+    char mut@ own a = new(char, 24);
+    u8[8] mut@ own rows = new(u8[8], 2);
+    // `gives:`: C gives back a pointer into the storage of the argument.
+    char* x = keep(a[24..].ptr);
+    u8[4]* n = narrow(rows[2..].ptr);
+    fn () char* g = keep_later(s.ptr);
+    char* mut* own slot = fresh(a[24..].ptr);
+    // `writes:`: C stores a pointer in a level marked `mut`, or in a field of a struct.
+    char* mut end = null;
+    keep_out(a[24..].ptr, &end);
+    holder mut h = holder{};
+    stash(a[24..].ptr, &h);
+    // `calls:` and `keeps:`: C calls a callback with the argument, or keeps it for a later call.
+    keep_back(s.ptr, seen);
+    save(a[24..].ptr);
+    char* kept = load();
+    // The variable tail, a `.ptr` that `->` reaches, a `.ptr` in parentheses, and a field.
+    string* sp = &s;
+    i32 t = keep_tail(2, s.ptr, sp->ptr, &end);
+    char* y = keep(sp->ptr);
+    char* z = keep((s.ptr));
+    named nm = named{.ptr = &s[0]};
+    char* f = keep(nm.ptr);
+    // The positions that take no `.ptr`.
+    void* c1 = keep_any(cast(s.ptr, void*)); //! error: '.ptr' can name the byte after the last
+    i32 t2 = keep_tail(1, cast(s.ptr, u64)); //! error: '.ptr' can name the byte after the last
+    char* c2 = keep(t > 0 ? s.ptr : null); //! error: '.ptr' can name the byte after the last
+    char* c3 = take(s.ptr); //! error: '.ptr' can name the byte after the last element
+    fn (char*) char* via = take;
+    char* c4 = via(s.ptr); //! error: '.ptr' can name the byte after the last element
+    del(slot);
+    del(rows);
+    del(a);
+    return 0;
+}

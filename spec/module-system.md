@@ -442,8 +442,8 @@ fn by_value(i32* a, i32* b) i32 {
 ```
 
 An `i32 mut@ xs` is sorted with `qsort(&xs[0], xs.len, sizeof(i32), by_value);`. C calls
-`by_value` with pointers to two elements of the argument `base` (A7 of `ownership-design.md` 5.1),
-so the argument is the address of an element and no `.ptr` (D3.5).
+`by_value` with pointers to two elements of the argument `base` (A7 of `ownership-design.md` 5.1).
+The call row says so, and it gives `base` the bound of the `xs.len` elements from `&xs[0]` (D9.8).
 A function taking a span, string, struct or fixed array is not extern-legal and cannot be passed
 to C. The library declares no `qsort`. One C symbol has one signature in a closure (D9.8), so a
 program declares it with the element type that it sorts, and a comparator of `void*` reads no
