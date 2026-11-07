@@ -1018,7 +1018,8 @@ fn vec_new(u64 cap) vec {
     vec v = vec{.data = new(i32, cap), .len = 0};
     return v;                        // implicit move of a local
 }
-fn vec_free(vec mut* v) void { del(v->data); v->len = 0; }
+fn vec_free(vec mut* v) void { vec_drop(move(*v)); }
+fn vec_drop(vec mut v) void { del(v.data); }
 vec x = vec_new(4);                  // ok: an owning rvalue lands
 vec y = x;                           // error: copying owning value 'x' needs move(x)
 vec mut z = move(x);                 // ok: x is now {{null, 0}, 0}
@@ -1026,7 +1027,7 @@ node* own[4] slots = {};             // an owning array
 node* own[4] more = slots;           // error: copying owning value 'slots' needs move(slots)
 del(z);                              // error: del takes a reference, not a vec
 i32 mut@ own d = vec_new(2).data;    // error: owning temporary would leak
-vec_free(&z);                        // ok: z.data is {null, 0} afterwards
+vec_drop(move(z));                   // ok: z is {{null, 0}, 0} afterwards
 ```
 
 ### 8.6 Strings

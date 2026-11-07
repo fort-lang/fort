@@ -958,9 +958,20 @@ fn list_pop(list mut* l, i32 mut* out) bool {
 }
 
 fn list_free(list mut* l) void {
+    list_drop(move(*l));
+}
+
+fn list_drop(list mut l) void {
     i32 mut unused = 0;
-    while (list_pop(l, &unused)) {
+    while (l.head != null) {
+        list_pop(&l, &unused);
     }
+}
+
+fn list_drop_made(list mut* own p) void {
+    list kept = move(*p);
+    del(p);
+    list_drop(move(kept));
 }
 ```
 
@@ -973,10 +984,17 @@ store into `n->next` lands in a field that `new` zeroed. `n` is fresh, so that s
 that `l->head` is empty, and `l->head = move(n)` passes. In `list_pop`, `n` comes from `l->head` and
 is not fresh, and a store through `out` can change any field that another pointer reaches, so
 `list_pop` stores `*out` after its owning store (D17.5, D17.11). `del(n)` frees the popped node and
-leaves `n` null (D17.9). A user writes `import list;`, `list.list mut l = list.list_create();`,
-`list.list_push(&l, 7);` and `defer list.list_free(&l);`; `&l` on a `list.list mut` is a
-`list.list mut*` (D5.8); a local named `list` would shadow the binding (section 5), hence `l`.
-`list.list copy = l;` is an error, because copying an owning value requires `move` (D17.7).
+leaves `n` null (D17.9). `list_drop` frees a list that the caller moves in: its loop ends where the
+test finds `l.head` null, so `head` is empty at its exit (D17.11, D17.20). `list_free` moves `*l`
+into it and leaves `list{}`, and `list_drop_made` ends a list in an allocation of `new`: the list
+moves out, the allocation goes, and `list_drop` frees the nodes. A user writes `import list;`,
+`list.list mut* own l = new(list.list);`, `defer list.list_drop_made(move(l));` and
+`list.list_push(l, 7);`. `new` gives the zero list, as `list_create` does (D10.2), and a call
+takes `l` as a `list.list mut*` (D17.4). A local `list.list mut l` that `list.list_push(&l, 7)`
+takes by address cannot end with `defer list.list_free(&l);`: the compiler reads no callee, and
+the call kills what it knows of `l`, so the exit is the leak error of D17.20. A local named `list`
+would shadow the binding (section 5), hence `l`. `list.list copy = *l;` is an error, because
+copying an owning value requires `move` (D17.7).
 
 ### 12.4 A multi-module application
 

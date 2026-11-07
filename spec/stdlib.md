@@ -53,10 +53,32 @@ library follows:
 - **Containers own their storage, not their contents.** `str_buf`, `int_vec` and
   `str_map` keep their storage in an `own` field, which makes each an owning aggregate (D17.7):
   it is passed by pointer (`str_buf mut*`), copying one from a variable into another needs
-  `move`, and `del` of a whole container is an error. Each has a `free` that `del`s the storage
-  and leaves the zero value; `free` of the zero value is a no-op (D17.9), so
-  `defer free(&c);` right after the declaration is always safe. `str_map` keys are borrowed;
-  freeing the container never touches them.
+  `move`, and `del` of a whole container is an error. Each has a `drop` that takes the container
+  by `move` and `del`s its storage (`strbuf.drop`, `vec.int_drop`, `strmap.drop`), and a `free`
+  that moves `*c` into the `drop` and leaves the zero value; `free` of the zero value is a no-op
+  (D17.9). `str_map` keys are borrowed; freeing the container never touches them.
+- **The end of a container.** Each owner of a local container must hold the zero value at each
+  exit of the local, or the exit is a compile error (D17.20). The compiler reads no callee, and
+  a call kills what it knows of each local whose address the function takes (D17.11, kill rule
+  5). So a container that no call takes by address ends with a deferred `strbuf.drop(move(c));`,
+  and a deferred `strbuf.free(&c);` or `strbuf.drop(move(c));` of a container that the function
+  lends to calls is a compile error. A container that the function lends to calls lives in an
+  allocation of `new` and ends through a `drop_made` of the program: the value moves out, the
+  allocation goes, and the `drop` of the container frees the storage. The samples of 2.4, 2.6
+  and 2.7 take this form:
+
+  ```fort
+  // Ends a buffer in an allocation of `new` that the caller moves in.
+  fn buf_drop_made(strbuf.str_buf mut* own p) void {
+      strbuf.str_buf kept = move(*p);
+      del(p);
+      strbuf.drop(move(kept));
+  }
+
+  strbuf.str_buf mut* own b = new(strbuf.str_buf);
+  defer buf_drop_made(move(b));
+  strbuf.append(b, "text");   // the calls take the pointer, and no call takes the address of b
+  ```
 - **Out-parameters that receive ownership are pointers to `own` slots**, `u8 mut@ own mut* out`
   (D13.5, D17.2). The caller initializes the slot to `{}` or `null` and passes its address; the
   callee `del`s `*out` and then stores an `own` rvalue into it, because the entry value of `*out`
@@ -83,8 +105,8 @@ library follows:
   ```
 
   A later `return data;` is an implicit `move` (D17.5) that empties `data` before the deferred
-  `del` runs (D7.8), so the allocation reaches the caller and every other path frees it. The
-  same shape with `strbuf.free(&b);` covers containers.
+  `del` runs (D7.8), so the allocation reaches the caller and every other path frees it. A
+  container takes the shape of the bullet above.
 - **`del` before storing.** Code that replaces owned storage writes `del(old)` before the store,
   `del(b->data); b->data = move(bigger);`, because a store over an `own` lvalue that the compiler
   cannot prove empty is a compile error (D17.11).
@@ -621,18 +643,25 @@ import std.io;
 import std.strbuf;
 import std.sys;
 
+// Ends a buffer in an allocation of `new` that the caller moves in (1.3).
+fn buf_drop_made(strbuf.str_buf mut* own p) void {
+    strbuf.str_buf kept = move(*p);
+    del(p);
+    strbuf.drop(move(kept));
+}
+
 // cat: copies one file to standard output.
 fn main(string@ args) i32 {
     if (args.len != 2) {
         return 2;
     }
-    strbuf.str_buf mut buf = strbuf.create();
-    defer strbuf.free(&buf);
-    if (!io.read_file(args[1], &buf)) {
+    strbuf.str_buf mut* own buf = new(strbuf.str_buf);
+    defer buf_drop_made(move(buf));
+    if (!io.read_file(args[1], buf)) {
         eprintln("cat: ", args[1], ": errno ", sys.errno());
         return 1;
     }
-    return io.write_all(io.STDOUT, strbuf.bytes(&buf)) ? 0 : 1;
+    return io.write_all(io.STDOUT, strbuf.bytes(buf)) ? 0 : 1;
 }
 ```
 
@@ -850,16 +879,24 @@ b->data = move(bigger);                 // the slot is zero, so the store passes
 import std.io;
 import std.strbuf;
 
+// Ends a buffer in an allocation of `new` that the caller moves in (1.3).
+fn buf_drop_made(strbuf.str_buf mut* own p) void {
+    strbuf.str_buf kept = move(*p);
+    del(p);
+    strbuf.drop(move(kept));
+}
+
 // Formats "    mov <reg>, <imm>\n". Ownership: the caller dels the result.
 fn mov_imm(string reg, i64 imm) string own {
-    strbuf.str_buf mut b = strbuf.with_cap(32);
-    defer strbuf.free(&b);
-    strbuf.append(&b, "    mov ");
-    strbuf.append(&b, reg);
-    strbuf.append(&b, ", ");
-    strbuf.append_i64(&b, imm);
-    strbuf.push(&b, '\n');
-    return strbuf.take(&b);   // an own rvalue flows into the own return type (D17.5)
+    strbuf.str_buf mut* own b = new(strbuf.str_buf);
+    defer buf_drop_made(move(b));
+    strbuf.reserve(b, 32);
+    strbuf.append(b, "    mov ");
+    strbuf.append(b, reg);
+    strbuf.append(b, ", ");
+    strbuf.append_i64(b, imm);
+    strbuf.push(b, '\n');
+    return strbuf.take(b);   // an own rvalue flows into the own return type (D17.5)
 }
 
 fn emit_mov(i32 fd) bool {
@@ -912,7 +949,7 @@ a type to a `void*` (D3.14), so a pointer that went in as a `void*` could not co
 typed pointer. A vector of pointers is a typed copy of the pattern. For pointers to elements that
 belong to someone else (an arena, a fixed array, an owner that outlives the vector), copy the file
 with the slot type `node mut* mut@ own items;`: `node_push(node_vec mut* v, node mut* n)` stores
-the view, `node_pop` returns `node mut*`, and `node_free` never touches a pointee. A typed handle
+the view, `node_pop` returns `node mut*`, and `node_drop` never touches a pointee. A typed handle
 is the other form: an `int_vec` of indices into a typed span that the caller owns. When the
 vector is to own its elements, copy the file with the slot type `node mut* own mut@ own items;`
 instead, an owned span of owned nodes (D17.2):
@@ -922,8 +959,9 @@ lvalue, D17.5). The `del` frees nothing, because a fresh slot is zero at run tim
 the compiler cannot know that inside `node_push`; the local `k` gives both elements one key
 (D17.11). `node_pop` returns `node mut* own` with `return move(v->items[v->len]);` (the slot is
 reached through `mut` storage, D17.6, and is left `null`); the growth loop moves each element
-with `del(bigger[i]); bigger[i] = move(v->items[i]);`; `node_free` `del`s every live element
-before the span; and a range loop over the live span lends,
+with `del(bigger[i]); bigger[i] = move(v->items[i]);`; `node_drop` `del`s every live element
+before the span, and `node_free` moves the vector into it; and a range loop over the live span
+lends,
 `for (node mut* n : v->items[..v->len])` (D17.10).
 
 ```fort
@@ -940,14 +978,22 @@ fn value_of(node* p) i64 {
     return p->value;
 }
 
+// Ends a vector in an allocation of `new` that the caller moves in (1.3): node_drop, the typed
+// copy of int_drop, frees the slots.
+fn node_drop_made(node_vec mut* own p) void {
+    node_vec kept = move(*p);
+    del(p);
+    node_drop(move(kept));
+}
+
 fn demo() i64 {
-    node_vec mut stack = node_vec{};
-    defer node_free(&stack);
+    node_vec mut* own stack = new(node_vec);  // the calls take the vector by pointer (1.3)
+    defer node_drop_made(move(stack));
     node mut* own n = new(node);              // new lands in an own place (D17.3, D17.8)
     defer del(n);
     n->value = 7;
-    node_push(&stack, n);                     // lends n; the vector never frees it
-    node mut* top = node_pop(&stack);         // the type that went in comes back
+    node_push(stack, n);                      // lends n; the vector never frees it
+    node mut* top = node_pop(stack);          // the type that went in comes back
     return value_of(top);
 }
 ```
