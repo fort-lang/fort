@@ -1362,25 +1362,27 @@ changes the function, and the verifier runs after it. The passes run in this ord
      When the right side has a writer, the lowering holds `_a = addr mut(p)` before it and stores
      into `(*_a)` (9.3), with no check. `_a` is the address of a whole store when it is a temporary
      that exactly one assignment writes, `p` designates no fixed storage and has an owning aggregate
-     type, `_a` is no memory, and only the store into `(*_a)` reads `_a`. The test reads `(*_a)` as
-     `p` while `_a` is not stale, and a stale `_a` gives no tracked place. `_a` turns stale as a
-     held address does (**Held address**), and the stale dataflow keeps its bit. Only the test reads
-     such an address as `p`: the kill rules and the gen rule of the store and the memory locals read
-     `(*_a)` as a place through `_a`, as before. The `addr` of `_a` ends no freshness, and each
-     store through `(*_a)` ends the freshness of the local of the place of the `addr`, before its
-     kill rules (**Fresh**). So those kill rules kill each fact through that local, as when the
-     `addr` ended the freshness, and the call of the right side keeps them (kill rule 5 of D17.11).
-     The pass marks such an address in each function, also past the whole-store work, so the
-     freshness and each verdict but those of the whole stores do not depend on that limit; only
-     within it does the stale dataflow keep the bit of `_a`. The reading holds for the reason of
-     **Held address**: while `_a` is not stale, no statement since the `addr` stored into a local
-     that the address of `p` reads or wrote memory, so `p` names the storage that `_a` points to.
-     A `call` of the right side can write memory after the `addr`, but its kill comes before the
-     test. It keeps the fact of an owner below `p` only when `p` is a place through a fresh pointer
-     local `_n`: no callee reaches the object of `_n`, `_n` is no memory, and each key of `p` is a
-     constant or a local that is no memory, so the call does not change the storage that `p`
-     names. Each other owner below `p` is reached through memory, because `p` is a place of a global
-     or has a `deref` or an `index` on a span or a `string`, so the kill ends its fact.
+     type, `_a` is no memory, and only stores into `(*_a)` read `_a`, one or more, with no check:
+     the two arms of a conditional, `*p = c ? a : b`, store through one `_a`. The test of each store
+     reads `(*_a)` as `p` while `_a` is not stale, and a stale `_a` gives no tracked place. A store
+     through `(*_a)` writes memory, so `_a` is stale at each later store on a path from it. `_a`
+     turns stale as a held address does (**Held address**), and the stale dataflow keeps its bit.
+     Only the test reads such an address as `p`: the kill rules and the gen rule of the store and
+     the memory locals read `(*_a)` as a place through `_a`, as before. The `addr` of `_a` ends no
+     freshness, and each store through `(*_a)` ends the freshness of the local of the place of the
+     `addr`, before its kill rules (**Fresh**). So those kill rules kill each fact through that
+     local, as when the `addr` ended the freshness, and the call of the right side keeps them (kill
+     rule 5 of D17.11). The pass marks such an address in each function, also past the whole-store
+     work, so the freshness and each verdict but those of the whole stores do not depend on that
+     limit; only within it does the stale dataflow keep the bit of `_a`. The reading holds for the
+     reason of **Held address**: while `_a` is not stale, no statement since the `addr` stored into
+     a local that the address of `p` reads or wrote memory, so `p` names the storage that `_a`
+     points to. A `call` of the right side can write memory after the `addr`, but its kill comes
+     before the test. It keeps the fact of an owner below `p` only when `p` is a place through a
+     fresh pointer local `_n`: no callee reaches the object of `_n`, `_n` is no memory, and each key
+     of `p` is a constant or a local that is no memory, so the call does not change the storage that
+     `p` names. Each other owner below `p` is reached through memory, because `p` is a place of a
+     global or has a `deref` or an `index` on a span or a `string`, so the kill ends its fact.
      A whole store into fixed storage of a named local is also proved when the bit of the local in
      the fifth dataflow of **Exits** holds right before the store: on each path, no store into its
      fixed storage that writes no zero value by **Values**, and no `addr` or `slice` of that

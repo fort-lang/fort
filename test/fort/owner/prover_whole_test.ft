@@ -78,7 +78,7 @@ string[48] PRELUDE = {
 
 // Each case is a FIR function and the verdicts of its whole stores (write_verdicts), which its
 // comment gives. Each owner below the destination must hold the zero value at the store.
-string[740] CASES = {
+string[799] CASES = {
     // a fresh `new` makes the owner of its object empty (gen rule 5): P
     "fn main.c1(_1 (b): box) -> void {",
     "    let _2 (p): box mut* own;",
@@ -903,15 +903,80 @@ string[740] CASES = {
     "        return;",
     "    }",
     "}",
+    // the two arms of a conditional store through one address of a fresh `new`: the test of each
+    // reads the address as `(*_3)` (R5), and the call of the first keeps the fact: P P
+    "fn main.c57(_1 (c): bool) -> void {",
+    "    let _2: void;",
+    "    let _3 (p): box mut* own;",
+    "    let _4: box mut*;",
+    "    bb0: {",
+    "        _3 = const zero box mut* own;",
+    "        live(_3);",
+    "        _3 = alloc<box>(const u64 1);",
+    "        _4 = addr mut((*_3));",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        (*_4) = call fn main.fill();",
+    "        goto bb3;",
+    "    }",
+    "    bb2: {",
+    "        (*_4) = const zero box;",
+    "        goto bb3;",
+    "    }",
+    "    bb3: {",
+    "        del(move (*_3).0);",
+    "        del(move _3);",
+    "        dead(_3);",
+    "        return;",
+    "    }",
+    "}",
+    // two stores through one address on one path: the first writes memory, so the address is
+    // stale at the second, and the kill rules of the first end the fact: P U0:2
+    "fn main.c58(_1 (b): box) -> void {",
+    "    let _2 (p): box mut* own;",
+    "    let _3: box mut*;",
+    "    bb0: {",
+    "        _2 = const zero box mut* own;",
+    "        live(_2);",
+    "        _2 = alloc<box>(const u64 1);",
+    "        _3 = addr mut((*_2));",
+    "        (*_3) = call fn main.fill();",
+    "        (*_3) = move _1;",
+    "        del(move (*_2).0);",
+    "        del(move _2);",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
+    // an address that a copy reads too is no address of a whole store, so its `addr` ends the
+    // freshness of `p`, and the store through it has no fact: U0:4
+    "fn main.c59(_1 (b): box) -> void {",
+    "    let _2 (p): box mut* own;",
+    "    let _3: box mut*;",
+    "    let _4: box mut*;",
+    "    bb0: {",
+    "        _2 = const zero box mut* own;",
+    "        live(_2);",
+    "        _2 = alloc<box>(const u64 1);",
+    "        _3 = addr mut((*_2));",
+    "        _4 = copy _3;",
+    "        (*_3) = move _1;",
+    "        del(move (*_2).0);",
+    "        del(move _2);",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
 };
 
-string[56] VERDICTS = {
+string[59] VERDICTS = {
     "P", "P", "P", "U0:4", "U0:4", "U0:4 P", "U1:4", "P", "P", "U0:1", "U0:4 P", "U0:2",
     "U0:2", "U0:2", "U0:4", "P P", "U0:4", "P", "P U0:4", "P", "P U0:4", "P U0:4", "", "U0:4 P",
     "U0:3", "U0:4", "P", "P U1:4", "P P", "P", "U0:2", "P P", "U0:4 P", "U2:4", "P", "U4:4",
     "P", "P U0:4", "U0:4", "U0:2", "P", "U0:3", "U0:3", "U0:4", "U0:3", "U0:2", "U0:4", "P U0:4",
     "P P", "P U0:4", "U0:2", "U0:4 P P", "U0:4 U0:4 P", "P U0:4 P U0:4", "P U0:4 P",
-    "P U0:4 U0:4 U0:4",
+    "P U0:4 U0:4 U0:4", "P P", "P U0:2", "U0:4",
 };
 
 // Writes the verdict of each whole store of p->wholes into `out`, in order, with a space between
@@ -1085,7 +1150,7 @@ fn expect_module(lower_env.env mut* e, fir.module* m, string@ want) void {
 
 // Fort sources whose whole stores the pass proves and does not prove, of each cause. A comment
 // gives the verdicts of each function (write_verdicts).
-string[143] SOURCE = {
+string[149] SOURCE = {
     "struct box {",
     "    u8 mut* own data;",
     "}",
@@ -1255,18 +1320,26 @@ string[143] SOURCE = {
     "    c.b = move(y);",
     "    del(c.b.data);",
     "}",
+    // the two arms of a conditional store through one address of a fresh `new`: P P
+    "fn cond_fresh(bool c) void {",
+    "    box mut* own p = new(box);",
+    "    *p = c ? fill() : box{};",
+    "    del(p->data);",
+    "    del(p);",
+    "}",
 };
 
-string[23] SOURCE_NAMES = {
+string[24] SOURCE_NAMES = {
     "make", "fill", "probe", "fresh_move", "fresh_call", "fresh_lit", "field_first", "nested",
     "element", "element_field", "through", "local_reassign", "loop_decl", "deferred",
     "global_store", "cond", "cond_live", "twice", "call_first", "param_call", "nested_zero",
-    "designated", "live_member",
+    "designated", "live_member", "cond_fresh",
 };
 
-string[23] SOURCE_VERDICTS = {
+string[24] SOURCE_VERDICTS = {
     "", "P", "U0:4", "P", "P", "P", "P", "U0:4 P", "P", "U0:1", "U0:2", "P P U0:4", "P",
     "P P", "U0:4", "P P", "U0:4 U0:4", "P U0:4", "P", "U0:3", "P P P P", "P P", "P U0:4",
+    "P P",
 };
 
 // Lowers the function `name` of the checked source of `e` and holds that the verifier accepts it.
