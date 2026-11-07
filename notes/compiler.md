@@ -1129,11 +1129,17 @@ came here.
   `scope.drop`). A drop moves each field whose type has a value drop into that drop
   (`strbuf.drop(move(g.out))`, `fir_flow.bits_drop(move(c.origins))`), dels each other owner of its
   value, and drains each chain in a loop, in the order of the free that it replaces, so each release
-  of a type stands once, in the drop of the type. No function of src/fort, src/lsp, std or
-  test/fort/support, a drop or another, dels the storage below a field or an element of a span whose
-  type has a value drop, through a parameter or a local: a local whose type holds such a field and
-  that the function lends to calls lives in an allocation and ends through the drop_made of its type
-  (`gen.gen_args_make` in `gen.gen_main`, `prover.probes_drop_made`). ctest `drop-fields`
+  of a type stands once, in the drop of the type. No function of src/fort, src/lsp, std, test/fort,
+  test/lsp or test/library, a drop or another, dels the storage below a field or an element of a
+  span whose type has a value drop, through a parameter or a local: a local whose type holds such a
+  field and that the function lends to calls lives in an allocation and ends through the drop_made
+  of its type (`gen.gen_args_make` in `gen.gen_main`, `prover.probes_drop_made`). A fixed array of
+  such values that a test lends to calls does the same (`fir_env.sets` in test/fort/support): a call
+  kills the fact of a `move` out of a memory local, so a drop of each element there leaves a site.
+  An owned span whose element type has owners (`new(fir_flow.bits, n)`) gives no site when the
+  drops of its elements go, so use an allocation with a drop; the aggregate leak error will decide
+  this case. test/lang stays outside the scan: a `del` below a field is valid fort, the corpus shows
+  the language, and a change there moves the oracle events of fir-run. ctest `drop-fields`
   (`test/drop_fields_test.py`) holds that count at 0 by a scan of the text, with a control tree. The
   scan reads each function at the top of a file and each function in each branch of a module `$if`,
   with its parameters, its locals and each `del`; it reads the code of a line without its comment

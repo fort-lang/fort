@@ -35,8 +35,9 @@ bullet at a time and without a rewrite.
   the modules of both targets), `panic_coverage`, `panic_coverage_selftest` and one
   `mutation_anchors_<table>` test for each table in `tools/mutations`, the three `mutate_`
   tests of `--check` over the fixture `test/mutate/strict_table.json`, and `drop-fields`
-  (`test/drop_fields_test.py`: no function of src/fort, src/lsp, std or test/fort/support dels the
-  storage below a field or an element of a span whose type has a value drop, with a control tree);
+  (`test/drop_fields_test.py`: no function of src/fort, src/lsp, std, test/fort, test/lsp or
+  test/library dels the storage below a field or an element of a span whose type has a value drop,
+  with a control tree);
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fir-run`,
   `library-interface`, `library-artifact`, `library-use`, `library-cache`, `fixpoint`,
   `aggregate-sites`, `aggregate-front`, `aggregate-lsp`, `aggregate-fir`, `aggregate-gen`,

@@ -10,6 +10,7 @@
 /// that walk did: the effects in item order, and a transfer as sets that equals the effects
 /// applied in order.
 import fort.fir;
+import fir_env;
 import fort.fir_flow;
 import fort.fir_verify;
 import lower_env;
@@ -190,14 +191,14 @@ fn close_block(fir_verify.effects mut* e) void {
 
 // The gen set and the kill set of `rule` for the only block of `e`, as text.
 fn sets_text(fir_verify.effects* e, u32 rule, strbuf.str_buf mut* out) void {
-    fir_flow.bits[1] mut gens = {};
-    fir_flow.bits[1] mut kills = {};
-    fir_verify.transfer_sets(e, rule, 1, 4, gens[..], kills[..]);
+    fir_env.sets mut* own s = fir_env.sets_make();
+    defer fir_env.sets_drop_made(move(s));
+    fir_verify.transfer_sets(e, rule, 1, 4, s->gens[..1], s->kills[..1]);
     strbuf.clear(out);
     strbuf.append(out, "gen");
     u32 mut i = 0;
     while (i < 4) {
-        if (fir_flow.bits_get(&gens[0], i)) {
+        if (fir_flow.bits_get(&s->gens[0], i)) {
             strbuf.push(out, ' ');
             strbuf.append_u64(out, cast(i, u64));
         }
@@ -206,14 +207,12 @@ fn sets_text(fir_verify.effects* e, u32 rule, strbuf.str_buf mut* out) void {
     strbuf.append(out, " kill");
     i = 0;
     while (i < 4) {
-        if (fir_flow.bits_get(&kills[0], i)) {
+        if (fir_flow.bits_get(&s->kills[0], i)) {
             strbuf.push(out, ' ');
             strbuf.append_u64(out, cast(i, u64));
         }
         i += 1;
     }
-    del(gens[0].words);
-    del(kills[0].words);
 }
 
 fn expect_sets(fir_verify.effects* e, u32 rule, string want) void {
@@ -306,9 +305,9 @@ fn the_sets_equal_the_effects_applied_in_order() void {
         close_block(&e);
         u32 mut rule = 12;
         while (rule <= 13) {
-            fir_flow.bits[1] mut gens = {};
-            fir_flow.bits[1] mut kills = {};
-            fir_verify.transfer_sets(&e, rule, 1, LOCALS, gens[..], kills[..]);
+            fir_env.sets mut* own s = fir_env.sets_make();
+            defer fir_env.sets_drop_made(move(s));
+            fir_verify.transfer_sets(&e, rule, 1, LOCALS, s->gens[..1], s->kills[..1]);
             u64 mut trial = 0;
             while (trial < 4) {
                 fir_flow.bits mut walked = fir_flow.bits_new(LOCALS);
@@ -322,8 +321,8 @@ fn the_sets_equal_the_effects_applied_in_order() void {
                     i += 1;
                 }
                 apply_all(&e, rule, &walked);
-                fir_flow.bits_subtract(&by_sets, &kills[0]);
-                fir_flow.bits_union(&by_sets, &gens[0]);
+                fir_flow.bits_subtract(&by_sets, &s->kills[0]);
+                fir_flow.bits_union(&by_sets, &s->gens[0]);
                 assert(fir_flow.bits_equal(&walked, &by_sets));
                 del(walked.words);
                 del(by_sets.words);
@@ -331,13 +330,11 @@ fn the_sets_equal_the_effects_applied_in_order() void {
             }
             u32 mut l = 0;
             while (l < LOCALS) {
-                if (fir_flow.bits_get(&kills[0], l)) {
+                if (fir_flow.bits_get(&s->kills[0], l)) {
                     decided += 1;
                 }
                 l += 1;
             }
-            del(gens[0].words);
-            del(kills[0].words);
             rule += 1;
         }
         del(e.items);

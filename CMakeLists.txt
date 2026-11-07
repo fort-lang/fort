@@ -399,9 +399,9 @@ set_tests_properties(aggregate-sites PROPERTIES
     LABELS "fort;integration"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
-# No function of src/fort, src/lsp, std or test/fort/support dels the storage below a field or an
-# element of a span whose type has a value drop: such a field ends through the drop of its type, so
-# each release stands once. A text scan with a control tree; it needs no compiler.
+# No function of src/fort, src/lsp, std, test/fort, test/lsp or test/library dels the storage below
+# a field or an element of a span whose type has a value drop: such a field ends through the drop of
+# its type, so each release stands once. A text scan with a control tree; it needs no compiler.
 add_test(NAME drop-fields
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/drop_fields_test.py" --root "${CMAKE_SOURCE_DIR}")
 set_tests_properties(drop-fields PROPERTIES

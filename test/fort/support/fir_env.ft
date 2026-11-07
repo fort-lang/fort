@@ -272,6 +272,46 @@ fn set_each(fir_flow.bits mut* s, u32@ list) void {
     }
 }
 
+// ---- the sets of a dataflow -------------------------------------------------------
+
+// The gen sets and the kill sets of up to two blocks. A test lends their spans to calls, so the
+// sets live in an allocation of sets_make and end through sets_drop_made.
+struct sets {
+    fir_flow.bits[2] gens;
+    fir_flow.bits[2] kills;
+}
+
+// Empty sets of count 0 in an allocation of their own, for a call that writes each set.
+fn sets_make() sets mut* own {
+    return new(sets);
+}
+
+// Empty sets of `count` numbers in an allocation of their own. The stores come right after the
+// `new`, so that the pass knows each owner of the allocation empty before its store.
+fn sets_make_with(u32 count) sets mut* own {
+    fir_flow.bits[2] mut gens = {fir_flow.bits_new(count), fir_flow.bits_new(count)};
+    fir_flow.bits[2] mut kills = {fir_flow.bits_new(count), fir_flow.bits_new(count)};
+    sets mut* own s = new(sets);
+    s->gens = move(gens);
+    s->kills = move(kills);
+    return s;
+}
+
+// Ends the sets that the caller moves in: each set through the drop of its type.
+fn sets_drop(sets mut s) void {
+    fir_flow.bits_drop(move(s.gens[0]));
+    fir_flow.bits_drop(move(s.gens[1]));
+    fir_flow.bits_drop(move(s.kills[0]));
+    fir_flow.bits_drop(move(s.kills[1]));
+}
+
+// Ends the sets of sets_make that the caller moves in.
+fn sets_drop_made(sets mut* own p) void {
+    sets kept = move(*p);
+    del(p);
+    sets_drop(move(kept));
+}
+
 // ---- leak probes ------------------------------------------------------------------
 
 // The rounds of a probe, the round it samples early, and how far a sample may move.
