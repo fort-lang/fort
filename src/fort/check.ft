@@ -119,7 +119,8 @@ struct written_type {
 // failure. `value` is cv_none unless the expression is constant. `untyped`
 // marks a constant that still takes its type from context. `lvalue` and
 // `is_mut` are level-0 answers. `sym` identifies the declaration for an
-// identifier or field access. It is null otherwise.
+// identifier or field access, and for a call the function that its callee node
+// names, which check_no_value quotes. It is null otherwise.
 struct expr {
     types.node* ty;
     consts.cval value;
@@ -185,8 +186,6 @@ struct checker {
     ast.node* callee;
     // The `.ptr` node that its position allows (D3.5).
     ast.node* ptr_ok;
-    // The count of the walks of the types of `extern fn` calls (give_id), which number each walk.
-    u64 give_walks;
     // The count of the walks of reach_walk (reach_id), which number each walk (D9.8).
     u64 reach_walks;
     // Whether the checker needs an operand address instead of its value.
@@ -2720,178 +2719,6 @@ fn raw_span_allowed(checker* ck) bool {
     return (path == CSTR_MODULE && name == CSTR_FN) || (path == ARGS_MODULE && name == ARGS_FN);
 }
 
-// A type and the question that the walk of an `extern fn` call asks of it (D3.5): with `exposing`,
-// whether C can give fort code a pointer through a value of the type that fort code gives to C;
-// without it, whether a value of the type that C gives holds a pointer that does not say `own`.
-struct give_item {
-    types.node* ty;
-    bool exposing;
-}
-
-// One walk of the types of an `extern fn` call (D3.5), with an explicit stack, so that a long
-// chain of structs needs no deep recursion. `todo` holds the items that the walk has still to read.
-// A struct that the walk entered keeps `id` and the question of the entry (types.give_entered),
-// so the walk enters each struct at most once for each question. Each entry is a step of
-// POINTER_WORK_LIMIT; past it `over` holds, and the call counts as one that gives a pointer
-// ("Unknown is an error", D17.11).
-struct give_walk {
-    give_item mut@ own todo;
-    u64 todo_len;
-    u64 id;
-    u64 work;
-    bool over;
-}
-
-// A number for a new walk of give_walk, above 0, which no struct keeps yet: a struct keeps 0 until
-// a walk enters it.
-fn give_id(checker mut* ck) u64 {
-    ck->give_walks += 1;
-    return ck->give_walks;
-}
-
-// Adds the item of `t` with the question `exposing` to the items that the walk has to read. No
-// type has nothing to read: the characters of a `string` have no type node.
-fn give_push(give_walk mut* w, types.node* t, bool exposing) void {
-    if (t == null) {
-        return;
-    }
-    if (w->todo_len == w->todo.len) {
-        give_item mut@ own more = new(give_item, grown_size(w->todo.len));
-        u64 mut i = 0;
-        while (i < w->todo_len) {
-            more[i] = w->todo[i];
-            i += 1;
-        }
-        del(w->todo);
-        w->todo = move(more);
-    }
-    w->todo[w->todo_len] = give_item{.ty = t, .exposing = exposing};
-    w->todo_len += 1;
-}
-
-// Whether the walk enters the struct `s` with the question `exposing` for the first time. A struct
-// that it entered before adds no item that its first entry did not add. Each entry is a step of
-// POINTER_WORK_LIMIT.
-fn give_enter(give_walk mut* w, types.node* s, bool exposing) bool {
-    if (types.give_entered(s, w->id, exposing)) {
-        return false;
-    }
-    w->work += 1;
-    if (w->work > POINTER_WORK_LIMIT) {
-        w->over = true;
-        return false;
-    }
-    types.keep_give_entered(s, w->id, exposing);
-    return true;
-}
-
-// Reads one item of the walk: true when the item gives fort code a pointer, and otherwise adds the
-// items that it leads to (D3.5).
-// A value that C gives holds a pointer when it is or holds a reference, a `void*` or a function
-// pointer that does not say `own`, as an element of a fixed array or a field of a struct at any
-// depth. A reference that says `own` is a new allocation (A2): it leads to the storage that it
-// reaches, which C wrote.
-// C writes a level that a value of fort code marks `mut`, so that level gives a pointer when its
-// storage holds one. C reads each level, each element and each field, and it calls a function
-// pointer with arguments that it gives and reads its result.
-// The storage of a `void*` holds no pointer (D3.14). A struct with no layout is in error, or it
-// waits in a module-level initializer, where a call is an error already (D4.6).
-fn give_step(give_walk mut* w, give_item it) bool {
-    types.node* t = it.ty;
-    if (!it.exposing) {
-        switch (t->kind) {
-        case types.type_kind.k_fn:
-            return true;
-        case types.type_kind.k_voidptr:
-            return !t->is_own;
-        case types.type_kind.k_ptr, types.type_kind.k_span, types.type_kind.k_string:
-            if (!t->is_own) {
-                return true;
-            }
-            give_push(w, t->elem, false);
-        case types.type_kind.k_array:
-            give_push(w, t->elem, false);
-        case types.type_kind.k_struct:
-            if (has_layout(t) && give_enter(w, t, false)) {
-                u64 mut i = 0;
-                while (i < types.field_count(t)) {
-                    give_push(w, types.field_at(t, i).ty, false);
-                    i += 1;
-                }
-            }
-        default:
-            // a primitive, an enum and `void` hold no pointer
-        }
-        return false;
-    }
-    switch (t->kind) {
-    case types.type_kind.k_fn:
-        u64 mut k = 0;
-        while (k < t->params.len) {
-            give_push(w, t->params[k], false);
-            k += 1;
-        }
-        give_push(w, t->elem, true);
-    case types.type_kind.k_ptr, types.type_kind.k_span, types.type_kind.k_string:
-        if (t->is_mut) {
-            give_push(w, t->elem, false);
-        }
-        give_push(w, t->elem, true);
-    case types.type_kind.k_array:
-        give_push(w, t->elem, true);
-    case types.type_kind.k_struct:
-        if (has_layout(t) && give_enter(w, t, true)) {
-            u64 mut f = 0;
-            while (f < types.field_count(t)) {
-                give_push(w, types.field_at(t, f).ty, true);
-                f += 1;
-            }
-        }
-    default:
-        // C writes nothing through a primitive, an enum, `void` or the storage of a `void*`
-    }
-    return false;
-}
-
-// Reads the items of the walk until one gives a pointer, the walk passes POINTER_WORK_LIMIT, or no
-// item is left. Returns whether the call can give fort code a pointer. The caller dels `todo`
-// after it, in the function that owns the walk, where the leak rule proves the `del` (D17.20).
-fn give_run(give_walk mut* w) bool {
-    bool mut gives = false;
-    while (!gives && !w->over && w->todo_len > 0) {
-        w->todo_len -= 1;
-        gives = give_step(w, w->todo[w->todo_len]);
-    }
-    return gives || w->over;
-}
-
-// Whether the `extern fn` of the type `fty` can give fort code a pointer that does not say `own`
-// (D3.5): its result, a level that a parameter marks `mut`, an argument of a callback, or a field
-// of a struct at any depth of one of these.
-fn c_gives_pointer(checker mut* ck, types.node* fty) bool {
-    give_walk mut w = give_walk{.id = give_id(ck)};
-    give_push(&w, fty->elem, false);
-    u64 mut i = 0;
-    while (i < fty->params.len) {
-        give_push(&w, fty->params[i], true);
-        i += 1;
-    }
-    bool gives = give_run(&w);
-    del(w.todo);
-    return gives;
-}
-
-// Whether C can give fort code a pointer through an argument of the type `t` in the variable tail
-// of an `extern fn` call (D3.5): the tail has no parameter, so the type of the argument is the type
-// that C reads.
-fn c_tail_gives(checker mut* ck, types.node* t) bool {
-    give_walk mut w = give_walk{.id = give_id(ck)};
-    give_push(&w, t, true);
-    bool gives = give_run(&w);
-    del(w.todo);
-    return gives;
-}
-
 // ---- the trusted boundary (D9.8) -------------------------------------------------------
 
 // The texts of the three errors of D9.8, around the name that each quotes.
@@ -3160,42 +2987,6 @@ fn check_symbol_imports(checker mut* ck, modules.module* m) void {
     }
 }
 
-// Whether an argument of the call `n` is a `.ptr` or a `->ptr` node (ptr_node). A call with none
-// needs no walk of its declaration (D3.5).
-fn has_ptr_argument(ast.node* n) bool {
-    u64 mut i = 0;
-    while (i < ast.ast_len(n)) {
-        if (ptr_node(ast.ast_child(n, i)) != null) {
-            return true;
-        }
-        i += 1;
-    }
-    return false;
-}
-
-// Whether the checked node `p` of ptr_node is the pseudo-field `.ptr` of a span or a string, and
-// not a field of a struct.
-fn is_pseudo_ptr(ast.node* p) bool {
-    types.node* mut t = p->a->ty;
-    if (t != null && p->kind == ast.ast_kind.k_arrow && t->kind == types.type_kind.k_ptr) {
-        t = t->elem;
-    }
-    return t != null && (t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string);
-}
-
-// Reports each `.ptr` argument of the checked call `n`, whose extern can give a pointer through an
-// argument of its variable tail (D3.5).
-fn report_tail_ptrs(checker mut* ck, ast.node* n) void {
-    u64 mut i = 0;
-    while (i < ast.ast_len(n)) {
-        ast.node* p = ptr_node(ast.ast_child(n, i));
-        if (p != null && is_pseudo_ptr(p)) {
-            check_error(ck, p->name_loc, PTR_POSITION_ERROR);
-        }
-        i += 1;
-    }
-}
-
 // `.len` and `.ptr`, the read-only pseudo-fields of arrays, spans and strings.
 fn pseudo_field(checker mut* ck, ast.node mut* n, types.node* t, expr mut* out) bool {
     bool len = n->name == "len";
@@ -3378,8 +3169,11 @@ fn check_unary(checker mut* ck, ast.node mut* n, expr mut* out) void {
         if (check_poisoned(a.ty)) {
             return;
         }
-        if (a.sym != null
-            && (a.sym->kind == ast.sym_kind.s_fn || a.sym->kind == ast.sym_kind.s_extern_fn)) {
+        // the operand node names the function: the result of the call `f()` names `f`, and
+        // `&f()` takes no function
+        ast.sym* named = n->a->sym;
+        if (named != null
+            && (named->kind == ast.sym_kind.s_fn || named->kind == ast.sym_kind.s_extern_fn)) {
             check_error(ck, n->loc, "'&' on a function: a function name is already a value");
             return;
         }
@@ -4870,7 +4664,10 @@ fn check_call(checker mut* ck, ast.node mut* n, expr mut* out) void {
     ck->callee = callee;
     check_operand(ck, callee, &f);
     ck->callee = outer_callee;
-    out->sym = f.sym;
+    // The function that the callee node names, as fir_lower.call_rvalue reads it, and null for a
+    // call through a value: `get()(x)` names no function, though the checked `get()` names `get`.
+    ast.sym* named = callee->sym;
+    out->sym = named;
     if (!check_poisoned(f.ty) && f.ty->kind != types.type_kind.k_fn) {
         check_msg_begin(ck);
         msg_str(ck, "cannot call a value of type ");
@@ -4881,11 +4678,11 @@ fn check_call(checker mut* ck, ast.node mut* n, expr mut* out) void {
     bool known = !check_poisoned(f.ty);
     if (known) {
         string mut name = "the callee";
-        if (f.sym != null) {
-            name = f.sym->name;
+        if (named != null) {
+            name = named->name;
         }
-        bool variadic = f.sym != null && f.sym->kind == ast.sym_kind.s_extern_fn
-            && (f.sym->node->flags & ast.FLAG_VARIADIC) != 0;
+        bool variadic = named != null && named->kind == ast.sym_kind.s_extern_fn
+            && (named->node->flags & ast.FLAG_VARIADIC) != 0;
         bool mut arity_ok = false;
         if (variadic) {
             arity_ok = check_arity_at_least(ck, n, name, f.ty->params.len);
@@ -4896,10 +4693,9 @@ fn check_call(checker mut* ck, ast.node mut* n, expr mut* out) void {
             return;
         }
     }
-    // a `.ptr` stands as an argument of an `extern fn` that can give fort code no pointer (D3.5)
-    bool is_extern = f.sym != null && f.sym->kind == ast.sym_kind.s_extern_fn;
-    bool ptr_legal = known && is_extern && has_ptr_argument(n) && !c_gives_pointer(ck, f.ty);
-    bool mut tail_gives = false;
+    // a `.ptr` stands as each argument of an `extern fn`, in the variable tail too (D3.5)
+    bool is_extern = named != null && named->kind == ast.sym_kind.s_extern_fn;
+    bool ptr_legal = known && is_extern;
     ast.node* outer_ptr = ck->ptr_ok;
     u64 mut i = 0;
     while (i < ast.ast_len(n)) {
@@ -4918,15 +4714,10 @@ fn check_call(checker mut* ck, ast.node mut* n, expr mut* out) void {
                 check_msg_type(ck, arg.ty);
                 msg_str(ck, "'");
                 check_msg_end(ck, ast.ast_child(n, i)->loc);
-            } else if (ptr_legal && !check_poisoned(arg.ty) && c_tail_gives(ck, arg.ty)) {
-                tail_gives = true;
             }
         }
         ck->ptr_ok = outer_ptr;
         i += 1;
-    }
-    if (tail_gives) {
-        report_tail_ptrs(ck, n);
     }
     if (!known) {
         return;
@@ -5629,118 +5420,6 @@ fn extern_legal(types.node* t) bool {
     }
 }
 
-// ---- the pointers that C gives (D17.13) ----------------------------------------------------
-
-// A pointer type that C gives to fort code with a `mut` that no parameter of its type has, and
-// where the signature names it: 0 for the result, and `k + 1` for parameter `k`. A null `ty` is
-// none.
-struct given_mut {
-    types.node* ty;
-    u64 at;
-}
-
-// The first pointer type that C gives in a call of a function of the type `f`, with a variable
-// tail when `tail` holds, that marks a level `mut` with no `own`, where `f` has a parameter that
-// can carry a pointer and no fixed parameter of that type (D17.13). C can give back an argument
-// (A7 of ownership-design.md 5.1), and a `mut` that no argument had writes storage that fort code
-// lent read-only. C gives the result, each parameter type of a function pointer parameter, because
-// C calls it with such values, and each pointer type that a level of a parameter holds where the
-// parameter marks that level `mut`, because C can store a pointer there. A fixed array adds no
-// level (D5.2), and the rule reads no field of a struct. The result comes first, and then the
-// parameters in order. A function pointer type that C gives runs C when fort code calls it, so a
-// call through it follows the same rule.
-fn first_given_mut(types.node* f, bool tail) given_mut {
-    // a pointer, a `void*`, a function pointer and the variable tail can carry a pointer
-    bool mut carries = tail;
-    u64 mut i = 0;
-    while (i < f->params.len) {
-        if (types.type_is_pointer_place(f->params[i])) {
-            carries = true;
-        }
-        i += 1;
-    }
-    types.node* r = given_lacks_mut(f, carries, f->elem);
-    if (r != null) {
-        return given_mut{.ty = r, .at = 0};
-    }
-    i = 0;
-    while (i < f->params.len) {
-        types.node* p = f->params[i];
-        types.node* mut found = null;
-        if (p->kind == types.type_kind.k_fn) {
-            u64 mut j = 0;
-            while (found == null && j < p->params.len) {
-                found = given_lacks_mut(f, carries, p->params[j]);
-                j += 1;
-            }
-        }
-        types.node* mut cur = p;
-        while (found == null && types.has_target_level(cur)) {
-            types.node* held = types.behind_arrays(cur->elem);
-            if (cur->is_mut && types.type_is_pointer_place(held)) {
-                found = given_lacks_mut(f, carries, held);
-            }
-            cur = held;
-        }
-        if (found != null) {
-            return given_mut{.ty = found, .at = i + 1};
-        }
-        i += 1;
-    }
-    return given_mut{};
-}
-
-// For the type `g` that C gives in a call of a function of the type `f`: `g` when it marks a level
-// `mut`, does not say `own` and has no fixed parameter of its type in `f`, and `carries` says that
-// a parameter of `f` can carry a pointer. For a function pointer type, the first such type of a
-// call through it. Null otherwise.
-fn given_lacks_mut(types.node* f, bool carries, types.node* g) types.node* {
-    if (g->kind == types.type_kind.k_fn) {
-        return first_given_mut(g, false).ty;
-    }
-    if (!carries || (types.type_is_reference(g) && g->is_own) || !marks_a_level_mut(g)) {
-        return null;
-    }
-    u64 mut i = 0;
-    while (i < f->params.len) {
-        if (types.type_equal(f->params[i], g)) {
-            return null;
-        }
-        i += 1;
-    }
-    return g;
-}
-
-// Whether the type `t` marks a level `mut`: level `k` is the storage that the `k`-th reference of
-// its chain reaches, and a fixed array adds no level (D5.2). An extern signature holds no fixed
-// array, so `t` is a reference or no pointer.
-fn marks_a_level_mut(types.node* t) bool {
-    types.node* mut cur = t;
-    while (types.has_target_level(cur)) {
-        if (cur->is_mut) {
-            return true;
-        }
-        cur = types.behind_arrays(cur->elem);
-    }
-    return false;
-}
-
-// Reports that the extern `name`, declared by `decl`, gives the type of `g` with a `mut` that no
-// parameter of that type has, at the result or at the parameter that names it (D17.13).
-fn report_given_mut(checker mut* ck, ast.node* decl, string name, given_mut g) void {
-    check_msg_begin(ck);
-    msg_str(ck, "extern ");
-    msg_quote(ck, name);
-    msg_str(ck, ": C gives '");
-    check_msg_type(ck, g.ty);
-    msg_str(ck, "' with a 'mut' that no parameter of that type has");
-    diag.loc mut at = decl->a->loc;
-    if (g.at > 0) {
-        at = param_at(decl, g.at - 1)->loc;
-    }
-    check_msg_end(ck, at);
-}
-
 // The `i`-th parameter declaration of a function, for the position a
 // signature difference is reported at.
 fn param_at(ast.node* decl, u64 k) ast.node* {
@@ -6045,14 +5724,6 @@ fn resolve_fn(checker mut* ck, ast.sym mut* s) void {
         return;
     }
     s->ty = types.type_fn(&ck->types, ret.ty, params[0..n], is_noreturn(decl->a));
-    if (is_extern && s->ty->kind == types.type_kind.k_fn) {
-        given_mut g = first_given_mut(s->ty, (decl->flags & ast.FLAG_VARIADIC) != 0);
-        if (g.ty != null) {
-            report_given_mut(ck, decl, s->name, g);
-            sym_fail(ck, s);
-            return;
-        }
-    }
     if (is_extern && !ck->defer_externs && !check_extern_agreement(ck, decl, s)) {
         // no one signature, so the symbol is poisoned
         sym_fail(ck, s);

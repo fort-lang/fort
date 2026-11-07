@@ -1,20 +1,21 @@
 {
   "comment": [
     "The rules of D3.5 and D6.9 that close two routes to a forged pointer. The `.ptr` of a span or a",
-    "string stands in two positions only, each as it stands: an argument of an `extern fn` that can",
-    "give fort code no pointer that does not say `own`, at any level and in any struct field, and an",
-    "operand of `==` or `!=`. No cast and no `str.from_cstr` takes a `.ptr` (D3.5). Only",
-    "`str.from_cstr` and `rt.args_init` take `p[lo..hi]` of a raw pointer, and no source names",
-    "`rt.args_init` (D6.9). The rows cover src/fort/check.ft: pseudo_field, has_ptr_argument,",
-    "give_enter, give_step, give_run, c_gives_pointer, the variable tail of check_call,",
-    "is_pseudo_ptr, the operands of `==` and `!=` in check_expr, raw_span_allowed, is_args_init,",
-    "check_span_expr and value_of_sym. The first stage runs the language tests of the two rules,",
-    "whose goldens pin each message and its position. The second runs check_raw_span_test.ft, which",
-    "holds the two functions in a sandbox std, and check_ptr_walk_limit_test.ft, the one witness of",
-    "the work limit of the walk. The table runs in the VM with the debug preset: pass a --runner",
-    "that runs tools/vm run in one slot, as notes/environment.md says. The md5 guard reads the",
-    "product compiler. The first round of a run in the VM can read stale (notes/testing.md 1), so",
-    "run the first row again before you trust it."
+    "string stands in two positions only, each as it stands: an argument of an `extern fn`, fixed or",
+    "in the variable tail, and an operand of `==` or `!=`. No cast and no `str.from_cstr` takes a",
+    "`.ptr` (D3.5). Only a trusted module declares or calls an `extern fn`, and its rows state what C",
+    "gives back (D9.8). Only `str.from_cstr` and `rt.args_init` take `p[lo..hi]` of a raw pointer,",
+    "and no source names `rt.args_init` (D6.9). The rows cover src/fort/check.ft: pseudo_field,",
+    "ptr_node, the arguments of check_call, the operands of `==` and `!=` in check_expr,",
+    "raw_span_allowed, is_args_init, check_span_expr and value_of_sym. Three rows hold the callee of",
+    "a call: check_call reads the symbol of the callee node and gives it to the result, so a call",
+    "through a function pointer that a call gives names no function, and the `&` of check_unary reads",
+    "its operand node. The first stage runs the language tests of the two rules, whose goldens pin",
+    "each message and its position. The second runs check_raw_span_test.ft, which holds the two",
+    "functions in a sandbox std. The table runs in the VM with the debug preset: pass a --runner that",
+    "runs tools/vm run in one slot, as notes/environment.md says. The md5 guard reads the product",
+    "compiler. The first round of a run in the VM can read stale (notes/testing.md 1), so run the",
+    "first row again before you trust it."
   ],
   "sources": [
     "src/fort/check.ft"
@@ -24,11 +25,11 @@
   "stages": [
     {
       "name": "the language tests of the two rules",
-      "command": "python3 test/lang/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std -j 4 fail/spans/007 fail/stdlib/007 fail/stdlib/008 fail/pointers/009 fail/pointers/010 fail/ffi/013 fail/ffi/014 fail/ffi/015 fail/ffi/016 run/pointers/004 run/pointers/014 run/stdlib/013 run/stdlib/068 run/stdlib/125 run/stdlib/126"
+      "command": "python3 test/lang/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std -j 4 fail/spans/007 fail/stdlib/007 fail/stdlib/008 fail/pointers/009 fail/pointers/010 fail/pointers/005 fail/ffi/013 fail/ffi/014 fail/ffi/015 run/ffi/020 run/pointers/004 run/pointers/014 run/stdlib/013 run/stdlib/068 run/stdlib/125 run/stdlib/126"
     },
     {
-      "name": "the checker suites of the two functions and of the work limit",
-      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 300 -j 2 check_raw_span_test check_ptr_walk_limit_test"
+      "name": "the checker suite of the two functions",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 300 -j 2 check_raw_span_test"
     }
   ],
   "mutations": [
@@ -47,179 +48,53 @@
       "what": "no argument of an `extern fn` takes a `.ptr`"
     },
     {
-      "decision": "D3.5-gives-any",
-      "file": "src/fort/check.ft",
-      "old": "    bool ptr_legal = known && is_extern && has_ptr_argument(n) && !c_gives_pointer(ck, f.ty);",
-      "new": "    bool ptr_legal = known && is_extern && has_ptr_argument(n);",
-      "what": "a `.ptr` argument of each `extern fn` is legal, one that gives a pointer too"
-    },
-    {
       "decision": "D3.5-fort-call",
       "file": "src/fort/check.ft",
-      "old": "    bool ptr_legal = known && is_extern && has_ptr_argument(n) && !c_gives_pointer(ck, f.ty);",
-      "new": "    bool ptr_legal = known && has_ptr_argument(n) && !c_gives_pointer(ck, f.ty);",
-      "what": "a fort function that gives no pointer takes a `.ptr`"
+      "old": "    bool ptr_legal = known && is_extern;",
+      "new": "    bool ptr_legal = known;",
+      "what": "an argument of a fort function and of a function pointer takes a `.ptr`"
     },
     {
-      "decision": "D3.5-has-ptr",
+      "decision": "D3.5-extern-tail",
       "file": "src/fort/check.ft",
-      "old": "        if (ptr_node(ast.ast_child(n, i)) != null) {\n            return true;",
-      "new": "        if (false) {\n            return true;",
-      "what": "a call with a `.ptr` argument counts as one with none"
+      "old": "        if (ptr_legal) {\n            ck->ptr_ok = ptr_node(ast.ast_child(n, i));",
+      "new": "        if (ptr_legal && i < f.ty->params.len) {\n            ck->ptr_ok = ptr_node(ast.ast_child(n, i));",
+      "what": "no argument of the variable tail takes a `.ptr`"
     },
     {
-      "decision": "D3.5-gives-result",
+      "decision": "D3.5-extern-arrow",
       "file": "src/fort/check.ft",
-      "old": "    give_push(&w, fty->elem, false);",
-      "new": "    give_push(&w, null, false);",
-      "what": "the result of an `extern fn` gives no pointer"
+      "old": "    if (n == null || (n->kind != ast.ast_kind.k_field && n->kind != ast.ast_kind.k_arrow)) {",
+      "new": "    if (n == null || n->kind != ast.ast_kind.k_field) {",
+      "what": "a `.ptr` that `->` reaches is no argument of an `extern fn`"
     },
     {
-      "decision": "D3.5-gives-parameter",
+      "decision": "D3.5-untrusted-call",
       "file": "src/fort/check.ft",
-      "old": "        give_push(&w, fty->params[i], true);",
-      "new": "        give_push(&w, null, true);",
-      "what": "no parameter of an `extern fn` gives a pointer"
+      "old": "    bool ptr_legal = known && is_extern;",
+      "new": "    bool ptr_legal = known && is_extern && checking_trusted(ck);",
+      "what": "an extern call in a module that is not trusted reports its `.ptr` too"
     },
     {
-      "decision": "D3.5-run-step",
+      "decision": "D3.5-extern-callee",
       "file": "src/fort/check.ft",
-      "old": "        gives = give_step(w, w->todo[w->todo_len]);",
-      "new": "        give_step(w, w->todo[w->todo_len]);",
-      "what": "no item of the walk gives a pointer"
+      "old": "    ast.sym* named = callee->sym;",
+      "new": "    ast.sym* named = f.sym;",
+      "what": "a call through the function pointer that an extern call gives is a call of that extern"
     },
     {
-      "decision": "D3.5-given-function",
+      "decision": "D6.7-address-of-call",
       "file": "src/fort/check.ft",
-      "old": "        case types.type_kind.k_fn:\n            return true;",
-      "new": "        case types.type_kind.k_fn:\n            return false;",
-      "what": "a function pointer that C gives is no pointer"
+      "old": "        ast.sym* named = n->a->sym;",
+      "new": "        ast.sym* named = a.sym;",
+      "what": "`&` of the result of a call takes the address of the function that the call names"
     },
     {
-      "decision": "D3.5-given-void",
+      "decision": "D6.11-call-result",
       "file": "src/fort/check.ft",
-      "old": "            return !t->is_own;",
-      "new": "            return false;",
-      "what": "a `void*` that C gives is no pointer"
-    },
-    {
-      "decision": "D3.5-given-reference",
-      "file": "src/fort/check.ft",
-      "old": "            if (!t->is_own) {\n                return true;",
-      "new": "            if (false) {\n                return true;",
-      "what": "a reference that C gives and that does not say `own` is no pointer"
-    },
-    {
-      "decision": "D3.5-given-own",
-      "file": "src/fort/check.ft",
-      "old": "            give_push(w, t->elem, false);\n        case types.type_kind.k_array:",
-      "new": "            give_push(w, null, false);\n        case types.type_kind.k_array:",
-      "what": "a reference that says `own` gives none of the pointers that its storage holds"
-    },
-    {
-      "decision": "D3.5-given-array",
-      "file": "src/fort/check.ft",
-      "old": "        case types.type_kind.k_array:\n            give_push(w, t->elem, false);",
-      "new": "        case types.type_kind.k_array:\n            give_push(w, null, false);",
-      "what": "an element of a fixed array that C gives holds no pointer"
-    },
-    {
-      "decision": "D3.5-given-field",
-      "file": "src/fort/check.ft",
-      "old": "                    give_push(w, types.field_at(t, i).ty, false);",
-      "new": "                    give_push(w, null, false);",
-      "what": "a field of a struct that C gives holds no pointer"
-    },
-    {
-      "decision": "D3.5-exposed-callback",
-      "file": "src/fort/check.ft",
-      "old": "            give_push(w, t->params[k], false);",
-      "new": "            give_push(w, null, false);",
-      "what": "C gives no pointer as an argument of a callback"
-    },
-    {
-      "decision": "D3.5-exposed-callback-result",
-      "file": "src/fort/check.ft",
-      "old": "        give_push(w, t->elem, true);\n    case types.type_kind.k_ptr",
-      "new": "        give_push(w, null, true);\n    case types.type_kind.k_ptr",
-      "what": "C writes no level of the result of a callback"
-    },
-    {
-      "decision": "D3.5-exposed-mut-level",
-      "file": "src/fort/check.ft",
-      "old": "        if (t->is_mut) {\n            give_push(w, t->elem, false);",
-      "new": "        if (false) {\n            give_push(w, t->elem, false);",
-      "what": "C writes no pointer into a level marked `mut`"
-    },
-    {
-      "decision": "D3.5-exposed-deeper",
-      "file": "src/fort/check.ft",
-      "old": "        }\n        give_push(w, t->elem, true);\n    case types.type_kind.k_array:",
-      "new": "        }\n        give_push(w, null, true);\n    case types.type_kind.k_array:",
-      "what": "C reads no level below the first"
-    },
-    {
-      "decision": "D3.5-exposed-array",
-      "file": "src/fort/check.ft",
-      "old": "    case types.type_kind.k_array:\n        give_push(w, t->elem, true);",
-      "new": "    case types.type_kind.k_array:\n        give_push(w, null, true);",
-      "what": "C reads no element of a fixed array"
-    },
-    {
-      "decision": "D3.5-exposed-field",
-      "file": "src/fort/check.ft",
-      "old": "                give_push(w, types.field_at(t, f).ty, true);",
-      "new": "                give_push(w, null, true);",
-      "what": "C reads no field of a struct"
-    },
-    {
-      "decision": "D3.5-walk-seen",
-      "file": "src/fort/check.ft",
-      "old": "    if (types.give_entered(s, w->id, exposing)) {",
-      "new": "    if (false) {",
-      "what": "the walk enters a struct again"
-    },
-    {
-      "decision": "D3.5-walk-mode",
-      "file": "src/fort/check.ft",
-      "old": "    if (types.give_entered(s, w->id, exposing)) {",
-      "new": "    if (types.give_entered(s, w->id, false) || types.give_entered(s, w->id, true)) {",
-      "what": "a struct that one question of the walk entered counts as entered for the other"
-    },
-    {
-      "decision": "D3.5-walk-limit",
-      "file": "src/fort/check.ft",
-      "old": "    if (w->work > POINTER_WORK_LIMIT) {\n        w->over = true;",
-      "new": "    if (w->work > POINTER_WORK_LIMIT + 1) {\n        w->over = true;",
-      "what": "the walk takes one step more than the limit"
-    },
-    {
-      "decision": "D3.5-walk-over",
-      "file": "src/fort/check.ft",
-      "old": "    return gives || w->over;",
-      "new": "    return gives && !w->over;",
-      "what": "a walk past the limit counts as one that gives no pointer"
-    },
-    {
-      "decision": "D3.5-tail",
-      "file": "src/fort/check.ft",
-      "old": "                tail_gives = true;",
-      "new": "                tail_gives = false;",
-      "what": "an argument of the variable tail gives no pointer"
-    },
-    {
-      "decision": "D3.5-tail-field",
-      "file": "src/fort/check.ft",
-      "old": "    return t != null && (t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string);",
-      "new": "    return t != null;",
-      "what": "a struct field named `ptr` in the variable tail is a `.ptr`"
-    },
-    {
-      "decision": "D3.5-tail-arrow",
-      "file": "src/fort/check.ft",
-      "old": "    if (t != null && p->kind == ast.ast_kind.k_arrow && t->kind == types.type_kind.k_ptr) {",
-      "new": "    if (false) {",
-      "what": "a `->ptr` in the variable tail is no `.ptr`"
+      "old": "    out->sym = named;",
+      "new": "    out->sym = f.sym;",
+      "what": "the result of a call through a value names the function of the call that gave the value"
     },
     {
       "decision": "D3.5-equality",
