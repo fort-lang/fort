@@ -11,23 +11,23 @@ import std.libc;
 import std.str;
 
 // The `.ptr` of a span or a string stands in two positions (D3.5), each as it stands: an argument
-// of an `extern fn` that can give fort code no pointer, and an operand of `==` or `!=`. No cast
-// takes a `.ptr`, so a program casts a span first, `cast(text, u8@).ptr`, or writes the address of
-// an element, `cast(&s[0], void*)`. A buffer that C wrote a C string into goes to
+// of an `extern fn`, which only a trusted module calls (D9.8), and an operand of `==` or `!=`. No
+// cast takes a `.ptr`, so a program casts a span first, `cast(text, u8@).ptr`, or writes the
+// address of an element, `cast(&s[0], void*)`. A buffer that C wrote a C string into goes to
 // `str.from_cbuf`. Each line below uses one of these forms.
 
-// strdup gives a new allocation, which says `own`, and the `char` that it reaches holds no
-// pointer, so its parameter takes a `.ptr`.
+// strdup gives a new allocation, which says `own`. C reads its argument up to the NUL that a
+// string literal holds after its last byte (D3.7).
 extern fn strdup(char* s) char mut* own;
 
 fn main() i32 {
     string text = "abc\n";
-    // write gives an integer and writes no level, so it gives no pointer. The span cast gives the
-    // bytes the type of the parameter, and the `.ptr` of an empty span goes to C too.
+    // write reads the `.len` bytes from the `.ptr` of its span. The span cast gives the bytes the
+    // type of the parameter, and the `.ptr` of an empty span goes to C too, with a length of 0.
     i64 wrote = libc.write(1, cast(text, u8@).ptr, text.len);
     string empty = text[4..];
     libc.write(1, cast(empty, u8@).ptr, empty.len);
-    // strlen and memcmp give no pointer either.
+    // strlen reads up to the NUL of the literal, and memcmp reads no byte for a length of 0.
     u8@ bytes = cast(text, u8@);
     println(libc.strlen(text.ptr) - 1, " ", libc.memcmp(bytes.ptr, bytes.ptr, 0), " ", wrote - 1);
 
@@ -49,7 +49,7 @@ fn main() i32 {
     string view = str.from_cbuf(cast(buf[..], u8@));
     println(view, " ", view.len);
 
-    // getenv gives back a `char*`, so its argument is the address of an element.
+    // The address of an element stands in each position: getenv reads `name` up to its NUL.
     string name = "FORT_T542_UNSET";
     char* found = libc.getenv(&name[0]);
     println(found == null, " ", copy != null);

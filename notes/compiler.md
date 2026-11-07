@@ -315,34 +315,24 @@ came here.
   interpreter and `owner/place` read the fields with no declaration. `scope.binding.module` is
   `k + 1` for module `k` of the set (`check.module_of`, `modules.read_at`), and the source lookup
   of `diag` takes the `diag.sources` that the session embeds.
-- **An `extern fn` declaration gives no `mut` that no argument had** (D17.13). `resolve_fn` asks
-  `first_given_mut` after it makes the type of an `extern fn`, before the comparison of D9.8, so a
-  declaration that a library holds back meets the rule too. The types that C gives are the result,
-  each parameter type of a function pointer parameter, and each pointer place that a level of a
-  parameter holds where the parameter marks that level `mut`. The walk of the levels goes through
-  fixed arrays (D5.2) and stops at a struct, whose fields the rule does not read. Such a type that
-  marks a level `mut` and whose outermost reference is not `own` needs a fixed parameter of the
-  same type (`types.type_equal`: `char` and `u8`, and `own` and no `own`, are other types), unless
-  no fixed parameter is a pointer place and the extern has no variable tail. A function pointer
-  type that C gives goes through `first_given_mut` itself, with its own parameters, and the error
-  names the type inside it. The order is the result, then the parameters from left to right, and
-  in a parameter its callback parameters or its levels from level 1. The error stands at the
-  result or at the parameter, and the symbol fails, so its calls report nothing more
-  (`check_extern_test.ft`, `fail/ffi/011` and `012`).
-- **The `.ptr` rule walks the declaration of each `extern fn` call with a `.ptr` argument** (D3.5).
-  `check_call` asks `c_gives_pointer` only when `has_ptr_argument` finds a `.ptr` or a `->ptr`
-  node, so a call with none costs nothing. The walk (`give_walk`) keeps an explicit stack of
-  items, a type and a question: with `exposing`, whether C can write a pointer through a value
-  that fort code gives; without it, whether a value that C gives holds a pointer that does not
-  say `own`. A struct keeps the number of the last walk that entered it and the questions of that
-  walk in one `u64` (`types.layout.give`), so the walk enters each struct at most twice and needs
-  no list of the structs that it saw; `checker.give_walks` numbers the walks from 1, and
-  `types.layout` grew from 72 to 80 bytes (`types_layout_test.ft`). Each
-  entry is a step of POINTER_WORK_LIMIT, and past it the call counts as one that gives a pointer:
-  a chain of 65537 structs is an error and a chain of 65536 is not, with no deep recursion
-  (`check_ptr_walk_limit_test.ft`). An argument of the variable tail is read after its check, with
-  a walk of its own and its own limit, and `report_tail_ptrs` then reports each `.ptr` argument of
-  the call; a struct field named `ptr` is no `.ptr` (`is_pseudo_ptr`).
+- **A `.ptr` stands as each argument of an `extern fn`, and no rule reads what C gives back**
+  (D3.5, D17.13). `check_call` sets `checker.ptr_ok` to the `.ptr` or `->ptr` node (`ptr_node`) of
+  each argument of a call whose callee is an `extern fn`, in the variable tail too, and
+  `pseudo_field` reports each other `.ptr` of a span or a string. The `.ptr` must be the argument
+  itself: a cast or a `?:` around it is no such position. `check_call` reads the extern from the
+  symbol of the callee node (`callee->sym`), as `fir_lower.call_rvalue` does, and gives the result
+  that symbol: `f()` names `f`, which `check_no_value` quotes, and `get()(x)` names no function, so
+  it has no variable tail and takes no `.ptr` (`fail/ffi/013` and `015`). `&` reads its operand
+  node, because `&f()` takes no function. A field of a struct named `ptr` is no `.ptr`, because
+  `pseudo_field` reads spans and strings only. Only a trusted module declares or calls an extern
+  (D9.8), and the rows of D9.8 state what C gives back: the declaration row gives the `mut` of each
+  pointer that C gives and where a pointer that C gives back lies, and the call row gives the bound
+  of each `.ptr`. In a module that is not trusted, each call is the error of D9.8, and its `.ptr`
+  arguments add none (`fail/ffi/013` and `014`, `check_extern_test.ft`). Two compile rules read the
+  types of a declaration before D9.8 replaced them: the `mut` rule of D17.13 (`first_given_mut`) and
+  the walk of D3.5 (`give_walk`, with its work limit and the field `types.layout.give`). Each one
+  checked a part of A7, and each review round found one more route past it. `types.layout` is 80
+  bytes without that field (`types_layout_test.ft`).
 - **Only a trusted module meets C, and the trust is one bit of the module node** (D9.8).
   `ast.FLAG_TRUSTED` on the `k_module` node is the bit. The parser sets it for a first item
   `import extern;` (`parse_trust_decl`), which makes no node, and reports each other

@@ -1,0 +1,61 @@
+//! run
+//! stdout:
+//| 2 true
+//| true
+//| 1971 0
+import extern;
+// Two forms that a trusted module may write and that no compile rule reads: the row of each
+// declaration and of each call says why each keeps A7 of ownership-design.md 5.1 (D9.8). memchr
+// gives back a pointer into the bytes that it reads, and its argument is the `.ptr` of a span, also
+// of an empty span, of which C reads no byte (D3.5). gmtime gives a `tm` in storage of C that its
+// contract lets the caller write, so its result marks `mut` (D17.13). Each function is in the C
+// library of Linux and of Darwin.
+
+// struct tm of glibc on x86-64 and of Darwin on arm64: nine `int`, a `long` and a `char*`.
+struct tm {
+    i32 sec;
+    i32 min;
+    i32 hour;
+    i32 mday;
+    i32 mon;
+    i32 year;
+    i32 wday;
+    i32 yday;
+    i32 isdst;
+    i64 gmtoff;
+    char* zone;
+}
+
+// C: memchr, memchr(3) of POSIX.
+// gives: null, or the address of the first byte that equals c among the n bytes at s.
+// writes: nothing; C reads at most n bytes at s. keeps: no pointer. calls: no fort function.
+// frees: nothing.
+extern fn memchr(u8* s, i32 c, u64 n) u8*;
+// C: gmtime, gmtime(3) of POSIX.
+// gives: null when the year does not fit an int (EOVERFLOW), or the address of a tm in storage
+// of C, which a later gmtime or localtime writes again; the contract lets the caller write it, so
+// the result marks `mut`. writes: no fort storage; C reads one i64 at t. keeps: no pointer.
+// calls: no fort function. frees: nothing.
+extern fn gmtime(i64* t) tm mut*;
+
+// C call memchr x2: b.ptr and e.ptr keep the bounds of their spans (D9.8 rule 2), and each call
+// gives the `.len` of the same span; e.len is 0, so C reads no byte at e.ptr.
+// C call gmtime: &day keeps one i64 (rule 2), a live local. The result is null on an overflow,
+// so main tests it before it writes through it.
+fn main() i32 {
+    string text = "abc";
+    u8@ b = cast(text, u8@);
+    u8* hit = memchr(b.ptr, 99, b.len);
+    println(cast(hit, u64) - cast(&b[0], u64), " ", hit != null);
+    u8@ e = b[3..];
+    println(memchr(e.ptr, 99, e.len) == null);
+    i64 day = 365 * 86400;
+    tm mut* g = gmtime(&day);
+    if (g == null) {
+        println("overflow");
+        return 1;
+    }
+    g->isdst = 0;
+    println(g->year + 1900, " ", g->isdst);
+    return 0;
+}
