@@ -572,8 +572,9 @@ fn a_test_gives_the_edge_of_each_value() void {
 // object of `b` and `_7` the address of the pair of an element of `s` whose index `_8` copies `k`;
 // one store through each reads it, so both are addresses of a whole store. A copy reads `_9` too,
 // `_11` is the address of an integer, which holds no owner, and two stores write `_12`, so none of
-// the three is one. `_13` copies a constant, and two stores write `_14`, so it has no key.
-string[31] WHOLE = {
+// the three is one. `_13` copies a constant, and two stores write `_14`, so it has no key. Two
+// stores through `_15` read it, as the two arms of a conditional do, so it is one too.
+string[35] WHOLE = {
     "fn main.a1(_1 (b): box mut*, _2 (s): shelf mut*, _3 (x): box, _4 (y): pair,",
     "           _5 (k): u64) -> void {",
     "    let _6: box mut*;",
@@ -585,6 +586,7 @@ string[31] WHOLE = {
     "    let _12: box mut*;",
     "    let _13: u64;",
     "    let _14: u64;",
+    "    let _15: box mut*;",
     "    bb0: {",
     "        _6 = addr mut((*_1));",
     "        _8 = copy _5;",
@@ -602,6 +604,9 @@ string[31] WHOLE = {
     "        _13 = const u64 0;",
     "        _14 = const u64 0;",
     "        _14 = const u64 1;",
+    "        _15 = addr mut((*_1));",
+    "        (*_15) = const zero box;",
+    "        (*_15) = const zero box;",
     "        return;",
     "    }",
     "}",
@@ -626,7 +631,8 @@ fn the_address_of_a_whole_store_is_marked_and_turns_stale() void {
     place.mark_whole_addresses(c, true);
     assert(info_at(c, 6).whole && info_at(c, 7).whole && !info_at(c, 6).held);
     assert(!info_at(c, 9).whole && !info_at(c, 10).whole && !info_at(c, 11).whole);
-    assert(!info_at(c, 12).whole && c->held.len == 2);
+    assert(!info_at(c, 12).whole && c->held.len == 3);
+    assert(info_at(c, 15).whole && !info_at(c, 15).held);
     assert(place.is_whole_place(c, place_of(f, 6, "*")));
     assert(!place.is_whole_place(c, place_of(f, 6, "")));
     assert(!place.is_whole_place(c, place_of(f, 9, "*")));
@@ -672,7 +678,8 @@ fn expect_no_readers(fir.func* f) void {
     place.survey mut* own c = survey_of(f);
     defer place.drop_made(move(c));
     place.mark_whole_addresses(c, false);
-    assert(info_at(c, 6).whole && info_at(c, 7).whole && c->held.len == 0);
+    assert(info_at(c, 6).whole && info_at(c, 7).whole && info_at(c, 15).whole);
+    assert(c->held.len == 0);
     place.apply_stale(c, fir.block_statement(f, 0, 3), &stale);
     assert(!fir_flow.bits_get(&stale, 6) && !fir_flow.bits_get(&stale, 7));
 }

@@ -302,9 +302,10 @@ fn is_held_address(survey* c, u32 a) bool {
 
 // Whether the local `a` is the address of a whole store (spec/fir.md 11, Whole stores): a temporary
 // that is no memory and no held address, that one store writes with `addr mut(p)`, where `p` is no
-// fixed storage and has an owning aggregate type, and that one store into `(*_a)` reads, with no
-// check and nothing else. The lowering holds such an address when the right side of a store of a
-// whole owning aggregate has a writer (spec/fir.md 9.3).
+// fixed storage and has an owning aggregate type, and that only stores into `(*_a)` read, one or
+// more, with no check. The lowering holds such an address when the right side of a store of a
+// whole owning aggregate has a writer (spec/fir.md 9.3), and the two arms of a conditional store
+// through one such address. Each store reads `_a` once, as its place.
 fn is_whole_address(survey* c, u32 a) bool {
     local_info* l = &c->locals[cast(a, u64)];
     bool temp = fir.local_at(c->f, a)->kind == fir.local_kind.lk_temp;
@@ -316,7 +317,7 @@ fn is_whole_address(survey* c, u32 a) bool {
         return false;
     }
     bool owning = types.type_is_owning_aggregate(fir.place_type(c->f, r.place));
-    return owning && l->reads == 1 && l->checks == 0 && l->stores == 1;
+    return owning && l->stores > 0 && l->reads == l->stores && l->checks == 0;
 }
 
 /// Marks the addresses of the whole stores (is_whole_address) after mark_memory. With `readers`,
