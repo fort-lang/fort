@@ -2,7 +2,7 @@
 //! flags: -I ../../src -I support
 //! stdout:
 //| text: sites 38, proved 23, rejected with an event 12, false rejects 3
-//| source: sites 77, proved 49, rejected with an event 21, false rejects 7
+//| source: sites 85, proved 53, rejected with an event 23, false rejects 9
 /// Holds the verdicts of the stores of a whole value of an owning aggregate in owner.prover
 /// (D17.11, spec/fir.md 11, Whole stores) against the runs of fir.interpreter and the events of
 /// fir.shadow (spec/ownership-design.md 3). A store over an owner slot of a live allocation is an
@@ -554,7 +554,7 @@ fn run_text_cases(run_env.env mut* e, fir.module* m) void {
 
 // The fort cases: each runs its function, and the function of its proof is the first name of its
 // pair in SOURCE_CASES.
-string[237] SOURCE = {
+string[250] SOURCE = {
     "struct box {",
     "    u8 mut* own data;",
     "}",
@@ -772,6 +772,23 @@ string[237] SOURCE = {
     "    t.y = pair{};",
     "    del(t.x.a);",
     "}",
+    // the two arms of a conditional store through one address of a fresh `new`: P P when
+    // `cond_true` and `cond_false` call it
+    "fn cond_fresh(bool c) void {",
+    "    box mut* own p = new(box);",
+    "    *p = c ? fill() : box{};",
+    "    del(p->data);",
+    "    del(p);",
+    "}",
+    // the same after a store into the owner: the arm that the run takes writes over it: R+ R-
+    // when `filled_true` calls it, and R- R+ when `filled_false` calls it
+    "fn cond_filled(bool c) void {",
+    "    box mut* own p = new(box);",
+    "    p->data = new(u8);",
+    "    *p = c ? fill() : box{};",
+    "    del(p->data);",
+    "    del(p);",
+    "}",
     // the kill rules of the first store through `p` end the fact that the `new` gave, so the
     // second store is no proved store over the owner that the first put there: P P P R+
     "fn twice() void {",
@@ -837,7 +854,7 @@ string[237] SOURCE = {
 
 // The functions of the source cases: the function that the pass proves, the function that the run
 // calls, and the verdicts.
-string[96] SOURCE_CASES = {
+string[108] SOURCE_CASES = {
     "s1", "s1", "R+ P",
     "s2", "s2", "P P",
     "s3", "s3", "P",
@@ -870,6 +887,10 @@ string[96] SOURCE_CASES = {
     "live_member", "live_member", "P P R+",
     "nested_zero", "nested_zero", "P P P P",
     "sibling", "sibling", "P P R+",
+    "cond_fresh", "cond_true", "P P",
+    "cond_fresh", "cond_false", "P P",
+    "cond_filled", "filled_true", "R+ R-",
+    "cond_filled", "filled_false", "R- R+",
 };
 
 // The callers: `s7` gives `over` a box whose owner holds an allocation, and `s8` one whose owner it
@@ -878,7 +899,7 @@ string[96] SOURCE_CASES = {
 // element `n` holds one. `two_false` and `two_true` take each exit of `two_exits`, `mixed_true`
 // and `mixed_false` each exit of `mixed`, and `move_true` and `move_false` each exit of
 // `move_defer`.
-string[46] CALLERS = {
+string[58] CALLERS = {
     "fn s7() void {",
     "    box mut b = fill();",
     "    over(&b);",
@@ -924,6 +945,18 @@ string[46] CALLERS = {
     "fn move_false() void {",
     "    move_defer(false);",
     "}",
+    "fn cond_true() void {",
+    "    cond_fresh(true);",
+    "}",
+    "fn cond_false() void {",
+    "    cond_fresh(false);",
+    "}",
+    "fn filled_true() void {",
+    "    cond_filled(true);",
+    "}",
+    "fn filled_false() void {",
+    "    cond_filled(false);",
+    "}",
     "",
 };
 
@@ -949,7 +982,7 @@ fn lower_decl(run_env.env mut* e, string name, fir.func mut* out, fir_lower.repo
 
 // Runs each fort case and holds the verdicts of its proved function against its run.
 fn each_source_case_holds_against_its_run(run_env.env mut* e) void {
-    string[283] mut all = {};
+    string[308] mut all = {};
     u64 mut k = 0;
     while (k < SOURCE.len) {
         all[k] = SOURCE[k];

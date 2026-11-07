@@ -1022,38 +1022,37 @@ came here.
 - **The emptiness pass proves the stores of a whole value of an owning aggregate, and only reports
   them** (D17.11, `spec/fir.md` 11, Whole stores). `owner.prover.find_wholes` lists in
   `proof.wholes` each assignment whose place has an owning aggregate type, but a store into fixed
-  storage of an aggregate `_0`. `collect_whole_facts` gives each owner below each destination a
-  fact of its own (`place.put_owners_below`), and `judge_wholes` tests them where the test of a
-  store into an `own` reference stands: `apply_facts` is three steps (`apply_reads`, `apply_call`,
+  storage of an aggregate `_0`. `collect_whole_facts` gives each owner below each destination a fact
+  of its own (`place.put_owners_below`), and `judge_wholes` tests them where the test of a store
+  into an `own` reference stands: `apply_facts` is three steps (`apply_reads`, `apply_call`,
   `apply_store`), so the walk tests the owners after the reads and again after the kill of the
   `call`, which gives cause 3. `proof.whole_leaks` counts the stores that the pass does not prove,
   and `prover.has_error` does not read it, so no verdict changes; `driver.overwrite_entry` writes
   the lines of `report.write_wholes` under `--whole-store-report` alone. The lowering writes a whole
   store through `(*_a)` of `_a = addr mut(p)` when the right side has a writer, with no check, so
-  `place.is_whole_address` marks such an `_a`, and only the test reads it as `p`
-  (`place.whole_source`); the stale dataflow keeps its bit (`mark_whole_addresses` lists it with
-  the held addresses), and no other reading changes. Without that reading `p = new(box); *p =
-  move(b);` was unproved, because no gen rule makes a place through `_a` empty. A declaration is a
+  `place.is_whole_address` marks such an `_a`, also when the two arms of a conditional store through
+  it, and only the test reads it as `p` (`place.whole_source`); the stale dataflow keeps its bit
+  (`mark_whole_addresses` lists it with the held addresses). Without that reading `p = new(box); *p
+  = move(b);` was unproved, because no gen rule makes a place through `_a` empty. A declaration is a
   store into a named local whose bit in the ended dataflow is set (`mark_ended_wholes`), so the
-  facts, which give a named local no entry fact, do not decide it. A call keeps each fact through
-  a fresh pointer local (kill rule 5 of D17.11, `prover.survives_call`), and the `addr` of the
-  address of a whole store ends no freshness: the store through it ends the freshness of the local
-  of its place, after its test and before its kill rules (`place.apply_fresh_end`). So `*pr =
+  facts, which give a named local no entry fact, do not decide it. A call keeps each fact through a
+  fresh pointer local (kill rule 5 of D17.11, `prover.survives_call`), and the `addr` of the address
+  of a whole store ends no freshness: the store through it ends the freshness of the local of its
+  place, after its test and before its kill rules (`place.apply_fresh_end`). So `*pr =
   make_probes(count)` after `pr = new(probes)` is proved, and the marks of these addresses run in
   each function, also past the whole-store work, so that no other verdict depends on that limit
-  (`place.mark_whole_addresses`). The grow loop of a vector, `bigger[i] = move(v->items[i])`, has
-  no fact, because no gen rule makes an element of a fresh span empty. `place.mark_values` marks
-  once each temporary that one store writes and one `move` reads, so a nested zero literal, whose
-  inner literals the lowering puts into temporaries, is a zero value (`place.is_zero_rvalue`), and
-  a store of a literal makes each owner empty that it leaves out or gives a zero value, at any
-  depth (gen rule 7 of D17.11, `place.is_zero_member`, `prover.gen_members`): so after
-  `dataflow{.count = n}` the owners that the literal leaves zero have their facts.
-  `test/fort/owner/whole_oracle_test.ft` holds each verdict against a run of `fir.interpreter`: a
-  store that the pass proves and whose run gives an `overwrite` event at its location fails it.
-  `fir.shadow` gives an `overwrite` the exit location of its statement (` exit <line>:<col>`), so
-  each expansion of a deferred store is a site of its own, and no event of one expansion marks
-  another (`mixed` in that test). The ticket of the change holds the count of the sites by directory
-  and by cause, and the command that measures it.
+  (`place.mark_whole_addresses`). The grow loop of a vector, `bigger[i] = move(v->items[i])`, has no
+  fact, because no gen rule makes an element of a fresh span empty. `place.mark_values` marks once
+  each temporary that one store writes and one `move` reads, so a nested zero literal, whose inner
+  literals the lowering puts into temporaries, is a zero value (`place.is_zero_rvalue`), and a store
+  of a literal makes each owner empty that it leaves out or gives a zero value, at any depth (gen
+  rule 7 of D17.11, `place.is_zero_member`, `prover.gen_members`): so after `dataflow{.count = n}`
+  the owners that the literal leaves zero have their facts. `test/fort/owner/whole_oracle_test.ft`
+  holds each verdict against a run of `fir.interpreter`: a store that the pass proves and whose run
+  gives an `overwrite` event at its location fails it. `fir.shadow` gives an `overwrite` the exit
+  location of its statement (` exit <line>:<col>`), so each expansion of a deferred store is a site
+  of its own, and no event of one expansion marks another (`mixed` in that test). The ticket of the
+  change holds the count of the sites by directory and by cause, and the command that measures it.
 - **The emptiness pass proves rule (b) of D17.21, and each use that it does not prove is an error**
   (`spec/fir.md` 11, Uses). `owner.prover.prove_uses` runs after the facts, in the same context, so
   it reuses the survey of the places, the stale dataflow, the tests against null and the map of
