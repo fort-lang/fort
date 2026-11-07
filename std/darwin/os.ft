@@ -11,6 +11,10 @@ string TARGET = "arm64-apple-macosx11.0.0";
 
 // dyld gives the path of the running binary. The function is dyld's (<mach-o/dyld.h>), not the
 // C library's (D9.8).
+// C: _NSGetExecutablePath, dyld(3) of macOS.
+// writes: C reads *size, the size of buf; it writes the path and its NUL at buf and gives 0 when
+// they fit in *size bytes, else it writes at size the size that it needs and gives -1.
+// keeps: no pointer. calls: no fort function. frees: nothing. gives: no pointer.
 extern fn _NSGetExecutablePath(char mut* buf, u32 mut* size) i32;
 
 // The buffer sizes the path is read with.
@@ -20,6 +24,9 @@ u64 EXE_PATH_MAX_CAP = 65536;
 // Appends the path of the running binary to `out` and returns true. real_path resolves the dyld
 // path when the file still exists at that path. Returns false and leaves `out` unchanged when
 // the system cannot give the path.
+// C call _NSGetExecutablePath: buf.ptr keeps the bound of buf, cap bytes (D9.8 rule 2), and
+// &cap keeps one u32 (rule 2) that holds cap, the length of buf, so C writes at most that many
+// bytes at buf.
 fn exe_path(strbuf.str_buf mut* out) bool {
     u32 mut cap = cast(EXE_PATH_FIRST_CAP, u32);
     while (cast(cap, u64) <= EXE_PATH_MAX_CAP) {
@@ -40,6 +47,9 @@ fn exe_path(strbuf.str_buf mut* out) bool {
 }
 
 /// Appends the canonical form of path to out. Returns false when realpath(3) fails.
+// C call libc.realpath: &c_path[0] keeps the bound of the str.to_cstr buffer c_path (D9.8 rule
+// 2), and its last byte is the NUL (rule 4). &buf[0] keeps the bound of buf, libc.PATH_MAX
+// bytes (rule 2), which C does not pass.
 fn real_path(string path, strbuf.str_buf mut* out) bool {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
@@ -58,10 +68,16 @@ i32 O_NONBLOCK = 0x4;
 // fstat(2) writes `struct stat` into `buf`. std.os declares it and std.libc does not, so only a
 // program that imports std.os binds the symbol (D9.8). A buffer of words and not a struct: a
 // struct would give the symbol a type that a program cannot write again.
+// C: fstat, fstat(2) of POSIX.1-2017.
+// writes: one `struct stat` at buf, 144 bytes, STAT_WORDS words of 8 bytes, on Linux x86-64 and
+// on macOS arm64. gives: 0 or -1. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn fstat(i32 fd, u64 mut* buf) i32;
 
 // stat(2) writes the `struct stat` of the file that `path` names, after each symbolic link, into
 // `buf`. std.os declares it for the reason of fstat.
+// C: stat, stat(2) of POSIX.1-2017.
+// writes: one `struct stat` at buf, 144 bytes, as fstat; C reads path to its NUL. gives: 0 or
+// -1. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn stat(char* path, u64 mut* buf) i32;
 
 // `struct stat` is STAT_WORDS 8-byte words with the alignment of C on both targets. MODE_BITS
@@ -75,6 +91,8 @@ u64 STAT_MODE_SHIFT = 32;
 
 /// Opens `path` to read and returns the descriptor, or -1 with the reason in sys.errno(). The
 /// open does not wait for the writer of a FIFO.
+// C call libc.open: c_path.ptr keeps the bound of the str.to_cstr buffer c_path, path.len + 1
+// bytes (D9.8 rule 2), and its last byte is the NUL (rule 4).
 fn open_nonblocking(string path) i32 {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
@@ -83,6 +101,8 @@ fn open_nonblocking(string path) i32 {
 
 /// Writes the type bits and the permission bits of the file that `fd` names, the low 16 bits of
 /// its `st_mode`, to `*mode`. Returns false with the reason in sys.errno() when fstat(2) fails.
+// C call fstat: &st[0] keeps the bound of st, STAT_WORDS words, 144 bytes (D9.8 rule 2), which
+// one `struct stat` fills.
 fn file_mode(i32 fd, u32 mut* mode) bool {
     u64[STAT_WORDS] mut st = {};
     if (fstat(fd, &st[0]) != 0) {
@@ -96,6 +116,9 @@ fn file_mode(i32 fd, u32 mut* mode) bool {
 /// symbolic link, the low 16 bits of its `st_mode`, to `*mode`. It opens nothing, so a FIFO and a
 /// file that the process cannot read give their mode too. Returns false with the reason in
 /// sys.errno() when stat(2) fails.
+// C call stat: c_path.ptr keeps the bound of the str.to_cstr buffer c_path, path.len + 1
+// bytes (D9.8 rule 2), and its last byte is the NUL (rule 4).
+// &st[0] keeps the bound of st, 144 bytes (rule 2), which one `struct stat` fills.
 fn path_mode(string path, u32 mut* mode) bool {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
@@ -113,6 +136,8 @@ fn path_mode(string path, u32 mut* mode) bool {
 /// both targets: the two C libraries read a type bit in different ways, and the Darwin kernel
 /// refuses S_ISGID with EPERM in a directory whose group is no group of the process. A success
 /// keeps errno.
+// C call libc.mkfifo: c_path.ptr keeps the bound of the str.to_cstr buffer c_path, path.len + 1
+// bytes (D9.8 rule 2), and its last byte is the NUL (rule 4).
 fn make_fifo(string path, u32 mode) bool {
     if ((mode & ~PERMISSION_BITS) != 0 || (mode & SET_ID_BITS) != 0) {
         *libc.errno_slot() = libc.EINVAL;
@@ -127,6 +152,7 @@ fn make_fifo(string path, u32 mode) bool {
 /// umask(2), and returns the bits in UMASK_BITS of the mask that was there before. umask does not
 /// fail and does not change errno. The other bits do not count, on both targets: Linux keeps only
 /// these bits, and Darwin keeps the bits 0o7777, also of a mask that the parent process set.
+// C call libc.umask: no pointer argument.
 fn set_umask(u32 mask) u32 {
     return cast(libc.umask(cast(mask & UMASK_BITS, u16)), u32) & UMASK_BITS;
 }
@@ -154,6 +180,9 @@ u32 UMASK_BITS = 0o777;
 /// text into `out` before it returns, and no later call changes the copy. errno stays as it was:
 /// the Darwin strerror(3) sets EINVAL for an unknown value, and the function puts the old value
 /// back.
+// C call libc.strerror: no pointer argument.
+// C call str.from_cstr: the result of strerror in this call, storage that C gave (D9.8 rule 3),
+// a C string with the NUL that the row of strerror states.
 fn error_text(i32 code, strbuf.str_buf mut* out) void {
     i32 saved = *libc.errno_slot();
     strbuf.append(out, str.from_cstr(libc.strerror(code)));
@@ -162,6 +191,8 @@ fn error_text(i32 code, strbuf.str_buf mut* out) void {
 
 /// Reports whether the process can reach the file `path` for `mode`, an access(2) mode such as
 /// libc.R_OK. Returns false and sets errno when it cannot or when access(2) fails.
+// C call libc.access: c_path.ptr keeps the bound of the str.to_cstr buffer c_path, path.len + 1
+// bytes (D9.8 rule 2), and its last byte is the NUL (rule 4).
 fn can_access(string path, i32 mode) bool {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
@@ -170,6 +201,8 @@ fn can_access(string path, i32 mode) bool {
 
 /// Makes the directory `path` with the permission bits `mode`, less the umask. Returns false and
 /// sets errno when mkdir(2) fails: EEXIST when an entry stands at `path`.
+// C call libc.mkdir: c_path.ptr keeps the bound of the str.to_cstr buffer c_path, path.len + 1
+// bytes (D9.8 rule 2), and its last byte is the NUL (rule 4).
 fn make_dir(string path, u32 mode) bool {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
@@ -182,6 +215,8 @@ fn make_dir(string path, u32 mode) bool {
 /// nothing and gives EINVAL on both targets: the Darwin chmod(2) clears S_ISGID for a file whose
 /// group is no group of the process and leaves EPERM in errno after a success. Without these
 /// bits, a success keeps errno.
+// C call libc.chmod: c_path.ptr keeps the bound of the str.to_cstr buffer c_path, path.len + 1
+// bytes (D9.8 rule 2), and its last byte is the NUL (rule 4).
 fn set_mode(string path, u32 mode) bool {
     if ((mode & SET_ID_BITS) != 0) {
         *libc.errno_slot() = libc.EINVAL;
@@ -195,6 +230,8 @@ fn set_mode(string path, u32 mode) bool {
 /// Makes a symbolic link at `link_path` whose target is the text `target`, with symlink(2). No
 /// file need stand at `target`. Returns false and sets errno when symlink fails: EEXIST when an
 /// entry stands at `link_path`, and ENOENT when its directory does not exist.
+// C call libc.symlink: c_target.ptr and c_link.ptr keep the bounds of the str.to_cstr buffers
+// c_target and c_link (D9.8 rule 2), and the last byte of each is its NUL (rule 4).
 fn make_symlink(string target, string link_path) bool {
     char mut@ own c_target = str.to_cstr(target);
     defer del(c_target);
@@ -205,6 +242,8 @@ fn make_symlink(string target, string link_path) bool {
 
 /// Removes the entry `path`, which is no directory; a symbolic link goes, not its target. Returns
 /// false and sets errno when unlink(2) fails: ENOENT when no entry stands at `path`.
+// C call libc.unlink: c_path.ptr keeps the bound of the str.to_cstr buffer c_path, path.len + 1
+// bytes (D9.8 rule 2), and its last byte is the NUL (rule 4).
 fn remove_file(string path) bool {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
@@ -212,6 +251,8 @@ fn remove_file(string path) bool {
 }
 
 /// Removes the empty directory `path`. Returns false and sets errno when rmdir(2) fails.
+// C call libc.rmdir: c_path.ptr keeps the bound of the str.to_cstr buffer c_path, path.len + 1
+// bytes (D9.8 rule 2), and its last byte is the NUL (rule 4).
 fn remove_dir(string path) bool {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
@@ -221,6 +262,8 @@ fn remove_dir(string path) bool {
 /// Removes the entry `name` of the directory that `dir_fd` names: an empty directory with
 /// `directory`, and else an entry that is no directory. Returns false and sets errno when
 /// unlinkat(2) fails.
+// C call libc.unlinkat: c_name.ptr keeps the bound of the str.to_cstr buffer c_name, name.len +
+// 1 bytes (D9.8 rule 2), and its last byte is the NUL (rule 4).
 fn remove_at(i32 dir_fd, string name, bool directory) bool {
     char mut@ own c_name = str.to_cstr(name);
     defer del(c_name);
@@ -234,6 +277,8 @@ fn remove_at(i32 dir_fd, string name, bool directory) bool {
 /// Gives the file at `old_path` the name `new_path` with rename(2), in one atomic step that
 /// replaces a file at `new_path`. Both paths must be on one file system. Returns false and sets
 /// errno when rename(2) fails.
+// C call libc.rename: c_old.ptr and c_new.ptr keep the bounds of the str.to_cstr buffers c_old
+// and c_new (D9.8 rule 2), and the last byte of each is its NUL (rule 4).
 fn rename(string old_path, string new_path) bool {
     char mut@ own c_old = str.to_cstr(old_path);
     defer del(c_old);
@@ -245,6 +290,9 @@ fn rename(string old_path, string new_path) bool {
 /// Appends the target of the symbolic link `path` to `out` and returns true. Returns false, leaves
 /// `out` unchanged, and sets errno when readlink(2) fails: EINVAL when `path` is no symbolic link.
 /// A target longer than 65535 bytes gives ERANGE.
+// C call libc.readlink: c_path.ptr keeps the bound of the str.to_cstr buffer c_path (D9.8 rule
+// 2), and its last byte is the NUL (rule 4). buf.ptr keeps the bound of buf, cap bytes (rule 2),
+// and the length cap fits it.
 fn read_link(string path, strbuf.str_buf mut* out) bool {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
@@ -269,6 +317,8 @@ fn read_link(string path, strbuf.str_buf mut* out) bool {
 /// Appends the absolute path of the working directory to `out` and returns true. Returns false,
 /// leaves `out` unchanged, and sets errno when getcwd(3) fails, for example with ENOENT when the
 /// directory was removed. A path longer than 65535 bytes gives ERANGE.
+// C call libc.getcwd: &buf[0] keeps the bound of buf, cap bytes (D9.8 rule 2), and the length
+// cap fits it.
 fn current_dir(strbuf.str_buf mut* out) bool {
     u64 mut cap = PATH_FIRST_CAP;
     while (cap <= PATH_LAST_CAP) {
@@ -291,6 +341,8 @@ fn current_dir(strbuf.str_buf mut* out) bool {
 /// and returns true. Returns false, leaves `out` unchanged, and sets errno when mkdtemp fails:
 /// ENOENT when the directory of `template` does not exist. glibc gives EINVAL for a template that
 /// does not end in `XXXXXX`, and the Darwin C library takes it.
+// C call libc.mkdtemp: &c_template[0] keeps the bound of the str.to_cstr buffer c_template
+// (D9.8 rule 2), and its last byte is the NUL (rule 4); C writes only bytes before that NUL.
 fn make_temp_dir(string template, strbuf.str_buf mut* out) bool {
     char mut@ own c_template = str.to_cstr(template);
     defer del(c_template);
@@ -305,6 +357,10 @@ fn make_temp_dir(string template, strbuf.str_buf mut* out) bool {
 /// of readdir(3): one byte of its kind, a `libc.DT_` value, then its name, then a NUL. next_entry
 /// reads the entries back. Returns false, leaves `out` unchanged, and sets errno when the
 /// directory does not open or when readdir fails.
+// C call libc.opendir: c_path.ptr keeps the bound of the str.to_cstr buffer c_path, path.len + 1
+// bytes (D9.8 rule 2), and its last byte is the NUL (rule 4).
+// C call append_entries: stream, storage that opendir gave in this function and not null (rule 3).
+// C call libc.closedir: stream, which opendir gave in this function (rule 3), with `move`.
 fn list_dir(string path, strbuf.str_buf mut* out) bool {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
@@ -325,6 +381,13 @@ fn list_dir(string path, strbuf.str_buf mut* out) bool {
 /// call gives each entry. A descriptor of another type of file gives ENOTDIR before the move, so
 /// its position does not change. A descriptor whose position does not move gives the errno of
 /// lseek(2) before the dup(2).
+// C call libc.lseek: no pointer argument.
+// C call libc.dup: no pointer argument.
+// C call libc.fdopendir: no pointer argument.
+// C call libc.close: no pointer argument.
+// C call append_entries: stream, storage that fdopendir gave in this function and not null
+// (D9.8 rule 3).
+// C call libc.closedir: stream, which fdopendir gave in this function (rule 3), with `move`.
 fn list_dir_fd(i32 dir_fd, strbuf.str_buf mut* out) bool {
     u32 mut mode = 0;
     if (!file_mode(dir_fd, &mode)) {
@@ -362,6 +425,14 @@ fn list_dir_fd(i32 dir_fd, strbuf.str_buf mut* out) bool {
 // at the end of the stream and the error number after an error. A record holds `reclen` bytes,
 // the NUL of the name included, so the copy of `reclen` bytes into a zero `dirent` holds the
 // whole name and no byte past the record (D9.8).
+// C call libc.readdir: stream is a parameter source (D9.8 rule 1), so append_entries is a
+// boundary function, and its callers in this module give a stream that opendir or fdopendir
+// gave.
+// C call libc.memcpy: cast(&entry, u8 mut*) keeps the bound of the local entry,
+// sizeof(libc.dirent) bytes (rule 2). cast(head, u8*) keeps the bound of the record that readdir
+// gave in this function, reclen bytes, as the row of readdir states (rule 3). The length size is
+// reclen, which fits both: the test above holds it at most sizeof(libc.dirent). The two do not
+// overlap, because entry is a local and the record is storage of C.
 fn append_entries(void mut* stream, strbuf.str_buf mut* out) bool {
     u64 start = out->len;
     while (true) {

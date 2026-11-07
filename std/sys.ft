@@ -30,6 +30,10 @@ fn errno() i32 {
 /// '=', which no variable name holds: getenv(3) of glibc finds no variable for such a name, and
 /// the Darwin C library looks up the name before the '='.
 /// A NUL in name limits the lookup to its prefix.
+// C call libc.getenv: &key[0] keeps the bound of the str.to_cstr buffer key, name.len + 1 bytes
+// (D9.8 rule 2), and its last byte is the NUL (rule 4).
+// C call str.from_cstr: value, storage that getenv gave in this function (rule 3), not null
+// here, with the NUL that the row of getenv states.
 fn env(string name, strbuf.str_buf mut* out) bool {
     for (char ch : name) {
         if (ch == '\0') {
@@ -55,12 +59,14 @@ fn set_errno(i32 code) void {
 }
 
 /// Returns the process id of the calling process. getpid(2) does not fail.
+// C call libc.getpid: no pointer argument.
 fn pid() i32 {
     return libc.getpid();
 }
 
 /// Ends the process with the signal SIGABRT, as abort(3) does. It flushes no runtime output, and
 /// deferred statements do not run.
+// C call libc.abort: no pointer argument.
 fn abort() noreturn {
     libc.abort();
 }
@@ -68,6 +74,7 @@ fn abort() noreturn {
 /// Sends the signal `sig` to the calling thread with raise(3). Returns true when raise accepted
 /// the signal; a signal that ends the process does not return. Returns false and sets
 /// sys.errno() for a signal number that the system does not have.
+// C call libc.raise: no pointer argument.
 fn raise_signal(i32 sig) bool {
     return libc.raise(sig) == 0;
 }
@@ -75,6 +82,8 @@ fn raise_signal(i32 sig) bool {
 /// Sets the variable `name` of the process environment to `value`, and replaces a value that is
 /// there. Returns false and sets sys.errno() when setenv(3) fails: an empty name or a name that
 /// contains '=' gives EINVAL. A NUL in name or value limits it to its prefix.
+// C call libc.setenv: &key[0] and &text[0] keep the bounds of the str.to_cstr buffers key and
+// text (D9.8 rule 2), and the last byte of each is its NUL (rule 4).
 fn set_env(string name, string value) bool {
     char mut@ own key = str.to_cstr(name);
     defer del(key);
@@ -86,6 +95,8 @@ fn set_env(string name, string value) bool {
 /// Removes the variable `name` from the process environment with unsetenv(3). A name that is not
 /// there is no failure. Returns false and sets sys.errno() when unsetenv fails: EINVAL for an
 /// empty name or a name that contains '='. A NUL in name limits it to its prefix.
+// C call libc.unsetenv: &key[0] keeps the bound of the str.to_cstr buffer key (D9.8 rule 2),
+// and its last byte is the NUL (rule 4).
 fn unset_env(string name) bool {
     char mut@ own key = str.to_cstr(name);
     defer del(key);
@@ -117,7 +128,9 @@ struct c_strings {
     char mut* mut@ own items;
 }
 
-// The C form of `list`. The caller frees both fields.
+// The C form of `list`. The caller frees both fields. items[i] is &bytes[at], the address of
+// the first byte of string i of `list`; a NUL follows each string in `bytes`, and null is the
+// last item. Each store uses a checked index, so each lies inside its span (D9.8 rule 4).
 fn c_strings_of(string@ list) c_strings {
     u64 mut total = 0;
     for (string s : list) {
@@ -151,6 +164,25 @@ fn c_strings_of(string@ list) c_strings {
 /// waited for in each case but the last, so no zombie stays. A NUL in a string of `argv` or `env`
 /// ends that string. run flushes no runtime output buffer: a caller whose output must come before
 /// the output of the command calls io.flush first, and the child flushes nothing either.
+// C call libc.pipe: &fds[0] keeps the bound of fds, two i32 (D9.8 rule 2), and C writes two.
+// C call libc.fcntl: F_SETFD with the int FD_CLOEXEC in the tail; no pointer argument.
+// C call libc.close x7: no pointer argument.
+// C call libc.fork: no pointer argument.
+// C call libc.setenv: vars.items[k] and vars.items[k + 1], each a pointer &c.bytes[at] that
+// c_strings_of makes into the span vars.bytes (rule 2, where c_strings_of makes it), and each
+// string ends in the NUL that c_strings_of stores after it by a checked index (rule 4). Both
+// items are strings of env, because k + 1 < env.len: k < env.len, and env.len is even. The
+// storage of vars and of args lives until the call: the defers of run del it at its exit.
+// C call libc.execvp: path is args.items[0], a string of argv with its NUL as for setenv, and
+// argv.len > 0. c_argv is &args.items[0] cast to `void*`, which keeps the bound of args.items,
+// argv.len + 1 pointers (rule 2). C reads the items to the null item args.items[argv.len], which
+// c_strings_of stores by a checked index (rule 4), and each item before it is a string of argv.
+// C call libc.write: &buf[0] keeps the bound of buf, 4 bytes (rule 2), and the length
+// ERRNO_BYTES is 4.
+// C call libc._exit: no pointer argument.
+// C call libc.read x2: &got[0] keeps the bound of got, 4 bytes (rule 2), and the length
+// ERRNO_BYTES is 4.
+// C call libc.waitpid x2: &wait_status keeps one i32 (rule 2), and C writes one int there.
 fn run(string@ argv, string@ env, i32 mut* status) run_result {
     if (argv.len == 0 || env.len % 2 != 0) {
         set_errno(libc.EINVAL);

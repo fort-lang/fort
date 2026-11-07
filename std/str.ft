@@ -138,6 +138,9 @@ fn from_cbuf(u8@ b) string {
 }
 
 /// Wraps a C string without copying. A null pointer returns an empty string.
+// C call libc.strlen: p and its NUL are parameter sources (D9.8 rule 1), so from_cstr is a
+// boundary function, and each caller gives a p that is not null here and that ends in a NUL
+// inside its storage.
 fn from_cstr(char* p) string {
     if (p == null) {
         string zero = {};
@@ -196,6 +199,8 @@ fn parse_i64(string s, i64 mut* out) bool {
 /// space. A prefix that strtod cannot read gives 0. Returns true and leaves sys.errno() unchanged
 /// when the value is in range. Returns false with ERANGE in sys.errno() when it is not; *out then
 /// holds the value that strtod gives, an infinity or a value near 0. A NUL in s ends the text.
+// C call libc.strtod: &text[0] keeps the bound of text, s.len + 1 bytes (D9.8 rule 2), and the
+// NUL is the last byte of the str.to_cstr buffer (rule 4). end is null, so C writes no pointer.
 fn parse_f64(string s, f64 mut* out) bool {
     char mut@ own text = to_cstr(s);
     defer del(text);
@@ -211,6 +216,8 @@ fn parse_f64(string s, f64 mut* out) bool {
 }
 
 /// parse_f64 for a float, with strtof(3).
+// C call libc.strtof: as strtod in parse_f64: &text[0] of the str.to_cstr buffer (rule 2), its
+// last byte the NUL (rule 4), and end null.
 fn parse_f32(string s, f32 mut* out) bool {
     char mut@ own text = to_cstr(s);
     defer del(text);
@@ -232,6 +239,11 @@ string FLOAT_FORMAT = "%.*e";
 /// as the C library writes it: at most buf.len - 1 bytes of the text into buf, then a NUL. An
 /// empty buf gets no byte. Returns the length of the whole text, which is buf.len or more when the
 /// text did not fit, or a value below 0 when snprintf fails. A precision below 0 gives 6 digits.
+// C call libc.snprintf_float x2: buf is &none[0] of a char[1] with the size 0, so C writes no
+// byte, or &text[0] of the span text, which keeps the bound of buf, text.len bytes (D9.8 rule
+// 2), with the size text.len, which fits it. fmt is &FLOAT_FORMAT[0], a string literal through a
+// global that is no `mut` global, with its NUL (rule 4); `%.*e` reads the int precision and the
+// double v.
 fn format_f64(u8 mut@ buf, i32 precision, f64 v) i32 {
     if (buf.len == 0) {
         char[1] mut none = {};

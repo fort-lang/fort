@@ -71,6 +71,7 @@ string mut@ own mut args_store = {};
 
 // Check a descriptor once when its buffer is assigned.
 // Preserve errno because isatty changes it for non-terminal descriptors.
+// C call libc.isatty: no pointer argument.
 fn is_interactive(i32 fd) bool {
     i32 mut* slot = libc.errno_slot();
     i32 saved = *slot;
@@ -96,6 +97,8 @@ fn buffers_init() void {
 }
 
 // Retry short writes and EINTR. Drop remaining bytes after another error.
+// C call libc.write: rest.ptr keeps the bound of the span rest (D9.8 rule 2), and the length
+// rest.len fits it. rest.len > 0, because done < bytes.len.
 fn write_all(i32 fd, u8@ bytes) void {
     u64 mut done = 0;
     while (done < bytes.len) {
@@ -133,6 +136,10 @@ fn has_newline(u8@ bytes) bool {
 
 // Flush before overflow. Bypass the buffer for inputs larger than BUFFER_SIZE.
 // Flush line-buffered output after input that contains a newline.
+// C call libc.memmove: room.ptr and bytes.ptr keep the bounds of their spans (D9.8 rule 2). The
+// length n is bytes.len, and it fits room.len, BUFFER_SIZE - b->len: a larger n flushes b, which
+// sets b->len to 0, and an n above BUFFER_SIZE returns before the call. bytes can be a view of
+// b->data, because a module can call this function, and memmove takes storage that overlaps.
 fn buffer_append(buffer mut* b, u8@ bytes) void {
     u64 n = bytes.len;
     if (n == 0) {
@@ -148,7 +155,7 @@ fn buffer_append(buffer mut* b, u8@ bytes) void {
     // The flush above leaves room for n bytes. The span and the copy below
     // therefore stay inside data.
     u8 mut@ room = b->data[b->len..];
-    libc.memcpy(room.ptr, bytes.ptr, n);
+    libc.memmove(room.ptr, bytes.ptr, n);
     b->len += n;
     if (b->is_line_buffered && has_newline(bytes)) {
         buffer_flush(b);
@@ -345,6 +352,10 @@ fn print_str(i32 fd, string s) void {
 
 // Write the first matching enum name. Write the numeric value when none matches. The compiler
 // gives each name as a NUL-terminated C string.
+// C call str.from_cstr: table[i].name, a place that the function reaches through the parameter
+// table, so the pointer and its NUL are parameter sources (D9.8 rule 1), and print_enum is a
+// boundary function. Each caller gives a table whose names end in a NUL: the code that the
+// compiler emits (A8), or a trusted module by its row.
 fn print_enum(i32 fd, i32 v, enum_member@ table) void {
     for (u64 mut i = 0; i < table.len; i++) {
         if (table[i].value == v) {
@@ -590,12 +601,17 @@ fn decimal_text(decimal* d, char mut@ buf) void {
 
 // Report whether C parsing reads the decimal back to v.
 // Ignore ERANGE because subnormal results can still match.
+// C call libc.strtod: &text[0] keeps the bound of text, TEXT_MAX_NUL bytes (D9.8 rule 2). The NUL
+// is the one that decimal_text stores at text[n] by a checked index (rule 4), into text, a local
+// of this function that lives until the call. end is null.
 fn reads_back_f64(decimal* d, f64 v) bool {
     char[TEXT_MAX_NUL] mut text = {};
     decimal_text(d, text[..]);
     return libc.strtod(&text[0], null) == v;
 }
 
+// C call libc.strtof: as strtod in reads_back_f64: &text[0] of text (rule 2), the NUL that
+// decimal_text stores (rule 4), and end null.
 fn reads_back_f32(decimal* d, f32 v) bool {
     char[TEXT_MAX_NUL] mut text = {};
     decimal_text(d, text[..]);
@@ -604,6 +620,10 @@ fn reads_back_f32(decimal* d, f32 v) bool {
 
 // Find the shortest f64 decimal that reads back to finite, nonnegative v.
 // Try the next higher decimal at each precision.
+// C call libc.snprintf_float: &scratch[0] keeps the bound of scratch, SCRATCH_MAX bytes (D9.8
+// rule 2), and the size SCRATCH_MAX fits it. fmt is &FORMAT[0], a string literal through a
+// global that is no `mut` global, with its NUL (rule 4); `%.*e` reads the int precision and the
+// double v.
 fn decimal_f64(f64 v, decimal mut* d) void {
     char[SCRATCH_MAX] mut scratch = {};
     for (u64 mut precision = 0; precision < DIGITS_F64; precision += 1) {
@@ -627,6 +647,8 @@ fn decimal_f64(f64 v, decimal mut* d) void {
 }
 
 // Find the shortest f32 decimal. Widening for snprintf preserves its value.
+// C call libc.snprintf_float: as in decimal_f64: &scratch[0] with the size SCRATCH_MAX (rule 2),
+// fmt &FORMAT[0] with its NUL (rule 4), and an int and a double for `%.*e`.
 fn decimal_f32(f32 v, decimal mut* d) void {
     char[SCRATCH_MAX] mut scratch = {};
     for (u64 mut precision = 0; precision < DIGITS_F32; precision += 1) {
@@ -651,6 +673,9 @@ fn decimal_f32(f32 v, decimal mut* d) void {
 // ---- the two float entry points ---------------------------------------------
 
 // Read the sign bit through memcpy so negative zero remains distinct.
+// C call libc.memcpy: cast(&bits, u8 mut*) and cast(&source, u8*) keep the bounds of the locals
+// bits and source, 8 bytes each (D9.8 rule 2), and the length F64_BYTES is 8. Two locals do
+// not overlap.
 fn negative_f64(f64 v) bool {
     u64 mut bits = 0;
     f64 mut source = v;
@@ -658,6 +683,7 @@ fn negative_f64(f64 v) bool {
     return (bits >> F64_SIGN_SHIFT) != 0;
 }
 
+// C call libc.memcpy: as in negative_f64, with two locals of 4 bytes and F32_BYTES, 4.
 fn negative_f32(f32 v) bool {
     u32 mut bits = 0;
     f32 mut source = v;
@@ -770,6 +796,8 @@ fn message_i64(i64 v) void {
 // the kind. The kind is "runtime error", "panic" or "assertion failed". The
 // runtime error contract fixes this shape for all three. The compiler gives the
 // file as a NUL-terminated C string.
+// C call str.from_cstr: file and its NUL are parameter sources (D9.8 rule 1), so fail_begin is
+// a boundary function, and each caller gives a file name with its NUL.
 fn fail_begin(char* file, u32 line, u32 col, string kind) void {
     flush_all();
     message.len = 0;
@@ -785,18 +813,26 @@ fn fail_begin(char* file, u32 line, u32 col, string kind) void {
 
 // Ends the line, writes it, and calls abort. The process then ends with
 // SIGABRT.
+// C call libc.abort: no pointer argument.
 fn fail_end() noreturn {
     message_str("\n");
     buffer_flush(&message);
     libc.abort();
 }
 
+// C call fail_begin: file and its NUL are parameter sources (D9.8 rule 1), so this is a
+// boundary function, and each caller gives a file name with its NUL: a function of std.rt,
+// which passes on the one that the code of the compiler gave it (A8), or a trusted module by
+// its row.
 fn fail_runtime(char* file, u32 line, u32 col, string what) noreturn {
     fail_begin(file, line, col, "runtime error");
     message_str(what);
     fail_end();
 }
 
+// C call fail_begin: file and its NUL are parameter sources (D9.8 rule 1), so this is a
+// boundary function, and each caller gives a file name with its NUL: the code that the
+// compiler emits (A8), or a trusted module by its row.
 fn fail_bounds(i64 index, u64 len, char* file, u32 line, u32 col) noreturn {
     fail_begin(file, line, col, "runtime error");
     message_str("index ");
@@ -806,6 +842,9 @@ fn fail_bounds(i64 index, u64 len, char* file, u32 line, u32 col) noreturn {
     fail_end();
 }
 
+// C call fail_begin: file and its NUL are parameter sources (D9.8 rule 1), so this is a
+// boundary function, and each caller gives a file name with its NUL: the code that the
+// compiler emits (A8), or a trusted module by its row.
 fn fail_span(i64 lo, i64 hi, u64 len, char* file, u32 line, u32 col) noreturn {
     fail_begin(file, line, col, "runtime error");
     message_str("span bounds ");
@@ -817,10 +856,18 @@ fn fail_span(i64 lo, i64 hi, u64 len, char* file, u32 line, u32 col) noreturn {
     fail_end();
 }
 
+// C call fail_runtime: file and its NUL are parameter sources (D9.8 rule 1), so this is a
+// boundary function, and each caller gives a file name with its NUL: the code that the
+// compiler emits (A8), or a trusted module by its row.
 fn fail_overflow(char* file, u32 line, u32 col) noreturn {
     fail_runtime(file, line, col, "integer overflow");
 }
 
+// C call fail_begin: file and its NUL are parameter sources (D9.8 rule 1), so this is a
+// boundary function, and each caller gives a file name with its NUL: the code that the
+// compiler emits (A8), or a trusted module by its row.
+// C call str.from_cstr: type_name and its NUL are parameter sources (rule 1), which each
+// caller gives as for file.
 fn fail_shift(i64 count, char* type_name, char* file, u32 line, u32 col) noreturn {
     fail_begin(file, line, col, "runtime error");
     message_str("shift count ");
@@ -830,14 +877,23 @@ fn fail_shift(i64 count, char* type_name, char* file, u32 line, u32 col) noretur
     fail_end();
 }
 
+// C call fail_runtime: file and its NUL are parameter sources (D9.8 rule 1), so this is a
+// boundary function, and each caller gives a file name with its NUL: the code that the
+// compiler emits (A8), or a trusted module by its row.
 fn fail_div_zero(char* file, u32 line, u32 col) noreturn {
     fail_runtime(file, line, col, "division by zero");
 }
 
+// C call fail_runtime: file and its NUL are parameter sources (D9.8 rule 1), so this is a
+// boundary function, and each caller gives a file name with its NUL: the code that the
+// compiler emits (A8), or a trusted module by its row.
 fn fail_div_overflow(char* file, u32 line, u32 col) noreturn {
     fail_runtime(file, line, col, "division overflow");
 }
 
+// C call fail_begin: file and its NUL are parameter sources (D9.8 rule 1), so this is a
+// boundary function, and each caller gives a file name with its NUL: the code that the
+// compiler emits (A8), or a trusted module by its row.
 fn fail_alloc_count(i64 n, char* file, u32 line, u32 col) noreturn {
     fail_begin(file, line, col, "runtime error");
     message_str("negative allocation count ");
@@ -848,12 +904,19 @@ fn fail_alloc_count(i64 n, char* file, u32 line, u32 col) noreturn {
 // Reports a store into an own reference that is not zero. This compiler emits no call (D17.11).
 // bootstrap-1 of tools/bootstrap.ref emits one for each such store, and it builds no module with
 // this std. The tests run/stdlib/082 and run/modes/022 call this entry directly.
+// C call fail_runtime: file and its NUL are parameter sources (D9.8 rule 1), so this is a
+// boundary function, and each caller, a trusted module, gives a file name with its NUL.
 fn fail_overwrite(char* file, u32 line, u32 col) noreturn {
     fail_runtime(file, line, col, "overwriting owned value");
 }
 
 // Report an enum value that no switch clause names.
 // Zero initialization and integer casts can produce such a value.
+// C call fail_begin: file and its NUL are parameter sources (D9.8 rule 1), so this is a
+// boundary function, and each caller gives a file name with its NUL: the code that the
+// compiler emits (A8), or a trusted module by its row.
+// C call str.from_cstr: type_name and its NUL are parameter sources (rule 1), which each
+// caller gives as for file.
 fn fail_enum(i64 v, char* type_name, char* file, u32 line, u32 col) noreturn {
     fail_begin(file, line, col, "runtime error");
     message_str("enum value ");
@@ -864,6 +927,9 @@ fn fail_enum(i64 v, char* type_name, char* file, u32 line, u32 col) noreturn {
 }
 
 // Report a panic message, including any embedded NUL byte.
+// C call fail_begin: file and its NUL are parameter sources (D9.8 rule 1), so this is a
+// boundary function, and each caller gives a file name with its NUL: the code that the
+// compiler emits (A8), or a trusted module by its row.
 fn panic(string msg, char* file, u32 line, u32 col) noreturn {
     fail_begin(file, line, col, "panic");
     message_str(msg);
@@ -872,6 +938,11 @@ fn panic(string msg, char* file, u32 line, u32 col) noreturn {
 
 // Reports a failed assert. text is the source text of the assert argument,
 // byte for byte.
+// C call fail_begin: file and its NUL are parameter sources (D9.8 rule 1), so this is a
+// boundary function, and each caller gives a file name with its NUL: the code that the
+// compiler emits (A8), or a trusted module by its row.
+// C call str.from_cstr: text and its NUL are parameter sources (rule 1), which each caller
+// gives as for file: the text of the assert with its NUL.
 fn assert_fail(char* text, char* file, u32 line, u32 col) noreturn {
     fail_begin(file, line, col, "assertion failed");
     message_str(str.from_cstr(text));
@@ -882,6 +953,10 @@ fn assert_fail(char* text, char* file, u32 line, u32 col) noreturn {
 
 // Return zeroed storage. Allocate one byte when the requested size is zero.
 // Report product overflow or allocation failure at the caller's position.
+// C call fail_runtime x2: file and its NUL are parameter sources (D9.8 rule 1), so alloc is a
+// boundary function, and each caller gives a file name with its NUL: the code that the compiler
+// emits (A8), or a trusted module by its row.
+// C call libc.calloc: no pointer argument; C gives a new allocation of size bytes or null.
 fn alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) void mut* own {
     if (elem_size != 0 && count > U64_MAX / elem_size) {
         fail_runtime(file, line, col, "allocation size overflow");
@@ -898,6 +973,9 @@ fn alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) void mut* own 
 }
 
 // Release storage from alloc. A null pointer does nothing.
+// C call libc.free: p is a parameter source (D9.8 rule 1), so free is a boundary function, and
+// each caller gives an owner, an allocation of alloc or null (A3): the code that the compiler
+// emits, or a trusted module by its row.
 fn free(void* own p) void {
     libc.free(move(p));
 }
@@ -905,6 +983,10 @@ fn free(void* own p) void {
 // ---- strings ----------------------------------------------------------------
 
 // Compare string bytes without using ==, which calls this function.
+// C call libc.memcmp: a, b and a_len are parameter sources (D9.8 rule 1), so str_eq is a
+// boundary function. Each caller gives the `.ptr` and the `.len` of two strings: the code that
+// the compiler emits for `==` (A8), or a trusted module by its row. a_len fits both, because
+// a_len == b_len, and a_len > 0, so no pointer is the `.ptr` of an empty string.
 fn str_eq(char* a, u64 a_len, char* b, u64 b_len) bool {
     if (a_len != b_len) {
         return false;
@@ -923,6 +1005,9 @@ fn str_eq(char* a, u64 a_len, char* b, u64 b_len) bool {
 // main that the compiler emits calls it (D6.9), with the argc and the argv that
 // C gives to main. Delete an earlier span first, so that a second call frees it
 // on each path.
+// C call str.from_cstr: view[i], an element of argv, so the pointer and its NUL are parameter
+// sources (D9.8 rule 1), and args_init is a boundary function: C gives main argc strings, each
+// with its NUL (ISO C11 5.1.2.2.1).
 fn args_init(i32 argc, char* mut* argv) void {
     del(args_store);
     if (argc <= 0) {
@@ -946,6 +1031,7 @@ fn args() string@ {
 
 // Flushes every buffer and ends the process with status & 0xFF. sys.exit
 // calls it.
+// C call libc.exit: no pointer argument.
 fn exit(i32 status) noreturn {
     flush_all();
     libc.exit(status & EXIT_STATUS_MASK);

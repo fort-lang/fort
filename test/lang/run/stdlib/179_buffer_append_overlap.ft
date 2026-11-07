@@ -1,0 +1,25 @@
+//! run
+//! link: ffi/memcpy_overlap.c
+//! stdout:
+//| abcdcdefg
+/// A module can call rt.buffer_append with a view of the bytes of the buffer itself, so the
+/// bytes and the free room of the buffer can overlap. buffer_append copies them with memmove,
+/// which takes overlapping ranges (D9.8: a call row that holds). The helper replaces memcpy with
+/// one that stops the run for overlapping ranges, so the test fails if the copy is memcpy.
+import std.rt;
+
+fn main() i32 {
+    rt.buffer mut b = {};
+    b.fd = 1;
+    string text = "abcdefg";
+    for (u64 mut i = 0; i < text.len; i++) {
+        b.data[i] = cast(text[i], u8);
+    }
+    b.len = 4;
+    // bytes is data[2..7] and the room starts at data[4]: the copy moves "cdefg" two bytes up.
+    rt.buffer_append(&b, b.data[2..7]);
+    b.data[b.len] = cast('\n', u8);
+    b.len += 1;
+    rt.buffer_flush(&b);
+    return 0;
+}
