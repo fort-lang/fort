@@ -3290,20 +3290,20 @@ says ownership is "by convention", this section supersedes it.
   store, no store into the fixed storage of the local but a store of a zero form, and no address of
   that storage, stands after the start of the function or after the last end of the scope of the
   local (`fir.md` 11, Whole stores). A zero form is `{}`, `null`, or a literal whose members are
-  each `{}` or `null`; it is the form of a store of the zero value that gen rule 4 reads (`fir.md`
-  11, Values). The rule reads the form and not the value. For `struct counted { i32 n; bool on; box
-  b; }`, `c = counted{0, false, box{}};` writes the zero value and still ends the proof by this
-  rule, because `0` and `false` are no such members. For `struct inner { u8 mut* own p; }` and
-  `struct outer { inner i; u8 mut* own q; }`, `o = outer{inner{null}, null};` ends it too, because a
-  member that is itself a literal is no such member: the lowering puts it into a temporary. The
-  local then holds no allocation of its scope: the frame of a call holds no allocation of the call,
-  a store of a zero form gives it none, and D17.20 reports a value that the local still holds at the
-  end of its scope. A declaration is such a store, and so is `b = T{};` after `b.f = null;` that
-  follows the declaration of `b`. This rule assumes that no operation writes the storage of the
-  local through a pointer to the local of an earlier entry of its block, or of an earlier scope:
-  such a pointer dangles, and a store through it is undefined (D10.7). A destination of any other
-  whole store that is no tracked place has no fact, so the compiler never proves its store: an
-  element whose index is no key, and a place through a pointer that is not tracked.
+  each a zero form; it is the form of a store of the zero value that gen rule 4 reads (`fir.md` 11,
+  Values). The rule reads the form and not the value. For `struct counted { i32 n; bool on; box b;
+  }`, `c = counted{0, false, box{}};` writes the zero value and still ends the proof by this rule,
+  because `0` and `false` are no zero forms. For `struct inner { u8 mut* own p; }` and `struct outer
+  { inner i; u8 mut* own q; }`, `o = outer{inner{null}, null};` keeps it: the lowering puts the
+  inner literal into a temporary, and the store of the temporary is a zero form too. The local then
+  holds no allocation of its scope: the frame of a call holds no allocation of the call, a store of
+  a zero form gives it none, and D17.20 reports a value that the local still holds at the end of its
+  scope. A declaration is such a store, and so is `b = T{};` after `b.f = null;` that follows the
+  declaration of `b`. This rule assumes that no operation writes the storage of the local through a
+  pointer to the local of an earlier entry of its block, or of an earlier scope: such a pointer
+  dangles, and a store through it is undefined (D10.7). A destination of any other whole store that
+  is no tracked place has no fact, so the compiler never proves its store: an element whose index is
+  no key, and a place through a pointer that is not tracked.
   For a local `b` of type `box`, whose field `data` is an `own` reference, `box mut* own p =
   new(box); *p = move(b);` passes, because `new` fills `*p` with zero (gen rule 5). For a function
   `make` that returns a `box mut* own`, `p = make(); *p = move(b);` does not pass: the facts of a
@@ -3422,8 +3422,9 @@ says ownership is "by convention", this section supersedes it.
      reference type (D19.4, `fir.md` 9.2).
   2. `del(p)` makes `p` empty (D17.9).
   3. `move(p)` makes its source `p` empty, and each tracked place below `p` (D17.6).
-  4. A store of the zero value (`{}`, `null`) into `p` makes `p` and each tracked place below `p`
-     empty.
+  4. A store of the zero value into `p` makes `p` and each tracked place below `p` empty. A store
+     of the zero value is a store of a zero form: `{}`, `null`, or a literal whose members are each
+     a zero form, at any depth.
   5. A store of a fresh `new` into a pointer local `n` makes each tracked place through `n` empty,
      because `new` fills its storage with zero (D10.2).
   6. A test against `null` (refinement R7 of `spec/ownership-design.md` 7): a branch on `p == null`
@@ -3436,6 +3437,12 @@ says ownership is "by convention", this section supersedes it.
      finds `null`, as in `p == null && e` and `p != null || e`. The value of a whole `&&` or `||`
      makes no fact, because the lowering joins its two operands before the branch. `fir.md` 11
      (Tests) gives the FIR form of a test and of its edge.
+  7. A store of a literal into `p` makes each tracked place below a member of `p` empty when the
+     literal gives that member a zero form, or leaves that field out as a designated literal does
+     (D6.5). A member that is itself a literal applies the rule to its own members. So for `struct
+     flow { u64 count; bits entry; }`, whose `bits` holds an `own` reference, `f = flow{.count =
+     n}; f.entry = make_bits(n);` passes: the literal leaves `entry` out, and the call keeps the
+     facts of the local `f`, which is not memory.
   These kill rules make a fact false:
   1. A store into a place `d` whose base is a local or a global kills the fact of each tracked
      place with that base that is not separate from `d`. So a store into a pointer local `p` kills
@@ -3628,6 +3635,17 @@ says ownership is "by convention", this section supersedes it.
   through the address of a fresh `p` kills as a store through another pointer and ends the
   freshness of `p`, the reading of `fir.md` 11; before, kill rule 2 read as if it covered such a
   store, and the compiler did not.
+  Amended 2026-11-07: a zero form is a literal whose members are each a zero form at any depth, and
+  gen rule 7 makes each member empty that a literal gives a zero form or leaves out. The coordinator
+  ruled both on 2026-11-06 under the user ruling "Check whole stores". Before, a zero form was `{}`,
+  `null`, or a literal whose members are each `{}` or `null`, so `o = outer{inner{null}, null};`
+  ended the proof by the scope of a named local, and no rule made a member of a literal empty unless
+  the whole literal was a zero form. Measured as above, 3 more whole stores are proved, and the
+  trees go from 472 such stores to 440 on each target; still no entry changes its output under
+  `--check` or `--leak-report`. A grow loop of a vector stays unproved: a gen rule for the elements
+  of a fresh `new(T, n)` that keys each element loses its fact at `i += 1`, so the coordinator ruled
+  on 2026-11-07 that no such rule enters, and the migration of the whole stores rewrites the 13 such
+  stores of the trees.
 
 ### D17.12 Owned strings
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

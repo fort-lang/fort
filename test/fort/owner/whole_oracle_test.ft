@@ -1,8 +1,8 @@
 //! run
 //! flags: -I ../../src -I support
 //! stdout:
-//| text: sites 33, proved 20, rejected with an event 11, false rejects 2
-//| source: sites 65, proved 39, rejected with an event 19, false rejects 7
+//| text: sites 38, proved 23, rejected with an event 12, false rejects 3
+//| source: sites 74, proved 47, rejected with an event 20, false rejects 7
 /// Holds the verdicts of the stores of a whole value of an owning aggregate in owner.prover
 /// (D17.11, spec/fir.md 11, Whole stores) against the runs of fir.interpreter and the events of
 /// fir.shadow (spec/ownership-design.md 3). A store over an owner slot of a live allocation is an
@@ -27,7 +27,7 @@ import std.strbuf;
 // The declarations that the cases name. `fill` gives a box whose owner holds an allocation.
 // `make` gives a box in an allocation whose owner holds an allocation, and `make_empty` one whose
 // owner is null. `G` is a global box, and a `holder` holds a box in an allocation of its own.
-string[39] PRELUDE = {
+string[43] PRELUDE = {
     "struct box {",
     "    u8 mut* own data;",
     "}",
@@ -63,6 +63,10 @@ string[39] PRELUDE = {
     "    del(q->data);",
     "    q->data = new(u8);",
     "}",
+    "struct twin {",
+    "    box a;",
+    "    box b;",
+    "}",
     "fn one() u64 {",
     "    return 1;",
     "}",
@@ -71,7 +75,7 @@ string[39] PRELUDE = {
 
 // The FIR cases. Each store of a case stands at a location of its own, the line of the statement
 // in the comment of the case.
-string[268] TEXT = {
+string[294] TEXT = {
     // a fresh `new` and a value with no call: the temporary and the store through `p`: P P
     "fn main.o1() -> void {",
     "    let _1 (p): box mut* own #1:1;",
@@ -356,11 +360,40 @@ string[268] TEXT = {
     "        return #4:1;",
     "    }",
     "}",
+    // a temporary that two stores write on two paths: the run takes the path where its `move`
+    // reads the store of an allocation, so the store into the member writes over it, and the
+    // store of the zero value on the other path does not run: P R- P P R+
+    "fn main.o16() -> void {",
+    "    let _1 (t): twin #1:1;",
+    "    let _2: box;",
+    "    let _3: u8 mut* own;",
+    "    let _4: box;",
+    "    let _5: u8 mut* own;",
+    "    bb0: {",
+    "        live(_1) #1:1;",
+    "        _3 = alloc<u8>(const u64 1) #2:1;",
+    "        _2 = aggregate box(move _3) #2:1;",
+    "        switch(const false) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _2 = aggregate box(const null u8 mut* own) #3:1;",
+    "        goto bb2;",
+    "    }",
+    "    bb2: {",
+    "        _1 = aggregate twin(move _2, const zero box) #4:1;",
+    "        _5 = alloc<u8>(const u64 1) #5:1;",
+    "        _4 = aggregate box(move _5) #5:1;",
+    "        _1.0 = move _4 #6:1;",
+    "        del(move _1.0.0) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
 };
 
-string[15] TEXT_VERDICTS = {
+string[16] TEXT_VERDICTS = {
     "P P", "P R+", "P R+", "P R-", "P R+", "P P", "R- R+", "P R+ P", "P P R+", "P P", "R+",
-    "P R+", "P R+", "P P P P R+", "R+",
+    "P R+", "P R+", "P P P P R+", "R+", "P R- P P R+",
 };
 
 // The counts of a set: its whole stores, those that the pass proves, those that it does not prove
@@ -521,7 +554,7 @@ fn run_text_cases(run_env.env mut* e, fir.module* m) void {
 
 // The fort cases: each runs its function, and the function of its proof is the first name of its
 // pair in SOURCE_CASES.
-string[200] SOURCE = {
+string[222] SOURCE = {
     "struct box {",
     "    u8 mut* own data;",
     "}",
@@ -694,6 +727,34 @@ string[200] SOURCE = {
     "    del(p->data);",
     "    del(p);",
     "}",
+    // a designated literal leaves its owner out, so the store into it finds it empty (gen rule
+    // 7): P P
+    "struct counted {",
+    "    u64 n;",
+    "    box b;",
+    "}",
+    "fn designated() void {",
+    "    counted mut c = counted{.n = 1};",
+    "    c.b = fill();",
+    "    del(c.b.data);",
+    "}",
+    // a member that holds an allocation stays live, and the store writes over it; the call of the
+    // member is a temporary first: P P R+
+    "fn live_member() void {",
+    "    counted mut c = counted{1, fill()};",
+    "    c.b = fill();",
+    "    del(c.b.data);",
+    "}",
+    // a nested zero literal is a zero form, so the second store finds the scope bit and the facts
+    // of the first; each inner literal is a temporary first: P P P P
+    "struct duo {",
+    "    box b;",
+    "    u8 mut* own q;",
+    "}",
+    "fn nested_zero() void {",
+    "    duo mut d = duo{box{null}, null};",
+    "    d = duo{box{null}, null};",
+    "}",
     // the kill rules of the first store through `p` end the fact that the `new` gave, so the
     // second store is no proved store over the owner that the first put there: P P P R+
     "fn twice() void {",
@@ -759,7 +820,7 @@ string[200] SOURCE = {
 
 // The functions of the source cases: the function that the pass proves, the function that the run
 // calls, and the verdicts.
-string[84] SOURCE_CASES = {
+string[93] SOURCE_CASES = {
     "s1", "s1", "R+ P",
     "s2", "s2", "P P",
     "s3", "s3", "P",
@@ -788,6 +849,9 @@ string[84] SOURCE_CASES = {
     "stored", "stored", "R+",
     "slot", "slot", "R+",
     "rounds", "rounds", "R+",
+    "designated", "designated", "P P",
+    "live_member", "live_member", "P P R+",
+    "nested_zero", "nested_zero", "P P P P",
 };
 
 // The callers: `s7` gives `over` a box whose owner holds an allocation, and `s8` one whose owner it
@@ -867,7 +931,7 @@ fn lower_decl(run_env.env mut* e, string name, fir.func mut* out, fir_lower.repo
 
 // Runs each fort case and holds the verdicts of its proved function against its run.
 fn each_source_case_holds_against_its_run(run_env.env mut* e) void {
-    string[246] mut all = {};
+    string[268] mut all = {};
     u64 mut k = 0;
     while (k < SOURCE.len) {
         all[k] = SOURCE[k];

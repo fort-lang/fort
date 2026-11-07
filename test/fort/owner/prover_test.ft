@@ -75,7 +75,7 @@ import std.strbuf;
 // `wide` has 170000 inner owners in a fixed array and a `wide2` 100000, and a `deep` 101000 in
 // 1000 `block`s of 101, each under the limit of the inner work. The chain `c0` to `c9` holds 50000
 // inner owners at the end of 11 steps, past the limit.
-string[108] PRELUDE = {
+string[112] PRELUDE = {
     "import extern; struct node {",
     "    node mut* own left;",
     "    node mut* own right;",
@@ -183,6 +183,10 @@ string[108] PRELUDE = {
     "}",
     "struct c9 {",
     "    i32 mut* own[50000] e;",
+    "}",
+    "struct duo {",
+    "    pair p;",
+    "    node mut* own c;",
     "}",
 };
 
@@ -392,7 +396,7 @@ string[82] MOVE = {
 string[4] MOVE_VERDICTS = {"PP/P", "PU/P", "PPU/PPP", "PU/PPP"};
 
 // A store of the zero value makes its place and each tracked place below it empty.
-string[112] ZERO = {
+string[175] ZERO = {
     // the move of a temporary that holds the zero value: UP
     "fn main.z1(_1 (b): node mut*) -> void {",
     "    let _2: node mut* own;",
@@ -447,7 +451,8 @@ string[112] ZERO = {
     "        return;",
     "    }",
     "}",
-    // an aggregate with an operand that is no constant: U
+    // an aggregate with an operand that is no constant is no zero value, and its member `_2.1`,
+    // whose operand is `null`, is empty (gen rule 7): P
     "fn main.z4(_1 (x): node mut* own) -> void {",
     "    let _2 (s): node;",
     "    let _3: node mut* own;",
@@ -512,9 +517,79 @@ string[112] ZERO = {
     "        return;",
     "    }",
     "}",
+    // a member of a literal whose operand holds a value: U
+    "fn main.z8(_1 (x): node mut* own) -> void {",
+    "    let _2 (s): node;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = aggregate node(move _1, const null node mut* own,",
+    "            const zero node mut* own[2], const zero node mut* own mut@ own);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _2.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2.0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // the members of a nested literal, whose temporary holds no zero value: the zero member of
+    // the pair, its other member, and the zero member of the `duo` (gen rule 7): PUP
+    "fn main.z9(_1 (x): node mut* own) -> void {",
+    "    let _2 (d): duo;",
+    "    let _3: pair;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own;",
+    "    bb0: {",
+    "        _3 = aggregate pair(const null node mut* own, move _1);",
+    "        _2 = aggregate duo(move _3, const null node mut* own);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: _2.0.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2.0.0 = move _4;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: _2.0.1) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        _2.0.1 = move _5;",
+    "        _6 = alloc<node>(const u64 1);",
+    "        check(overwrite: _2.1) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        _2.1 = move _6;",
+    "        return;",
+    "    }",
+    "}",
+    // a temporary that two stores write on two paths: the `move` can read the store that holds
+    // a value, so the member gives no fact: U
+    "fn main.z10(_1 (x): node mut* own, _2 (c): bool) -> void {",
+    "    let _3 (d): duo;",
+    "    let _4: pair;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _4 = aggregate pair(move _1, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _4 = aggregate pair(const null node mut* own, const null node mut* own);",
+    "        goto bb2;",
+    "    }",
+    "    bb2: {",
+    "        _3 = aggregate duo(move _4, const null node mut* own);",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: _3.0.0) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        _3.0.0 = move _5;",
+    "        return;",
+    "    }",
+    "}",
 };
 
-string[7] ZERO_VERDICTS = {"UP/PP", "P/UP", "PP/PP", "U/P", "U/PUP", "U/PUP", "U/PUP"};
+string[10] ZERO_VERDICTS = {
+    "UP/PP", "P/UP", "PP/PP", "P/P", "U/PUP", "U/PUP", "U/PUP", "U/P", "PUP/PPP", "U/P",
+};
 
 // A store of a fresh `new` makes each tracked place through the pointer empty.
 string[88] FRESH = {

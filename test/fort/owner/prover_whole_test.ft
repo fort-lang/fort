@@ -78,7 +78,7 @@ string[48] PRELUDE = {
 
 // Each case is a FIR function and the verdicts of its whole stores (write_verdicts), which its
 // comment gives. Each owner below the destination must hold the zero value at the store.
-string[683] CASES = {
+string[740] CASES = {
     // a fresh `new` makes the owner of its object empty (gen rule 5): P
     "fn main.c1(_1 (b): box) -> void {",
     "    let _2 (p): box mut* own;",
@@ -835,14 +835,83 @@ string[683] CASES = {
     "        return;",
     "    }",
     "}",
+    // a designated literal leaves its owners out, so the stores into them after it find them
+    // empty (gen rule 7); the literal itself writes over the owners of the parameter: U0:4 P P
+    "fn main.c52(_1 (o): outer mut*, _2 (b): box, _3 (c): box) -> void {",
+    "    let _4: u64;",
+    "    bb0: {",
+    "        (*_1) = aggregate zeroed outer(const i32 5, const zero box, const zero box[2]);",
+    "        (*_1).1 = move _2;",
+    "        _4 = const u64 1;",
+    "        (*_1).2[_4] = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a member of a literal that holds a value stays unproved, and a zero member after it is
+    // empty: U0:4 U0:4 P
+    "fn main.c53(_1 (o): outer mut*, _2 (b): box, _3 (c): box, _4 (d): box) -> void {",
+    "    let _5: u64;",
+    "    bb0: {",
+    "        (*_1) = aggregate outer(const i32 5, move _2, const zero box[2]);",
+    "        (*_1).1 = move _3;",
+    "        _5 = const u64 0;",
+    "        (*_1).2[_5] = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // the members of a nested literal in a temporary: its zero member is empty, and its member
+    // that holds a value is not: P U0:4 P U0:4
+    "fn main.c54(_1 (d): deep mut*, _2 (b): box, _3 (c): box, _4 (x): box) -> void {",
+    "    let _5: outer;",
+    "    let _6: u64;",
+    "    bb0: {",
+    "        _5 = aggregate outer(const i32 1, move _2, const zero box[2]);",
+    "        (*_1) = aggregate deep(move _5, const zero outer);",
+    "        _6 = const u64 0;",
+    "        (*_1).0.2[_6] = move _3;",
+    "        (*_1).0.1 = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // a literal whose members are each a zero value, a nested literal in a temporary among them,
+    // is the zero value, so the next store into its member finds the owner below it empty (gen
+    // rule 4): P U0:4 P
+    "fn main.c55(_1 (l): link mut*, _2 (b): box) -> void {",
+    "    let _3: box;",
+    "    bb0: {",
+    "        _3 = aggregate box(const null u8 mut* own);",
+    "        (*_1) = aggregate link(const null link mut*, move _3);",
+    "        (*_1).1 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // a temporary that two stores write on two paths holds no known value at its `move`, which
+    // can read the store of a value: P U0:4 U0:4 U0:4
+    "fn main.c56(_1 (l): link mut*, _2 (b): box, _3 (c): box, _4 (k): bool) -> void {",
+    "    let _5: box;",
+    "    bb0: {",
+    "        _5 = move _2;",
+    "        switch(copy _4) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _5 = aggregate box(const null u8 mut* own);",
+    "        goto bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_1) = aggregate link(const null link mut*, move _5);",
+    "        (*_1).1 = move _3;",
+    "        return;",
+    "    }",
+    "}",
 };
 
-string[51] VERDICTS = {
+string[56] VERDICTS = {
     "P", "P", "P", "U0:4", "U0:4", "U0:4 P", "U1:4", "P", "P", "U0:1", "U0:4 P", "U0:2",
     "U0:2", "U0:2", "U0:4", "P P", "U0:4", "P", "P U0:4", "P", "P U0:4", "P U0:4", "", "U0:4 P",
     "U0:3", "U0:4", "P", "P U1:4", "P P", "P", "U0:2", "P P", "U0:4 P", "U2:4", "P", "U4:4",
     "P", "P U0:4", "U0:4", "U0:2", "P", "U0:3", "U0:3", "U0:4", "U0:3", "U0:2", "U0:4", "P U0:4",
-    "P P", "P U0:4", "U0:2",
+    "P P", "P U0:4", "U0:2", "U0:4 P P", "U0:4 U0:4 P", "P U0:4 P U0:4", "P U0:4 P",
+    "P U0:4 U0:4 U0:4",
 };
 
 // Writes the verdict of each whole store of p->wholes into `out`, in order, with a space between
@@ -1016,7 +1085,7 @@ fn expect_module(lower_env.env mut* e, fir.module* m, string@ want) void {
 
 // Fort sources whose whole stores the pass proves and does not prove, of each cause. A comment
 // gives the verdicts of each function (write_verdicts).
-string[121] SOURCE = {
+string[143] SOURCE = {
     "struct box {",
     "    u8 mut* own data;",
     "}",
@@ -1158,17 +1227,46 @@ string[121] SOURCE = {
     "    del(q->data);",
     "    *q = fill();",
     "}",
+    // a nested zero literal is a zero form, so the second store into `d` finds the scope bit and
+    // the facts of the first (gen rule 4); the lowering writes each inner literal into a
+    // temporary first, a whole store of its own: P P P P
+    "struct duo {",
+    "    box b;",
+    "    u8 mut* own q;",
+    "}",
+    "fn nested_zero() void {",
+    "    duo mut d = duo{box{null}, null};",
+    "    d = duo{box{null}, null};",
+    "}",
+    // a designated literal leaves its owner out, so the store into it finds it empty (gen rule
+    // 7): P P
+    "struct counted {",
+    "    u64 n;",
+    "    box b;",
+    "}",
+    "fn designated(box mut x) void {",
+    "    counted mut c = counted{.n = 1};",
+    "    c.b = move(x);",
+    "    del(c.b.data);",
+    "}",
+    // a member that holds a value stays live: P U0:4
+    "fn live_member(box mut x, box mut y) void {",
+    "    counted mut c = counted{1, move(x)};",
+    "    c.b = move(y);",
+    "    del(c.b.data);",
+    "}",
 };
 
-string[20] SOURCE_NAMES = {
+string[23] SOURCE_NAMES = {
     "make", "fill", "probe", "fresh_move", "fresh_call", "fresh_lit", "field_first", "nested",
     "element", "element_field", "through", "local_reassign", "loop_decl", "deferred",
-    "global_store", "cond", "cond_live", "twice", "call_first", "param_call",
+    "global_store", "cond", "cond_live", "twice", "call_first", "param_call", "nested_zero",
+    "designated", "live_member",
 };
 
-string[20] SOURCE_VERDICTS = {
+string[23] SOURCE_VERDICTS = {
     "", "P", "U0:4", "P", "P", "P", "P", "U0:4 P", "P", "U0:1", "U0:2", "P P U0:4", "P",
-    "P P", "U0:4", "P P", "U0:4 U0:4", "P U0:4", "P", "U0:3",
+    "P P", "U0:4", "P P", "U0:4 U0:4", "P U0:4", "P", "U0:3", "P P P P", "P P", "P U0:4",
 };
 
 // Lowers the function `name` of the checked source of `e` and holds that the verifier accepts it.
@@ -1250,7 +1348,7 @@ fn expect_limits(lower_env.env mut* e, fir.module* m) void {
 // after the file of the function: the message and the note of D17.11 and the cause, at the `=` of
 // the assignment. The destination of a deref is in a parenthesis, and the two arms of a
 // conditional store give one store at one `=`.
-string[27] REPORTED = {
+string[30] REPORTED = {
     ":28:8: overwriting owned value: cannot prove '(*p).data' is empty here",
     ":28:8: note: del or move '(*p).data' before this store",
     ":28:8: note: cause 4: no fact proves that the owner is empty",
@@ -1278,6 +1376,9 @@ string[27] REPORTED = {
     ":120:8: overwriting owned value: cannot prove '(*q).data' is empty here",
     ":120:8: note: del or move '(*q).data' before this store",
     ":120:8: note: cause 3: the call of the right side kills the fact of the owner",
+    ":141:9: overwriting owned value: cannot prove 'c.b.data' is empty here",
+    ":141:9: note: del or move 'c.b.data' before this store",
+    ":141:9: note: cause 4: no fact proves that the owner is empty",
 };
 
 // Holds that `got` holds the lines of `want`, each after `file` and with a line feed.

@@ -1052,9 +1052,12 @@ came here.
   make_probes(count)` after `pr = new(probes)` is proved, and the marks of these addresses run in
   each function, also past the whole-store work, so that no other verdict depends on that limit
   (`place.mark_whole_addresses`). The grow loop of a vector, `bigger[i] = move(v->items[i])`, has
-  no fact, because no gen rule makes an element of a fresh span empty. A literal with an omitted
-  owner field, such as `dataflow{.count = n}`, is no zero value, so the owners that it leaves zero
-  take no fact.
+  no fact, because no gen rule makes an element of a fresh span empty. `place.mark_values` marks
+  once each temporary that one store writes and one `move` reads, so a nested zero literal, whose
+  inner literals the lowering puts into temporaries, is a zero value (`place.is_zero_rvalue`), and
+  a store of a literal makes each owner empty that it leaves out or gives a zero value, at any
+  depth (gen rule 7 of D17.11, `place.is_zero_member`, `prover.gen_members`): so after
+  `dataflow{.count = n}` the owners that the literal leaves zero have their facts.
   `test/fort/owner/whole_oracle_test.ft` holds each verdict against a run of `fir.interpreter`: a
   store that the pass proves and whose run gives an `overwrite` event at its location fails it.
   `fir.shadow` gives an `overwrite` the exit location of its statement (` exit <line>:<col>`), so
