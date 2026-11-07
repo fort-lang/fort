@@ -7,8 +7,9 @@
 //| ok
 /// Checks `--lib <name> <root> --emit-interface` and `--emit-summaries` in src/fort/driver.ft
 /// (D9.11, toolchain.md 1 and 2.1): the usage errors of a library build, a root that cannot be
-/// read or holds no module, a compile error, an overwrite error of D17.11, and the interface file
-/// and the summary file on stdout, which two runs write alike.
+/// read or holds no module, a compile error, an overwrite error of D17.11, a drop that is not
+/// release-only (D17.9), and the interface file and the summary file on stdout, which two runs
+/// write alike.
 import capture;
 import fort.driver;
 import library_env;
@@ -305,6 +306,72 @@ fn an_unproved_overwrite_store_is_exit_one() void {
     assert(!out_is_empty());
 }
 
+// A module with a drain whose drop stores an owner into a global, which is not release-only, and
+// the same module with a drop that only frees (D17.9).
+string[10] BACK_CELLS = {
+    "struct cell {",
+    "    i32 mut* own p;",
+    "}",
+    "cell mut BACK = {};",
+    "fn cell_drop(cell mut c) void {",
+    "    del(BACK.p);",
+    "    BACK.p = move(c.p);",
+    "}",
+    "fn drain(cell mut@ own s) void {",
+    "    del(s, cell_drop);",
+};
+
+string[8] FREE_CELLS = {
+    "struct cell {",
+    "    i32 mut* own p;",
+    "}",
+    "fn cell_drop(cell mut c) void {",
+    "    del(c.p);",
+    "}",
+    "fn drain(cell mut@ own s) void {",
+    "    del(s, cell_drop);",
+};
+
+// Writes the lines of `lines` and a closing brace as the file `path`.
+fn write_lines(string path, string@ lines) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(&b, lines[i]);
+        strbuf.push(&b, '\n');
+        i += 1;
+    }
+    strbuf.append(&b, "}\n");
+    write_file(path, strbuf.view(&b));
+}
+
+// A library build decides the drop of each `del(s, d)` after the emptiness pass, as `--check`
+// does (D17.9): a drop that is not release-only is the error at the drop with the note at the
+// store, exit 1 and no interface file. With a drop that only frees, the build writes the file,
+// which declares the drain and the drop with no body.
+fn a_drop_that_is_not_release_only_is_exit_one() void {
+    make_dir("drains");
+    write_file("drains/rt.ft", "i32 B = 1;\n");
+    write_lines("drains/cells.ft", BACK_CELLS[..]);
+    string[5] args = {"fort", "--lib", "std", "drains", "--emit-interface"};
+    assert(run(args[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("drains/cells.ft:10:12: error: cannot drop the elements with 'cell_drop': "));
+    assert(err_has("drains/cells.ft:7:12: note: 'cell_drop' stores an owner through memory "));
+    assert(out_is_empty());
+    string[5] summaries = {"fort", "--lib", "std", "drains", "--emit-summaries"};
+    assert(run(summaries[..]) == EXIT_COMPILE_ERROR);
+    assert(out_is_empty());
+    write_lines("drains/cells.ft", FREE_CELLS[..]);
+    assert(run(args[..]) == EXIT_OK);
+    assert(err_is(""));
+    string own text = capture.text("out.txt");
+    defer del(text);
+    assert(str.find(text, "fn cell_drop(cell mut c) void;\n") >= 0);
+    assert(str.find(text, "fn drain(cell mut@ own s) void;\n") >= 0);
+    assert(str.find(text, "del(") < 0);
+}
+
 fn the_interface_file_is_written_to_stdout_alike_twice() void {
     write_root();
     string[5] args = {"fort", "--lib", "std", "root", "--emit-interface"};
@@ -484,6 +551,7 @@ fn main() i32 {
     println("root ok");
     a_compile_error_in_a_module_is_exit_one();
     an_unproved_overwrite_store_is_exit_one();
+    a_drop_that_is_not_release_only_is_exit_one();
     the_interface_file_is_written_to_stdout_alike_twice();
     the_summary_file_is_written_to_stdout_alike_twice();
     the_summaries_need_a_library_with_no_error();

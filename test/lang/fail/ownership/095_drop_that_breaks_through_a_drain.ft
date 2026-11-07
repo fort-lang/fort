@@ -1,0 +1,46 @@
+//! fail
+// The drop of `del(s, d)` takes the bit of each function that it calls (D17.9), and a drain in a
+// drop calls the drop of the inner span. `row_drop` drains its cells with `cell_drop`, which calls
+// a function value, so the inner drain is an error, `row_drop` is not release-only, and the notes
+// of each drain of rows go through the inner drain.
+// A deferred `del(s, d)` that two exits expand and a `del(s, d)` in a loop are one error each, at
+// the drop of the statement.
+struct cell {
+    i32 mut* own p;
+}
+
+struct row {
+    cell mut@ own cells;
+}
+
+fn noop() void {
+}
+
+fn () void HOOK = noop;
+
+fn cell_drop(cell mut c) void {
+    del(c.p);
+    HOOK();
+}
+
+fn row_drop(row mut r) void {
+    del(r.cells, cell_drop); //! error: cannot drop the elements with 'cell_drop': it is not release-only
+}
+
+fn twice(bool early, row mut@ own rows) i32 {
+    defer del(rows, row_drop); //! error: cannot drop the elements with 'row_drop': it is not release-only
+    if (early) {
+        return 1;
+    }
+    return 2;
+}
+
+fn main() i32 {
+    row mut@ own rows = new(row, 2);
+    del(rows, row_drop); //! error: cannot drop the elements with 'row_drop': it is not release-only
+    for (i32 mut k = 0; k < 2; k += 1) {
+        cell mut@ own cells = new(cell, 1);
+        del(cells, cell_drop); //! error: cannot drop the elements with 'cell_drop': it is not release-only
+    }
+    return twice(true, new(row, 1));
+}

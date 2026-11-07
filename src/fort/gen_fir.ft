@@ -4,6 +4,7 @@
 import fort.ast;
 import fort.check;
 import fort.fir;
+import fort.fir.release;
 import fort.fir_llvm;
 import fort.fir_lower;
 import fort.fir_passes;
@@ -14,6 +15,7 @@ import fort.modules;
 import fort.owner.prover;
 import fort.owner.report;
 import fort.owner.summary;
+import fort.session;
 import std.strbuf;
 import fort.types;
 
@@ -28,12 +30,14 @@ fn emits(ast.node* fn_node) bool {
 /// What the lowering of one program reads: the checker, which the lowering takes as `mut`, and
 /// the runtime entries of the checks, which the verifier reads, with the kinds that the mode
 /// removes excused (fir_verify.excuse_mode). `calls` takes each function that the emptiness pass
-/// proves, for the ownership summaries, or is null when the build computes none. emit_program
-/// makes it once.
+/// proves, for the ownership summaries, or is null when the build computes none. `drops` takes
+/// each function that the lowering makes, for the release-only bit of D17.9, or is null when the
+/// program holds no `del(s, d)`. emit_program makes it once.
 struct fir_path {
     check.checker mut* ck;
     fir_verify.runtime rt;
     summary.graph mut* calls;
+    release.table mut* drops;
 }
 
 /// The passes between the lowering and the translator (spec/fir.md 3): the verifier, the
@@ -126,6 +130,9 @@ fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
         }
         gen.gen_error(g, why.at, strbuf.view(&text));
         return false;
+    }
+    if (fp->drops != null) {
+        release.scan(fp->drops, f);
     }
     fir.check_kind mut missing = fir.check_kind.chk_overflow;
     if (!fir_verify.runtime_holds(f, &fp->rt, &missing)) {
@@ -317,12 +324,20 @@ fn gen_program(gen.emitter mut* g, check.checker mut* ck, modules.module_set* se
 
 /// Emits the program as gen_program does. When `calls` is not null, it also adds each function
 /// that the emptiness pass proves to `calls`, with the work of its proof, and after a run with no
-/// compile error it solves `calls`: the ownership summaries (spec/ownership-design.md 8.2).
+/// compile error it solves `calls`: the ownership summaries (spec/ownership-design.md 8.2). When
+/// the program holds a `del(s, d)`, the release-only bit of each function that the lowering makes
+/// decides each drop after the last function, and a drop that is not release-only is a compile
+/// error (D17.9, release.report).
 fn emit_program(gen.emitter mut* g, check.checker mut* ck, modules.module_set* set,
                 summary.graph mut* calls) bool {
     g->ck = ck;
     fir_path mut fp = fir_path{.ck = ck, .rt = fir_verify.runtime_of(ck), .calls = calls};
     fir_verify.excuse_mode(&fp.rt, g->opts.release, g->opts.no_bounds_check);
+    release.table mut* own drops = release.make();
+    defer release.drop_made(move(drops));
+    if (check.drain_count(ck) > 0) {
+        fp.drops = drops;
+    }
     // The named types every module carries, used or not.
     strbuf.append(&g->named, gen.SPAN_TYPE);
     strbuf.append(&g->named, " = type { ptr, i64 }\n");
@@ -340,6 +355,13 @@ fn emit_program(gen.emitter mut* g, check.checker mut* ck, modules.module_set* s
         if (main_decl != null) {
             // the only unmangled definition, in the entry module
             gen.gen_main(g, main_decl->sym);
+        }
+    }
+    if (fp.drops != null) {
+        // each function is lowered, so each drop has its bit (D17.9)
+        release.solve(fp.drops);
+        if (release.report(fp.drops, ck, session.diags(g->sess)) > 0) {
+            g->failed = true;
         }
     }
     gen_data.gen_finish(g);

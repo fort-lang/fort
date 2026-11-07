@@ -1063,6 +1063,83 @@ fn a_wide_scope_ends_every_local_and_expands_every_defer() void {
     }
 }
 
+// A deferred `del(s, d)` expands at each exit as a drain of its own (D17.9, spec/fir.md 9.4): each
+// expansion moves the span out of `s` into a temporary of its own, runs its own loop over the
+// elements and frees the storage, and each statement of it carries the location of its exit. The
+// two expansions stand on two paths, so each run moves the span out once.
+fn a_deferred_drain_expands_at_each_exit_with_a_loop_of_its_own() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string[12] source = {
+        "struct cell {",
+        "    i32 mut* own p;",
+        "}",
+        "fn cell_drop(cell mut c) void {",
+        "    del(c.p);",
+        "}",
+        "fn f(bool c, cell mut@ own s) void {",
+        "    defer del(s, cell_drop);",
+        "    if (c) {",
+        "        return;",
+        "    }",
+        "}",
+    };
+    string[51] want = {
+        "fn main.f(_1 (c): bool, _2 (s): cell mut@ own) -> void {",
+        "    let _0: void;",
+        "    let _3: cell mut@ own #8:11;",
+        "    let _4: u64 #8:11;",
+        "    let _5: bool #8:11;",
+        "    let _6: void #8:18;",
+        "    let _7: cell mut@ own #8:11;",
+        "    let _8: u64 #8:11;",
+        "    let _9: bool #8:11;",
+        "    let _10: void #8:18;",
+        "",
+        "    bb0: {",
+        "        switch(copy _1) -> [true: bb1, otherwise: bb2] #9:5 s2;",
+        "    }",
+        "    bb1: {",
+        "        _3 = move _2 #8:11 exit 10:9 s4;",
+        "        _4 = const u64 0 #8:11 exit 10:9 s4;",
+        "        goto bb3 #8:11 exit 10:9 s4;",
+        "    }",
+        "    bb2: {",
+        "        _7 = move _2 #8:11 exit 12:1 s5;",
+        "        _8 = const u64 0 #8:11 exit 12:1 s5;",
+        "        goto bb6 #8:11 exit 12:1 s5;",
+        "    }",
+        "    bb3: {",
+        "        _5 = lt(copy _4, copy _3.1) #8:11 exit 10:9 s4;",
+        "        switch(copy _5) -> [true: bb4, otherwise: bb5] #8:11 exit 10:9 s4;",
+        "    }",
+        "    bb4: {",
+        "        _6 = call fn main.cell_drop(move _3[_4]) #8:18 exit 10:9 s4;",
+        "        _4 = add(copy _4, const u64 1) #8:11 exit 10:9 s4;",
+        "        goto bb3 #8:11 exit 10:9 s4;",
+        "    }",
+        "    bb5: {",
+        "        del(move _3) #8:11 exit 10:9 s4;",
+        "        return #10:9 s3;",
+        "    }",
+        "    bb6: {",
+        "        _9 = lt(copy _8, copy _7.1) #8:11 exit 12:1 s5;",
+        "        switch(copy _9) -> [true: bb7, otherwise: bb8] #8:11 exit 12:1 s5;",
+        "    }",
+        "    bb7: {",
+        "        _10 = call fn main.cell_drop(move _7[_8]) #8:18 exit 12:1 s5;",
+        "        _8 = add(copy _8, const u64 1) #8:11 exit 12:1 s5;",
+        "        goto bb6 #8:11 exit 12:1 s5;",
+        "    }",
+        "    bb8: {",
+        "        del(move _7) #8:11 exit 12:1 s5;",
+        "        return #12:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
+}
+
 fn main() i32 {
     the_worked_example_lowers_byte_for_byte();
     println("worked example ok");
@@ -1073,6 +1150,7 @@ fn main() i32 {
     a_deferred_call_that_does_not_return_ends_a_break_and_a_fall_off();
     nested_scopes_unwind_inner_first_each_with_its_markers();
     a_deferred_statement_in_a_range_for_expands_before_the_variable_ends();
+    a_deferred_drain_expands_at_each_exit_with_a_loop_of_its_own();
     println("exits ok");
     a_break_inside_deferred_code_leaves_the_loop_inside_it();
     clause_exits_inside_deferred_code_stay_inside_it();

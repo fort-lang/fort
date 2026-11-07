@@ -2122,11 +2122,12 @@ fn lower_builtin(lowerer mut* lw, ast.node* n) bool {
 
 // `del(e)` at the name `del` (spec/fir.md 9.4, D17.9): `del(move p)` of the place of an lvalue,
 // with its index checks first, which empties the place; for an rvalue, `_t = e` and then `del(move
-// _t)`, which only frees.
+// _t)`, which only frees. `del(s, d)` drains the span first (lower_drain).
 fn lower_del(lowerer mut* lw, ast.node* n) bool {
     ast.node* e = ast.ast_child(n, 0);
+    bool lvalue = (e->ann & check.ANN_LVALUE) != 0;
     fir.place mut p = fir.place{};
-    if ((e->ann & check.ANN_LVALUE) != 0) {
+    if (lvalue) {
         if (!lower_place(lw, e, &p)) {
             return false;
         }
@@ -2137,8 +2138,52 @@ fn lower_del(lowerer mut* lw, ast.node* n) bool {
         }
         p = fir.place_local(t);
     }
+    if (ast.ast_len(n) == 2) {
+        p = drained(lw, n, p, lvalue);
+    }
     append(lw, fir.stmt_del(p, n->a->loc, lw->stmt));
     return true;
+}
+
+// The drain of `del(s, d)` before its `del` (spec/fir.md 9.4, D17.9), after the place `p` of `s`,
+// and the place that the `del` then frees. An lvalue `s` moves out first, `_t = move p`, so `p`
+// holds the zero value while `d` runs; the temporary of an rvalue is `_t` itself. Then the counter
+// `_i: u64 = const u64 0`; the blocks head, body and done; `_c = lt(copy _i, copy _t.1)` and
+// `switch(copy _c)` in head; `call fn d(move _t[_i])` at `d` and `_i = add(copy _i, const u64 1)`
+// in body, then `goto head`. The `del` stands in done. The counter never passes the length, so
+// neither the index nor the `add` needs a check. Each other statement stands at the name `del`.
+fn drained(lowerer mut* lw, ast.node* n, fir.place p, bool lvalue) fir.place {
+    diag.loc at = n->a->loc;
+    ast.node* d = ast.ast_child(n, 1);
+    fir.place mut t = p;
+    if (lvalue) {
+        u32 held = fir.local_add(lw->f, fir.place_type(lw->f, p), fir.local_kind.lk_temp, null, at);
+        t = fir.place_local(held);
+        assign(lw, t, fir.rvalue_use(lw->f, fir.operand_move(p)), at);
+    }
+    types.node* wide = u64_ty(lw);
+    u32 i = fir.local_add(lw->f, wide, fir.local_kind.lk_temp, null, at);
+    fir.place counter = fir.place_local(i);
+    fir.operand index = fir.operand_copy(counter);
+    assign(lw, counter, fir.rvalue_use(lw->f, int_const(wide, false, 0)), at);
+    u32 head = fir.block_new(lw->f);
+    u32 body = fir.block_new(lw->f);
+    u32 done = fir.block_new(lw->f);
+    jump(lw, head, at);
+    lw->block = head;
+    fir.rvalue below = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_lt, index, length_of(lw, t));
+    branch(lw, into_temp(lw, bool_ty(lw), below, at), body, done, at);
+    lw->block = body;
+    u32 first = fir.operand_push(lw->f, fir.operand_move(fir.place_index(lw->f, t, i)));
+    fir.rvalue call = fir.rvalue_call_fn(d->sym, first, 1);
+    u32 sink = fir.local_add(lw->f, fir.rvalue_type(lw->f, call), fir.local_kind.lk_temp, null,
+                             d->loc);
+    assign(lw, fir.place_local(sink), call, d->loc);
+    fir.operand one = int_const(wide, false, 1);
+    assign(lw, counter, fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_add, index, one), at);
+    jump(lw, head, at);
+    lw->block = done;
+    return t;
 }
 
 // The name of the runtime function of `k`.

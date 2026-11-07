@@ -1,0 +1,521 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| span of owners ok
+//| report list ok
+//| drains ok
+//| positions ok
+//| drop errors ok
+//| operand errors ok
+//| arity ok
+//| emptiable ok
+//| qualified ok
+/// Checks `del(s, d)` in src/fort/check.ft (D17.9): which spans are spans of owners, the list of
+/// the one-operand `del`s of a span of owners that --span-del-report reads, the list of the
+/// `del(s, d)` calls that the release-only check reads, and each error of the two operands with
+/// its count, which a fail test cannot hold (notes/testing.md 3).
+import fort.ast;
+import fort.check;
+import check_env;
+import fort.session;
+import std.strbuf;
+
+// The types of the sources below, lines 1 to 18: `cell` holds an owner, `plain` holds none,
+// `deep` holds one in a nested struct, and `pair` holds two in a fixed array. `main` starts on
+// line 19, so the first statement of a body stands on line 20.
+string[18] TYPES = {
+    "struct cell {",
+    "    i32 mut* own p;",
+    "}",
+    "struct plain {",
+    "    i32 v;",
+    "}",
+    "struct deep {",
+    "    cell c;",
+    "}",
+    "struct pair {",
+    "    i32 mut* own[2] two;",
+    "}",
+    "fn cell_drop(cell mut c) void {",
+    "    del(c.p);",
+    "}",
+    "fn other(i32 v) void {",
+    "    return;",
+    "}",
+};
+
+// Appends each line of `lines` and a newline to `out`.
+fn join(string@ lines, strbuf.str_buf mut* out) void {
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(out, lines[i]);
+        strbuf.push(out, '\n');
+        i += 1;
+    }
+}
+
+// Checks TYPES, then `decls`, then a `main` whose body is `body` and `return 0;`, as the module
+// `main`.
+fn check_lines(check_env.env mut* e, string@ decls, string@ body) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    join(TYPES[..], &b);
+    join(decls, &b);
+    strbuf.append(&b, "fn main() i32 {\n");
+    join(body, &b);
+    strbuf.append(&b, "    return 0;\n}\n");
+    return check_env.check_src(e, strbuf.view(&b));
+}
+
+// Whether the diagnostic `i` is `<at>: ` and then the items of `parts`, joined.
+fn reported(check_env.env mut* e, u64 k, string at, string@ parts) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    strbuf.append(&b, at);
+    strbuf.append(&b, ": ");
+    u64 mut i = 0;
+    while (i < parts.len) {
+        strbuf.append(&b, parts[i]);
+        i += 1;
+    }
+    if (check_env.report_text(e, k) != strbuf.view(&b)) {
+        eprintln("diagnostic ", k, ": ", check_env.report_text(e, k), "\nand not ",
+                 strbuf.view(&b));
+        return false;
+    }
+    return true;
+}
+
+// The line of the `del` of the one-operand list at `i`.
+fn span_del_line(check_env.env* e, u64 i) u64 {
+    return cast(check.span_del_at(&e->ck, i)->a->loc.line, u64);
+}
+
+// The line of the call of the list of drains at `i`.
+fn drain_line(check_env.env* e, u64 i) u64 {
+    return cast(check.drain_at(&e->ck, i)->loc.line, u64);
+}
+
+// ---- the span of owners ------------------------------------------------------------
+
+// A span of owners is an `own` span whose element type holds an `own` place in its fixed storage,
+// at any level: a struct with an owner, a struct that holds such a struct, a fixed array of
+// owners, and an `own` pointer. A span of a type with no owner, a span of `i32`, an `own` pointer
+// and a `string own` are no spans of owners, and so is the type of a function.
+string[17] KINDS = {
+    "    cell mut@ own a = new(cell, 1);",
+    "    deep mut@ own b = new(deep, 1);",
+    "    pair mut@ own c = new(pair, 1);",
+    "    i32 mut* own mut@ own d = new(i32 mut* own, 1);",
+    "    plain mut@ own f = new(plain, 1);",
+    "    i32 mut@ own g = new(i32, 1);",
+    "    cell mut* own k = new(cell);",
+    "    string own m = {};",
+    "    del(a);",
+    "    del(b);",
+    "    del(c);",
+    "    del(d);",
+    "    del(f);",
+    "    del(g);",
+    "    del(k->p);",
+    "    del(k);",
+    "    del(m);",
+};
+
+fn spans_of_owners_are_the_own_spans_whose_elements_hold_owners() void {
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_lines(e, TYPES[..0], KINDS[..]));
+    assert(check_env.errors(e) == 0);
+    assert(!check.is_span_of_owners(check_env.sym_of(e, "main", "cell_drop")->ty));
+    // four of the nine `del`s free a span of owners: `a`, `b`, `c` and `d`
+    assert(check.span_del_count(&e->ck) == 4);
+    assert(span_del_line(e, 0) == 28);
+    assert(span_del_line(e, 1) == 29);
+    assert(span_del_line(e, 2) == 30);
+    assert(span_del_line(e, 3) == 31);
+    assert(check.drain_count(&e->ck) == 0);
+    println("span of owners ok");
+}
+
+// The one-operand list holds each `del` of a span of owners once, in the order of the walk: an
+// rvalue, a field, an element of a fixed array and a deferred `del` are each one entry, and the
+// list says nothing of a `del(s, d)`. A program with such a `del` checks with no error.
+string[7] REPORT_DECLS = {
+    "struct box {",
+    "    cell mut@ own items;",
+    "}",
+    "fn make() cell mut@ own {",
+    "    return new(cell, 2);",
+    "}",
+    "fn ignore() void {}",
+};
+
+string[9] REPORT_BODY = {
+    "    del(make());",
+    "    box mut b = box{};",
+    "    del(b.items);",
+    "    cell mut@ own[2] two = {};",
+    "    del(two[1]);",
+    "    cell mut@ own s = new(cell, 1);",
+    "    defer del(s);",
+    "    cell mut@ own t = new(cell, 1);",
+    "    del(t, cell_drop);",
+};
+
+fn each_one_operand_del_of_a_span_of_owners_joins_the_report_list() void {
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_lines(e, REPORT_DECLS[..], REPORT_BODY[..]));
+    assert(check_env.errors(e) == 0);
+    assert(check.span_del_count(&e->ck) == 4);
+    assert(span_del_line(e, 0) == 27);
+    assert(span_del_line(e, 1) == 29);
+    assert(span_del_line(e, 2) == 31);
+    assert(span_del_line(e, 3) == 33);
+    // the position is the name `del`
+    assert(check.span_del_at(&e->ck, 3)->a->loc.col == 11);
+    assert(check.span_del_at(&e->ck, 0)->a->loc.col == 5);
+    assert(check.drain_count(&e->ck) == 1);
+    assert(drain_line(e, 0) == 35);
+    println("report list ok");
+}
+
+// ---- the drains ----------------------------------------------------------------------
+
+// Each `del(s, d)` whose operands check joins the list of drains once, in the order of the walk:
+// a local, an rvalue, a deferred `del` and a `del` in a loop. Its second child is the name of the
+// drop, which carries the symbol of the function, and no span of it joins the one-operand list.
+string[9] DRAINS = {
+    "    cell mut@ own a = new(cell, 1);",
+    "    del(a, cell_drop);",
+    "    del(new(cell, 3), cell_drop);",
+    "    cell mut@ own b = new(cell, 1);",
+    "    defer del(b, cell_drop);",
+    "    for (i32 mut i = 0; i < 2; i += 1) {",
+    "        cell mut@ own c = new(cell, 1);",
+    "        del(c, cell_drop);",
+    "    }",
+};
+
+fn each_del_with_a_drop_joins_the_list_of_drains() void {
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(check_lines(e, TYPES[..0], DRAINS[..]));
+    assert(check_env.errors(e) == 0);
+    assert(check.drain_count(&e->ck) == 4);
+    assert(check.span_del_count(&e->ck) == 0);
+    u64 mut i = 0;
+    while (i < check.drain_count(&e->ck)) {
+        ast.node* call = check.drain_at(&e->ck, i);
+        assert(ast.ast_len(call) == 2);
+        ast.node* drop = ast.ast_child(call, 1);
+        assert(drop->sym != null && drop->sym->kind == ast.sym_kind.s_fn);
+        assert(drop->sym->name == "cell_drop");
+        i += 1;
+    }
+    assert(drain_line(e, 0) == 21);
+    assert(drain_line(e, 1) == 22);
+    assert(drain_line(e, 2) == 24);
+    assert(drain_line(e, 3) == 27);
+    println("drains ok");
+}
+
+// A drain joins the list from each statement position that a call takes: a deferred block, the
+// step of a `for`, and a block of a `$if` that the configuration selects. The block of a `$if`
+// that it does not select is not checked, so its `del` joins no list.
+string[17] POSITIONS = {
+    "    cell mut@ own a = new(cell, 1);",
+    "    defer {",
+    "        del(a, cell_drop);",
+    "    }",
+    "    for (i32 mut i = 0; i < 1; del(new(cell, 1), cell_drop)) {",
+    "        i += 1;",
+    "    }",
+    "    $if ($cfg(target_os) == \"nowhere\") {",
+    "        cell mut@ own b = new(cell, 1);",
+    "        del(b, cell_drop);",
+    "        del(b);",
+    "    } else {",
+    "        cell mut@ own c = new(cell, 1);",
+    "        del(c, cell_drop);",
+    "        cell mut@ own d = new(cell, 1);",
+    "        del(d);",
+    "    }",
+};
+
+fn a_drain_joins_the_list_from_each_statement_position() void {
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    session.config_set(&e->m.s, "target_os", "linux");
+    assert(check_lines(e, TYPES[..0], POSITIONS[..]));
+    assert(check_env.errors(e) == 0);
+    assert(check.drain_count(&e->ck) == 3);
+    assert(drain_line(e, 0) == 22);
+    assert(drain_line(e, 1) == 24);
+    assert(drain_line(e, 2) == 33);
+    assert(check.span_del_count(&e->ck) == 1);
+    assert(span_del_line(e, 0) == 35);
+    println("positions ok");
+}
+
+// ---- the errors of the drop ---------------------------------------------------------------
+
+// The drop names a fort function of type `fn (E) void`, exactly: one error for a function of
+// another parameter, of another result, of a `noreturn` result, of two parameters and of a
+// parameter that drops `mut` from an `own` pointer, each at the name of the drop.
+string[17] WRONG_DECLS = {
+    "fn by_pointer(cell* c) void {",
+    "}",
+    "fn counts(cell mut c) i32 {",
+    "    del(c.p);",
+    "    return 0;",
+    "}",
+    "fn stops(cell mut c) noreturn {",
+    "    del(c.p);",
+    "    panic(\"x\");",
+    "}",
+    "fn two(cell mut c, i32 n) void {",
+    "    del(c.p);",
+    "}",
+    "fn frozen(i32* own p) void {",
+    "    del(p);",
+    "}",
+    "fn ignore() void {}",
+};
+
+string[7] WRONG_BODY = {
+    "    cell mut@ own s = new(cell, 2);",
+    "    del(s, by_pointer);",
+    "    del(s, counts);",
+    "    del(s, stops);",
+    "    del(s, two);",
+    "    i32 mut* own mut@ own t = new(i32 mut* own, 1);",
+    "    del(t, frozen);",
+};
+
+fn the_drop_has_the_type_fn_of_the_element_to_void() void {
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_lines(e, WRONG_DECLS[..], WRONG_BODY[..]));
+    assert(check_env.errors(e) == 5);
+    string[2] one = {"the drop 'by_pointer' has type fn (cell*) void, ",
+                     "and 'del' needs fn (cell) void"};
+    assert(reported(e, 0, "38:12", one[..]));
+    string[2] two = {"the drop 'counts' has type fn (cell) i32, ",
+                     "and 'del' needs fn (cell) void"};
+    assert(reported(e, 1, "39:12", two[..]));
+    string[2] three = {"the drop 'stops' has type fn (cell) noreturn, ",
+                       "and 'del' needs fn (cell) void"};
+    assert(reported(e, 2, "40:12", three[..]));
+    string[2] four = {"the drop 'two' has type fn (cell, i32) void, ",
+                      "and 'del' needs fn (cell) void"};
+    assert(reported(e, 3, "41:12", four[..]));
+    string[2] five = {"the drop 'frozen' has type fn (i32* own) void, ",
+                      "and 'del' needs fn (i32 mut* own) void"};
+    assert(reported(e, 4, "43:12", five[..]));
+    assert(check.drain_count(&e->ck) == 0);
+    println("drop errors ok");
+}
+
+// Checks `body` after TYPES, holds that it does not check, that it reports `count` errors, and
+// that the first is `<at>: ` and the items of `parts`. No `del` of `body` joins either list.
+fn refused(string@ body, u64 count, string at, string@ parts) void {
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_lines(e, TYPES[..0], body));
+    if (check_env.errors(e) != count) {
+        eprintln("got ", check_env.errors(e), " errors, the first: ", check_env.report_text(e, 0));
+        assert(false);
+    }
+    assert(reported(e, 0, at, parts));
+    assert(check.drain_count(&e->ck) == 0);
+    assert(check.span_del_count(&e->ck) == 0);
+}
+
+string NOT_A_SPAN = "'del' with a drop needs an own span whose elements hold owners, not ";
+string NOT_A_NAME = "the drop of 'del' must name a fort function, not ";
+
+string[2] NO_OWNER = {"    i32 mut@ own n = new(i32, 2);", "    del(n, cell_drop);"};
+string[2] PLAIN = {"    plain mut@ own n = new(plain, 2);", "    del(n, cell_drop);"};
+string[3] POINTER = {"    cell mut* own p = new(cell);", "    del(p, cell_drop);", "    del(p);"};
+string[1] NULL_SPAN = {"    del(null, cell_drop);"};
+string[3] VIEW = {
+    "    cell mut@ own s = new(cell, 2);",
+    "    cell mut@ v = s[..];",
+    "    del(v, cell_drop);",
+};
+string[3] VALUE = {
+    "    cell mut@ own s = new(cell, 2);",
+    "    fn (cell) void f = cell_drop;",
+    "    del(s, f);",
+};
+string[2] NUMBER = {"    cell mut@ own s = new(cell, 2);", "    del(s, 7);"};
+string[2] TEXT = {"    cell mut@ own s = new(cell, 2);", "    del(s, \"x\");"};
+string[2] BUILTIN = {"    cell mut@ own s = new(cell, 2);", "    del(s, print);"};
+string[2] UNKNOWN = {"    cell mut@ own s = new(cell, 2);", "    del(s, nowhere);"};
+string[2] BOTH = {"    i32 mut@ own n = new(i32, 2);", "    del(n, 7);"};
+string[2] CALL = {"    cell mut@ own s = new(cell, 2);", "    del(s, other(1));"};
+string[2] GROUPED = {"    cell mut@ own s = new(cell, 2);", "    del(s, (cell_drop));"};
+
+// The first operand of `del(s, d)` is a span of owners, and the second names a fort function:
+// each other operand gives one error and no list entry. A span with no owner, an `own` pointer,
+// `null` and a span that does not own fail at the first operand; a function value, a number, a
+// string, a builtin, an unknown name, a call and a name in parentheses fail at the second, a call
+// at its parenthesis and a name in parentheses at the name.
+// When both fail, both report.
+fn each_operand_of_the_wrong_kind_is_one_error() void {
+    string[2] no_owner = {NOT_A_SPAN, "i32 mut@ own"};
+    refused(NO_OWNER[..], 1, "21:9", no_owner[..]);
+    string[2] plain = {NOT_A_SPAN, "plain mut@ own"};
+    refused(PLAIN[..], 1, "21:9", plain[..]);
+    string[2] pointer = {NOT_A_SPAN, "cell mut* own"};
+    refused(POINTER[..], 1, "21:9", pointer[..]);
+    string[2] null_span = {NOT_A_SPAN, "void* own"};
+    refused(NULL_SPAN[..], 1, "20:9", null_span[..]);
+    string[1] view = {"'del' needs an owning operand, not cell mut@"};
+    refused(VIEW[..], 1, "22:9", view[..]);
+    string[2] value = {NOT_A_NAME, "a function value"};
+    refused(VALUE[..], 1, "22:12", value[..]);
+    string[2] number = {NOT_A_NAME, "a value of type i32"};
+    refused(NUMBER[..], 1, "21:12", number[..]);
+    string[2] text = {NOT_A_NAME, "a value of type string"};
+    refused(TEXT[..], 1, "21:12", text[..]);
+    string[1] builtin = {"'print' cannot be used as a value"};
+    refused(BUILTIN[..], 1, "21:12", builtin[..]);
+    string[1] unknown = {"unknown name 'nowhere'"};
+    refused(UNKNOWN[..], 1, "21:12", unknown[..]);
+    refused(BOTH[..], 2, "21:9", no_owner[..]);
+    string[2] call = {NOT_A_NAME, "a value of type void"};
+    refused(CALL[..], 1, "21:17", call[..]);
+    string[2] grouped = {NOT_A_NAME, "an expression in parentheses"};
+    refused(GROUPED[..], 1, "21:13", grouped[..]);
+    println("operand errors ok");
+}
+
+string[1] NO_OPERAND = {"    del();"};
+string[2] THREE = {"    cell mut@ own s = new(cell, 2);", "    del(s, cell_drop, cell_drop);"};
+string[2] FOUR = {"    cell mut@ own s = new(cell, 2);", "    del(s, 1, 2, 3);"};
+
+// `del` takes one or two operands: zero, three and four are one error each, at the parenthesis of
+// the call, and no operand of such a call is checked against the rules of the drop.
+fn del_takes_one_or_two_operands() void {
+    string[1] zero = {"'del' takes 1 or 2 arguments, 0 given"};
+    refused(NO_OPERAND[..], 1, "20:8", zero[..]);
+    string[1] three = {"'del' takes 1 or 2 arguments, 3 given"};
+    refused(THREE[..], 1, "21:8", three[..]);
+    string[1] four = {"'del' takes 1 or 2 arguments, 4 given"};
+    refused(FOUR[..], 1, "21:8", four[..]);
+    println("arity ok");
+}
+
+// `del(s, d)` empties an lvalue `s` as `del(s)` does (D17.6): through an immutable level it is an
+// error, and a module-level constant cannot be emptied. A `del(s, d)` that fails so joins no list.
+string[10] EMPTIABLE = {
+    "struct box {",
+    "    cell mut@ own items;",
+    "}",
+    "fn lent(box* b) void {",
+    "    del(b->items, cell_drop);",
+    "}",
+    "cell mut@ own KEPT = {};",
+    "fn kept() void {",
+    "    del(KEPT, cell_drop);",
+    "}",
+};
+
+fn the_drain_empties_its_operand_as_del_does() void {
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(!check_lines(e, EMPTIABLE[..], TYPES[..0]));
+    assert(check_env.errors(e) == 2);
+    string[2] lent = {"'del' cannot empty an immutable indirection: ",
+                      "nothing may be taken out of what was only lent"};
+    assert(reported(e, 0, "23:10", lent[..]));
+    string[1] kept = {"'del' cannot empty a module-level constant: it lives in read-only memory"};
+    assert(reported(e, 1, "27:9", kept[..]));
+    assert(check.drain_count(&e->ck) == 0);
+    println("emptiable ok");
+}
+
+// The drop can name a function of another module as `m.f`, for the element type of that module.
+// A function of that module of another type is one error at the name.
+string[8] STORE = {
+    "struct cell {",
+    "    i32 mut* own p;",
+    "}",
+    "fn drop(cell mut c) void {",
+    "    del(c.p);",
+    "}",
+    "fn other(cell* c) void {",
+    "}",
+};
+
+string[6] QUALIFIED = {
+    "import store;",
+    "fn main() i32 {",
+    "    store.cell mut@ own s = new(store.cell, 2);",
+    "    del(s, store.drop);",
+    "    return 0;",
+    "}",
+};
+
+string[7] QUALIFIED_WRONG = {
+    "import store;",
+    "fn main() i32 {",
+    "    store.cell mut@ own s = new(store.cell, 2);",
+    "    del(s, store.other);",
+    "    del(s);",
+    "    return 0;",
+    "}",
+};
+
+// Writes the lines of `lines` as the module `rel` of the sandbox.
+fn add_lines(check_env.env mut* e, string rel, string@ lines) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    join(lines, &b);
+    check_env.add(e, rel, strbuf.view(&b));
+}
+
+// Checks the lines of `lines` as the module `main`.
+fn check_joined(check_env.env mut* e, string@ lines) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    join(lines, &b);
+    return check_env.check_src(e, strbuf.view(&b));
+}
+
+fn the_drop_can_be_a_function_of_another_module() void {
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    add_lines(e, "store.ft", STORE[..]);
+    assert(check_joined(e, QUALIFIED[..]));
+    assert(check_env.errors(e) == 0);
+    assert(check.drain_count(&e->ck) == 1);
+    ast.node* drop = ast.ast_child(check.drain_at(&e->ck, 0), 1);
+    assert(drop->kind == ast.ast_kind.k_field && drop->sym->name == "drop");
+    check_env.reopen(e);
+    add_lines(e, "store.ft", STORE[..]);
+    assert(!check_joined(e, QUALIFIED_WRONG[..]));
+    assert(check_env.errors(e) == 1);
+    // a qualified name stands at its `.`, and a type names no module
+    string[2] other = {"the drop 'other' has type fn (cell*) void, ",
+                       "and 'del' needs fn (cell) void"};
+    assert(reported(e, 0, "4:17", other[..]));
+    assert(check.span_del_count(&e->ck) == 1);
+    println("qualified ok");
+}
+
+fn main() i32 {
+    spans_of_owners_are_the_own_spans_whose_elements_hold_owners();
+    each_one_operand_del_of_a_span_of_owners_joins_the_report_list();
+    each_del_with_a_drop_joins_the_list_of_drains();
+    a_drain_joins_the_list_from_each_statement_position();
+    the_drop_has_the_type_fn_of_the_element_to_void();
+    each_operand_of_the_wrong_kind_is_one_error();
+    del_takes_one_or_two_operands();
+    the_drain_empties_its_operand_as_del_does();
+    the_drop_can_be_a_function_of_another_module();
+    return 0;
+}

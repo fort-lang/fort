@@ -1,0 +1,61 @@
+//! run
+//! stdout:
+//| sets 5 64 0
+//| order 0 1 2 0 4
+//| words 64 64 64 0 0
+//| after 0
+//| empty 0
+// `del(s, d)` frees a span of owners after it moves each element into the drop `d` (D17.9): the
+// probe of the design of `del(s, drop)`, which wrote the drain by hand, in the form itself. Each
+// element goes into the drop once, from index 0 to the last, and a slot that holds the zero value
+// goes into the drop too, so the drop accepts it (D13.5). The drop is release-only: it stores no
+// owner through memory, and its store of a count into a global stores no owner. A span with no
+// element calls no drop. The run under fir.interpreter makes no ownership event, so no element
+// leaks and none is freed twice.
+struct set {
+    u32 count;
+    u64 mut@ own words;
+}
+
+i32[8] mut ORDER = {};
+u64[8] mut WORDS = {};
+u64 mut SEEN = 0;
+
+fn set_drop(set mut s) void {
+    ORDER[SEEN] = cast(s.count, i32);
+    WORDS[SEEN] = s.words.len;
+    SEEN += 1;
+    del(s.words);
+}
+
+fn set_new(u32 count, u64 words) set {
+    set mut s = set{.count = count};
+    del(s.words);
+    s.words = new(u64, words);
+    return s;
+}
+
+fn main() i32 {
+    set mut@ own sets = new(set, 5);
+    for (u64 mut b = 0; b < 3; b += 1) {
+        sets[b] = set_new(cast(b, u32), 64);
+    }
+    sets[4].count = 4;
+    println("sets ", sets.len, " ", sets[1].words.len, " ", sets[3].words.len);
+    del(sets, set_drop);
+    print("order");
+    for (u64 mut i = 0; i < SEEN; i += 1) {
+        print(" ", ORDER[i]);
+    }
+    println();
+    print("words");
+    for (u64 mut i = 0; i < SEEN; i += 1) {
+        print(" ", WORDS[i]);
+    }
+    println();
+    println("after ", sets.len);
+    set mut@ own none = new(set, 0);
+    del(none, set_drop);
+    println("empty ", SEEN - 5);
+    return 0;
+}

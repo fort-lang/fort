@@ -1,0 +1,441 @@
+/// The release-only bit of each function of a unit, and the check of the drop of each `del(s, d)`
+/// (D17.9). A function is release-only when three things are true. No statement of it stores a
+/// value other than a constant into a place whose type holds owners and that it reaches through
+/// memory: a global, a dereference, or an index into a span or a `string`. It calls no `extern fn`
+/// and no function value. Each fort function that it calls is release-only. The release-only
+/// functions are the greatest set that keeps the three conditions.
+//
+// scan reads the FIR of each function once, after the lowering, and keeps the events that the bit
+// reads, in the order of the blocks and of their statements: each break and each direct call.
+// solve finds the functions that are not release-only. A function breaks the bit itself when it
+// has a break, or a direct call of a function that the table does not hold, whose body the build
+// does not have. A walk backwards along the calls from those functions reaches each other
+// function that is not release-only, and it keeps the call through which it reached each one. So
+// report names a shortest chain of calls from a drop to a function that breaks the bit itself.
+// The module uses switches and no function-pointer dispatch table. It holds no module-level
+// mutable state: each vector belongs to one table.
+import fort.ast;
+import fort.check;
+import fort.containers;
+import fort.diag;
+import fort.fir;
+import fort.fir_print;
+import fort.types;
+import std.strbuf;
+import std.strmap;
+
+/// No event and no function.
+u64 NONE = 18446744073709551615;
+
+/// What an event of a function is: a direct call, or a break of the bit.
+enum event_kind {
+    ev_call, // a call of a fort function
+    ev_store, // a store of a value other than a constant into an owner place through memory
+    ev_extern, // a call of an `extern fn`
+    ev_value, // a call through a function value
+}
+
+// One event of the function `owner` of the table, at `at`. `callee` is the function that a call
+// or an extern call names. `target` is the function of the table that a call names, or NONE when
+// the table does not hold it (solve).
+struct event {
+    event_kind kind;
+    u64 owner;
+    ast.sym* callee;
+    diag.loc at;
+    u64 target;
+}
+
+// One function of the table and its events `events[first..first + count]`. After solve, `broken`
+// says that the function is not release-only, `cause` is the first event that breaks the bit in
+// the function itself or NONE, and `via` is the call through which the walk reached the function
+// or NONE.
+struct entry {
+    ast.sym* sym;
+    u64 first;
+    u64 count;
+    bool broken;
+    u64 cause;
+    u64 via;
+}
+
+// `items[..len]` holds the entries in the order of scan.
+struct entry_vec {
+    entry mut@ own items;
+    u64 len;
+}
+
+// `items[..len]` holds the events, function by function.
+struct event_vec {
+    event mut@ own items;
+    u64 len;
+}
+
+/// The functions of one unit and their events. A zero value is an empty table.
+struct table {
+    containers.pool texts; // the symbols of the functions
+    strmap.str_map index; // the entry of each symbol
+    entry_vec entries;
+    event_vec events;
+}
+
+/// Releases the table. The table is empty and usable afterwards.
+fn free(table mut* t) void {
+    drop(move(*t));
+}
+
+// Frees a table that the caller moves in: the pool of the symbols, the index, then each vector.
+fn drop(table mut t) void {
+    containers.pool_drop(move(t.texts));
+    strmap.drop(move(t.index));
+    del(t.entries.items);
+    del(t.events.items);
+}
+
+// An empty table in an allocation of its own, for a function that lends the table to calls.
+fn make() table mut* own {
+    return new(table);
+}
+
+// Ends a table of make that the caller moves in.
+fn drop_made(table mut* own p) void {
+    table kept = move(*p);
+    del(p);
+    drop(move(kept));
+}
+
+fn push_entry(entry_vec mut* v, entry e) void {
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "release.push_entry: capacity overflow");
+        entry mut@ own bigger = new(entry, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = e;
+    v->len += 1;
+}
+
+fn push_event(event_vec mut* v, event e) void {
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "release.push_event: capacity overflow");
+        event mut@ own bigger = new(event, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = e;
+    v->len += 1;
+}
+
+// The symbol of `s` as fir_print writes it, interned in the texts of `t`. Its buffer stays a
+// local here, so scan has no local owner that a call can vacate.
+fn intern_symbol(table mut* t, ast.sym* s) string {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    fir_print.print_symbol(s, &b);
+    return containers.pool_intern(&t->texts, strbuf.view(&b));
+}
+
+// What the statements of a function store into a local as a whole (fills_of): no store, one store
+// of a constant, or another store. A local that is no temporary of the lowering takes FILL_OTHER.
+u8 FILL_NONE = 0;
+u8 FILL_CONSTANT = 1;
+u8 FILL_OTHER = 2;
+
+// Writes to `fills[k]` what the statements of `f` store into its local `k` as a whole. `fills`
+// holds one entry for each local.
+fn fills_of(fir.func* f, u8 mut@ fills) void {
+    u32 mut k = 0;
+    while (k < fir.local_count(f)) {
+        fills[cast(k, u64)] = FILL_NONE;
+        if (fir.local_at(f, k)->kind != fir.local_kind.lk_temp) {
+            fills[cast(k, u64)] = FILL_OTHER;
+        }
+        k += 1;
+    }
+    u32 mut bk = 0;
+    while (bk < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, bk)) {
+            fir.statement* s = fir.block_statement(f, bk, i);
+            fir.place p = s->place;
+            if (s->kind == fir.stmt_kind.st_assign && p.base == fir.base_kind.bk_local
+                && p.proj_len == 0) {
+                u64 at = cast(p.local, u64);
+                bool constant = s->value.kind == fir.rvalue_kind.rv_use
+                    && fir.rvalue_operand(f, s->value, 0).kind == fir.operand_kind.ok_const;
+                if (fills[at] == FILL_NONE && constant) {
+                    fills[at] = FILL_CONSTANT;
+                } else {
+                    fills[at] = FILL_OTHER;
+                }
+            }
+            i += 1;
+        }
+        bk += 1;
+    }
+}
+
+// Whether the assignment `s` of `f` stores a constant: a `const` operand, or a read of a temporary
+// that one statement fills with a constant and no other statement fills (`fills`). The lowering
+// puts the `null` and the `{}` of an `own` reference into such a temporary first, and the verifier
+// lets no read of a temporary come before its fill.
+fn is_constant(fir.func* f, fir.statement* s, u8@ fills) bool {
+    if (s->value.kind != fir.rvalue_kind.rv_use) {
+        return false;
+    }
+    fir.operand o = fir.rvalue_operand(f, s->value, 0);
+    if (o.kind == fir.operand_kind.ok_const) {
+        return true;
+    }
+    return o.place.base == fir.base_kind.bk_local && o.place.proj_len == 0
+        && fills[cast(o.place.local, u64)] == FILL_CONSTANT;
+}
+
+// Whether the statement `s` of `f` stores an owner through memory: an assignment of a value
+// other than a constant (is_constant) into a place whose type holds owners, at a global or at a
+// place that reads memory to find its storage (fir.place_indirect). A constant of a type that
+// holds owners is its zero value, so its store breaks nothing.
+fn is_owner_store(fir.func* f, fir.statement* s, u8@ fills) bool {
+    if (s->kind != fir.stmt_kind.st_assign) {
+        return false;
+    }
+    bool memory = s->place.base == fir.base_kind.bk_global || fir.place_indirect(f, s->place);
+    return memory && types.type_owner_count(fir.place_type(f, s->place)) > 0
+        && !is_constant(f, s, fills);
+}
+
+// The event of the call that the statement `s` of the function `owner` makes.
+fn call_event(fir.statement* s, u64 owner) event {
+    event mut ev = event{event_kind.ev_call, owner, s->value.callee_sym, s->loc, NONE};
+    switch (s->value.callee) {
+    case fir.callee_kind.cl_fn:
+        ev.kind = event_kind.ev_call;
+    case fir.callee_kind.cl_extern:
+        ev.kind = event_kind.ev_extern;
+    case fir.callee_kind.cl_value:
+        ev.kind = event_kind.ev_value;
+        ev.callee = null;
+    }
+    return ev;
+}
+
+/// Adds the function `f`, which the lowering made, with each event of its body. Each function of
+/// a unit has its own symbol (D9.7), so a second function with the symbol of an entry breaks the
+/// precondition.
+fn scan(table mut* t, fir.func* f) void {
+    string name = intern_symbol(t, f->sym);
+    if (!strmap.put(&t->index, name, cast(t->entries.len, i64))) {
+        panic("release.scan: a second function with the symbol of an entry");
+    }
+    u64 owner = t->entries.len;
+    u64 first = t->events.len;
+    u8 mut@ own fills = new(u8, cast(fir.local_count(f), u64));
+    defer del(fills);
+    fills_of(f, fills);
+    u32 mut bk = 0;
+    while (bk < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, bk)) {
+            fir.statement* s = fir.block_statement(f, bk, i);
+            if (is_owner_store(f, s, fills)) {
+                push_event(&t->events, event{event_kind.ev_store, owner, null, s->loc, NONE});
+            }
+            if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call) {
+                push_event(&t->events, call_event(s, owner));
+            }
+            i += 1;
+        }
+        bk += 1;
+    }
+    push_entry(&t->entries, entry{f->sym, first, t->events.len - first, false, NONE, NONE});
+}
+
+// The entry of the function `s`, or NONE when the table does not hold it.
+fn find(table* t, ast.sym* s) u64 {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    fir_print.print_symbol(s, &b);
+    i64 mut at = -1;
+    if (!strmap.get(&t->index, strbuf.view(&b), &at)) {
+        return NONE;
+    }
+    return cast(at, u64);
+}
+
+/// Finds the functions that are not release-only: each function that breaks the bit itself, and
+/// each function from which a chain of direct calls reaches one. A second run gives the same
+/// answer.
+fn solve(table mut* t) void {
+    u64 n = t->entries.len;
+    // the target of each call, and the count of the calls of each target in starts[target + 1]
+    u64 mut@ own starts = new(u64, n + 1);
+    defer del(starts);
+    u64 mut k = 0;
+    while (k < t->events.len) {
+        event mut* ev = &t->events.items[k];
+        ev->target = NONE;
+        if (ev->kind == event_kind.ev_call) {
+            ev->target = find(t, ev->callee);
+            if (ev->target != NONE) {
+                starts[ev->target + 1] += 1;
+            }
+        }
+        k += 1;
+    }
+    // `calls[starts[g]..starts[g + 1]]` holds the calls of the function `g`, in event order
+    u64 mut g = 0;
+    while (g < n) {
+        starts[g + 1] += starts[g];
+        g += 1;
+    }
+    u64 mut@ own calls = new(u64, starts[n]);
+    defer del(calls);
+    u64 mut@ own filled = new(u64, n);
+    defer del(filled);
+    k = 0;
+    while (k < t->events.len) {
+        u64 target = t->events.items[k].target;
+        if (target != NONE) {
+            calls[starts[target] + filled[target]] = k;
+            filled[target] += 1;
+        }
+        k += 1;
+    }
+    // the functions that break the bit themselves, in the order of scan, start the walk
+    u64 mut@ own queue = new(u64, n);
+    defer del(queue);
+    u64 mut tail = 0;
+    u64 mut e = 0;
+    while (e < n) {
+        entry mut* en = &t->entries.items[e];
+        en->broken = false;
+        en->cause = NONE;
+        en->via = NONE;
+        u64 mut j = en->first;
+        while (j < en->first + en->count && en->cause == NONE) {
+            event ev = t->events.items[j];
+            if (ev.kind != event_kind.ev_call || ev.target == NONE) {
+                en->cause = j;
+                en->broken = true;
+                queue[tail] = e;
+                tail += 1;
+            }
+            j += 1;
+        }
+        e += 1;
+    }
+    // each caller of a function that is not release-only is not release-only either
+    u64 mut head = 0;
+    while (head < tail) {
+        u64 callee = queue[head];
+        head += 1;
+        u64 mut j = starts[callee];
+        while (j < starts[callee + 1]) {
+            u64 call = calls[j];
+            u64 caller = t->events.items[call].owner;
+            if (!t->entries.items[caller].broken) {
+                t->entries.items[caller].broken = true;
+                t->entries.items[caller].via = call;
+                queue[tail] = caller;
+                tail += 1;
+            }
+            j += 1;
+        }
+    }
+}
+
+/// Whether the function `s` is release-only. solve must have run. A function that the table does
+/// not hold has no body in the build, so it is not release-only.
+fn is_release_only(table* t, ast.sym* s) bool {
+    u64 e = find(t, s);
+    return e != NONE && !t->entries.items[e].broken;
+}
+
+/// Reports each call `del(s, d)` of the checker `ck` whose drop `d` is not release-only, in the
+/// order of the walk of the checker, and gives the count of the errors. solve must have run. The
+/// error stands at `d`: `cannot drop the elements with '<d>': it is not release-only`. Its notes
+/// follow a shortest chain of direct calls from `d`, `'<f>' calls '<g>' here` at each call, and
+/// then name the event that breaks the bit at its statement: `'<f>' stores an owner through
+/// memory here`, `'<f>' calls the extern '<x>' here`, `'<f>' calls a function value here`, or
+/// `'<f>' calls '<g>', which has no body in this build`. A drop that the table does not hold
+/// takes the note `'<d>' has no body in this build` at `d`.
+fn report(table* t, check.checker* ck, diag.sink mut* diags) u64 {
+    strbuf.str_buf mut text = strbuf.create();
+    defer del(text.data);
+    return report_drops(t, ck, diags, &text);
+}
+
+// The errors of report, with the scratch buffer `text`. The caller keeps `text`, so it is no local
+// owner here.
+fn report_drops(table* t, check.checker* ck, diag.sink mut* diags, strbuf.str_buf mut* text) u64 {
+    u64 mut errors = 0;
+    u64 mut i = 0;
+    while (i < check.drain_count(ck)) {
+        ast.node* d = ast.ast_child(check.drain_at(ck, i), 1);
+        if (!is_release_only(t, d->sym)) {
+            report_drop(t, d, diags, text);
+            errors += 1;
+        }
+        i += 1;
+    }
+    return errors;
+}
+
+// The error and the notes of report for the drop `d`, with the scratch buffer `text`, which the
+// caller keeps.
+fn report_drop(table* t, ast.node* d, diag.sink mut* diags, strbuf.str_buf mut* text) void {
+    strbuf.clear(text);
+    strbuf.append(text, "cannot drop the elements with '");
+    strbuf.append(text, d->sym->name);
+    strbuf.append(text, "': it is not release-only");
+    diag.error(diags, d->loc, strbuf.view(text));
+    u64 mut e = find(t, d->sym);
+    strbuf.clear(text);
+    if (e == NONE) {
+        strbuf.push(text, '\'');
+        strbuf.append(text, d->sym->name);
+        strbuf.append(text, "' has no body in this build");
+        diag.note(diags, d->loc, strbuf.view(text));
+        return;
+    }
+    while (t->entries.items[e].via != NONE) {
+        event call = t->events.items[t->entries.items[e].via];
+        strbuf.clear(text);
+        strbuf.push(text, '\'');
+        strbuf.append(text, t->entries.items[e].sym->name);
+        strbuf.append(text, "' calls '");
+        strbuf.append(text, call.callee->name);
+        strbuf.append(text, "' here");
+        diag.note(diags, call.at, strbuf.view(text));
+        e = call.target;
+    }
+    event cause = t->events.items[t->entries.items[e].cause];
+    strbuf.clear(text);
+    strbuf.push(text, '\'');
+    strbuf.append(text, t->entries.items[e].sym->name);
+    switch (cause.kind) {
+    case event_kind.ev_store:
+        strbuf.append(text, "' stores an owner through memory here");
+    case event_kind.ev_extern:
+        strbuf.append(text, "' calls the extern '");
+        strbuf.append(text, cause.callee->name);
+        strbuf.append(text, "' here");
+    case event_kind.ev_value:
+        strbuf.append(text, "' calls a function value here");
+    case event_kind.ev_call:
+        strbuf.append(text, "' calls '");
+        strbuf.append(text, cause.callee->name);
+        strbuf.append(text, "', which has no body in this build");
+    }
+    diag.note(diags, cause.at, strbuf.view(text));
+}

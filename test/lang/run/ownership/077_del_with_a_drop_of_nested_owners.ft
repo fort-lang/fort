@@ -1,0 +1,122 @@
+//! run
+//! stdout:
+//| arrays 3 freed 5
+//| spans 2 3 freed 5
+//| one 1 freed 1
+//| many 1000 sum 499500
+// `del(s, d)` of spans whose element types hold owners in other forms (D17.9): a fixed array of
+// two `own` pointers, a struct that holds a span of owners, so that the drop drains each inner
+// span with a drop of its own, one element, and a thousand elements, each dropped once in index
+// order. A slot that holds the zero value goes into the drop too. The drops count in globals,
+// which store no owner. `new` makes no span of spans, so the inner spans stand in a struct.
+struct leaf {
+    i32 v;
+}
+
+u64 mut DROPS = 0;
+u64 mut FREED = 0;
+i64 mut SUM = 0;
+i64 mut NEXT = 0;
+
+// Frees one leaf, and counts it when it holds an allocation.
+fn leaf_drop(leaf mut* own p) void {
+    DROPS += 1;
+    if (p != null) {
+        FREED += 1;
+        if (cast(p->v, i64) != NEXT) {
+            SUM = -1000000;
+        }
+        SUM += cast(p->v, i64);
+        NEXT += 1;
+    }
+    del(p);
+}
+
+// The element of a span of fixed arrays: both owners go, first then second.
+fn pair_drop(leaf mut* own[2] pair) void {
+    leaf_drop(move(pair[0]));
+    leaf_drop(move(pair[1]));
+}
+
+struct row {
+    leaf mut* own mut@ own cells;
+}
+
+// The element of a span of rows: the inner span drains with a drop of its own.
+fn row_drop(row mut r) void {
+    del(r.cells, leaf_drop);
+}
+
+fn made(i32 v) leaf mut* own {
+    leaf mut* own p = new(leaf);
+    p->v = v;
+    return p;
+}
+
+// Clears the counts after `what` and the counts that the drops made.
+fn report(string what) void {
+    println(what, " freed ", FREED);
+    DROPS = 0;
+    FREED = 0;
+    SUM = 0;
+    NEXT = 0;
+}
+
+fn main() i32 {
+    leaf mut* own[2] mut@ own arrays = new(leaf mut* own[2], 3);
+    i32 mut v = 0;
+    for (u64 mut i = 0; i < arrays.len; i += 1) {
+        for (u64 mut k = 0; k < 2; k += 1) {
+            if (i * 2 + k < 5) {
+                leaf mut* own p = made(v);
+                del(arrays[i][k]);
+                arrays[i][k] = move(p);
+                v += 1;
+            }
+        }
+    }
+    print("arrays ", arrays.len);
+    del(arrays, pair_drop);
+    report("");
+    row mut@ own rows = new(row, 2);
+    // the old span moves out before the store, and its drain comes after it: the calls of a drain
+    // would kill the fact of the field that the store needs
+    leaf mut* own mut@ own two = new(leaf mut* own, 2);
+    leaf mut* own mut@ own old = move(rows[0].cells);
+    rows[0].cells = move(two);
+    del(old, leaf_drop);
+    leaf mut* own mut@ own three = new(leaf mut* own, 3);
+    leaf mut* own mut@ own older = move(rows[1].cells);
+    rows[1].cells = move(three);
+    del(older, leaf_drop);
+    for (u64 mut i = 0; i < 5; i += 1) {
+        leaf mut* own p = made(cast(i, i32));
+        if (i >= 2) {
+            u64 at = i - 2;
+            del(rows[1].cells[at]);
+            rows[1].cells[at] = move(p);
+        } else {
+            del(rows[0].cells[i]);
+            rows[0].cells[i] = move(p);
+        }
+    }
+    print("spans ", rows.len, " ", rows[1].cells.len);
+    del(rows, row_drop);
+    report("");
+    leaf mut* own mut@ own one = new(leaf mut* own, 1);
+    leaf mut* own only = made(0);
+    del(one[0]);
+    one[0] = move(only);
+    print("one ", one.len);
+    del(one, leaf_drop);
+    report("");
+    leaf mut* own mut@ own many = new(leaf mut* own, 1000);
+    for (u64 mut i = 0; i < many.len; i += 1) {
+        leaf mut* own p = made(cast(i, i32));
+        del(many[i]);
+        many[i] = move(p);
+    }
+    del(many, leaf_drop);
+    println("many ", DROPS, " sum ", SUM);
+    return 0;
+}
