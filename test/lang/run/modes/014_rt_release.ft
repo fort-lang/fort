@@ -44,7 +44,13 @@ rt.enum_member[2] mut table = {};
 // bcmp(3) and bcopy(3) read and write the bytes of a block through a `void*`.
 // No cast gives a type to a `void*` (D3.14), so the test gives the block of
 // alloc to C as it is.
+// C: bcmp, bcmp(3) of glibc and of macOS, <strings.h>; POSIX.1-2001, which POSIX.1-2008 removed.
+// writes: nothing; C reads at most n bytes at a and at b. gives: 0 when the n bytes are the same,
+// and another int when not; no pointer. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn bcmp(void* a, void* b, u64 n) i32;
+// C: bcopy, bcopy(3) of glibc and of macOS, <strings.h>; POSIX.1-2001, which POSIX.1-2008 removed.
+// writes: n bytes at destination, which it reads from n bytes at source; the two can overlap.
+// gives: no result. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn bcopy(void* source, void mut* destination, u64 n) void;
 
 fn both_i64(i64 v) void {
@@ -71,6 +77,10 @@ fn both_bool(bool v) void {
     rt.flush(1);
 }
 
+// C call rt.str_eq: start(a) and start(b), which start of this module makes as &s[0] of the string
+// parameter, with the bound s.len, or as null when s is empty (D9.8 rule 2); the lengths a.len and
+// b.len are the bounds of those strings. str_eq reads a_len bytes of each only when a_len == b_len
+// and a_len > 0, so the length fits both.
 fn both_eq(string a, string b) void {
     print(a == b, " ");
     rt.flush(1);
@@ -89,6 +99,18 @@ fn start(string s) char* {
     return &s[0];
 }
 
+// C call rt.print_enum: table[..], a span of the two rows of the global table (D9.8 rule 2). This
+// function stores each name as &"red"[0] or &"blue"[0], which end in the NUL of their literals
+// (rule 4), and no store changes table before the call.
+// C call rt.print_ptr: p, null; print_ptr reads no byte at a pointer.
+// C call rt.alloc: &"modes.ft"[0], a literal with its NUL (rule 4); the other arguments are
+// integers.
+// C call bcmp: block, the storage that rt.alloc gave in this function: the word gives: of its row
+// states n = 32 zeroed bytes, never null (D9.8 rule 3); cast(&seen, void*) keeps the bound of seen,
+// one u8[32] (rule 2). The length n, 32, fits both.
+// C call bcopy x2: cast(&seen, void*) or cast(&seen, void mut*), the 32 bytes of seen (rule 2), and
+// block, the 32 bytes that rt.alloc gave (rule 3); the length n, 32, fits both.
+// C call rt.free: move(block), the allocation that rt.alloc gave, which free takes (A3).
 fn main(string@ argv) i32 {
     i64 i64_min = -9223372036854775808;
     u64 u64_max = 18446744073709551615;

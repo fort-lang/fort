@@ -18,12 +18,19 @@ import std.rt;
 string[10] PATHS = {"p0.txt", "p1.txt", "p2.txt", "p3.txt", "p4.txt",
                     "p5.txt", "p6.txt", "p7.txt", "p8.txt", "p9.txt"};
 
-fn open_write(string path) i32 {
-    return libc.open(path.ptr, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o644);
+// C call libc.open: path and its NUL are parameter sources (D9.8 rule 1), so open_write is a
+// boundary function, and each caller gives a name with its NUL.
+fn open_write(char* path) i32 {
+    return libc.open(path, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o644);
 }
 
-fn file_size(string path) i64 {
-    i32 fd = libc.open(path.ptr, libc.O_RDONLY, 0);
+// C call libc.open: path and its NUL are parameter sources (D9.8 rule 1), so file_size is a
+// boundary function, and each caller gives a name with its NUL.
+// C call libc.read: buf.ptr keeps the bound of the span buf, 64 bytes (rule 2), and the length
+// buf.len fits it.
+// C call libc.close: no pointer argument.
+fn file_size(char* path) i64 {
+    i32 fd = libc.open(path, libc.O_RDONLY, 0);
     if (fd < 0) {
         return -1;
     }
@@ -43,22 +50,28 @@ fn file_size(string path) i64 {
 
 // Prints the size of each of the first n files. A size says whether that
 // descriptor's bytes have arrived.
+// C call file_size: &PATHS[i][0] names element i of the global PATHS, no mut global, whose elements
+// literals initialize, with the NUL of that literal (D9.8 rule 4).
 fn sizes(u64 n) void {
     for (u64 mut i = 0; i < n; i++) {
         if (i > 0) {
             print(" ");
         }
-        print(file_size(PATHS[i]));
+        print(file_size(&PATHS[i][0]));
     }
     println();
 }
 
+// C call open_write x3: &PATHS[i][0], &PATHS[8][0] and &PATHS[9][0] name elements of the global
+// PATHS, no mut global, whose elements literals initialize, with the NUL of that literal (D9.8 rule
+// 4).
+// C call libc.close: no pointer argument.
 fn main() i32 {
     i32[10] mut fds = {};
 
     // Eight descriptors fill the pool beside stdout. Every write waits.
     for (u64 mut i = 0; i < 8; i++) {
-        fds[i] = open_write(PATHS[i]);
+        fds[i] = open_write(&PATHS[i][0]);
         rt.print_str(fds[i], "ab");
     }
     sizes(8);
@@ -66,12 +79,12 @@ fn main() i32 {
     // The ninth finds no free slot, so the runtime flushes the oldest one and
     // hands it over. The first descriptor's two bytes are on disk now. The
     // eight others still wait.
-    fds[8] = open_write(PATHS[8]);
+    fds[8] = open_write(&PATHS[8][0]);
     rt.print_str(fds[8], "ab");
     sizes(9);
 
     // The tenth takes the next slot in the same order.
-    fds[9] = open_write(PATHS[9]);
+    fds[9] = open_write(&PATHS[9][0]);
     rt.print_str(fds[9], "ab");
     sizes(10);
 

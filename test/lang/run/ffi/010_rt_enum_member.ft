@@ -18,10 +18,27 @@ import std.rt;
 // this test is the boundary that can see it: it declares the same two fields
 // with C's own offsetof and sizeof. So C writes a table here and print_enum
 // reads it, and then fort writes a table and C reads it back.
+// C: rt_enum_sizeof, test/lang/ffi/rt_enum.c, which gives sizeof(struct rt_enum_member).
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
 extern fn rt_enum_sizeof() u64;
+// C: rt_enum_offset_value, test/lang/ffi/rt_enum.c, which gives the offsetof of value.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
 extern fn rt_enum_offset_value() u64;
+// C: rt_enum_offset_name, test/lang/ffi/rt_enum.c, which gives the offsetof of name.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
 extern fn rt_enum_offset_name() u64;
+// C: rt_enum_fill, test/lang/ffi/rt_enum.c, which fills three rows.
+// writes: three rt.enum_member at m, each with a value and a name, a pointer to a static C string
+// literal with its NUL. gives: no result. keeps: no pointer. calls: no fort function. frees:
+// nothing.
 extern fn rt_enum_fill(rt.enum_member mut* m) void;
+// C: rt_enum_check, test/lang/ffi/rt_enum.c, which compares three rows with its own.
+// writes: nothing; C reads three rt.enum_member at m, and the name of each row to its NUL with
+// strcmp, until a row differs. gives: a bool and no pointer. keeps: no pointer. calls: no fort
+// function. frees: nothing.
 extern fn rt_enum_check(rt.enum_member* m) bool;
 
 // Answers with the distance between two addresses. That distance is fort's
@@ -30,6 +47,19 @@ fn off(void* base, void* field) u64 {
     return cast(field, u64) - cast(base, u64);
 }
 
+// C call rt_enum_sizeof x2: no argument.
+// C call rt_enum_offset_value: no argument.
+// C call rt_enum_offset_name: no argument.
+// C call rt_enum_fill: &table[0] keeps the bound of table from element 0, three rows (D9.8 rule 2),
+// and C writes three.
+// C call rt.print_enum x4: table[..], a span of three rows (rule 2); the name of each row is a C
+// string literal with its NUL that rt_enum_fill stored in this function (rule 3).
+// C call rt_enum_check x2: &mine[0] and &table[0] keep the bounds of mine and table, three rows
+// each (rule 2), and C reads three. The names of mine are &"minus_seven"[0], &"zero"[0] and
+// &"million"[0], which end in the NUL of their literals (rule 4); the names of table are the ones
+// that rt_enum_fill stored (rule 3).
+// C call off x3: the addresses of a local and of its parts, cast to void*; off reads no byte at
+// them and subtracts them as integers (D3.11).
 fn main() i32 {
     rt.enum_member[3] mut table = {};
 

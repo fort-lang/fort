@@ -21,6 +21,11 @@ modules are checked under the root of that target. Each set reads nested directo
 make, so a list of files may name one module of `std/` or the modules of both targets. A module
 that both targets share checks under the root of the target.
 
+The files of `test/lang/run` and `test/lang/programs` get the checks of D9.8 only: a test
+exercises the language, so the names, the width and the rules of notes/style.md 3.1 do not
+apply to it (ROWS_ONLY). Each such file is indexed with the `--cfg` options of the `//! flags:`
+directive of its test (lang_options).
+
 The naming checks of notes/style.md 3.1 apply to a file of `src/fort`, `src/lsp` and `std`
 by its path. The prefix check applies in each directory of those roots. The function and
 glossary checks apply to a nested module only: a file in a subdirectory of `src/fort`,
@@ -54,7 +59,12 @@ SOURCE_SETS = (
     ("test/lsp/**/*.ft", ("src", "test/fort/support")),
     ("test/library/**/*.ft", ("src", "test/library/chain")),
     ("test/tty/**/*.ft", ()),
+    ("test/lang/run/**/*.ft", ()),
+    ("test/lang/programs/**/*.ft", ()),
 )
+# The trees whose files get the checks of D9.8 and the diagnostics of the compiler only. A
+# language test exercises the language rather than the conventions (notes/testing.md 8).
+ROWS_ONLY = ("test/lang/",)
 SOURCE_GLOBS = tuple(glob for glob, _ in SOURCE_SETS)
 TARGETS = ("linux", "darwin")
 
@@ -399,8 +409,11 @@ def group_records(document, root, cache):
     return buckets
 
 
-def file_problems(records, diagnostics, has_source_text=True, segments=None):
+def file_problems(records, diagnostics, has_source_text=True, segments=None, names=True):
     """The problems one run reports about one file, sorted by position.
+
+    `names` False leaves out the problems of the records, the names of D1.4, for a file of
+    ROWS_ONLY.
 
     A rejected file can still contain resolved index records. Check those records.
     Diagnostics disable the empty-index guard because an early error can produce no records.
@@ -409,7 +422,7 @@ def file_problems(records, diagnostics, has_source_text=True, segments=None):
     problems = list(diagnostics)
     seen = set()
     found = []
-    for record in records:
+    for record in records if names else ():
         for message in record_problems(record, segments):
             key = (record["line"], record["col"], message)
             if key in seen:
@@ -441,8 +454,9 @@ def document_problems(document, root, relative, has_source_text=True):
                          module_segments(relative))
 
 
-def index_document(fort, root, relative, includes=(), std_dir=None):
-    """Run `fort --index` over one file and return (document, error).
+def index_document(fort, root, relative, includes=(), std_dir=None, options=()):
+    """Run `fort --index` over one file and return (document, error). `options` are more
+    arguments of the compiler, the `--cfg` options of a language test (lang_options).
 
     The compiler exits 0 for a clean file and 1 for reported diagnostics.
     Another status or malformed output indicates a broken environment.
@@ -455,6 +469,7 @@ def index_document(fort, root, relative, includes=(), std_dir=None):
         # The compiler takes one search root per `-I`. They are spelled
         # relative to the working directory, which is the repository root.
         command.extend(["-I", str(include)])
+    command.extend(options)
     command.append(str(relative))
     proc = subprocess.run(
         command,
@@ -478,6 +493,41 @@ def index_document(fort, root, relative, includes=(), std_dir=None):
             "fort exited with status 1 but reported no diagnostic: %s" % proc.stderr.strip(),
         )
     return document, None
+
+
+def rows_only(relative):
+    """Whether the file `relative` gets the checks of D9.8 only (ROWS_ONLY)."""
+    name = Path(relative).as_posix()
+    return any(name.startswith(prefix) for prefix in ROWS_ONLY)
+
+
+# The directive of a language test that gives the compiler its options (spec/toolchain.md 7.2).
+FLAGS_DIRECTIVE = re.compile(r"\A//! flags:(.*)\Z")
+
+
+def lang_options(root, relative):
+    """The `--cfg` options of the `//! flags:` directive of the test of the file `relative` of
+    ROWS_ONLY, as a tuple of arguments, or (). A module of a directory test,
+    `run/modules/<name>/dep.ft`, takes the directive of the `main.ft` beside it. A key that the
+    options do not set stops the compile of its `$if` (D21.1), so the index needs them."""
+    if not rows_only(relative):
+        return ()
+    path = Path(root) / relative
+    main = path.parent / "main.ft"
+    if main.is_file():
+        path = main
+    options = []
+    for line in path.read_text(encoding="utf-8").split("\n"):
+        if not line.startswith("//!"):
+            break
+        found = FLAGS_DIRECTIVE.match(line)
+        if found is None:
+            continue
+        words = found.group(1).split()
+        for at, word in enumerate(words):
+            if word == "--cfg" and at + 1 < len(words):
+                options.extend((word, words[at + 1]))
+    return tuple(options)
 
 
 def text_problems(relative, text, root=None):
@@ -1411,7 +1461,9 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
     for path, includes in files:
         relative = os.path.relpath(str(path), str(root))
         text = Path(path).read_text(encoding="utf-8")
-        entries.append((relative, tuple(includes), real_path(root, relative, cache), text))
+        # A run judges a file only when its roots and its options agree, so the pair is its key.
+        given = (tuple(includes), lang_options(root, relative))
+        entries.append((relative, given, real_path(root, relative, cache), text))
     reports = [None] * len(entries)
     runs = 0
     for indexes, buckets, diagnostics, error in std_documents(fort, root, entries, cache, target):
@@ -1423,13 +1475,14 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
                 continue
             records = buckets.get(path, [])
             reports[index] = file_problems(records, diagnostics, has_source_text(text),
-                                           module_segments(relative))
+                                           module_segments(relative), not rows_only(relative))
             rows = Rows(root, buckets, cache, std_roots, memo)
             reports[index].extend(row_problems(rows, path, records))
-    for index, (relative, includes, _, _) in enumerate(entries):
+    for index, (relative, given, _, _) in enumerate(entries):
         if reports[index] is not None:
             continue
-        document, error = index_document(fort, root, relative, includes, std_dir)
+        includes, options = given
+        document, error = index_document(fort, root, relative, includes, std_dir, options)
         runs += 1
         if error is not None:
             reports[index] = [(1, 1, error)]
@@ -1441,24 +1494,27 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
             if reports[other] is not None:
                 continue
             records = buckets.get(entries[other][2])
-            if other != index and (not records or entries[other][1] != includes):
+            if other != index and (not records or entries[other][1] != given):
                 # The whole design rests on one fact: a file's records depend on
                 # that file's own import closure and on nothing wider. So the
                 # records of a file in this document are the records its own run
-                # would give. The search roots are the one thing that can change
-                # that closure. Thus, a run judges a file only when the roots
-                # agree. Std/ resolves through the copy beside the compiler, which is
-                # another file, and the test/fort and test/lsp tests carry the roots of
+                # would give. The search roots and the `--cfg` options of a language
+                # test are the things that can change that closure. Thus, a run judges a
+                # file only when the roots and the options agree. Std/ resolves through
+                # the copy beside the compiler, which is another file, and the test/fort
+                # and test/lsp tests carry the roots of
                 # test/fort/support. A module of src/fort carries `-I src`, so a run of a
                 # module of src/lsp, which carries the same root, can judge it.
                 continue
             source = has_source_text(entries[other][3])
             segments = module_segments(entries[other][0])
-            reports[other] = file_problems(records or [], diagnostics, source, segments)
+            reports[other] = file_problems(records or [], diagnostics, source, segments,
+                                           not rows_only(entries[other][0]))
             reports[other].extend(row_problems(rows, entries[other][2], records or []))
     lines = []
     for index, (relative, _, _, text) in enumerate(entries):
-        problems = text_problems(relative, text, root) + reports[index]
+        problems = [] if rows_only(relative) else text_problems(relative, text, root)
+        problems += reports[index]
         problems.sort(key=lambda problem: (problem[0], problem[1]))
         lines.append(
             ["%s:%d:%d: %s" % (relative, line, col, message) for line, col, message in problems]

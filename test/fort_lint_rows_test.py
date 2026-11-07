@@ -87,6 +87,15 @@ class Rules(unittest.TestCase):
             self.assertEqual(status, 1 if expected else 0, output)
             return output
 
+    def check_raw(self, files):
+        """Write `files` (name to text), lint them, and return the output; the lint must fail."""
+        with tempfile.TemporaryDirectory() as out:
+            root = os.path.realpath(out)
+            names = [write(root, name, text) for name, text in files.items()]
+            status, output, _ = lint(root, names)
+            self.assertEqual(status, 1, output)
+            return output
+
     def test_a_declaration_and_a_call_with_their_rows_pass(self):
         text = ("import extern;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
                 "// C call labs: no pointer argument.\n"
@@ -383,6 +392,46 @@ class Rules(unittest.TestCase):
                  "one.ft": head + "// C call labs x1: no pointer argument.\n" + body}
         self.check(files, [("one.ft", 8, "count 1 call(s) of 'labs', and its body holds 3")])
 
+    def test_a_language_test_gets_the_rows_and_no_names(self):
+        # A file of test/lang/run or test/lang/programs gets the checks of D9.8 and no check of
+        # D1.4: its module name, its struct name and its long line pass, and its extern with no
+        # row is reported. The same text in another tree gets each check.
+        text = ("import extern;\n\n// " + "x" * 100 + "\nstruct Bad_Name {\n    i64 v;\n}\n\n"
+                "extern fn labs(i64 v) i64;\n")
+        files = {"test/lang/run/ffi/001_bad.ft": text,
+                 "test/lang/programs/Bad.ft": text,
+                 "other/001_bad.ft": text}
+        self.check(files, [
+            ("other/001_bad.ft", 1, "module '001_bad' is not lower_case"),
+            ("other/001_bad.ft", 3, "line is 103 columns"),
+            ("other/001_bad.ft", 4, "struct 'Bad_Name' is not lower_case"),
+            ("other/001_bad.ft", 8, "extern 'labs' has no declaration row"),
+            ("test/lang/programs/Bad.ft", 8, "extern 'labs' has no declaration row"),
+            ("test/lang/run/ffi/001_bad.ft", 8, "extern 'labs' has no declaration row")])
+
+    def test_a_language_test_keeps_the_errors_of_the_compiler(self):
+        # A language test gets no check of D1.4, but a closure that the compiler cannot check
+        # is still a problem: the rows of a file with no index cannot be read.
+        text = "fn main() i32 {\n    return missing;\n}\n"
+        output = self.check_raw({"test/lang/run/x/001_broken.ft": text})
+        self.assertIn("test/lang/run/x/001_broken.ft:1:1:", output)
+        self.assertIn("missing", output)
+
+    def test_a_language_test_takes_the_cfg_options_of_its_flags(self):
+        # The `--cfg` options of `//! flags:` reach the index, so a `$if` on a key of the test
+        # compiles. A module of a directory test takes the options of the main.ft beside it.
+        main = ("//! run\n//! flags: --release --cfg mode=good\n"
+                "import extern;\nimport dep;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                "// C call labs: no pointer argument.\n"
+                "fn main() i32 {\n    $if ($cfg(mode) == \"good\") {\n"
+                "        return cast(labs(cast(dep.KEY.len, i64)), i32);\n    }\n}\n")
+        dep = "string KEY = $cfg(mode);\n"
+        self.check({"test/lang/run/modules/keyed/main.ft": main,
+                    "test/lang/run/modules/keyed/dep.ft": dep}, [])
+        output = self.check_raw({"elsewhere/keyed/main.ft": main,
+                                 "elsewhere/keyed/dep.ft": dep})
+        self.assertIn("configuration key 'mode' is not set", output)
+
     def test_a_row_in_the_standard_library_is_checked(self):
         # A module of std/ is trusted by its root (D9.8). The test removes the declaration row
         # of `strlen` from a copy of the std.libc of the target and the call row of mem.copy.
@@ -614,6 +663,30 @@ class Parts(unittest.TestCase):
                            ("import externs;", False)):
             with self.subTest(text=text):
                 self.assertEqual(fort_lint.Source(text).is_trusted_form(), want)
+
+    def test_the_options_of_a_language_test_are_its_cfg_pairs(self):
+        fort_lint = lint_module()
+        with tempfile.TemporaryDirectory() as out:
+            root = os.path.realpath(out)
+            write(root, "test/lang/run/a/001_one.ft",
+                  "//! run\n//! flags: --release --cfg a=1,b= --no-bounds-check --cfg c=x=y\n"
+                  "//! stdout:\n//| 1\n// --cfg z=0 is no directive\nfn main() i32 {}\n")
+            write(root, "test/lang/run/modules/d/main.ft", "//! run\n//! flags: --cfg k=v\n")
+            write(root, "test/lang/run/modules/d/dep.ft", "//! flags: --cfg other=1\n")
+            write(root, "test/lang/programs/plain.ft", "//! run\nfn main() i32 {}\n")
+            write(root, "test/fort/x.ft", "//! flags: --cfg k=v\n")
+            for relative, want in (
+                    ("test/lang/run/a/001_one.ft", ("--cfg", "a=1,b=", "--cfg", "c=x=y")),
+                    ("test/lang/run/modules/d/main.ft", ("--cfg", "k=v")),
+                    ("test/lang/run/modules/d/dep.ft", ("--cfg", "k=v")),
+                    ("test/lang/programs/plain.ft", ()),
+                    ("test/fort/x.ft", ())):
+                with self.subTest(relative=relative):
+                    self.assertEqual(fort_lint.lang_options(root, relative), want)
+        self.assertTrue(fort_lint.rows_only("test/lang/programs/calc.ft"))
+        self.assertTrue(fort_lint.rows_only("test/lang/run/ffi/001_libc.ft"))
+        self.assertFalse(fort_lint.rows_only("test/fort/lang_test.ft"))
+        self.assertFalse(fort_lint.rows_only("std/rt.ft"))
 
     def test_the_standard_roots_include_each_place_of_std(self):
         fort_lint = lint_module()

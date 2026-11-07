@@ -156,7 +156,8 @@ Keep exact identifiers and diagnostic text.
   field may (`node mut* own node`), since fields are not variables and are outside the module
   namespace (D7.9). `tools/fort_lint.py` enforces exactly that, and the 100-column wrap, over
   `std/`, `src/fort/`, `src/lsp/`, `test/fort/`, `test/lsp/`, `test/library/` and `test/tty/`,
-  nested directories included, with the audit rows of D9.8 (`notes/testing.md` 8); nothing
+  nested directories included, with the audit rows of D9.8, which it also checks in
+  `test/lang/run` and `test/lang/programs` (`notes/testing.md` 8); nothing
   formats `.ft`, so
   indentation and spacing are still written by hand and read by review. Run it with
   `tools/vm lint`, or by hand as

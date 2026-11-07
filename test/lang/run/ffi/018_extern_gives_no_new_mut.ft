@@ -30,13 +30,47 @@ struct tm {
     char* zone;
 }
 
+// C: strchr, ISO C11 7.24.5.2, strchr(3).
+// writes: nothing; C reads s to its NUL. gives: null, or a pointer into s at the first byte c,
+// before or at its NUL. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn strchr(char* s, i32 c) char*;
+// C: strtol, ISO C11 7.22.1.4, strtol(3).
+// writes: one char* at endptr when endptr is not null, a pointer into nptr after the last byte that
+// C read. C reads nptr up to the first byte that is no digit, which is the NUL at the latest.
+// gives: a long and no pointer. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn strtol(char* nptr, char* mut* endptr, i32 base) i64;
+// C: gmtime, ISO C11 7.27.3.3, gmtime(3).
+// writes: nothing in fort storage; C reads one time_t at t. gives: null, or a pointer to one struct
+// tm of C, static storage that a later gmtime or localtime can change; no `mut`, because fort code
+// only reads it. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn gmtime(i64* t) tm*;
+// C: gmtime_r, gmtime_r(3) of POSIX.1-2017.
+// writes: one struct tm at out, 56 bytes on both targets, the size of tm. C reads one time_t at t.
+// gives: out, or null. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn gmtime_r(i64* t, tm mut* out) tm mut*;
+// C: fopen, ISO C11 7.21.5.3, fopen(3).
+// writes: nothing in fort storage; C reads path and mode to their NULs. gives: null, or a new FILE
+// of C that fclose ends. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn fopen(char* path, char* mode) void mut* own;
+// C: fclose, ISO C11 7.21.5.1, fclose(3).
+// frees: the FILE f, which fopen gave. gives: 0 or EOF. writes: no fort storage. keeps: no pointer.
+// calls: no fort function.
 extern fn fclose(void mut* own f) i32;
 
+// C call strchr: &abc[0] keeps the bound of abc from element 0, 4 chars (D9.8 rule 2), and the
+// initializer of abc stores its NUL in the last element, abc[3] (rule 4).
+// C call str.from_cstr: found, which strchr gave in this function, a pointer into abc (rule 3);
+// from_cstr reads it to the NUL of abc. 98 is in abc, so found is not null.
+// C call strtol: &digits[0], 4 chars from element 0 (rule 2), with the NUL that its initializer
+// stores in digits[3] (rule 4); &end, the address of the local end, one char* (rule 2), and C
+// writes one.
+// C call gmtime: &day, the address of the local day, one i64 (rule 2).
+// C call gmtime_r: &day, one i64, and &out, the address of the local out, one tm of 56 bytes (rule
+// 2), the size of the struct tm of C.
+// C call fopen: &path[0] names the buffer that str.to_cstr gave, with its NUL (rule 4), and
+// &mode[0] keeps the bound of mode, 2 chars, with the NUL that its initializer stores in mode[1]
+// (rule 4).
+// C call fclose: move(f), the FILE that fopen gave in this function, not null (rule 3).
 fn main() i32 {
     char[4] abc = {'a', 'b', 'c', cast(0, char)};
     char* found = strchr(&abc[0], 98);

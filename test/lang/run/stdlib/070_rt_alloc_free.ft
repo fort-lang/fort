@@ -25,13 +25,22 @@ string FILE = "070_rt_alloc_free.ft";
 // bcmp(3) and bcopy(3) read and write the bytes of a block through a `void*`. A
 // cast gives no type to a `void*` (D3.14), and no span of a pointer exists
 // (D6.9), so these helpers hand the block to C as it is.
+// C: bcmp, bcmp(3) of glibc and of macOS, <strings.h>; POSIX.1-2001, which POSIX.1-2008 removed.
+// writes: nothing; C reads at most n bytes at a and at b. gives: 0 when the n bytes are the same,
+// and another int when not; no pointer. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn bcmp(void* a, void* b, u64 n) i32;
+// C: bcopy, bcopy(3) of glibc and of macOS, <strings.h>; POSIX.1-2001, which POSIX.1-2008 removed.
+// writes: n bytes at destination, which it reads from n bytes at source; the two can overlap.
+// gives: no result. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn bcopy(void* source, void mut* destination, u64 n) void;
 
 // Answers whether all n bytes at p are zero, for an n above 0. D10.2 promises
 // that of both. The parameter is void*, which alloc's void mut* own result
 // reaches by the monotone drop of D5.4, so a reader writes no cast. bcmp holds
 // the bytes against zeroed ones.
+// C call bcmp: p and n are parameter sources (D9.8 rule 1), so all_zero is a boundary function, and
+// each caller gives a block of at least n bytes. cast(&zeros[0], void*) keeps the bound of zeros
+// from element 0, n bytes (rule 2), so n fits both.
 fn all_zero(void* p, u64 n) bool {
     u8@ own zeros = new(u8, n);
     bool same = bcmp(p, cast(&zeros[0], void*), n) == 0;
@@ -40,6 +49,9 @@ fn all_zero(void* p, u64 n) bool {
 }
 
 // Answers byte i of the block at p, through a copy of its first i + 1 bytes.
+// C call bcopy: p and i are parameter sources (D9.8 rule 1), so byte_at is a boundary function, and
+// each caller gives a block of at least i + 1 bytes. cast(&copy[0], void mut*) keeps the bound of
+// copy from element 0, i + 1 bytes (rule 2), so i + 1 fits both.
 fn byte_at(void* p, u64 i) u8 {
     u8 mut@ own copy = new(u8, i + 1);
     bcopy(p, cast(&copy[0], void mut*), i + 1);
@@ -53,6 +65,9 @@ fn byte_at(void* p, u64 i) u8 {
 // comes. A caller that bound the result as void* own could not call this at
 // all, because the drop of D5.4 runs one way only (D3.11, toolchain.md 5.1).
 // bcopy copies the first i + 1 bytes out, and back with byte i set.
+// C call bcopy x2: p and i are parameter sources (D9.8 rule 1), so poke is a boundary function, and
+// each caller gives a block of at least i + 1 bytes. &copy[0], cast to void mut* or void*, keeps
+// the bound of copy from element 0, i + 1 bytes (rule 2), so i + 1 fits both.
 fn poke(void mut* p, u64 i, u8 v) void {
     u8 mut@ own copy = new(u8, i + 1);
     bcopy(p, cast(&copy[0], void mut*), i + 1);
@@ -61,6 +76,17 @@ fn poke(void mut* p, u64 i, u8 v) void {
     del(copy);
 }
 
+// C call rt.alloc x4: &FILE[0] names the global FILE, no mut global, which a literal initializes,
+// with the NUL of that literal (D9.8 rule 4); the other arguments are integers.
+// C call all_zero x4: cast(&from_new[0], void*) keeps the bound of from_new from element 0, n bytes
+// (rule 2), with n; from_alloc with n, 64 bytes, zero_elem with 1, 1 byte, and large with big, big
+// bytes, each storage that rt.alloc gave in main: the word gives: of its row states elem_size *
+// count zeroed bytes, or 1 byte for a product of 0, never null (D9.8 rule 3).
+// C call poke x2: from_alloc, the 64 bytes that rt.alloc gave (rule 3), with i 0 and n - 1, so i +
+// 1 is at most 64.
+// C call byte_at x2: from_alloc, 64 bytes, with i 0 and n - 1, as for poke.
+// C call rt.free x5: null, and four blocks that rt.alloc gave in this function, which free takes
+// (A3).
 fn main() i32 {
     u64 n = 64;
     u8 mut@ own from_new = new(u8, n);

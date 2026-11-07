@@ -27,20 +27,68 @@ struct block {
     u8 tag;
 }
 
+// C: multidim_sizeof_grid, test/lang/ffi/multidim.c, which gives sizeof(int32_t[2][3]).
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
 extern fn multidim_sizeof_grid() u64;
+// C: multidim_sizeof_row, test/lang/ffi/multidim.c, which gives sizeof(int32_t[3]).
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
 extern fn multidim_sizeof_row() u64;
+// C: multidim_sizeof_cube, test/lang/ffi/multidim.c, which gives sizeof(int32_t[2][2][3]).
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
 extern fn multidim_sizeof_cube() u64;
+// C: multidim_sizeof_block, test/lang/ffi/multidim.c, which gives sizeof(struct block).
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
 extern fn multidim_sizeof_block() u64;
+// C: multidim_offsetof_block_tag, test/lang/ffi/multidim.c, which gives offsetof(struct block,
+// tag).
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
 extern fn multidim_offsetof_block_tag() u64;
+// C: multidim_sizeof_cell_grid, test/lang/ffi/multidim.c, which gives sizeof(struct cell[2][3]).
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
 extern fn multidim_sizeof_cell_grid() u64;
+// C: multidim_sizeof_span, test/lang/ffi/multidim.c, which gives sizeof(struct span).
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
 extern fn multidim_sizeof_span() u64;
+// C: multidim_fill, test/lang/ffi/multidim.c, which stores 10 * i + j in each element.
+// gives: no result. writes: 6 int32_t at grid, two rows of three. keeps: no pointer. calls: no fort
+// function. frees: nothing.
 extern fn multidim_fill(i32 mut* grid) void;
+// C: multidim_digest, test/lang/ffi/multidim.c, which mixes each element into a digit.
+// gives: an int64_t and no pointer. writes: nothing; C reads 6 int32_t at grid. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn multidim_digest(i32* grid) i64;
+// C: multidim_block_digest, test/lang/ffi/multidim.c, which mixes the grid and the tag of *b.
+// gives: an int64_t and no pointer. writes: nothing; C reads the one struct block at b. keeps: no
+// pointer. calls: no fort function. frees: nothing.
 extern fn multidim_block_digest(block* b) i64;
+// C: multidim_at, test/lang/ffi/multidim.c, which reads element j of row i of rows of three.
+// gives: an int32_t and no pointer. writes: nothing; C reads the int32_t at grid + 3 * i + j.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn multidim_at(i32* grid, i32 i, i32 j) i32;
+// C: multidim_cell_at, test/lang/ffi/multidim.c, which reads the n of cell j of row i of rows of
+// three.
+// gives: an int32_t and no pointer. writes: nothing; C reads the struct cell at cells + 3 * i + j.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn multidim_cell_at(cell* cells, i32 i, i32 j) i32;
+// C: multidim_span_row_sum, test/lang/ffi/multidim.c, which sums row k of len rows of three, or
+// gives -1 when k >= len.
+// gives: an int64_t and no pointer. writes: nothing; C reads the 3 int32_t of row k at rows when k
+// < len. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn multidim_span_row_sum(i32* rows, u64 len, u64 k) i64;
+// C: multidim_span_len_at, test/lang/ffi/multidim.c, which reads the len of span header k.
+// gives: a uint64_t and no pointer. writes: nothing; C reads the span header k, 16 bytes, at spans.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn multidim_span_len_at(void* spans, u64 k) u64;
+// C: multidim_span_first_at, test/lang/ffi/multidim.c, which reads the first element of span k.
+// gives: an int32_t and no pointer. writes: nothing; C reads the span header k at spans and the
+// int32_t at its ptr. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn multidim_span_first_at(void* spans, u64 k) i32;
 
 // A nested array in read-only memory, laid out by the emitter's initializer
@@ -52,6 +100,29 @@ fn off(void* base, void* field) u64 {
     return cast(field, u64) - cast(base, u64);
 }
 
+// C call multidim_sizeof_grid: no argument.
+// C call multidim_sizeof_row x2: no argument.
+// C call multidim_sizeof_cube: no argument.
+// C call multidim_sizeof_block: no argument.
+// C call multidim_sizeof_cell_grid: no argument.
+// C call multidim_offsetof_block_tag: no argument.
+// C call multidim_fill: &m[0][0], the address of an element of the nested fixed array m, keeps the
+// rest of the whole storage of m, 6 i32 (D9.8 rule 2, D3.4), and C writes 6.
+// C call multidim_digest: &w[0][0] keeps the 6 i32 of w (rule 2, D3.4), and C reads 6.
+// C call multidim_at x2: &w[0][0], 6 i32 (rule 2), of which C reads the element 5; and
+// &CONST_GRID[0][0], the 6 i32 of the constant CONST_GRID (rule 2), of which C reads the element 3.
+// C call multidim_block_digest: &b, the address of the local b, one block (rule 2).
+// C call multidim_cell_at x2: &cells[0][0] keeps the 6 cells of the nested fixed array cells (rule
+// 2, D3.4), and C reads the cells 5 and 1.
+// C call multidim_span_row_sum x2: &rows[0][0], the address of an element of the span rows, whose
+// elements are i32[3], keeps the rest of its whole storage, rows.len rows of 3 i32 (rule 2, D3.4);
+// the length rows.len is that count of rows, and C reads row k only when k < len.
+// C call multidim_span_len_at: cast(&spans[0], void*) keeps the bound of spans from element 0, two
+// span headers (rule 2), and C reads header 1.
+// C call multidim_span_first_at: cast(&spans[0], void*), two span headers (rule 2); C reads header
+// 0, rows[0][0..3], and the first of its 3 i32 (rule 2).
+// C call off x4: the addresses of a local and of its parts, cast to void*; off reads no byte at
+// them and subtracts them as integers (D3.11).
 fn main() i32 {
     println(sizeof(i32[2][3]), " ", sizeof(i32[3]), " ", sizeof(i32[2][2][3]), " ",
             sizeof(block), " ", sizeof(cell[2][3]), " ", sizeof(cell[2][3][2]), " ",

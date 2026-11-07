@@ -6,6 +6,7 @@
 //| f32 powers ok
 import extern;
 import std.io;
+import std.libc;
 import std.str;
 import std.strbuf;
 
@@ -23,14 +24,8 @@ import std.strbuf;
 // The printed text reaches the reader through a file, because the print
 // family writes to a descriptor and to nothing else (D12.2): one family of
 // values is printed one per line, the file is read back whole, and each line
-// is handed to the reader with the value that produced it.
-extern fn strtod(char* s, char* mut* end) f64;
-extern fn strtof(char* s, char* mut* end) f32;
-
-// The bits of a float and a float of those bits: the one way a fort program
-// reaches every encoding, since a cast converts values and not patterns
-// (D3.14).
-extern fn memcpy(u8 mut* dst, u8* src, u64 n) void;
+// is handed to the reader with the value that produced it. The test calls
+// the declarations of std.libc.
 
 string PATH = "floats.txt";
 
@@ -38,17 +33,24 @@ string PATH = "floats.txt";
 // that, so each round takes a slice of them.
 u64 ROUND = 256;
 
+// The bits of a float and a float of those bits: the one way a fort program
+// reaches every encoding, since a cast converts values and not patterns
+// (D3.14).
+// C call libc.memcpy: cast(&v, u8 mut*) and cast(&source, u8*) keep the bounds of the locals v and
+// source, 8 bytes each (D9.8 rule 2), and the length 8 fits both.
 fn f64_of_bits(u64 bits) f64 {
     f64 mut v = 0.0;
     u64 mut source = bits;
-    memcpy(cast(&v, u8 mut*), cast(&source, u8*), 8);
+    libc.memcpy(cast(&v, u8 mut*), cast(&source, u8*), 8);
     return v;
 }
 
+// C call libc.memcpy: cast(&v, u8 mut*) and cast(&source, u8*) keep the bounds of the locals v and
+// source, 4 bytes each (D9.8 rule 2), and the length 4 fits both.
 fn f32_of_bits(u32 bits) f32 {
     f32 mut v = 0.0;
     u32 mut source = bits;
-    memcpy(cast(&v, u8 mut*), cast(&source, u8*), 4);
+    libc.memcpy(cast(&v, u8 mut*), cast(&source, u8*), 4);
     return v;
 }
 
@@ -77,6 +79,11 @@ fn power_of_two_f32(i64 e) f32 {
 
 // Reads the file back and hands each line to `strtod`, with the value that
 // wrote it. Answers false at the first line that does not read back.
+// C call libc.strtod: &bytes[at] keeps the bound of bytes, the buffer that str.to_cstr gave, from
+// element at (D9.8 rule 2). The NUL is the one that this function stores by the checked index
+// bytes[end], at or after at, or the one of str.to_cstr after the text (rule 4); no store changes
+// it before the call, so strtod reads inside bytes. The end pointer is null, and C writes no
+// pointer.
 fn lines_read_back_as_f64(f64@ values) bool {
     strbuf.str_buf mut text = strbuf.create();
     defer del(text.data);
@@ -95,7 +102,7 @@ fn lines_read_back_as_f64(f64@ values) bool {
         // The line ends where the newline is, and to_cstr already put a NUL
         // after the last byte, so overwriting the newline ends this line.
         bytes[end] = cast(0, char);
-        if (strtod(&bytes[at], null) != values[i]) {
+        if (libc.strtod(&bytes[at], null) != values[i]) {
             return false;
         }
         at = end + 1;
@@ -104,6 +111,11 @@ fn lines_read_back_as_f64(f64@ values) bool {
     return true;
 }
 
+// C call libc.strtof: &bytes[at] keeps the bound of bytes, the buffer that str.to_cstr gave, from
+// element at (D9.8 rule 2). The NUL is the one that this function stores by the checked index
+// bytes[end], at or after at, or the one of str.to_cstr after the text (rule 4); no store changes
+// it before the call, so strtof reads inside bytes. The end pointer is null, and C writes no
+// pointer.
 fn lines_read_back_as_f32(f32@ values) bool {
     strbuf.str_buf mut text = strbuf.create();
     defer del(text.data);
@@ -120,7 +132,7 @@ fn lines_read_back_as_f32(f32@ values) bool {
             end += 1;
         }
         bytes[end] = cast(0, char);
-        if (strtof(&bytes[at], null) != values[i]) {
+        if (libc.strtof(&bytes[at], null) != values[i]) {
             return false;
         }
         at = end + 1;
