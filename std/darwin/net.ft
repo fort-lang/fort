@@ -74,6 +74,7 @@ fn parse_ipv4(string text, u32 mut* out) bool {
 }
 
 // Closes fd and restores errno from the failed call.
+// C call libc.close: no pointer argument.
 fn close_and_fail(i32 fd) i32 {
     i32 saved = sys.errno();
     libc.close(fd);
@@ -83,6 +84,12 @@ fn close_and_fail(i32 fd) i32 {
 
 /// Opens a TCP listener on every interface and sets SO_REUSEADDR.
 /// Port 0 asks the kernel for an available port.
+// C call libc.socket: no pointer argument.
+// C call libc.setsockopt: cast(&on, void*) keeps the bound of the i32 on, 4 bytes (D9.8 rule
+// 2), and the length on_len is sizeof(i32).
+// C call libc.bind: cast(&addr, void*) keeps the bound of the local addr, sizeof(sockaddr_in)
+// bytes (rule 2), and the length is sizeof(sockaddr_in).
+// C call libc.listen: no pointer argument.
 fn listen(u16 port, i32 backlog) i32 {
     i32 fd = libc.socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -108,6 +115,7 @@ fn listen(u16 port, i32 backlog) i32 {
 }
 
 /// Accepts one connection without returning its peer address.
+// C call libc.accept: addr and len are null, so C writes no fort storage.
 fn accept(i32 fd) i32 {
     i32 client = libc.accept(fd, null, null);
     if (client < 0) {
@@ -118,6 +126,9 @@ fn accept(i32 fd) i32 {
 
 /// Connects to a dotted IPv4 address and port.
 /// Invalid address text sets EINVAL without a system call.
+// C call libc.socket: no pointer argument.
+// C call libc.connect: cast(&addr, void*) keeps the bound of the local addr,
+// sizeof(sockaddr_in) bytes (D9.8 rule 2), and the length is sizeof(sockaddr_in).
 fn connect(string host_ipv4, u16 port) i32 {
     u32 mut host = 0;
     if (!parse_ipv4(host_ipv4, &host)) {
@@ -141,6 +152,9 @@ fn connect(string host_ipv4, u16 port) i32 {
 
 /// Reports the bound port in host byte order.
 /// A failure returns false and leaves *out unchanged.
+// C call libc.getsockname: cast(&addr, void mut*) keeps the bound of the local addr,
+// sizeof(sockaddr_in) bytes (D9.8 rule 2), and &len keeps one u32 (rule 2) that holds
+// sizeof(sockaddr_in), so C writes at most that many bytes at addr, and then one u32 at len.
 fn local_port(i32 fd, u16 mut* out) bool {
     sockaddr_in mut addr = {};
     u32 mut len = cast(sizeof(sockaddr_in), u32);

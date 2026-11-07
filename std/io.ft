@@ -17,6 +17,8 @@ u64 CHUNK = 4096;
 
 /// Opens path for reading. A path containing \0 names its prefix.
 /// A failure returns -1 and sets sys.errno().
+// C call libc.open: c_path.ptr keeps the bound of the str.to_cstr buffer c_path, path.len + 1
+// bytes (D9.8 rule 2), and its last byte is the NUL (rule 4).
 fn open_read(string path) i32 {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
@@ -25,6 +27,8 @@ fn open_read(string path) i32 {
 
 /// Opens path for writing, creates it with mode 0o644, or truncates it.
 /// A failure returns -1 and sets sys.errno().
+// C call libc.open: c_path.ptr keeps the bound of the str.to_cstr buffer c_path, path.len + 1
+// bytes (D9.8 rule 2), and its last byte is the NUL (rule 4).
 fn open_write(string path) i32 {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
@@ -35,6 +39,8 @@ fn open_write(string path) i32 {
 /// `mode` gives the permission bits of a file that O_CREAT makes, less the umask; other flags
 /// ignore it. A path containing \0 names its prefix.
 /// A failure returns -1 and sets sys.errno().
+// C call libc.open: c_path.ptr keeps the bound of the str.to_cstr buffer c_path, path.len + 1
+// bytes (D9.8 rule 2), and its last byte is the NUL (rule 4).
 fn open(string path, i32 flags, i32 mode) i32 {
     char mut@ own c_path = str.to_cstr(path);
     defer del(c_path);
@@ -44,6 +50,7 @@ fn open(string path, i32 flags, i32 mode) i32 {
 /// Flushes the runtime buffer for fd, then closes fd. The buffer forgets the type of the file, so
 /// a file that a later open gives the same number gets the state of its own type.
 /// Returns false when close(2) fails. The descriptor is invalid after either result.
+// C call libc.close: no pointer argument.
 fn close(i32 fd) bool {
     // Flush before close removes the descriptor.
     rt.reset_buffer(fd);
@@ -57,6 +64,8 @@ fn flush(i32 fd) void {
 
 /// Reads once into buf. Returns 0 at end of file or for an empty buffer.
 /// Retries EINTR. Other failures return -1 and set sys.errno().
+// C call libc.read: buf.ptr keeps the bound of buf (D9.8 rule 2), and the length buf.len fits
+// it, so C writes at most buf.len bytes. buf.len > 0.
 fn read(i32 fd, u8 mut@ buf) i64 {
     if (buf.len == 0) {
         return 0;
@@ -72,6 +81,8 @@ fn read(i32 fd, u8 mut@ buf) i64 {
 /// Writes once from buf. Returns the count of bytes written, at most buf.len, or 0 for an empty
 /// buffer, which makes no system call. Retries EINTR. Other failures return -1 and set
 /// sys.errno().
+// C call libc.write: buf.ptr keeps the bound of buf (D9.8 rule 2), and the length buf.len fits
+// it. buf.len > 0.
 fn write(i32 fd, u8@ buf) i64 {
     if (buf.len == 0) {
         return 0;
@@ -86,6 +97,8 @@ fn write(i32 fd, u8@ buf) i64 {
 
 /// Writes all bytes, handles partial writes, and retries EINTR.
 /// Returns false when write fails or reports zero progress. Some bytes can already be written.
+// C call libc.write: rest.ptr keeps the bound of the span rest (D9.8 rule 2), and the length
+// rest.len fits it. rest.len > 0, because done < buf.len.
 fn write_all(i32 fd, u8@ buf) bool {
     u64 mut done = 0;
     while (done < buf.len) {
@@ -177,6 +190,7 @@ fn write_file(string path, u8@ data) bool {
 
 /// Reports whether fd names a terminal. Returns false and sets sys.errno() when fd names no
 /// terminal or no open descriptor.
+// C call libc.isatty: no pointer argument.
 fn is_terminal(i32 fd) bool {
     return libc.isatty(fd) == 1;
 }
@@ -184,6 +198,7 @@ fn is_terminal(i32 fd) bool {
 /// Makes a pipe. Writes the descriptor of its read end to *read_end and the descriptor of its
 /// write end to *write_end, and returns true. Returns false, leaves both unchanged, and sets
 /// sys.errno() when pipe(2) fails.
+// C call libc.pipe: &fds[0] keeps the bound of fds, two i32 (D9.8 rule 2), and C writes two.
 fn pipe(i32 mut* read_end, i32 mut* write_end) bool {
     i32[2] mut fds = {};
     if (libc.pipe(&fds[0]) != 0) {
@@ -198,6 +213,7 @@ fn pipe(i32 mut* read_end, i32 mut* write_end) bool {
 /// free. The two descriptors share the position and the status flags of the file. Returns the
 /// new descriptor, or -1 and sets sys.errno() when dup fails: EBADF when `fd` is not open, and
 /// EMFILE when no descriptor is free.
+// C call libc.dup: no pointer argument.
 fn dup(i32 fd) i32 {
     return libc.dup(fd);
 }
@@ -211,6 +227,7 @@ fn dup(i32 fd) i32 {
 /// them in, so a caller that needs an order calls io.flush between the writes. When
 /// `new_fd` is `old_fd` and is open, nothing changes. Returns -1 and sets sys.errno() when dup2
 /// fails: EBADF when `old_fd` is not open or `new_fd` is negative.
+// C call libc.dup2: no pointer argument.
 fn dup2(i32 old_fd, i32 new_fd) i32 {
     rt.flush(old_fd);
     rt.flush(new_fd);

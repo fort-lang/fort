@@ -1,5 +1,7 @@
 /// Declares the libc functions that the standard library uses on Darwin arm64.
 /// Names use C linkage.
+// The `//` lines directly above each declaration are its row (D9.8): the C function, the source
+// of its contract, and the five points of A7 of spec/ownership-design.md 5.1.
 
 // open(2) flags, Darwin arm64 values.
 i32 O_RDONLY = 0;
@@ -22,60 +24,166 @@ i32 EINVAL = 22;
 i32 ENOTSOCK = 38;
 i32 ECONNREFUSED = 61;
 
+// C: malloc, ISO C11 7.22.3.4 and 7.22.3, malloc(3).
+// gives: null, or a new allocation of `size` bytes, aligned for each type of a fundamental
+// alignment, that only free frees (`own`, A2). writes: no fort storage. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn malloc(u64 size) void mut* own;
 /// Allocates zeroed storage for n elements of size bytes.
+// C: calloc, ISO C11 7.22.3.2 and 7.22.3, calloc(3).
+// gives: null, also when n * size does not fit a size_t, or a new allocation of n * size zero
+// bytes, aligned for each type of a fundamental alignment, that only free frees (`own`, A2).
+// writes: no fort storage. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn calloc(u64 n, u64 size) void mut* own;
+// C: free, ISO C11 7.22.3.3, free(3).
+// frees: p, an allocation that malloc or calloc gave, which the `own` moves to C; nothing for
+// null. gives: no pointer. writes: no storage that fort code still holds. keeps: no pointer.
+// calls: no fort function.
 extern fn free(void* own p) void;
 
-// C gives back dst from memcpy, memmove and memset. The `void` results keep that pointer out of
-// fort code: for the `.ptr` of an empty span, it names the byte after the span (D3.5).
+// C: memcpy, ISO C11 7.24.2.1, memcpy(3).
+// writes: n bytes at dst, from the n bytes at src; the two must not overlap, so the call row
+// says why they do not. gives: no pointer: C gives back dst, and the `void` result keeps it out
+// of fort code, as for the `.ptr` of an empty span it names the byte after the span (D3.5).
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn memcpy(u8 mut* dst, u8* src, u64 n) void;
+// C: memmove, ISO C11 7.24.2.2, memmove(3).
+// writes: n bytes at dst, from the n bytes at src, which can overlap them. gives: no pointer:
+// the `void` result drops dst, as for memcpy. keeps: no pointer. calls: no fort function.
+// frees: nothing.
 extern fn memmove(u8 mut* dst, u8* src, u64 n) void;
+// C: memcmp, ISO C11 7.24.4.1, memcmp(3).
+// writes: nothing; C reads n bytes at a and n bytes at b. gives: an i32 and no pointer.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn memcmp(u8* a, u8* b, u64 n) i32;
+// C: memset, ISO C11 7.24.6.1, memset(3).
+// writes: n bytes at dst, each the low byte of v. gives: no pointer: the `void` result drops
+// dst, as for memcpy. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn memset(u8 mut* dst, i32 v, u64 n) void;
+// C: strlen, ISO C11 7.24.6.3, strlen(3).
+// writes: nothing; C reads s to its NUL, which the call row finds in the storage of s.
+// gives: the count of bytes before the NUL. keeps: no pointer. calls: no fort function.
+// frees: nothing.
 extern fn strlen(char* s) u64;
+// C: getenv, ISO C11 7.22.4.6, getenv(3) of POSIX.1-2017.
+// gives: null, or a C string with its NUL in the environment, storage of C that a later getenv,
+// setenv or unsetenv can change or free; no `mut`, because fort code must not write it.
+// writes: nothing; C reads name to its NUL. keeps: no pointer. calls: no fort function.
+// frees: nothing.
 extern fn getenv(char* name) char*;
+// C: exit, ISO C11 7.22.4.4, exit(3).
+// calls: each function that atexit(3) registered, which no module of std does, and then C
+// flushes its streams and ends the process. gives: no return. writes: no fort storage.
+// keeps: no pointer. frees: no fort allocation before the process ends.
 extern fn exit(i32 code) noreturn;
+// C: abort, ISO C11 7.22.4.1, abort(3).
+// calls: a handler of SIGABRT that an earlier call of C keeps, which no module of std sets; then
+// C ends the process with SIGABRT. gives: no return. writes: no fort storage. keeps: no
+// pointer. frees: nothing.
 extern fn abort() noreturn;
 
-// The promoted open mode passes through an i32 variadic argument.
+// C: open, open(2) of POSIX.1-2017.
+// writes: nothing; C reads path to its NUL, and the variable tail is the mode, a promoted int
+// that C reads when flags hold O_CREAT. gives: a descriptor or -1. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn open(char* path, i32 flags, ...) i32;
+// C: read, read(2) of POSIX.1-2017.
+// writes: at most n bytes at buf. gives: the count of bytes, 0 at the end of the file, or -1.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn read(i32 fd, u8 mut* buf, u64 n) i64;
+// C: write, write(2) of POSIX.1-2017.
+// writes: nothing in fort storage; C reads at most n bytes at buf. gives: the count of bytes, or
+// -1. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn write(i32 fd, u8* buf, u64 n) i64;
+// C: close, close(2) of POSIX.1-2017.
+// gives: 0 or -1. writes: no fort storage. keeps: no pointer. calls: no fort function.
+// frees: no storage; C closes the descriptor.
 extern fn close(i32 fd) i32;
+// C: lseek, lseek(2) of POSIX.1-2017.
+// gives: the new offset or -1. writes: no fort storage. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn lseek(i32 fd, i64 offset, i32 whence) i64;
+// C: isatty, isatty(3) of POSIX.1-2017.
+// gives: 1, or 0 with errno set. writes: no fort storage. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn isatty(i32 fd) i32;
 
 // Darwin implements errno through this accessor.
+// C: __error, the C library of macOS, which <sys/errno.h> declares as the errno of the thread.
+// gives: the address of the errno of the calling thread, an int of storage of C for the life of
+// the thread, which fort code reads and writes. writes: no fort storage. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn __error() i32 mut*;
 
 // Returns the errno slot for internal standard-library calls.
+// C call __error: no pointer argument.
 fn errno_slot() i32 mut* {
     return __error();
 }
 
 // The float formatting arguments pass through a variadic call.
+// C: snprintf, ISO C11 7.21.6.5 and 7.21.6.1, snprintf(3).
+// writes: at most size bytes at buf, the last of them a NUL, and none for a size of 0; C reads
+// fmt to its NUL and reads the variable tail as fmt says, so the call row gives fmt and the
+// types of the tail. gives: the length of the whole text, or a value below 0.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn snprintf(char mut* buf, u64 size, char* fmt, ...) i32;
 
+// C call snprintf: buf, size and fmt are parameter sources (D9.8 rule 1), so the function is a
+// boundary function: each caller gives a size that fits the bound of buf, fmt with its NUL, and
+// a fmt such as `%.*e` that reads one int and one double, the precision and v of the tail.
 fn snprintf_float(char mut* buf, u64 size, char* fmt, i32 precision, f64 v) i32 {
     return snprintf(buf, size, fmt, precision, v);
 }
 
 // Darwin uses u32 for socklen_t. Socket addresses cross C as pointers.
+// C: socket, socket(2) of POSIX.1-2017.
+// gives: a descriptor or -1. writes: no fort storage. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn socket(i32 domain, i32 kind, i32 protocol) i32;
+// C: setsockopt, setsockopt(2) of POSIX.1-2017.
+// writes: nothing in fort storage; C reads len bytes at value. gives: 0 or -1.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn setsockopt(i32 fd, i32 level, i32 name, void* value, u32 len) i32;
+// C: bind, bind(2) of POSIX.1-2017.
+// writes: nothing in fort storage; C reads len bytes at addr. gives: 0 or -1.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn bind(i32 fd, void* addr, u32 len) i32;
+// C: listen, listen(2) of POSIX.1-2017.
+// gives: 0 or -1. writes: no fort storage. keeps: no pointer. calls: no fort function.
+// frees: nothing.
 extern fn listen(i32 fd, i32 backlog) i32;
+// C: accept, accept(2) of POSIX.1-2017.
+// writes: nothing when addr and len are null; else C reads *len, writes at most *len bytes at
+// addr and then the length of the address at len. gives: a descriptor or -1.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn accept(i32 fd, void mut* addr, u32 mut* len) i32;
+// C: connect, connect(2) of POSIX.1-2017.
+// writes: nothing in fort storage; C reads len bytes at addr. gives: 0 or -1.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn connect(i32 fd, void* addr, u32 len) i32;
+// C: getsockname, getsockname(2) of POSIX.1-2017.
+// writes: C reads *len, writes at most *len bytes at addr and then the length of the address at
+// len. gives: 0 or -1. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn getsockname(i32 fd, void mut* addr, u32 mut* len) i32;
 
 // fcntl(2), readlink(2) and realpath(3). fcntl takes a variable tail in C, and this declaration
 // keeps it on both targets (D9.8).
+// C: fcntl, fcntl(2) of POSIX.1-2017.
+// writes: no fort storage for F_SETFD, the one command of std, whose tail is one int; a command
+// whose tail is a pointer needs a call row for that storage. gives: an int, or -1.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn fcntl(i32 fd, i32 cmd, ...) i32;
+// C: readlink, readlink(2) of POSIX.1-2017.
+// writes: at most size bytes at buf, with no NUL; C reads path to its NUL. gives: the count of
+// bytes, or -1. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn readlink(char* path, char mut* buf, u64 size) i64;
 // Pass a buffer of PATH_MAX bytes as `resolved`. The result is that buffer, or null with errno set.
 // A null buffer makes C allocate a result that fort cannot free, so use `os.real_path` instead.
+// C: realpath, realpath(3) of POSIX.1-2017 and of macOS.
+// writes: at most PATH_MAX bytes at resolved, the path and its NUL; C reads path to its NUL.
+// gives: resolved, with no `mut` that the argument lacked, or null. keeps: no pointer.
+// calls: no fort function. frees: nothing; a null resolved makes C allocate, and std passes none.
 extern fn realpath(char* path, char mut* resolved) char*;
 
 // <dirent.h>: a directory stream is an allocation of C that closedir(3) frees, so the stream
@@ -101,8 +209,21 @@ struct dirent_head {
     u16 namlen;
     u8 kind;
 }
+// C: opendir, opendir(3) of POSIX.1-2017.
+// gives: null, or a new directory stream, storage of C that only closedir frees (`own`).
+// writes: nothing; C reads path to its NUL. keeps: no pointer. calls: no fort function.
+// frees: nothing.
 extern fn opendir(char* path) void mut* own;
+// C: readdir, readdir(3) of POSIX.1-2017 and of macOS.
+// gives: null at the end of the stream and on an error, or a record of `reclen` bytes in storage
+// of C, which the next readdir or closedir of dir can change or free. The kernel rounds a record
+// up to 8 bytes after the NUL of its name, so it holds the 24 bytes of `dirent_head`. No `mut`.
+// writes: the stream, storage of C, and errno. keeps: no pointer. calls: no fort function.
+// frees: nothing.
 extern fn readdir(void mut* dir) dirent_head*;
+// C: closedir, closedir(3) of POSIX.1-2017.
+// frees: the stream dir, which opendir or fdopendir gave (`own`), and C closes its descriptor.
+// gives: 0 or -1. writes: no fort storage. keeps: no pointer. calls: no fort function.
 extern fn closedir(void mut* own dir) i32;
 
 // The `kind` values of a directory entry. A file system that does not record the kind gives
@@ -137,38 +258,117 @@ i32 FD_CLOEXEC = 1;
 // temporary directory (mkdtemp replaces the six X of its argument in place), and
 // the environment of the process. A float parser stores a `char*` into `*end`, so `end`
 // marks that level `mut` and the `char*` it holds marks none (D17.13).
+
+// C: strerror, ISO C11 7.24.6.2, strerror(3).
+// gives: a C string with its NUL in storage of C, which a later strerror can change; no `mut`,
+// because fort code must not write it. writes: no fort storage. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn strerror(i32 code) char*;
+// C: strtod, ISO C11 7.22.1.3, strtod(3).
+// writes: C reads s to its NUL; with end not null, it writes at end a pointer into s, storage
+// that fort code gave in the same call, with no `mut`; it sets errno to ERANGE when the value
+// does not fit. gives: the value. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn strtod(char* s, char* mut* end) f64;
+// C: strtof, ISO C11 7.22.1.3, strtof(3).
+// writes: as strtod: C reads s to its NUL and writes at end, when not null, a pointer into s.
+// gives: the value. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn strtof(char* s, char* mut* end) f32;
+// C: mkdtemp, mkdtemp(3) of POSIX.1-2017 and of macOS.
+// writes: C reads tmpl to its NUL and writes the X bytes at its end, which the C library of
+// macOS takes in any count. gives: tmpl, with no `mut` that the argument lacked, or null.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn mkdtemp(char mut* tmpl) char*;
+// C: setenv, setenv(3) of POSIX.1-2017 and of macOS.
+// writes: nothing in fort storage; C reads name and value to their NULs. keeps: no pointer: C
+// copies both strings into storage of its own. gives: 0 or -1. calls: no fort function.
+// frees: no fort allocation; C can change or free a string of the environment that getenv gave.
 extern fn setenv(char* name, char* value, i32 overwrite) i32;
+// C: unsetenv, unsetenv(3) of POSIX.1-2017.
+// writes: nothing in fort storage; C reads name to its NUL. gives: 0 or -1. keeps: no pointer.
+// calls: no fort function. frees: no fort allocation; C can free the string that it removes.
 extern fn unsetenv(char* name) i32;
 
 // <unistd.h>, <sys/stat.h>, <sys/wait.h>: files, directories, descriptors and
 // child processes. `mode_t` crosses as u32 on both targets: a Mac's u16 fills the
 // same register, and one signature serves both roots (D9.8).
+
+// C: access, access(2) of POSIX.1-2017.
+// writes: nothing; C reads path to its NUL. gives: 0 or -1. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn access(char* path, i32 mode) i32;
+// C: getcwd, getcwd(3) of POSIX.1-2017 and of macOS.
+// writes: at most size bytes at buf, the path and its NUL; ERANGE when size is too small.
+// gives: buf, with the `mut` that the argument has, or null. keeps: no pointer.
+// calls: no fort function. frees: nothing; a null buf makes C allocate, and std passes none.
 extern fn getcwd(char mut* buf, u64 size) char mut*;
+// C: unlink, unlink(2) of POSIX.1-2017.
+// writes: nothing; C reads path to its NUL. gives: 0 or -1. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn unlink(char* path) i32;
 // rename(2) gives the file at old_path the name new_path. It replaces a file at new_path in
 // one atomic step, so a reader sees the old file or the new file. Both paths must be on one
 // file system.
+// C: rename, ISO C11 7.21.4.2, rename(2) of POSIX.1-2017.
+// writes: nothing; C reads old_path and new_path to their NULs. gives: 0 or -1.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn rename(char* old_path, char* new_path) i32;
+// C: rmdir, rmdir(2) of POSIX.1-2017.
+// writes: nothing; C reads path to its NUL. gives: 0 or -1. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn rmdir(char* path) i32;
+// C: symlink, symlink(2) of POSIX.1-2017.
+// writes: nothing; C reads target and link_path to their NULs. gives: 0 or -1.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn symlink(char* target, char* link_path) i32;
+// C: mkdir, mkdir(2) of POSIX.1-2017.
+// writes: nothing; C reads path to its NUL. gives: 0 or -1. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn mkdir(char* path, u32 mode) i32;
+// C: chmod, chmod(2) of POSIX.1-2017.
+// writes: nothing; C reads path to its NUL. gives: 0 or -1. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn chmod(char* path, u32 mode) i32;
+// C: dup, dup(2) of POSIX.1-2017.
+// gives: a descriptor or -1. writes: no fort storage. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn dup(i32 fd) i32;
+// C: dup2, dup2(2) of POSIX.1-2017.
+// gives: new_fd or -1. writes: no fort storage. keeps: no pointer. calls: no fort function.
+// frees: no storage; C closes the file that new_fd named.
 extern fn dup2(i32 old_fd, i32 new_fd) i32;
+// C: pipe, pipe(2) of POSIX.1-2017.
+// writes: two ints at fds, the read end and then the write end. gives: 0 or -1.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn pipe(i32 mut* fds) i32;
+// C: fork, fork(2) of POSIX.1-2017.
+// gives: the id of the child, 0 in the child, or -1. The child runs on in fort code with a copy
+// of the storage of the process. writes: no fort storage. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn fork() i32;
+// C: execvp, execvp(3) of POSIX.1-2017.
+// writes: nothing; C reads file to its NUL, and argv as an array of `char*` that a null pointer
+// ends, each item to its NUL. gives: -1 when it fails; a success ends the image of the process
+// and does not return. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn execvp(char* file, void* argv) i32;
+// C: waitpid, waitpid(2) of POSIX.1-2017.
+// writes: one int at status when status is not null. gives: the id of the child, 0, or -1.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn waitpid(i32 pid, i32 mut* status, i32 options) i32;
+// C: _exit, _exit(2) of POSIX.1-2017.
+// calls: no fort function: _exit calls no function that atexit(3) registered and flushes no
+// stream. gives: no return. writes: no fort storage. keeps: no pointer. frees: no fort
+// allocation before the process ends.
 extern fn _exit(i32 status) noreturn;
 // raise(3) sends the signal `sig` to the calling thread. It returns 0, or not 0 for a
 // signal number that the system does not have.
+// C: raise, ISO C11 7.14.2.1, raise(3).
+// calls: a handler of sig that an earlier call of C keeps, which no module of std sets.
+// gives: 0, or not 0. writes: no fort storage. keeps: no pointer. frees: nothing.
 extern fn raise(i32 sig) i32;
 // getpid(2): the id of this process, which names the temporary files of a library artifact.
+// C: getpid, getpid(2) of POSIX.1-2017.
+// gives: the id of the process. writes: no fort storage. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn getpid() i32;
 // <fcntl.h>: the flags of open(2) that the artifact writer adds, Darwin arm64 values: create a
 // new file only, refuse a symbolic link, and open a directory only.
@@ -181,9 +381,22 @@ i32 ELOOP = 62;
 // AT_REMOVEDIR (the Darwin arm64 value) an empty directory; fdopendir(3) reads the
 // entries of that directory.
 i32 AT_REMOVEDIR = 0x80;
+// C: unlinkat, unlinkat(2) of POSIX.1-2017.
+// writes: nothing; C reads path to its NUL. gives: 0 or -1. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn unlinkat(i32 dir_fd, char* path, i32 flags) i32;
+// C: fdopendir, fdopendir(3) of POSIX.1-2017.
+// gives: null, or a new directory stream on fd, storage of C that only closedir frees (`own`);
+// the stream takes fd, and closedir closes it. writes: no fort storage. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn fdopendir(i32 fd) void mut* own;
 // umask(2) sets the file mode creation mask of the process and gives the mask before it.
 // mkfifo(3) makes a FIFO at `path`. `mode_t` is u16 on Darwin arm64.
+// C: umask, umask(2) of POSIX.1-2017.
+// gives: the mask before the call; umask does not fail. writes: no fort storage.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn umask(u16 mask) u16;
+// C: mkfifo, mkfifo(3) of POSIX.1-2017.
+// writes: nothing; C reads path to its NUL. gives: 0 or -1. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn mkfifo(char* path, u16 mode) i32;
