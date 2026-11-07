@@ -518,27 +518,34 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   - `frees:` C frees no allocation that fort still owns, but the allocation that a parameter
     that says `own` gives it (D17.13).
 
-  Each call in a trusted module of an `extern fn`, of a boundary function or of a function
-  pointer that C gave keeps the contract of its callee, and a call row says why (D9.8): one row
-  for each call, or one row with a count for calls that hold for one reason. The row names a
+  Each call in a trusted module of an `extern fn`, of a boundary function or of a function pointer
+  that C gave keeps the contract of its callee, and a call row says why (D9.8): one row for each
+  call, or one row with a count for calls that hold for one reason, which names the callee as the
+  body spells it. Each call through another function value has a row too, because no rule tells the
+  two kinds apart: it says which kind the value is, or, for a value that the caller gives, it holds
+  for both kinds, gives the sources of C, and the call gives no boundary function. The row names a
   source for each pointer and each length that C reads or writes in the call, at any depth (an
-  argument, storage that C reads through an argument, a callback result, or a value that a
-  callback stores), and the NUL of each C string that C reads. A length that C uses with a
-  pointer fits the bound of the source of that pointer, in bytes, and a length that C uses with
-  more than one pointer fits the bound of each. The first source in this order that fits is the
-  source: a parameter source, a byte pointer, a length or a NUL from a parameter, from a place
-  that the function reaches through a parameter, from a function that a parameter gives, or from
-  a `mut` global; then the own bound of a value that no call of C gave, `.len` elements of a span
-  or a string, the rest of the object for the address of an element of a fixed array, a span or
-  a string, one object for another address or a typed pointer to a type other than `char`, `u8`
-  or `void`, kept through each cast; then storage that a call of C in the same function returned
-  or wrote, with the size and the NUL that its declaration row states; then the NUL of a string
-  literal (also through a global that is no `mut` global), of a buffer of `str.to_cstr` or of a
-  fixed array whose last element the function sets to the NUL (another `string` has none). A
-  parameter source stands only in a boundary function, whose callers are trusted. So a length
-  fits each buffer that C uses it with, and a C string ends in a NUL inside its storage, at each
-  call that the rows cover. The list is a checklist for review, and the ticket that writes the
-  rows of `std` corrects it where a true row cannot be written (section 12).
+  argument, storage that C reads through an argument, a callback result, or a value that a callback
+  stores), and the NUL of each C string that C reads. A length that C uses with a pointer fits the
+  bound of the source of that pointer, in bytes, and a length that C uses with more than one pointer
+  fits the bound of each. A source reads a value where the function, or a fort function of the same
+  module that it calls, makes it, and the storage that the value names lives until the call. The
+  first source in this order that fits is the source: a parameter source, a byte pointer, a length
+  or a NUL from a parameter, from a place that the function reaches through a parameter, from a
+  function that a parameter gives, or from a `mut` global, but a span or a string with its `.ptr`
+  and `.len`, and a typed pointer to another type, also through a cast; then the own bound of a
+  value that no call of C gave, `.len` elements of a span or a string, the rest of the object for
+  the address of an element of a fixed array, a span or a string, one object for another address or
+  a typed pointer to a type other than `char`, `u8` or `void`, kept through each cast; then storage
+  that a call of C in the same function returned or wrote, with the size and the NUL that its
+  declaration row states; then the NUL of a string literal (also through a global that is no `mut`
+  global), of a buffer of `str.to_cstr`, or one that the function or a fort function of its module
+  stores by a checked index into the array or span of the pointer, a null item of an array of
+  pointers included (another `string` has none). A parameter source stands only in a boundary
+  function, whose callers are trusted. So a length fits each buffer that C uses it with, and a C
+  string ends in a NUL inside its storage, at each call that the rows cover. The list is a checklist
+  for review. The rows of `std` and of `test/fort/support/heap.ft` corrected it on 2026-11-06, where
+  a true row could not be written (D9.8).
   The user ruled the points on the pointers that C gives with "(A) Close R1-R7" (2026-10-31), and
   the coordinator ratified the out-parameter and the alignment on 2026-11-01. No cast gives a
   function pointer another type, as an argument of an `extern fn` too (D3.14), so fort gives C no
@@ -1417,7 +1424,11 @@ the directory that the compiler loads a module from, and not its name, makes it 
 ruling of 2026-11-05 made each length fit each buffer that C uses it with, kept the bound of a value
 through a cast, put the parameter source first, and trusted the modules of `fort --lib std <root>`.
 The source list is a checklist for review, and the ticket that writes the rows of `std` corrects it
-where a true row cannot be written. Each declaration has a row with the five points of A7, and each
+where a true row cannot be written. The rows of `std` corrected it on 2026-11-06 (D9.8): a span, a
+string, their `.ptr` and `.len`, and a typed pointer from a parameter keep their own bound, also
+through a cast; a NUL that a fort function of the module stores by a checked index is a NUL; and a
+source reads a value where such a function makes it. Each declaration has a row with the five
+points of A7, and each
 call has a call row; `tools/fort_lint.py` reports a missing row. The compile rules that checked a
 part of A7 on a declaration go: the walk of D3.5 ("Refuse if any pointer"), which read the
 declaration of an extern for a `.ptr` argument, and the rule of D17.13 on the `mut` of a pointer

@@ -144,13 +144,14 @@ library follows:
   `void*`, or `void mut*` where C writes it (D3.11); reaching either takes a `cast`, so the
   caller decides what C may write into. An `extern` that hides a C write behind a buffer
   without `mut` lies about C, and no compile rule reaches it: its audit row is wrong (D9.8).
-- Each module that the compiler loads from the library is trusted (D9.8): it may declare and call
-  an `extern fn`, and each declaration and each call has an audit row (A7 of
-  `ownership-design.md` 5.1). A module that does not write `import extern;` calls no extern and
-  names no boundary function: a function of a trusted module with a parameter whose type reaches
-  a pointer to `char`, `u8` or `void`, also through a function pointer type, such as
-  `str.from_cstr`, `libc.snprintf_float`, `rt.print_enum`, `rt.args_init` and the entries of
-  `std.rt` that take a C string. It calls the functions of the library that take spans and
+- Each module that the compiler loads from its standard library directory, each module of `<root>`
+  in `fort --lib std <root>`, and each section of the interface file of a used library `std` is
+  trusted (D9.8): it may declare and call an `extern fn`, and each declaration and each call has
+  an audit row (A7 of `ownership-design.md` 5.1). A module that does not write `import extern;`
+  calls no extern and names no boundary function: a function of a trusted module with a parameter
+  whose type reaches a pointer to `char`, `u8` or `void`, also through a function pointer type,
+  such as `str.from_cstr`, `libc.snprintf_float`, `rt.print_enum`, `rt.args_init` and the entries
+  of `std.rt` that take a C string. It calls the functions of the library that take spans and
   strings, whose bounds the checker checks.
 
 ### 1.5 Naming

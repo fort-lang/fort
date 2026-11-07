@@ -277,7 +277,7 @@ fn sum(i32 a, i32 b) i32 {
 }
 
 /// Writes the bytes of b to the descriptor fd.
-// C call write: buf is the `.ptr` of the span b and n is `b.len`, so C reads `b.len` bytes of b.
+// C call libc.write: buf is the `.ptr` of the span b and n is `b.len`, so C reads b.len bytes.
 fn put(i32 fd, u8@ b) i64 {
     return libc.write(fd, b.ptr, b.len);
 }
