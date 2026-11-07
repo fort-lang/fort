@@ -1,0 +1,296 @@
+{
+  "comment": [
+    "The table of `del(s, d)` and the release-only bit (D17.9, spec/fir.md 9.4): the operands of",
+    "`del` and the two lists of `del` calls in src/fort/check.ft, the mark of an expression in",
+    "parentheses (src/fort/parser.ft), which a drop may not carry, the drain that",
+    "src/fort/fir_lower.ft writes, the events, the walk and the errors of",
+    "src/fort/fir/release.ft, the bit in a build (src/fort/gen_fir.ft), under --check and under",
+    "--fir, and the option --span-del-report (src/fort/driver.ft). Each row breaks one rule. The",
+    "first stage runs the module suites of the checker, the lowering and the bit, which hold the",
+    "count and the position of each error and the FIR of each drain. The second runs the driver",
+    "test, which holds the error in each build mode, under --check and under --fir, and the lines",
+    "of --span-del-report. The third runs the fail and the run tests of the form, whose goldens",
+    "hold the notes and whose runs hold the order of the drops. The table runs in the Linux VM with",
+    "the debug preset and the default runner. The md5 guard reads the product compiler. The build",
+    "waits 2 s and touches the sources in the guest first, as tools/mutations/use_fort.json does.",
+    "The first round of a run can read stale (notes/testing.md 7), so the first two rows are rows",
+    "that a full run caught. The row D17.9-store-global needs FIR text: the lowering stores into a",
+    "global through an address that it takes first, so only the case `globals` of",
+    "test/fort/fir/release_test.ft stores into a global place with no address before it, and the",
+    "same case holds D17.9-store-field, a store through a pointer and then a field in one place.",
+    "The rows D17.9-constant-temporary, D17.9-each-block, D17.9-constant-first,",
+    "D17.9-check-verdict, D17.9-build-verdict and D17.9-store-field come from the review of the",
+    "first version, which ran them on a darwin host."
+  ],
+  "sources": [
+    "src/fort/check.ft",
+    "src/fort/fir_lower.ft",
+    "src/fort/fir/release.ft",
+    "src/fort/gen_fir.ft",
+    "src/fort/driver.ft",
+    "src/fort/parser.ft"
+  ],
+  "binary": "build/Linux/debug/fort",
+  "build": "sleep 2 && touch src/fort/check.ft src/fort/fir_lower.ft src/fort/fir/release.ft src/fort/gen_fir.ft src/fort/driver.ft src/fort/parser.ft && cmake --build build/Linux/debug --target fort",
+  "stages": [
+    {
+      "name": "the module suites of the drain",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 4 check_drop_test fir/release_test fir_lower_own_test"
+    },
+    {
+      "name": "the driver test",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 driver_test"
+    },
+    {
+      "name": "the fail and run tests of the drain",
+      "command": "python3 test/lang/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 4 fail/ownership/091 fail/ownership/092 fail/ownership/093 fail/ownership/094 fail/ownership/095 fail/modules/034 fail/casts/048 run/ownership/075 run/ownership/076 run/ownership/077 run/modules/drop"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D17.9-report",
+      "file": "src/fort/fir/release.ft",
+      "old": "        if (!is_release_only(t, d->sym)) {",
+      "new": "        if (false) {",
+      "what": "no drop is an error, also one that is not release-only"
+    },
+    {
+      "decision": "D17.9-drain-list",
+      "file": "src/fort/check.ft",
+      "old": "    push_call(&ck->drains, n);",
+      "new": "    u64 none = ck->drains.len;",
+      "what": "no `del(s, d)` joins the list of drains, so no drop is decided"
+    },
+    {
+      "decision": "D17.9-arity",
+      "file": "src/fort/check.ft",
+      "old": "    if (count == 0 || count > 2) {",
+      "new": "    if (count == 0 || count > 3) {",
+      "what": "`del` takes three operands"
+    },
+    {
+      "decision": "D17.9-span-of-owners",
+      "file": "src/fort/check.ft",
+      "old": "        && types.type_layout_pending(t->elem) == null && types.type_owner_count(t->elem) > 0;",
+      "new": "        && types.type_layout_pending(t->elem) == null;",
+      "what": "each `own` span is a span of owners, a span of `i32` among them"
+    },
+    {
+      "decision": "D17.9-first-operand",
+      "file": "src/fort/check.ft",
+      "old": "    if (!spans) {\n        check_msg_begin(ck);",
+      "new": "    if (false) {\n        check_msg_begin(ck);",
+      "what": "the first operand of `del(s, d)` can be a span with no owner or a pointer"
+    },
+    {
+      "decision": "D17.9-named",
+      "file": "src/fort/check.ft",
+      "old": "        && !grouped && d->sym != null && d->sym->kind == ast.sym_kind.s_fn;",
+      "new": "        && !grouped && d->sym != null;",
+      "what": "the drop can be a function value in a local"
+    },
+    {
+      "decision": "D17.9-drop-type",
+      "file": "src/fort/check.ft",
+      "old": "    if (!types.type_equal(d->ty, want)) {",
+      "new": "    if (false) {",
+      "what": "the drop can have another type than `fn (E) void`"
+    },
+    {
+      "decision": "D17.9-emptiable",
+      "file": "src/fort/check.ft",
+      "old": "    if (e.lvalue && !check_emptiable(ck, arg, s->name)) {\n        return;\n    }",
+      "new": "    if (e.lvalue) {\n        check_emptiable(ck, arg, s->name);\n    }",
+      "what": "a `del(s, d)` that cannot empty its operand joins the list of drains"
+    },
+    {
+      "decision": "D17.9-span-del-list",
+      "file": "src/fort/check.ft",
+      "old": "    } else if (is_span_of_owners(e.ty)) {",
+      "new": "    } else if (false) {",
+      "what": "no one-operand `del` of a span of owners joins the list of --span-del-report"
+    },
+    {
+      "decision": "D17.9-lower",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    if (ast.ast_len(n) == 2) {\n        p = drained(lw, n, p, lvalue);\n    }",
+      "new": "    if (false) {\n        p = drained(lw, n, p, lvalue);\n    }",
+      "what": "`del(s, d)` frees the storage and drops no element"
+    },
+    {
+      "decision": "D17.9-move-out",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    if (lvalue) {\n        u32 held",
+      "new": "    if (false) {\n        u32 held",
+      "what": "the drain runs on the place of `s` and does not move the span out first"
+    },
+    {
+      "decision": "D17.9-each",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    fir.operand one = int_const(wide, false, 1);\n    assign(lw, counter, fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_add, index, one), at);",
+      "new": "    fir.operand one = int_const(wide, false, 2);\n    assign(lw, counter, fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_add, index, one), at);",
+      "what": "the drain drops every second element"
+    },
+    {
+      "decision": "D17.9-store",
+      "file": "src/fort/fir/release.ft",
+      "old": "    return memory && types.type_owner_count(fir.place_type(f, s->place)) > 0",
+      "new": "    return false && types.type_owner_count(fir.place_type(f, s->place)) > 0",
+      "what": "no store breaks the bit"
+    },
+    {
+      "decision": "D17.9-store-global",
+      "file": "src/fort/fir/release.ft",
+      "old": "    bool memory = s->place.base == fir.base_kind.bk_global || fir.place_indirect(f, s->place);",
+      "new": "    bool memory = fir.place_indirect(f, s->place);",
+      "what": "a store of an owner into a global keeps the bit"
+    },
+    {
+      "decision": "D17.9-store-owners",
+      "file": "src/fort/fir/release.ft",
+      "old": "    return memory && types.type_owner_count(fir.place_type(f, s->place)) > 0",
+      "new": "    return memory",
+      "what": "a store of a value with no owner through memory breaks the bit"
+    },
+    {
+      "decision": "D17.9-constant",
+      "file": "src/fort/fir/release.ft",
+      "old": "                if (fills[at] == FILL_NONE && constant) {",
+      "new": "                if (fills[at] == FILL_NONE) {",
+      "what": "a temporary that one statement fills with an allocation counts as a constant"
+    },
+    {
+      "decision": "D17.9-constant-operand",
+      "file": "src/fort/fir/release.ft",
+      "old": "    if (o.kind == fir.operand_kind.ok_const) {\n        return true;\n    }",
+      "new": "    if (o.kind == fir.operand_kind.ok_const) {\n        return false;\n    }",
+      "what": "a store of the zero value of an aggregate through memory breaks the bit"
+    },
+    {
+      "decision": "D17.9-extern",
+      "file": "src/fort/fir/release.ft",
+      "old": "        ev.kind = event_kind.ev_extern;",
+      "new": "        ev.kind = event_kind.ev_call;",
+      "what": "a call of an extern reads as a call of a function with no body, and its note changes"
+    },
+    {
+      "decision": "D17.9-value",
+      "file": "src/fort/fir/release.ft",
+      "old": "            if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call) {",
+      "new": "            if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call\n                && s->value.callee != fir.callee_kind.cl_value) {",
+      "what": "a call through a function value keeps the bit"
+    },
+    {
+      "decision": "D17.9-absent",
+      "file": "src/fort/fir/release.ft",
+      "old": "            if (ev.kind != event_kind.ev_call || ev.target == NONE) {",
+      "new": "            if (ev.kind != event_kind.ev_call) {",
+      "what": "a call of a function with no body in the build keeps the bit"
+    },
+    {
+      "decision": "D17.9-callers",
+      "file": "src/fort/fir/release.ft",
+      "old": "            if (!t->entries.items[caller].broken) {",
+      "new": "            if (false) {",
+      "what": "a caller of a function that is not release-only keeps the bit"
+    },
+    {
+      "decision": "D17.9-build",
+      "file": "src/fort/gen_fir.ft",
+      "old": "    if (check.drain_count(ck) > 0) {\n        fp.drops = drops;\n    }",
+      "new": "    if (false) {\n        fp.drops = drops;\n    }",
+      "what": "a build decides no drop"
+    },
+    {
+      "decision": "D17.9-check",
+      "file": "src/fort/driver.ft",
+      "old": "    bool draining = check.drain_count(&an->ck) > 0;",
+      "new": "    bool draining = false;",
+      "what": "--check decides no drop"
+    },
+    {
+      "decision": "D17.9-span-del-report",
+      "file": "src/fort/driver.ft",
+      "old": "    if (opts->span_del_report) {\n        write_span_dels(&an->ck);\n    }",
+      "new": "    if (false) {\n        write_span_dels(&an->ck);\n    }",
+      "what": "--span-del-report writes no line"
+    },
+    {
+      "decision": "D17.9-constant-temporary",
+      "file": "src/fort/fir/release.ft",
+      "old": "        if (fir.local_at(f, k)->kind != fir.local_kind.lk_temp) {",
+      "new": "        if (false) {",
+      "what": "a named local that one statement fills with a constant counts as a constant"
+    },
+    {
+      "decision": "D17.9-each-block",
+      "file": "src/fort/fir/release.ft",
+      "old": "    while (bk < fir.block_count(f)) {\n        u32 mut i = 0;\n        while (i < fir.block_statement_count(f, bk)) {\n            fir.statement* s = fir.block_statement(f, bk, i);\n            if (is_owner_store",
+      "new": "    while (bk < 1) {\n        u32 mut i = 0;\n        while (i < fir.block_statement_count(f, bk)) {\n            fir.statement* s = fir.block_statement(f, bk, i);\n            if (is_owner_store",
+      "what": "scan reads only the first block of each function"
+    },
+    {
+      "decision": "D17.9-constant-first",
+      "file": "src/fort/fir/release.ft",
+      "old": "                if (fills[at] == FILL_NONE && constant) {",
+      "new": "                if (constant) {",
+      "what": "the last fill of a temporary decides whether it is a constant"
+    },
+    {
+      "decision": "D17.9-check-verdict",
+      "file": "src/fort/driver.ft",
+      "old": "        if (release.report(drops, &an->ck, session.diags(s)) > 0) {\n            proved = false;\n        }",
+      "new": "        if (release.report(drops, &an->ck, session.diags(s)) > 0) {\n            proved = proved;\n        }",
+      "what": "--check reports a drop that is not release-only but keeps its verdict"
+    },
+    {
+      "decision": "D17.9-build-verdict",
+      "file": "src/fort/gen_fir.ft",
+      "old": "        if (release.report(fp.drops, ck, session.diags(g->sess)) > 0) {\n            g->failed = true;\n        }",
+      "new": "        if (release.report(fp.drops, ck, session.diags(g->sess)) > 0) {\n            g->failed = g->failed;\n        }",
+      "what": "a build reports a drop that is not release-only but writes its output"
+    },
+    {
+      "decision": "D17.9-store-field",
+      "file": "src/fort/fir/release.ft",
+      "old": "    bool memory = s->place.base == fir.base_kind.bk_global || fir.place_indirect(f, s->place);",
+      "new": "    bool memory = s->place.base == fir.base_kind.bk_global || fir.place_indirect(f, s->place)\n        && s->place.proj_len == 1;",
+      "what": "a store through a pointer and then a field does not count"
+    },
+    {
+      "decision": "D17.9-constant-aggregate",
+      "file": "src/fort/fir/release.ft",
+      "old": "    if (s->value.kind != fir.rvalue_kind.rv_use) {\n        return false;\n    }",
+      "new": "    if (s->value.kind != fir.rvalue_kind.rv_use) {\n        return s->value.kind == fir.rvalue_kind.rv_aggregate;\n    }",
+      "what": "a literal with members counts as a constant"
+    },
+    {
+      "decision": "D17.9-fir",
+      "file": "src/fort/driver.ft",
+      "old": "    bool scanning = check.drain_count(&an->ck) > 0;",
+      "new": "    bool scanning = false;",
+      "what": "--fir and --fir-after decide no drop"
+    },
+    {
+      "decision": "D17.9-fir-verdict",
+      "file": "src/fort/driver.ft",
+      "old": "        proved = proved && broken == 0;",
+      "new": "        proved = proved || broken == 0;",
+      "what": "--fir reports a drop that is not release-only but writes the FIR"
+    },
+    {
+      "decision": "D17.9-grouped",
+      "file": "src/fort/check.ft",
+      "old": "        && !grouped && d->sym != null && d->sym->kind == ast.sym_kind.s_fn;",
+      "new": "        && d->sym != null && d->sym->kind == ast.sym_kind.s_fn;",
+      "what": "a drop in parentheses passes"
+    },
+    {
+      "decision": "D17.9-grouped-flag",
+      "file": "src/fort/parser.ft",
+      "old": "            grouped->flags |= ast.FLAG_GROUPED;",
+      "new": "            grouped->flags |= 0;",
+      "what": "the parser marks no expression in parentheses, so a drop in parentheses passes"
+    }
+  ]
+}
