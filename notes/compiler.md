@@ -837,8 +837,9 @@ came here.
   work: statements and terminators times the checks and the stores that no check stands right before
   and that write no whole scratch local, plus blocks times locals, plus the steps of the stale
   chains. Past `owner.prover.WORK_LIMIT` (2^20) the function gets no proof; the compiler, the server
-  and `std` measure 11872 or less, and the language tests 23608 or less (`proof.work`, a probe build
-  over the corpora, 2026-10-24). The memory marks take one scan and one walk: a held address that is
+  and `std` measure 25734 or less, and the language tests 25216 or less (`proof.work`, a probe build
+  that writes the work of each function from `report.write_leaks` under `--check`, over the
+  corpora, 2026-11-06). The memory marks take one scan and one walk: a held address that is
   memory ends once. Two paths are separate only while neither leaves its object, by a deref or a
   span index after its first step: `p->next->g` can be `p->g`. A held address `(*_a)` reads as the
   place of its `addr mut` when one check and one store read `_a` and nothing else does, `_a` is no

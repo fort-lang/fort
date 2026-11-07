@@ -3342,7 +3342,7 @@ says ownership is "by convention", this section supersedes it.
   one. The first of those errors has a second note at the same position: `the function exceeds the
   work limit of D17.11; split it`. A function with no overwrite check and no store that needs a
   proof has no work. The functions of the compiler, its language server and the standard library
-  measure 11872 or less, and a function of the language tests 23608 or less. The one exception is
+  measure 25734 or less, and a function of the language tests 25216 or less. The one exception is
   `big` of `fail/ownership/060`, which passes the limit on purpose.
   `del` and `move` leave zero behind. So for locals `v`, `a` and `b`, `del(v.data); v.data =
   new(...)` passes, `a = move(b)` after `move(a)` passes, and a store into a local that holds `{}`
@@ -3442,6 +3442,11 @@ says ownership is "by convention", this section supersedes it.
   a local into the bytes of an owner slot is outside the guarantee. The user ruled "(A) Close
   R1-R7" (user, 2026-10-31), and D3.14 refuses each such cast, an argument of an `extern fn`
   included, so no form stays outside.
+  Amended 2026-11-06: the measured maxima of the work are 25734 (`driver.library_entry`) for the
+  compiler, its language server and the standard library, and 25216 (`main` of `run/ffi/011`) for
+  the language tests. Before, the entry gave the maxima of 2026-10-24, 11872 and 23608. Later
+  changes of the compiler and of the language tests made the functions longer; the limit and each
+  verdict stay.
 
 ### D17.12 Owned strings
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
