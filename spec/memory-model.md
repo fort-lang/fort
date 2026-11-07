@@ -492,9 +492,13 @@ exactly two things for ownership, and it checks two more at compile time:
   `cast` of the zero value frees nothing, so it needs no proof of the owners of `*p`, as after
   `move(p)`, after `del(p)` and in the arm where a test finds `p` null (D17.20). `del` fixes a leak
   at an exit, and it does nothing on an empty owner (D17.9). For a `del(p)` whose `*p` can hold
-  live owners, the fix moves each inner owner into a local first. A `del` or a `cast` of a span
-  whose elements hold owners needs no proof for those owners, but a span local of `own` type still
-  needs the zero value at an exit. An
+  live owners, the fix moves each inner owner into a local first. A span whose elements hold
+  owners ends through `del(s, d)` (D17.9): the compiler moves each element into the drop `d`, a
+  release-only fort function, and then frees the storage, so the leak rule needs no proof for the
+  owners of the elements. A `del(s)` of such a span with one operand needs no proof either, and it
+  leaks what the elements hold; `--span-del-report` lists it until it is an error. A `cast` of
+  such a span to another element type is an error. A span local of `own` type still needs the
+  zero value at an exit. An
   exit that the compiler cannot prove is a compile error. The compiler first reports each `del` and
   each `cast` that it cannot prove and accepts the program; a later change makes each such site a
   compile error (D17.20).

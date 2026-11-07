@@ -593,6 +593,16 @@ so `G` is read before `bump` runs.
 - **`del(e)`**: `del(move p)` for a place (`ANN_LVALUE`); for an rvalue, `_t = e` then
   `del(move _t)`. When the lowering of `e` already put the owning value in a temporary, that
   temporary is `_t`. The `del` stands at the name `del`, as section 13 shows.
+- **`del(s, d)`** (D17.9): the place `p` of `s` with its index checks first, then `_t = move p`;
+  for an rvalue, the temporary `_t` of `del(e)`. Then the counter `_i: u64 = const u64 0`, `goto
+  head`; in head `_c = lt(copy _i, copy _t.1)` and `switch(copy _c) -> [true: body, otherwise:
+  done]`; in body `_r = call fn d(move _t[_i])`, `_i = add(copy _i, const u64 1)` and `goto
+  head`; in done `del(move _t)`. The counter never passes the length, so neither the index nor the
+  `add` needs a check. The call stands at `d`, and each other statement and terminator at the name
+  `del`. The FIR has no form of its own for the drain, so the verifier, the emptiness pass, the
+  interpreter and the translator take it as they take a loop. After the lowering of the last
+  function, the release-only bit of D17.9 reads the FIR of each function of the unit
+  (`src/fort/fir/release.ft`) and decides each drop.
 - **The print family**: `fd` into an operand once, then one `call fn std.rt.print_*` for each
   argument, left to right, with the conversions of item 19: an enum as `cast<i32>(a)` and
   `_t = aggregate enum_member@(const enum_table m.E, const u64 n)` of its `n` members; a
@@ -1252,7 +1262,8 @@ changes the function, and the verifier runs after it. The passes run in this ord
      run that reaches it, and a `del` of the zero value frees nothing, so no `leak` event comes
      from it; a `cast` of the zero value gives the zero value, whose later `del` frees nothing too.
      A `del` of a span or of a `string`, and of a pointer to an object with no inner owner, is no
-     site. So a span whose elements hold owners waits for refinement R8 (D17.20). A site in an
+     site. A span whose elements hold owners ends through `del(s, d)`, whose drain the lowering
+     writes (9.4), so the pass adds no fact for it (D17.9, D17.20). A site in an
      abort block keeps its obligation, because D17.20 gives part 2 no exception. A deferred `del`
      expands at each exit with one location, and the pass proves each expansion. After a `cast`,
      no obligation tests the object through a pointer to a type with no inner owner, so a store
