@@ -760,6 +760,15 @@ set_tests_properties(fort_lint_std PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# Hold the rules of tools/fort_lint.py on the audit rows of D9.8, and its boundary functions against
+# the ones that the compiler refuses.
+add_test(NAME fort_lint_rows
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/fort_lint_rows_test.py"
+            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}")
+set_tests_properties(fort_lint_rows PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # Hold the library options `--use` and `--cache-dir` of test/lang/run_tests.py (D9.11).
 add_test(NAME lang_harness_selftest
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/lang_harness_test.py"
@@ -894,7 +903,7 @@ file(GLOB_RECURSE FORT_FORT_C_SOURCES CONFIGURE_DEPENDS
     "${FORT_TEST_DIR}/*.c" "${FORT_TEST_DIR}/*.h")
 fort_format_targets("" ${FORT_FORT_C_SOURCES})
 
-# lint: the D1.4 names and the line width of every fort source. fort_lint.py
+# lint: the D1.4 names, the line width and the D9.8 rows of every fort source. fort_lint.py
 # reads `fort --index`, so it needs the compiler, and it names --std-dir because
 # the library does not stand beside that binary. The C helpers of the corpus build
 # with -Werror (lang_ffi_helpers) and have no lint of their own; the harness lints

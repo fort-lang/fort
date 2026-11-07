@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-"""Check names and line widths in project fort sources.
+"""Check names, line widths and the audit rows of D9.8 in project fort sources.
 
 The tool reads `fort --index` output instead of parsing fort again. It checks each imported
 file once and reports problems as `<file>:<line>:<col>: <message>`.
+
+The rows of D9.8: each `extern fn` of a trusted module has a declaration row, the call rows of
+each function of a trusted module count each call of an `extern fn`, of a boundary function and
+through a function value, and a name of a boundary function goes only to C (row_problems). A
+boundary function is found by the types of its parameters in the source, with the structs that
+the index records resolve, so the answer is the checker's own for each struct and each name
+(Rows.reaches).
 
 Use `fort_lint.py --fort build/<Host>/<preset>/fort [--target linux|darwin] [-I dir ...]
 [file.ft ...]`.
@@ -45,6 +52,8 @@ SOURCE_SETS = (
     ("src/lsp/**/*.ft", ("src",)),
     ("test/fort/**/*.ft", ("src", "test/fort/support")),
     ("test/lsp/**/*.ft", ("src", "test/fort/support")),
+    ("test/library/**/*.ft", ("src", "test/library/chain")),
+    ("test/tty/**/*.ft", ()),
 )
 SOURCE_GLOBS = tuple(glob for glob, _ in SOURCE_SETS)
 TARGETS = ("linux", "darwin")
@@ -493,6 +502,791 @@ def text_problems(relative, text, root=None):
     return problems
 
 
+# ---- the audit rows of D9.8 ------------------------------------------------------------------
+
+# The five points of A7 (spec/ownership-design.md 5.1) that a declaration row gives, each once.
+ROW_WORDS = ("gives:", "writes:", "keeps:", "calls:", "frees:")
+# The first line of a declaration row: `// C: <the symbol>, <the source of its contract>.`
+DECLARATION_ROW = re.compile(r"\A// C: ([A-Za-z_][A-Za-z0-9_]*), \S")
+# A line that starts a declaration row, whatever it names.
+DECLARATION_ROW_START = re.compile(r"\A// C:")
+# The first line of a call row: `// C call <the callee>: ...`, or `// C call <the callee> x<N>:`
+# for N calls of one callee that hold for one reason. The callee is the call as the body spells
+# it, its module path included and its white space left out: `libc.write`, `str.from_cstr`,
+# `fail_begin`, or the place of a function value, `cmp`, `table[i+1]`, `pick()` or
+# `z->introspect->enumerator`.
+CALL_ROW = re.compile(r"\A// C call (\S+?)(?: x(\d+))?:(?:\s|\Z)")
+# A line that starts a call row, whatever it holds after the words.
+CALL_ROW_START = re.compile(r"\A// C call\b")
+# The first item `import extern;` that makes a module trusted (D9.3, D9.8).
+TRUST_FORM = re.compile(r"\A\s*import\s+extern\s*;")
+# The kinds of an index record whose value can be a function pointer that a call calls.
+VALUE_KINDS = ("local", "parameter", "global", "field", "constant")
+# The base types whose pointer is a byte pointer (D9.8): a pointer to one of them, any marks.
+BYTE_BASES = ("char", "u8", "void")
+IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# The keywords that can stand before a group that a body calls, and are no part of the callee:
+# `return (k)(x)` and `defer (k)(x)` call `(k)`. No other keyword stands before such a group.
+STATEMENT_KEYWORDS = ("return", "defer")
+ROWS = "D9.8"
+
+
+class Source:
+    """The text of one fort file, with the bytes of each comment and literal blanked.
+
+    The file reads as Latin-1, so one character is one byte and an index record's byte column
+    (D20.3) is a column of the text. `code` has the length of `text`: each byte of a comment, a
+    string literal or a char literal is a space, and each newline stays, so a scan of `code`
+    meets only the tokens of fort code and each offset keeps its line.
+    """
+
+    def __init__(self, text):
+        self.text = text
+        self.lines = text.split("\n")
+        self.starts = [0]
+        for line in self.lines[:-1]:
+            self.starts.append(self.starts[-1] + len(line) + 1)
+        self.code = blank_comments_and_literals(text)
+
+    def offset(self, line, col):
+        """The offset of a 1-based line and byte column."""
+        return self.starts[line - 1] + col - 1
+
+    def line_of(self, offset):
+        """The 1-based line that holds `offset`."""
+        low, high = 0, len(self.starts) - 1
+        while low < high:
+            middle = (low + high + 1) // 2
+            if self.starts[middle] <= offset:
+                low = middle
+            else:
+                high = middle - 1
+        return low + 1
+
+    def is_trusted_form(self):
+        """Whether the first item is `import extern;`."""
+        return TRUST_FORM.match(self.code) is not None
+
+
+def blank_comments_and_literals(text):
+    """`text` with the bytes of each `//` comment and each string or char literal as spaces."""
+    out = list(text)
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "/" and text.startswith("//", i):
+            while i < n and text[i] != "\n":
+                out[i] = " "
+                i += 1
+            continue
+        if c in "\"'":
+            j = i + 1
+            while j < n and text[j] != c and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            end = min(j + 1, n)
+            for k in range(i, end):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = end
+            continue
+        i += 1
+    return "".join(out)
+
+
+def matching_close(code, open_at):
+    """The offset of the bracket that closes the one at `open_at`, or -1."""
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    stack = []
+    for i in range(open_at, len(code)):
+        c = code[i]
+        if c in pairs:
+            stack.append(pairs[c])
+        elif c in ")]}":
+            if not stack or stack.pop() != c:
+                return -1
+            if not stack:
+                return i
+    return -1
+
+
+def keyword_before(code, offset, word):
+    """The offset of the last `word` token that starts before `offset`, or -1."""
+    for found in reversed(list(re.finditer(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % word,
+                                           code[:offset]))):
+        return found.start()
+    return -1
+
+
+def comment_run(source, line):
+    """The `//` lines directly above the 1-based `line`, top first, as (line, text) pairs.
+
+    The run stops at a blank line, at a line of code, at `///` text and at a harness directive
+    (`//!`, `//|`), so a row stands below the `///` text of its item (notes/style.md 1.2).
+    """
+    run = []
+    number = line - 1
+    while number >= 1:
+        stripped = source.lines[number - 1].strip()
+        if not stripped.startswith("//") or stripped[:3] in ("///", "//!", "//|"):
+            break
+        run.append((number, stripped))
+        number -= 1
+    run.reverse()
+    return run
+
+
+def type_tokens(code, start, end):
+    """The tokens of the type text `code[start:end]`, as (text, offset) pairs."""
+    tokens = []
+    i = start
+    while i < end:
+        c = code[i]
+        if c.isspace():
+            i += 1
+            continue
+        word = IDENTIFIER.match(code, i)
+        if word is not None and word.end() <= end:
+            tokens.append((word.group(0), i))
+            i = word.end()
+            continue
+        if c == "[":
+            close = matching_close(code, i)
+            if close < 0 or close >= end:
+                close = end - 1
+            tokens.append(("[]", i))
+            i = close + 1
+            continue
+        tokens.append((c, i))
+        i += 1
+    return tokens
+
+
+class TypeParser:
+    """Reads one type of grammar.md 2 from its tokens into nested dicts.
+
+    A type is {"base": base, "suffixes": ["*" | "@" | "[]", ...]}. A base is {"group": type},
+    {"fn": [type, ...], "result": type}, or {"name": text, "at": offset of its last identifier}.
+    The marks `own` and `mut` read as nothing, because reach reads no mark (D9.8).
+    """
+
+    def __init__(self, tokens):
+        self.tokens = tokens
+        self.at = 0
+
+    def peek(self):
+        return self.tokens[self.at][0] if self.at < len(self.tokens) else None
+
+    def take(self):
+        token = self.tokens[self.at]
+        self.at += 1
+        return token
+
+    def marks(self):
+        while self.peek() in ("own", "mut"):
+            self.take()
+
+    def parse_type(self):
+        base = self.parse_base()
+        self.marks()
+        suffixes = []
+        while self.peek() in ("*", "@", "[]"):
+            suffixes.append(self.take()[0])
+            self.marks()
+        return {"base": base, "suffixes": suffixes}
+
+    def parse_base(self):
+        token = self.peek()
+        if token is None:
+            return {"name": "", "at": -1}
+        if token == "(":
+            self.take()
+            inner = self.parse_type()
+            if self.peek() == ")":
+                self.take()
+            return {"group": inner}
+        if token == "fn" and self.at + 1 < len(self.tokens) and self.tokens[self.at + 1][0] == "(":
+            self.take()
+            self.take()
+            params = []
+            while self.peek() not in (")", None):
+                params.append(self.parse_type())
+                if self.peek() == ",":
+                    self.take()
+            if self.peek() == ")":
+                self.take()
+            return {"fn": params, "result": self.parse_type()}
+        text, at = self.take()
+        if not IDENTIFIER.fullmatch(text):
+            return {"name": "", "at": -1}
+        while self.peek() == "." and self.at + 1 < len(self.tokens):
+            self.take()
+            text, at = self.take()
+        return {"name": text, "at": at}
+
+
+def type_start(code, name_at, stops):
+    """The offset after the delimiter that starts the type in front of the name at `name_at`.
+
+    A parameter type starts after `(` or `,` of its list, a field type after `{` or `;` of its
+    struct. The scan goes back over brackets of the type itself, such as the list of a function
+    pointer type.
+    """
+    depth = 0
+    i = name_at - 1
+    while i >= 0:
+        c = code[i]
+        if c in ")]":
+            depth += 1
+        elif c in "([":
+            if depth == 0:
+                return i + 1
+            depth -= 1
+        elif c in stops and depth == 0:
+            return i + 1
+        i -= 1
+    return 0
+
+
+class Rows:
+    """The facts of the audit rows of one `fort --index` document: which module is trusted,
+    which function is a boundary function (D9.8), and the text of each file.
+
+    `buckets` holds the records of the document by the real path of their file. The memos of
+    texts, trust and reach are kept across documents in `memo`, because one file gives the same
+    records in each closure of one target.
+    """
+
+    def __init__(self, root, buckets, cache, std_roots, memo):
+        self.root = root
+        self.buckets = buckets
+        self.cache = cache
+        self.std_roots = std_roots
+        self.memo = memo
+        self.at_position = {}
+
+    def source(self, path):
+        sources = self.memo.setdefault("sources", {})
+        if path not in sources:
+            try:
+                with open(path, encoding="latin-1") as handle:
+                    sources[path] = Source(handle.read())
+            except OSError:
+                sources[path] = None
+        return sources[path]
+
+    def trusted(self, path):
+        """Whether the module of the file `path` is trusted (D9.8): a file of a standard library
+        root, or a file whose first item is `import extern;`."""
+        trust = self.memo.setdefault("trust", {})
+        if path not in trust:
+            inside = any(path.startswith(root + os.sep) for root in self.std_roots)
+            source = self.source(path)
+            trust[path] = inside or (source is not None and source.is_trusted_form())
+        return trust[path]
+
+    def records_at(self, path, line, col):
+        """The records of the file `path` whose name starts at line and col."""
+        table = self.at_position.get(path)
+        if table is None:
+            table = {}
+            for record in self.buckets.get(path, []):
+                table.setdefault((record["line"], record["col"]), []).append(record)
+            self.at_position[path] = table
+        return table.get((line, col), [])
+
+    def declared(self, path, kind):
+        """The offsets of the declaring records of `kind` in the file `path`, in order, with the
+        records."""
+        table = self.memo.setdefault("declared", {})
+        key = (path, kind)
+        if key not in table:
+            source = self.source(path)
+            table[key] = [(source.offset(r["line"], r["col"]), r)
+                          for r in self.buckets.get(path, [])
+                          if r["kind"] == kind and r.get("is_decl")]
+        return table[key]
+
+    def decl_key(self, record):
+        """The real path, line and column of the declaration of a record, or None."""
+        decl = record.get("decl")
+        if not decl or not decl.get("file"):
+            return None
+        return (real_path(self.root, decl["file"], self.cache), decl["line"], decl["col"])
+
+    def type_at(self, path, name_at, stops):
+        """The parsed type in front of the declared name at offset `name_at` of `path`."""
+        source = self.source(path)
+        start = type_start(source.code, name_at, stops)
+        return TypeParser(type_tokens(source.code, start, name_at)).parse_type()
+
+    def struct_names(self, path, ty):
+        """The declaration keys of the structs that the parsed type `ty` names, at any depth."""
+        source = self.source(path)
+        keys = []
+        todo = [ty]
+        while todo:
+            item = todo.pop()
+            base = item["base"]
+            if "group" in base:
+                todo.append(base["group"])
+            elif "fn" in base:
+                todo.extend(base["fn"])
+                todo.append(base["result"])
+            elif base["at"] >= 0:
+                line = source.line_of(base["at"])
+                col = base["at"] - source.starts[line - 1] + 1
+                for record in self.records_at(path, line, col):
+                    if record["kind"] == "struct":
+                        key = self.decl_key(record)
+                        if key is not None:
+                            keys.append(key)
+        return keys
+
+    def struct_facts(self, key):
+        """(whether a field type is a byte pointer, the keys of the structs that the fields
+        name) of the struct declared at `key`."""
+        facts = self.memo.setdefault("structs", {})
+        if key in facts:
+            return facts[key]
+        path, line, col = key
+        source = self.source(path)
+        direct, names = False, []
+        if source is not None:
+            name_at = source.offset(line, col)
+            open_at = source.code.find("{", name_at)
+            close = matching_close(source.code, open_at) if open_at >= 0 else -1
+            for at, _ in self.declared(path, "field"):
+                if not open_at < at < close:
+                    continue
+                ty = self.type_at(path, at, "{;")
+                direct = direct or type_is_byte_pointer(ty)
+                names.extend(self.struct_names(path, ty))
+        facts[key] = (direct, names)
+        return facts[key]
+
+    def reaches(self, path, ty):
+        """Whether the parsed type `ty` of the file `path` reaches a pointer to `char`, `u8` or
+        `void` (D9.8): itself, or through a pointee, an element, a field, or a parameter or the
+        result of a function pointer type, at any depth."""
+        if type_is_byte_pointer(ty):
+            return True
+        seen = set()
+        todo = list(self.struct_names(path, ty))
+        while todo:
+            key = todo.pop()
+            if key in seen:
+                continue
+            seen.add(key)
+            direct, names = self.struct_facts(key)
+            if direct:
+                return True
+            todo.extend(names)
+        return False
+
+    def is_boundary(self, key):
+        """Whether the fort function declared at `key` is a boundary function (D9.8): a function
+        of a trusted module with a parameter whose type reaches a byte pointer."""
+        answers = self.memo.setdefault("boundary", {})
+        if key in answers:
+            return answers[key]
+        path, line, col = key
+        answer = False
+        source = self.source(path)
+        if source is not None and self.trusted(path) and any(
+                r["kind"] == "fn" and r.get("is_decl") for r in self.records_at(path, line, col)):
+            name_at = source.offset(line, col)
+            body = source.code.find("{", name_at)
+            for at, _ in self.declared(path, "parameter"):
+                if name_at < at < body and self.reaches(path, self.type_at(path, at, "(,")):
+                    answer = True
+                    break
+        answers[key] = answer
+        return answer
+
+
+def type_is_byte_pointer(ty):
+    """Whether the parsed type is itself a pointer to `char`, `u8` or `void`, or holds one as a
+    pointee, an element, or a parameter or the result of a function pointer type, with no
+    struct between (D9.8). A base `char`, `u8` or `void` whose first suffix is `*` is one:
+    `char*`, `u8 mut*`, `void* own`, `char*@` and `u8**`. `u8@`, `char[4]` and `char[4]*` are
+    none, because the pointer, if any, points at a span or an array."""
+    todo = [ty]
+    while todo:
+        item = todo.pop()
+        base = item["base"]
+        first = item["suffixes"][0] if item["suffixes"] else None
+        plain = base
+        while "group" in plain and not plain["group"]["suffixes"]:
+            plain = plain["group"]["base"]
+        if first == "*" and plain.get("name") in BYTE_BASES:
+            return True
+        if "group" in base:
+            todo.append(base["group"])
+        elif "fn" in base:
+            todo.extend(base["fn"])
+            todo.append(base["result"])
+    return False
+
+
+def spelled_callee(code, start):
+    """The qualified name that ends with the name token at `start`, with no white space:
+    `libc.write` for `write`, also when the source writes `libc . write`."""
+    begin = start
+    while True:
+        dot, dot_at = prev_char(code, begin)
+        if dot != ".":
+            break
+        word = re.search(r"[A-Za-z_][A-Za-z0-9_]*\s*\Z", code[:dot_at])
+        if word is None:
+            break
+        begin = word.start()
+    name = IDENTIFIER.match(code, start).group(0)
+    return begin, re.sub(r"\s+", "", code[begin:start]) + name
+
+
+def callee_text(code, open_at):
+    """The callee of the call whose `(` stands at `open_at`, with no white space: a name with
+    its module path or its members (`h.on`, `z->introspect->enumerator`), an element
+    (`table[0]`), or a call (`pick()`)."""
+    j = open_at - 1
+    while j >= 0 and code[j].isspace():
+        j -= 1
+    end = j + 1
+    while j >= 0:
+        c = code[j]
+        if c in ")]":
+            j = matching_open(code, j) - 1
+        elif c.isalnum() or c == "_":
+            while j >= 0 and (code[j].isalnum() or code[j] == "_"):
+                j -= 1
+        else:
+            break
+        k = j
+        while k >= 0 and code[k].isspace():
+            k -= 1
+        if k >= 0 and code[k] == "." and not (k >= 1 and code[k - 1] == "."):
+            j = k - 1
+        elif k >= 1 and code[k - 1:k + 1] == "->":
+            j = k - 2
+        elif c in ")]" and k >= 0 and code[k] in ")]":
+            j = k
+        elif c in ")]" and k >= 0 and (code[k].isalnum() or code[k] == "_"):
+            word = re.search(r"[A-Za-z_][A-Za-z0-9_]*\Z", code[:k + 1])
+            if word is not None and word.group(0) in STATEMENT_KEYWORDS:
+                break
+            j = k
+        else:
+            break
+        while j >= 0 and code[j].isspace():
+            j -= 1
+    return re.sub(r"\s+", "", code[j + 1:end])
+
+
+def matching_open(code, close_at):
+    """The offset of the bracket that opens the one that closes at `close_at`, or 0."""
+    pairs = {")": "(", "]": "[", "}": "{"}
+    stack = []
+    for i in range(close_at, -1, -1):
+        c = code[i]
+        if c in pairs:
+            stack.append(pairs[c])
+        elif c in "([{":
+            if not stack or stack.pop() != c:
+                return 0
+            if not stack:
+                return i
+    return 0
+
+
+def value_calls(rows, path, source, body_open, body_close):
+    """The callees of the calls through a function value in `code[body_open:body_close]`: a
+    call whose callee is a local, a parameter, a global, a field or a constant of a function
+    type, an element (`table[0](...)`), or the result of a call or a group (`pick()(...)`). The
+    lint does not tell a function pointer that C gave from one of fort code (D9.8), so each such
+    call needs a call row."""
+    code = source.code
+    found = []
+    for at in range(body_open + 1, body_close):
+        if code[at] != "(":
+            continue
+        before, before_at = prev_char(code, at)
+        if before in ")]":
+            if before == ")":
+                opened = matching_open(code, before_at)
+                word = re.search(r"[A-Za-z_][A-Za-z0-9_]*\s*\Z", code[:opened])
+                if word is not None and word.group(0).strip() == "fn":
+                    # `fn () (void)`: the list of a function type and a grouped result
+                    continue
+            found.append(callee_text(code, at))
+            continue
+        word = re.search(r"[A-Za-z_][A-Za-z0-9_]*\Z", code[:before_at + 1])
+        if word is None:
+            continue
+        line = source.line_of(word.start())
+        col = word.start() - source.starts[line - 1] + 1
+        for record in rows.records_at(path, line, col):
+            if record["kind"] in VALUE_KINDS and is_function_type(record.get("type")):
+                found.append(callee_text(code, at))
+                break
+    return found
+
+
+def is_function_type(text):
+    """Whether a type that a record spells is a function type, grouped or not."""
+    return (text or "").lstrip("(").startswith("fn ")
+
+
+def next_char(code, offset):
+    """The first character at or after `offset` that is no white space, and its offset."""
+    i = offset
+    while i < len(code) and code[i].isspace():
+        i += 1
+    return (code[i], i) if i < len(code) else ("", i)
+
+
+def prev_char(code, offset):
+    """The last character before `offset` that is no white space, and its offset."""
+    i = offset - 1
+    while i >= 0 and code[i].isspace():
+        i -= 1
+    return (code[i], i) if i >= 0 else ("", -1)
+
+
+def call_open(code, before):
+    """The offset of the `(` of the call whose argument list holds `before`, an offset just
+    after a `(` or a `,`, or -1 when no bracket opens it."""
+    depth = 0
+    i = before - 1
+    while i >= 0:
+        c = code[i]
+        if c in ")]}":
+            depth += 1
+        elif c in "([{":
+            if depth == 0:
+                return i if c == "(" else -1
+            depth -= 1
+        elif c == ";" and depth == 0:
+            return -1
+        i -= 1
+    return -1
+
+
+def goes_to_c(rows, path, source, start, end):
+    """Whether the name at `start`..`end` of `source` stands as the callee of a call, or as a
+    whole argument of a call whose callee is an `extern fn` or a function pointer (D9.8)."""
+    code = source.code
+    after, after_at = next_char(code, end)
+    if after == "(":
+        return True
+    begin, _ = spelled_callee(code, start)
+    before, before_at = prev_char(code, begin)
+    if before not in "(," or after not in ",)" or not before:
+        return False
+    open_at = before_at if before == "(" else call_open(code, before_at)
+    if open_at < 0:
+        return False
+    callee, callee_at = prev_char(code, open_at)
+    if callee in ")]":
+        return True
+    word = re.search(r"[A-Za-z_][A-Za-z0-9_]*\Z", code[:callee_at + 1])
+    if word is None:
+        return False
+    line = source.line_of(word.start())
+    col = word.start() - source.starts[line - 1] + 1
+    for record in rows.records_at(path, line, col):
+        kind = record["kind"]
+        if kind == "extern fn":
+            return True
+        if kind in VALUE_KINDS and is_function_type(record.get("type")):
+            return True
+    return False
+
+
+def in_import(source, offset):
+    """Whether `offset` lies in an import declaration: its statement starts with `import`."""
+    start = max(source.code.rfind(c, 0, offset) for c in ";{}") + 1
+    return re.match(r"\s*import\s", source.code[start:offset]) is not None
+
+
+def declaration_row_problems(source, record):
+    """The problems of the declaration row of one `extern fn` of a trusted module (D9.8)."""
+    name = record["name"]
+    at = source.offset(record["line"], record["col"])
+    start = keyword_before(source.code, at, "extern")
+    line = source.line_of(start if start >= 0 else at)
+    run = comment_run(source, line)
+    firsts = [i for i, (_, text) in enumerate(run) if DECLARATION_ROW_START.match(text)]
+    where = (record["line"], record["col"])
+    if not firsts:
+        return [where + ("extern '%s' has no declaration row: write '// C: %s, <the source of "
+                         "its contract>.' and the five points of A7 above it (%s)"
+                         % (name, name, ROWS),)]
+    if len(firsts) > 1:
+        return [(run[firsts[1]][0], 1, "extern '%s' has %d declaration rows; give it one (%s)"
+                 % (name, len(firsts), ROWS))]
+    row = run[firsts[0]:]
+    problems = []
+    first = DECLARATION_ROW.match(row[0][1])
+    if first is None or first.group(1) != name:
+        problems.append((row[0][0], 1, "the declaration row of extern '%s' names %s and not '%s' "
+                         "(%s)" % (name, "'%s'" % first.group(1) if first else "no symbol", name,
+                                   ROWS)))
+    text = " ".join(item[2:] for _, item in row)
+    for word in ROW_WORDS:
+        count = len(re.findall(r"(?<![A-Za-z0-9_])%s" % re.escape(word), text, re.IGNORECASE))
+        if count != 1:
+            problems.append((row[0][0], 1, "the declaration row of extern '%s' gives '%s' %d "
+                             "times; give each point of A7 once (%s)"
+                             % (name, word, count, ROWS)))
+    return problems
+
+
+def call_rows(run):
+    """The call rows of a comment run, as (line, callee, count) triples. A row runs from its
+    `// C call` line to the next one or to the end of the run. A row that does not parse has the
+    callee None."""
+    rows = []
+    for line, text in run:
+        if not CALL_ROW_START.match(text):
+            continue
+        found = CALL_ROW.match(text)
+        if found is None:
+            rows.append((line, None, 0))
+            continue
+        rows.append((line, found.group(1), int(found.group(2) or "1")))
+    return rows
+
+
+def text_calls(code, callee, start, end):
+    """The count of calls `callee(` in `code[start:end]`, with no name and no member access
+    (`.` or `->`) before it; a range `..` or an operator `>` can stand before it. The pattern
+    takes white space between each two characters of the callee, which has none of its own
+    (spelled_callee, callee_text). This count only places the rows: the count of the index is
+    the authority (function_row_problems)."""
+    parts = [re.escape(c) for c in callee]
+    pattern = r"(?<![A-Za-z0-9_])(?<!->)(?<![^.]\.)%s\s*\(" % r"\s*".join(parts)
+    return len(re.findall(pattern, code[start:end]))
+
+
+def function_row_problems(rows, path, source, record, calls, values=()):
+    """The problems of the call rows of one function of a trusted module (D9.8).
+
+    `calls` maps the callee of each call of an `extern fn`, of a boundary function and through
+    a function value in the body to its count on this target: the calls that the index records,
+    and the calls through a value that the brackets of the body give. That count is the
+    authority, so a callee whose text the lint counts lower is an error. The rows of a callee
+    count its calls in the text of the body, so a call in a `$if` branch of another target
+    counts too. `values` holds the callees that are function values.
+    """
+    name = record["name"]
+    at = source.offset(record["line"], record["col"])
+    start = keyword_before(source.code, at, "fn")
+    run = comment_run(source, source.line_of(start if start >= 0 else at))
+    body_open = source.code.find("{", at)
+    body_close = matching_close(source.code, body_open) if body_open >= 0 else -1
+    counted = {}
+    first_line = {}
+    problems = []
+    for line, callee, count in call_rows(run):
+        if callee is None or count < 1:
+            problems.append((line, 1, "a call row of fn '%s' does not read as '// C call "
+                             "<the callee>: ...' or '// C call <the callee> x<N>: ...' with N "
+                             "above 0 (%s)" % (name, ROWS)))
+            continue
+        counted[callee] = counted.get(callee, 0) + count
+        first_line.setdefault(callee, line)
+    for callee in sorted(set(calls) | set(counted)):
+        held = text_calls(source.code, callee, body_open, body_close + 1)
+        rowed = counted.get(callee, 0)
+        index = calls.get(callee, 0)
+        if index > held:
+            # A form of the text that the lint does not read: the count of the index holds.
+            source_of_count = ("the calls through a value that the brackets of the body give"
+                               if callee in values else "the index of the compiler")
+            problems.append((record["line"], record["col"], "fn '%s' has %d call(s) of '%s' by "
+                             "%s, and the lint finds %d in its text: write the callee in a "
+                             "plain form, so that the rows count each call (%s)"
+                             % (name, index, callee, source_of_count, held, ROWS)))
+        elif rowed == 0 and callee in values:
+            problems.append((record["line"], record["col"], "fn '%s' has %d call(s) through the "
+                             "function value '%s' and no call row for it: write '// C call %s: "
+                             "...' above it, with what the value is (%s)"
+                             % (name, held, callee, callee, ROWS)))
+        elif rowed == 0:
+            problems.append((record["line"], record["col"], "fn '%s' has %d call(s) of '%s' and "
+                             "no call row for it: write '// C call %s: ...' above it (%s)"
+                             % (name, held, callee, callee, ROWS)))
+        elif rowed != held:
+            problems.append((first_line[callee], 1, "the call rows of fn '%s' count %d call(s) "
+                             "of '%s', and its body holds %d (%s)"
+                             % (name, rowed, callee, held, ROWS)))
+    return problems
+
+
+def row_problems(rows, path, records):
+    """The problems of D9.8 that the records of the file `path` show, as (line, col, message).
+
+    In a trusted module: each `extern fn` has its declaration row, and the call rows of each
+    function count each call of an `extern fn`, of a boundary function and through a function
+    value in its body. In each
+    module: a name of a boundary function stands only as the callee of a call or as an argument
+    of a call whose callee is an `extern fn` or a function pointer.
+    """
+    source = rows.source(path)
+    if source is None:
+        return []
+    trusted = rows.trusted(path)
+    problems = []
+    functions = []
+    uses = []
+    for record in records:
+        if record.get("is_decl"):
+            if rows.decl_key(record) != (path, record["line"], record["col"]):
+                # An `as` alias of an import declares a name here and binds a declaration
+                # elsewhere (D20.3): it is no function and no extern of this module.
+                continue
+            if trusted and record["kind"] == "extern fn":
+                problems.extend(declaration_row_problems(source, record))
+            elif trusted and record["kind"] == "fn":
+                at = source.offset(record["line"], record["col"])
+                body_open = source.code.find("{", at)
+                body_close = matching_close(source.code, body_open) if body_open >= 0 else -1
+                functions.append((body_open, body_close, record, {}))
+            continue
+        if record["kind"] == "extern fn":
+            uses.append((record, False))
+        elif record["kind"] == "fn":
+            key = rows.decl_key(record)
+            if key is not None and rows.is_boundary(key):
+                uses.append((record, True))
+    for record, boundary in uses:
+        start = source.offset(record["line"], record["col"])
+        end = start + len(record["name"])
+        if boundary and not in_import(source, start) and not goes_to_c(rows, path, source,
+                                                                       start, end):
+            problems.append((record["line"], record["col"], "boundary function '%s' goes here as "
+                             "a value, and not to C: name it only as the callee of a call or as "
+                             "an argument of a call of an extern fn or a function pointer (%s)"
+                             % (spelled_callee(source.code, start)[1], ROWS)))
+            continue
+        if next_char(source.code, end)[0] != "(":
+            continue
+        for body_open, body_close, _, calls in functions:
+            if body_open < start < body_close:
+                callee = spelled_callee(source.code, start)[1]
+                calls[callee] = calls.get(callee, 0) + 1
+                break
+    for body_open, body_close, record, calls in functions:
+        values = set()
+        if body_open >= 0 and body_close > body_open:
+            for callee in value_calls(rows, path, source, body_open, body_close):
+                calls[callee] = calls.get(callee, 0) + 1
+                values.add(callee)
+        problems.extend(function_row_problems(rows, path, source, record, calls, values))
+    return problems
+
+
 def std_module(relative):
     """The module path of a file of `std/` in the standard root of its target, or None.
 
@@ -575,6 +1369,17 @@ def std_documents(fort, root, entries, cache, target):
     return runs
 
 
+def standard_roots(fort, root, std_dir):
+    """The real paths of the standard library directories that a run can load a module from:
+    `std/` of the tree, `--std-dir`, $FORT_STD_DIR, and `std` beside the compiler (D9.2). A
+    module of one of them is trusted (D9.8)."""
+    found = [os.path.join(str(root), "std"), os.path.join(os.path.dirname(str(fort)), "std")]
+    for given in (std_dir, os.environ.get("FORT_STD_DIR")):
+        if given:
+            found.append(os.path.join(str(root), str(given)))
+    return tuple(sorted({os.path.realpath(path) for path in found}))
+
+
 def lint_files(fort, root, files, std_dir=None, target="linux"):
     """Return the formatted problems of each file, and the number of runs.
 
@@ -600,6 +1405,8 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
     is stable and uses position. Two problems at one position keep rule order.
     """
     cache = {}
+    memo = {}
+    std_roots = standard_roots(fort, root, std_dir)
     entries = []
     for path, includes in files:
         relative = os.path.relpath(str(path), str(root))
@@ -617,6 +1424,8 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
             records = buckets.get(path, [])
             reports[index] = file_problems(records, diagnostics, has_source_text(text),
                                            module_segments(relative))
+            rows = Rows(root, buckets, cache, std_roots, memo)
+            reports[index].extend(row_problems(rows, path, records))
     for index, (relative, includes, _, _) in enumerate(entries):
         if reports[index] is not None:
             continue
@@ -627,6 +1436,7 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
             continue
         buckets = group_records(document, root, cache)
         diagnostics = diagnostic_problems(document)
+        rows = Rows(root, buckets, cache, std_roots, memo)
         for other in range(index, len(entries)):
             if reports[other] is not None:
                 continue
@@ -645,6 +1455,7 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
             source = has_source_text(entries[other][3])
             segments = module_segments(entries[other][0])
             reports[other] = file_problems(records or [], diagnostics, source, segments)
+            reports[other].extend(row_problems(rows, entries[other][2], records or []))
     lines = []
     for index, (relative, _, _, text) in enumerate(entries):
         problems = text_problems(relative, text, root) + reports[index]
@@ -744,7 +1555,7 @@ def main(argv=None):
             file=sys.stderr,
         )
         return 1
-    print("fort_lint: %d file(s), no violation of D1.4" % len(files))
+    print("fort_lint: %d file(s), no violation of D1.4 or D9.8" % len(files))
     return 0
 
 

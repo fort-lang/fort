@@ -32,7 +32,10 @@ bullet at a time and without a rewrite.
   import of a compiler module), `long_imports_selftest` and `lang_harness_selftest` (the tool
   and the `--use` and `--cache-dir` options of `run_tests.py`), `highlight_selftest`,
   `extension_selftest`, `fort_lint_std` (`tools/fort_lint.py` over one module of `std/` and over
-  the modules of both targets), `panic_coverage`, `panic_coverage_selftest` and one
+  the modules of both targets), `fort_lint_rows` (`test/fort_lint_rows_test.py`: each rule of the
+  lint on the audit rows of D9.8, and the boundary functions of the lint against the ones that the
+  compiler refuses, over a module of each parameter type and over the `std` of the build),
+  `panic_coverage`, `panic_coverage_selftest` and one
   `mutation_anchors_<table>` test for each table in `tools/mutations`, the three `mutate_`
   tests of `--check` over the fixture `test/mutate/strict_table.json`, and `drop-fields`
   (`test/drop_fields_test.py`: no function of src/fort, src/lsp, std, test/fort, test/lsp or
@@ -1418,10 +1421,23 @@ bullet at a time and without a rewrite.
   test of its own, since Node 18 loads every file under `test/`.
 - **What checks `.ft` source, and what does not** (T-076). Three things do. `tools/fort_lint.py`
   (target `lint`) holds `std/**/*.ft` (outside the target directories), `std/<target>/**/*.ft`,
-  `src/fort/**/*.ft` and `src/lsp/**/*.ft` to the identifier conventions of D1.4, to the naming
-  rules of `notes/style.md` 3.1 and to 100 columns. A module of `src/fort` takes
-  `-I src`, because it imports its siblings as `fort.<path>` from that root (D9.11);
-  it reads `fort --index` (D20.3) rather than tokenizing
+  `src/fort/**/*.ft`, `src/lsp/**/*.ft`, `test/fort`, `test/lsp`, `test/library` and `test/tty`
+  to the identifier conventions of D1.4, to the naming rules of `notes/style.md` 3.1, to 100
+  columns, and to the audit rows of D9.8: a declaration row above each `extern fn` of a trusted
+  module, call rows that count each call of an extern, of a boundary function and through a
+  function value, and a boundary function as a value only on its way to C. The lint finds a
+  boundary function by the parameter types that the index records spell, and `fort_lint_rows`
+  holds that answer equal to the one of the compiler. A call row names the callee as the body
+  spells it, with no white space (`libc.write`, `table[i+1]`). The rows count the calls in the
+  text, and the count of the index (the records, and the brackets of a call through a value) is
+  the authority: a callee that the text counts lower is an error. Each target lints its own
+  `$if` branches and
+  `std/<target>`, so the CI job `lint` of macOS checks the rows of `std/darwin` and of the Darwin
+  block of `test/fort/support/heap.ft`. In the VM a wrapper script that adds
+  `--target arm64-apple-macosx11.0.0` to the compiler, with `--std-dir` set to the output of
+  `tools/assemble_std.sh darwin` and `--target darwin`, lints the Darwin side.
+  A module of `src/fort` takes `-I src`, because it imports its siblings as `fort.<path>` from
+  that root (D9.11); it reads `fort --index` (D20.3) rather than tokenizing
   fort a second time, so the kinds and types it reasons about are the checker's own answers, and a
   second tokenizer cannot drift from the language. `lint` passes `--target`, so each host lints
   its own `std/<target>/*.ft` under its own root: one root declares one libc, and the other
