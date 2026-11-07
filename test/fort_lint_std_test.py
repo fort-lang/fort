@@ -20,7 +20,7 @@ import unittest
 
 OPTIONS = None
 
-CLEAN = re.compile(r"^fort_lint: (\d+) file\(s\), no violation of D1\.4$")
+CLEAN = re.compile(r"^fort_lint: (\d+) file\(s\), no violation of D1\.4 or D9\.8$")
 
 
 def lint(root, files, target="linux"):

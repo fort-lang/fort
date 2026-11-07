@@ -155,7 +155,9 @@ Keep exact identifiers and diagnostic text.
   UPPER_CASE. A variable never takes its type's name (`point p`, `box bx`, `list mut* mut l`); a
   field may (`node mut* own node`), since fields are not variables and are outside the module
   namespace (D7.9). `tools/fort_lint.py` enforces exactly that, and the 100-column wrap, over
-  `std/`, `src/fort/` and `src/lsp/`, nested directories included; nothing formats `.ft`, so
+  `std/`, `src/fort/`, `src/lsp/`, `test/fort/`, `test/lsp/`, `test/library/` and `test/tty/`,
+  nested directories included, with the audit rows of D9.8 (`notes/testing.md` 8); nothing
+  formats `.ft`, so
   indentation and spacing are still written by hand and read by review. Run it with
   `tools/vm lint`, or by hand as
   `tools/vm run 'python3 tools/fort_lint.py --fort build/Linux/debug/fort <file.ft>'`.
