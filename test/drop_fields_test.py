@@ -7,15 +7,21 @@ notes/compiler.md 6). A function that dels the storage below such a field or ele
 strbuf.drop, so a defect of the drop shows on one path only. Such a field ends through the drop of
 its type, `strbuf.drop(move(v.text))`.
 
-This test reads the .ft files of src/fort, src/lsp, std and test/fort/support, where a module takes
-its bare name (`import check_env;`). It reads each declaration at the top of a file and each
+This test reads the .ft files of src/fort, src/lsp, std, test/fort, test/lsp and test/library: each
+tree that CI compiles but test/lang. A module of test/fort/support takes its bare name
+(`import check_env;`), and a module of test/library/chain takes its path below the chain
+(`import aaa.base;`). This test does not read test/lang. Its programs show what the language
+accepts, and a `del` below a field is valid fort. A change of a program there can also move the
+oracle events of test/fir_run_test.py. At 672dfa81 the scan listed 7 lines in test/lang/programs
+and test/lang/run/stdlib. The scan reads each declaration at the top of a file and each
 declaration in each branch of a module `$if`, so it reads the code of both targets. Of each
 function it reads the parameters, the locals and each `del`. It lists each `del` whose operand
 passes through a field or an element of a span, strictly below its root, whose type has a value
 drop. It holds the count of the list at 0. The scan reads the code of a line: it removes each `//`
 comment and the text of each string and char literal first, so a brace in a literal does not move
 the end of a body. A control tree gives one line for each form that the scan follows, one for each
-of two modules of test/fort/support, and no line for a `del` of the storage of a local of such a
+of two modules of test/fort/support, one for a suite of test/fort, one for a suite of test/lsp, one
+for a module of test/library/chain, and no line for a `del` of the storage of a local of such a
 type itself (the Del form of notes/compiler.md 6).
 
 A type has a value drop when a function whose name holds `drop` takes it by value:
@@ -46,7 +52,7 @@ import sys
 import tempfile
 import unittest
 
-TREES = ("src/fort", "src/lsp", "std", "test/fort/support")
+TREES = ("src/fort", "src/lsp", "std", "test/fort", "test/lsp", "test/library")
 
 # A declared type: a name, then `mut`, `own`, `*`, `@` and `[N]` in any order. N is any text
 # without a `]`, as `2 * 2`.
@@ -69,9 +75,13 @@ OPTIONS = None
 def module_name(rel):
     """The module path of a file: src/fort/owner/prover.ft is fort.owner.prover, src/lsp/json.ft
     lsp.json, std/strbuf.ft std.strbuf, std/linux/libc.ft std.libc, and
-    test/fort/support/check_env.ft check_env, as the suites import it with `-I support`."""
+    test/fort/support/check_env.ft check_env, as the suites import it with `-I support`, and
+    test/library/chain/aaa/base.ft aaa.base, as the chain builds it. A suite takes its path, as
+    test.fort.ast_test, and no file imports it."""
     parts = rel[:-len(".ft")].split("/")
     if parts[:3] == ["test", "fort", "support"]:
+        return ".".join(parts[3:])
+    if parts[:3] == ["test", "library", "chain"]:
         return ".".join(parts[3:])
     if parts[0] == "src":
         return ".".join(parts[1:])
@@ -343,8 +353,9 @@ class DropFields(unittest.TestCase):
         names = {key[1] for key in scan.drops}
         for name in ("str_buf", "str_map", "int_vec", "bits"):
             self.assertIn(name, names, "the scan finds no value drop of %s" % name)
-        # 537 `del`s of a path at the drop form change; a scan that reads none would pass
-        self.assertGreater(scan.read, 300, "the scan reads too few `del`s of a path")
+        # 537 `del`s of a path at the drop form change, and 2079 when the scan reads the suites;
+        # a scan that reads none would pass
+        self.assertGreater(scan.read, 1500, "the scan reads too few `del`s of a path")
         self.assertEqual(found, [], "%d `del`s below a field or an element of a span whose type "
                          "has a value drop:\n%s" % (len(found), listing(found)))
 
@@ -618,10 +629,47 @@ fn clear(env mut* p) void {
 }
 """
 
+# A suite of test/fort and a suite of test/lsp each give a line through a module of
+# test/fort/support, and a module of test/library/chain gives a line through a struct of another
+# module of the chain, which it names by its path below the chain.
+CONTROL_SUITE = """import sink;
+
+fn main() i32 {
+    sink.env mut e = sink.env{};
+    del(e.text.data);
+    return 0;
+}
+"""
+
+CONTROL_LSP_SUITE = """import outer;
+
+fn clear(outer.env mut* p) void {
+    del(p->inner.text.data);
+}
+"""
+
+CONTROL_CHAIN_BASE = """import std.strbuf;
+
+struct rec {
+    strbuf.str_buf text;
+}
+"""
+
+CONTROL_CHAIN_TOP = """import aaa.base;
+
+fn clear(base.rec mut r) void {
+    del(r.text.data);
+}
+"""
+
 CONTROL = {"std/strbuf.ft": CONTROL_STD, "std/linux/plat.ft": CONTROL_PLAT,
            "src/fort/holder.ft": CONTROL_HOLDER, "src/fort/alias.ft": CONTROL_ALIAS,
            "src/fort/platform.ft": CONTROL_PLATFORM, "src/lsp/item.ft": CONTROL_ITEM,
-           "test/fort/support/sink.ft": CONTROL_SINK, "test/fort/support/outer.ft": CONTROL_OUTER}
+           "test/fort/support/sink.ft": CONTROL_SINK, "test/fort/support/outer.ft": CONTROL_OUTER,
+           "test/fort/suite_test.ft": CONTROL_SUITE,
+           "test/lsp/lsp_suite_test.ft": CONTROL_LSP_SUITE,
+           "test/library/chain/aaa/base.ft": CONTROL_CHAIN_BASE,
+           "test/library/chain/zzz/top.ft": CONTROL_CHAIN_TOP}
 CONTROL_LINES = [
     ("src/fort/alias.ft", 14, "by_alias"), ("src/fort/alias.ft", 18, "by_rename"),
     ("src/fort/holder.ft", 25, "holder_drop"), ("src/fort/holder.ft", 29, "clear"),
@@ -636,8 +684,9 @@ CONTROL_LINES = [
     ("src/fort/holder.ft", 130, "two_line_struct"), ("src/fort/holder.ft", 134, "gives_fn"),
     ("src/fort/holder.ft", 138, "spaced"), ("src/fort/holder.ft", 142, "sized_items"),
     ("src/fort/platform.ft", 4, "by_platform"), ("src/lsp/item.ft", 13, "by_item"),
-    ("src/lsp/item.ft", 21, "other_module"), ("test/fort/support/outer.ft", 8, "clear"),
-    ("test/fort/support/sink.ft", 8, "drop")]
+    ("src/lsp/item.ft", 21, "other_module"), ("test/fort/suite_test.ft", 5, "main"),
+    ("test/fort/support/outer.ft", 8, "clear"), ("test/fort/support/sink.ft", 8, "drop"),
+    ("test/library/chain/zzz/top.ft", 4, "clear"), ("test/lsp/lsp_suite_test.ft", 4, "clear")]
 
 
 def main():
