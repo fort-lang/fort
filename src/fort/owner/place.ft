@@ -373,8 +373,7 @@ fn find_taken(survey* c, fir.statement* s, u32 mut* out) bool {
 // that is memory is no held address.
 fn mark_memory(survey mut* c) void {
     fir.func* f = c->f;
-    // the storage of an aggregate result is the destination of the caller
-    if (fir.type_aggregate(fir.local_at(f, 0)->ty)) {
+    if (is_aggregate_result(f, 0)) {
         c->locals[0].memory = true;
     }
     u32 mut b = 0;
@@ -571,11 +570,20 @@ fn apply_stale(survey* c, fir.statement* s, fir_flow.bits mut* stale) void {
     }
 }
 
+/// Whether the statement `s` is a call, the one trigger of the call effect. A callee reaches each
+/// byte of memory (D10.7), so a call has two results. It kills each fact that does not survive it
+/// (prover.apply_call, kill rule 5 of D17.11). It vacates each owner of each memory local
+/// (prover.vacate_memory, rule (b) of D17.21). It also exposes the frames that its operands borrow
+/// (alias.apply_reads), and it can write memory (writes_memory).
+fn is_call(fir.statement* s) bool {
+    return s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call;
+}
+
 // Whether the assignment `s` can write memory: a `call`, a store through a pointer, or a store
 // straight into a memory local or a global. A store into fixed storage of a local that is no
 // memory writes no memory, and `alloc` writes only new storage.
 fn writes_memory(survey* c, fir.statement* s) bool {
-    if (s->value.kind == fir.rvalue_kind.rv_call || !fir.place_fixed(c->f, s->place)) {
+    if (is_call(s) || !fir.place_fixed(c->f, s->place)) {
         return true;
     }
     return c->locals[cast(s->place.local, u64)].memory;
@@ -609,10 +617,10 @@ fn mark_values(survey mut* c) void {
     }
 }
 
-// The mark of the local `t` for mark_values: tv_zero when its store writes a `use` or an
-// `aggregate` whose operands are each a zero value (marks_zero), tv_literal for each other
-// `aggregate`, and tv_other else. The mark is tv_other while the walk reads the store, so a chain
-// that reads itself takes no zero value.
+// The mark of the local `t` for mark_values: tv_zero when its store writes the zero value
+// (is_zero_rvalue), tv_literal for each other `aggregate`, and tv_other else. The marks of the
+// temporaries that the store moves come first. The mark is tv_other while the walk reads the
+// store, so a chain that reads itself takes no zero value.
 fn value_of(survey mut* c, u32 t) temp_value {
     u64 at = cast(t, u64);
     if (c->locals[at].value != temp_value.tv_unseen) {
@@ -626,27 +634,20 @@ fn value_of(survey mut* c, u32 t) temp_value {
     if (r.kind != fir.rvalue_kind.rv_use && r.kind != fir.rvalue_kind.rv_aggregate) {
         return temp_value.tv_other;
     }
-    temp_value mut v = temp_value.tv_zero;
     u32 mut i = 0;
-    while (i < r.ops_len && v == temp_value.tv_zero) {
-        if (!marks_zero(c, fir.rvalue_operand(c->f, r, i))) {
-            v = temp_value.tv_other;
+    while (i < r.ops_len) {
+        fir.operand o = fir.rvalue_operand(c->f, r, i);
+        if (o.kind == fir.operand_kind.ok_move && is_local(o.place)) {
+            value_of(c, o.place.local);
         }
         i += 1;
     }
-    if (v != temp_value.tv_zero && r.kind == fir.rvalue_kind.rv_aggregate) {
-        v = temp_value.tv_literal;
+    if (is_zero_rvalue(c, r)) {
+        c->locals[at].value = temp_value.tv_zero;
+    } else if (r.kind == fir.rvalue_kind.rv_aggregate) {
+        c->locals[at].value = temp_value.tv_literal;
     }
-    c->locals[at].value = v;
-    return v;
-}
-
-// Whether the operand `o` is a zero value for mark_values, which marks the temporary that it moves.
-fn marks_zero(survey mut* c, fir.operand o) bool {
-    if (o.kind != fir.operand_kind.ok_move || !is_local(o.place)) {
-        return is_zero_constant(o);
-    }
-    return value_of(c, o.place.local) == temp_value.tv_zero;
+    return c->locals[at].value;
 }
 
 // Whether the local `t` is a temporary that is no memory, that one store writes and that one read
@@ -657,9 +658,9 @@ fn is_moved_once(survey* c, u32 t) bool {
 }
 
 /// Whether the operand `o` is a zero value (spec/fir.md 11, Values): `const zero T`, `null T`, or
-/// the `move` of a temporary that mark_values marks tv_zero.
+/// the `move` of a temporary that mark_values marks tv_zero. With a null `c`, only a constant.
 fn is_zero_operand(survey* c, fir.operand o) bool {
-    if (o.kind == fir.operand_kind.ok_move && is_local(o.place)) {
+    if (c != null && o.kind == fir.operand_kind.ok_move && is_local(o.place)) {
         return c->locals[cast(o.place.local, u64)].value == temp_value.tv_zero;
     }
     return is_zero_constant(o);
@@ -669,12 +670,18 @@ fn is_zero_operand(survey* c, fir.operand o) bool {
 /// `aggregate`, `zeroed` or not, whose operands are each a zero value (is_zero_operand), at any
 /// depth of the temporaries of the nested literals. mark_values comes first.
 fn is_zero_rvalue(survey* c, fir.rvalue r) bool {
+    return is_zero_store(c->f, c, r);
+}
+
+/// is_zero_rvalue for an rvalue of `f`, with the survey `c` of `f` or with null. The entry zeroing
+/// gives null, because it comes before the survey: then only constants make a zero value.
+fn is_zero_store(fir.func* f, survey* c, fir.rvalue r) bool {
     if (r.kind != fir.rvalue_kind.rv_use && r.kind != fir.rvalue_kind.rv_aggregate) {
         return false;
     }
     u32 mut i = 0;
     while (i < r.ops_len) {
-        if (!is_zero_operand(c, fir.rvalue_operand(c->f, r, i))) {
+        if (!is_zero_operand(c, fir.rvalue_operand(f, r, i))) {
             return false;
         }
         i += 1;
@@ -774,12 +781,8 @@ fn find_moved_temp(survey* c, fir.rvalue r, u32 mut* out) bool {
         return false;
     }
     fir.operand o = fir.rvalue_operand(c->f, r, 0);
-    if (o.kind != fir.operand_kind.ok_move || !is_local(o.place)) {
-        return false;
-    }
-    local_info* l = &c->locals[cast(o.place.local, u64)];
-    if (fir.local_at(c->f, o.place.local)->kind != fir.local_kind.lk_temp
-        || !is_single(c, o.place.local) || l->reads != 1) {
+    if (o.kind != fir.operand_kind.ok_move || !is_local(o.place)
+        || !is_moved_once(c, o.place.local)) {
         return false;
     }
     *out = o.place.local;
@@ -1063,7 +1066,12 @@ fn is_separate(survey* c, path a, path b) bool {
 
 // Whether `q` has a deref or an index on a span or a `string` after its first step.
 fn is_leaving(survey* c, path q) bool {
-    u32 mut i = 1;
+    return is_leaving_from(c, q, 1);
+}
+
+// Whether `q` has a deref or an index on a span or a `string` at step `from` or after it.
+fn is_leaving_from(survey* c, path q, u32 from) bool {
+    u32 mut i = from;
     while (i < q.len) {
         step s = step_at(c, q, i);
         if (s.kind == step_kind.sk_deref || s.header) {
@@ -1127,15 +1135,7 @@ fn can_vacate(survey* c, path b, path p) bool {
     if (!is_through_memory(c, b)) {
         return false;
     }
-    i = b.len + 1;
-    while (i < p.len) {
-        step s = step_at(c, p, i);
-        if (s.kind == step_kind.sk_deref || s.header) {
-            return true;
-        }
-        i += 1;
-    }
-    return false;
+    return is_leaving_from(c, p, b.len + 1);
 }
 
 // Whether the path `q` can read a reference that a vacate of `p` empties: a deref or an index on
@@ -1179,29 +1179,13 @@ fn is_through(survey* c, path q, u32 n) bool {
         || step_at(c, q, 0).kind != step_kind.sk_deref) {
         return false;
     }
-    u32 mut i = 1;
-    while (i < q.len) {
-        step s = step_at(c, q, i);
-        if (s.kind == step_kind.sk_deref || s.header) {
-            return false;
-        }
-        i += 1;
-    }
-    return true;
+    return !is_leaving(c, q);
 }
 
 // Whether `q` holds a deref or an index on a span or a `string`: a store into it is a store
 // through a pointer.
 fn is_indirect(survey* c, path q) bool {
-    u32 mut i = 0;
-    while (i < q.len) {
-        step s = step_at(c, q, i);
-        if (s.kind == step_kind.sk_deref || s.header) {
-            return true;
-        }
-        i += 1;
-    }
-    return false;
+    return is_leaving_from(c, q, 0);
 }
 
 /// Whether `q` lies in storage that holds no allocation at the entry: fixed storage of a temporary,
@@ -1216,9 +1200,17 @@ fn is_empty_at_entry(survey* c, path q) bool {
     }
     fir.local* l = fir.local_at(c->f, q.local);
     if (l->kind == fir.local_kind.lk_return) {
-        return !fir.type_aggregate(l->ty);
+        return !is_aggregate_result(c->f, q.local);
     }
     return l->kind == fir.local_kind.lk_temp;
+}
+
+/// Whether the local `n` is `_0` of an aggregate type. Its storage is the destination of the
+/// caller (fir.md 5.3): it is memory, it can hold owners at the entry, and it is no storage of a
+/// local of this run, so its frame is no origin (owner.alias).
+fn is_aggregate_result(fir.func* f, u32 n) bool {
+    fir.local* l = fir.local_at(f, n);
+    return l->kind == fir.local_kind.lk_return && fir.type_aggregate(l->ty);
 }
 
 /// Whether the local `n` is a scratch local: a temporary, or `_0`, of an `own` reference type
@@ -1243,15 +1235,7 @@ fn is_through_memory(survey* c, path q) bool {
 
 // Whether `q` holds an index whose key is the local `k`.
 fn has_key(survey* c, path q, u32 k) bool {
-    u32 mut i = 0;
-    while (i < q.len) {
-        step s = step_at(c, q, i);
-        if (s.kind == step_kind.sk_index && s.key.kind == key_kind.kk_local && s.key.local == k) {
-            return true;
-        }
-        i += 1;
-    }
-    return false;
+    return key_rank(c, q, k) > 0;
 }
 
 // Whether `q` is a place through a fresh pointer local of `fresh`. A null `fresh` has no local.
