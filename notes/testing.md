@@ -757,7 +757,41 @@ bullet at a time and without a rewrite.
   family, and `hold_floor` stops the test below it. So a family that accepts no item stops the test.
   `FORCED` runs a case of `GATE_CASES` with a chosen set of report lines and no error. Each row
   names the event kind that then fails the item, and another verdict stops the test (`run_forced`).
-  The rows hold that a line of one rule does not excuse an event of another rule. **The row `leak at
+  The rows hold that a line of one rule does not excuse an event of another rule. **The judge and
+  the pass call the same functions of `fir` and `types`.** This command lists them:
+
+      comm -12 \
+        <(grep -v '^ *//' test/fort/owner/oracle_test.ft \
+          | grep -oE '\b(fir|types)\.[a-z_0-9]+\(' | sort -u) \
+        <(cat src/fort/owner/*.ft | grep -v '^ *//' \
+          | grep -oE '\b(fir|types)\.[a-z_0-9]+\(' | sort -u)
+
+  A mutant of a function of that list with a `bool` result changes the pass and the judge together.
+  Those functions are `fir.term_is_abort`, `fir.stmt_reads`, `types.type_is_owning_aggregate` and
+  `types.type_is_reference`. So each needs a case for each branch, and `tools/mutations/oracle.json`
+  has a row for each branch: the rows D17.20-abort, D17.11-reads, D17.20-owning and D17.1-reference.
+  `fir.term_is_abort` gives the flag of an abort block. The case `before_check` of the gate holds a
+  block that ends in a `check`, and `abort_block` one that ends in a `panic`. The FIR case
+  `leak_abort` holds a block that ends in a `trap`, and the case `unreachable` of the gate one that
+  ends in `unreachable`. `fir.stmt_reads` gives `take_named` each operand of a statement. The FIR
+  case `value_call` and row accept-value-caller of `tools/mutations/disposition.json` hold a
+  constant that an assignment reads. The FIR case `const_call` holds the callee operand of a call
+  through a value. **The test holds the `del` branch of `fir.stmt_reads` only through the pass.**
+  Row D17.11-reads-del takes two false rejects of the FIR case `del_join` from the pinned stdout,
+  and no panic stops the test. The judge does not show that mutant: `take_named` reads a constant of
+  a function, and a `del` reads a `move`. With the mutant in `take_named` alone, the stdout of the
+  test does not change. For `types.type_is_owning_aggregate`, the hand case `fa1` holds a fixed
+  array of `own` pointers. The case `nested_array` of the gate holds a fixed array of a struct that
+  owns. For `types.type_is_reference`, the case `string_owner` of the gate holds a `string own`. The
+  sandbox runtime (`test/fort/support/run_env.ft`) holds `void* own` and an owning span. With a
+  mutant of either, it does not check, and the test stops at the first batch. A new function that
+  the judge and the pass both call needs a case and a row for each branch. **The case `whole_chain`
+  is no item of the hand set** (`GATE_ITEMS`). Its store of a whole struct goes over the owner of an
+  allocation that owns a second one. A line of `--whole-store-report` does not excuse the `leak at
+  exit` of the second allocation, and the rows of `FORCED` for the case hold that. Only `FORCED`
+  runs the case, and the test stops when no row of `FORCED` names it. **No test holds that the
+  compiler gives `whole_chain` only the whole line at this revision.** The rows of `FORCED` set the
+  lines by hand. **The row `leak at
   exit` judges only a run of a program whose `main` returns.** `shadow.test_exit` gives that event,
   and the interpreter calls it only there (`interpreter.run_program`). So the gate judges that kind
   in the hand cases and in the seeded family only. A run of the exhaustive family, of the shapes or
