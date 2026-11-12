@@ -14,10 +14,13 @@
 //| V11 ok
 //| V12 ok
 //| V13 ok
+//| V14 ok
+//| V15 ok
+//| V16 ok
 //| graphs ok
 //| report ok
 /// Checks the FIR verifier: `types_agree`, the runtime entries, the text of a violation, and for
-/// each clause of the rules V1 to V13 a function that breaks it and a function on the edge that
+/// each clause of the rules V1 to V16 a function that breaks it and a function on the edge that
 /// keeps it. A case parses a FIR text against a checked prelude and a sandbox runtime.
 import fort.ast;
 import check_env;
@@ -399,7 +402,7 @@ fn red(env mut* e, string lets, string blocks, u32 rule, string what, u32 block,
 
 // Whether `rule` is a flow rule. The flow rules run after every local rule.
 fn flow_rule(u32 rule) bool {
-    return rule == 9 || rule == 11 || rule == 12 || rule == 13;
+    return rule == 9 || rule >= 11;
 }
 
 // Holds that the function `header` with `lets` and `blocks` breaks no local rule. The local
@@ -2269,7 +2272,7 @@ fn v12_a_move_of_a_part_empties_the_temporary() void {
     // a move through a deref empties the storage the pointer designates, and not the pointer
     string[5] through = {
         lets, pointer, "bb0: { _4 = const zero holder; _5 = addr mut(_4);",
-        "_2 = move (*_5).0; _3 = copy (*_5).1;", "del(move _2); return; }",
+        "_2 = move (*_5).0; _3 = copy (*_5).1;", "del(move _2); dead(_4); return; }",
     };
     flow_green(e, NOTHING, through[..]);
 }
@@ -2459,6 +2462,536 @@ fn v13_keeps_what_the_rule_does_not_name() void {
     flow_green(e, NOTHING, whole[..]);
 }
 
+// ---- V14 -------------------------------------------------------------------------------------
+
+// The locals of most cases of V14: a named owner local, an owning temporary and a `void` result.
+string SCOPED = "let _1 (p): u8 mut* own; let _2: u8 mut* own; let _3: void;";
+
+// The start of most cases of V14: the scope of `_1` opens and `_1` takes an allocation.
+string OPEN = "bb0: { live(_1); _1 = call fn main.grab();";
+
+fn v14_no_return_in_the_scope_of_a_named_owner_local() void {
+    env mut* own e = make();
+    defer drop_made(move(e));
+    // `live` opens the scope
+    string[2] live = {SCOPED, "bb0: { live(_1); return; }"};
+    flow_red(e, NOTHING, live[..], 14, fir_verify.V14_OPEN, 0, 1);
+    // a store of a value opens it with no `live`
+    string[2] store = {SCOPED, "bb0: { _1 = call fn main.grab(); return; }"};
+    flow_red(e, NOTHING, store[..], 14, fir_verify.V14_OPEN, 0, 1);
+    string[2] moved_in = {SCOPED, "bb0: { _2 = call fn main.grab(); _1 = move _2; return; }"};
+    flow_red(e, NOTHING, moved_in[..], 14, fir_verify.V14_OPEN, 0, 2);
+    // a move out of the local and a `del` of it close no scope: only `dead` does
+    string[3] moved = {SCOPED, OPEN, "_3 = call fn main.take(move _1); return; }"};
+    flow_red(e, NOTHING, moved[..], 14, fir_verify.V14_OPEN, 0, 3);
+    string[3] deleted = {SCOPED, OPEN, "del(move _1); return; }"};
+    flow_red(e, NOTHING, deleted[..], 14, fir_verify.V14_OPEN, 0, 3);
+    // a store of the zero value closes none
+    string[3] zeroed = {SCOPED, OPEN, "del(move _1); _1 = const null u8 mut* own; return; }"};
+    flow_red(e, NOTHING, zeroed[..], 14, fir_verify.V14_OPEN, 0, 4);
+    // a store or a `live` after the `dead` opens the scope again
+    string[3] again = {
+        SCOPED, OPEN, "del(move _1); dead(_1); _1 = call fn main.grab(); return; }",
+    };
+    flow_red(e, NOTHING, again[..], 14, fir_verify.V14_OPEN, 0, 5);
+    string[3] relive = {SCOPED, OPEN, "del(move _1); dead(_1); live(_1); return; }"};
+    flow_red(e, NOTHING, relive[..], 14, fir_verify.V14_OPEN, 0, 5);
+    // the `dead` of another local closes nothing
+    string[4] other = {
+        SCOPED, "let _4 (q): u8 mut* own;", OPEN, "live(_4); del(move _1); dead(_4); return; }",
+    };
+    flow_red(e, NOTHING, other[..], 14, fir_verify.V14_OPEN, 0, 5);
+    // the `dead` closes the scope
+    string[3] closed = {SCOPED, OPEN, "del(move _1); dead(_1); return; }"};
+    flow_green(e, NOTHING, closed[..]);
+    string[3] passed = {SCOPED, OPEN, "_3 = call fn main.take(move _1); dead(_1); return; }"};
+    flow_green(e, NOTHING, passed[..]);
+    string[4] both = {
+        SCOPED, "let _4 (q): u8 mut* own;", OPEN,
+        "live(_4); del(move _1); dead(_4); dead(_1); return; }",
+    };
+    flow_green(e, NOTHING, both[..]);
+    // each scope of a local that two scopes hold has its `dead`
+    string[4] scopes = {
+        SCOPED, OPEN, "del(move _1); dead(_1); live(_1); _1 = call fn main.grab();",
+        "del(move _1); dead(_1); return; }",
+    };
+    flow_green(e, NOTHING, scopes[..]);
+}
+
+fn v14_reads_each_named_local_that_can_hold_an_allocation() void {
+    env mut* own e = make();
+    defer drop_made(move(e));
+    // a local of an owning struct type, and a store into a member of it
+    string[2] whole = {"let _1 (h): holder;", "bb0: { live(_1); return; }"};
+    flow_red(e, NOTHING, whole[..], 14, fir_verify.V14_OPEN, 0, 1);
+    string[2] member = {"let _1 (h): holder;", "bb0: { _1.0 = call fn main.grab(); return; }"};
+    flow_red(e, NOTHING, member[..], 14, fir_verify.V14_OPEN, 0, 1);
+    string[2] count = {"let _1 (h): holder;", "bb0: { _1.1 = const u64 1; return; }"};
+    flow_red(e, NOTHING, count[..], 14, fir_verify.V14_OPEN, 0, 1);
+    // an aggregate with one operand that is no zero constant is a value
+    string[3] literal = {
+        "let _1 (h): holder;",
+        "bb0: { _1 = aggregate holder(const null u8 mut* own, const u64 0);", "return; }",
+    };
+    flow_red(e, NOTHING, literal[..], 14, fir_verify.V14_OPEN, 0, 1);
+    // a fixed array of owners, an `own` span and a `string own`
+    string[3] array = {
+        "let _1 (a): u8 mut* own[2]; let _2: u64;",
+        "bb0: { _2 = const u64 0; _1[_2] = call fn main.grab();", "return; }",
+    };
+    flow_red(e, NOTHING, array[..], 14, fir_verify.V14_OPEN, 0, 2);
+    string[2] span = {"let _1 (s): u8 mut@ own;", "bb0: { live(_1); return; }"};
+    flow_red(e, NOTHING, span[..], 14, fir_verify.V14_OPEN, 0, 1);
+    string[2] text = {"let _1 (s): string own;", "bb0: { live(_1); return; }"};
+    flow_red(e, NOTHING, text[..], 14, fir_verify.V14_OPEN, 0, 1);
+    // the same locals with a `dead`
+    string[3] ended = {
+        "let _1 (h): holder; let _2 (a): u8 mut* own[2]; let _3 (s): string own;",
+        "bb0: { live(_1); live(_2); live(_3); _1.1 = const u64 1;",
+        "dead(_3); dead(_2); dead(_1); return; }",
+    };
+    flow_green(e, NOTHING, ended[..]);
+}
+
+fn v14_an_address_opens_the_scope() void {
+    env mut* own e = make();
+    defer drop_made(move(e));
+    string lets = "let _1 (p): u8 mut* own; let _2: u8 mut* own mut*; let _3: u8 mut* own*;";
+    string[2] address = {lets, "bb0: { _2 = addr mut(_1); return; }"};
+    flow_red(e, NOTHING, address[..], 14, fir_verify.V14_OPEN, 0, 1);
+    string[2] view = {lets, "bb0: { _3 = addr(_1); return; }"};
+    flow_red(e, NOTHING, view[..], 14, fir_verify.V14_OPEN, 0, 1);
+    // an address after the `dead` opens the scope again
+    string[2] after = {lets, "bb0: { live(_1); dead(_1); _3 = addr(_1); return; }"};
+    flow_red(e, NOTHING, after[..], 14, fir_verify.V14_OPEN, 0, 3);
+    // the address of a member, and a slice of a fixed array
+    string[2] member = {
+        "let _1 (h): holder; let _2: u64 mut*;", "bb0: { _2 = addr mut(_1.1); return; }",
+    };
+    flow_red(e, NOTHING, member[..], 14, fir_verify.V14_OPEN, 0, 1);
+    string[3] slice = {
+        "let _1 (a): u8 mut* own[2]; let _2: u8 mut* own@;",
+        "bb0: { _2 = slice(_1, const u64 0, const u64 2);", "return; }",
+    };
+    flow_red(e, NOTHING, slice[..], 14, fir_verify.V14_OPEN, 0, 1);
+    // the `dead` comes after the address
+    string[2] closed = {lets, "bb0: { live(_1); _2 = addr mut(_1); dead(_1); return; }"};
+    flow_green(e, NOTHING, closed[..]);
+    // a store and an address through a pointer name no fixed storage of the local
+    string[3] through = {
+        lets, "bb0: { live(_1); _2 = addr mut(_1); dead(_1);",
+        "(*_2) = call fn main.grab(); _3 = addr((*_2)); return; }",
+    };
+    flow_green(e, NOTHING, through[..]);
+}
+
+fn v14_follows_the_scopes_of_every_path() void {
+    env mut* own e = make();
+    defer drop_made(move(e));
+    string lets = "let _2 (p): u8 mut* own;";
+    string start = "bb0: { live(_2); _2 = call fn main.grab(); del(move _2);";
+    // one arm ends the scope, and the join returns
+    string[6] arm = {
+        lets, start, "switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { dead(_2); goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    flow_red(e, F, arm[..], 14, fir_verify.V14_OPEN, 3, 1);
+    // each `return` needs the `dead` on its own path
+    string[5] second = {
+        lets, start, "switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { dead(_2); _0 = const i32 1; return; }",
+        "bb2: { _0 = const i32 0; return; }",
+    };
+    flow_red(e, F, second[..], 14, fir_verify.V14_OPEN, 2, 1);
+    // the body of a loop opens the scope, and the exit edge skips the `dead` of the latch
+    string[5] loop = {
+        lets, "bb0: { goto bb1; }",
+        "bb1: { live(_2); switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb2: { dead(_2); goto bb1; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    flow_red(e, F, loop[..], 14, fir_verify.V14_OPEN, 3, 1);
+    // the latch opens the scope, so the second turn leaves the loop with it
+    string[5] latch = {
+        lets, "bb0: { goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb2: { live(_2); goto bb1; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    flow_red(e, F, latch[..], 14, fir_verify.V14_OPEN, 3, 1);
+    // V14 holds on any path, and a path can start in a block that nothing names
+    string[4] alone = {
+        lets, "bb0: { _0 = const i32 0; return; }", "bb1: { live(_2); goto bb2; }",
+        "bb2: { _0 = const i32 0; return; }",
+    };
+    flow_red(e, F, alone[..], 14, fir_verify.V14_OPEN, 2, 1);
+    // the edge that V9 prunes on a constant switch carries the scope too
+    string[4] pruned = {
+        lets, "bb0: { live(_2); switch(const true) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { dead(_2); _0 = const i32 0; return; }",
+        "bb2: { _0 = const i32 0; return; }",
+    };
+    flow_red(e, F, pruned[..], 14, fir_verify.V14_OPEN, 2, 1);
+    // each path to each `return` holds the `dead`
+    string[5] each = {
+        lets, start, "switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { dead(_2); _0 = const i32 1; return; }",
+        "bb2: { dead(_2); _0 = const i32 0; return; }",
+    };
+    flow_green(e, F, each[..]);
+    string[5] turns = {
+        lets, "bb0: { goto bb1; }",
+        "bb1: { live(_2); _2 = call fn main.grab(); del(move _2); dead(_2);",
+        "switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb2: { _0 = const i32 0; return; }",
+    };
+    flow_green(e, F, turns[..]);
+}
+
+fn v14_keeps_what_the_rule_does_not_name() void {
+    env mut* own e = make();
+    defer drop_made(move(e));
+    // a named local of a type that owns nothing needs no `dead`
+    string[4] plain = {
+        "let _1 (n): i32; let _2 (q): pair; let _3 (v): u8 mut*; let _4 (a): i32[2];",
+        "let _5: i32 mut*;",
+        "bb0: { live(_1); _1 = const i32 1; live(_2); _2 = const zero pair; live(_3);",
+        "_3 = call fn main.peek(); live(_4); _5 = addr mut(_1); return; }",
+    };
+    flow_green(e, NOTHING, plain[..]);
+    // a parameter is no named local
+    string[1] parameter = {"bb0: { del(move _1); _1 = call fn main.grab(); return; }"};
+    flow_green(e, "fn main.take(_1 (p): u8 mut* own) -> void", parameter[..]);
+    // a store of a zero rvalue opens no scope: the entry zeroing, and a store after the `dead`
+    string[3] zero = {
+        "let _1 (p): u8 mut* own; let _2 (h): holder;",
+        "bb0: { _1 = const null u8 mut* own; _2 = const zero holder; live(_1); dead(_1);",
+        "_1 = const zero u8 mut* own; _2.0 = const null u8 mut* own; return; }",
+    };
+    flow_green(e, NOTHING, zero[..]);
+    string[3] literal = {
+        "let _1 (h): holder;",
+        "bb0: { _1 = aggregate holder(const null u8 mut* own, const zero u64);", "return; }",
+    };
+    flow_green(e, NOTHING, literal[..]);
+    // a `trap` leaves no scope
+    string[2] trap = {SCOPED, "bb0: { live(_1); _1 = call fn main.grab(); trap; }"};
+    flow_green(e, NOTHING, trap[..]);
+    string[4] aborts = {
+        "let _2 (p): u8 mut* own;",
+        "bb0: { live(_2); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { trap; }",
+        "bb2: { dead(_2); _0 = const i32 0; return; }",
+    };
+    flow_green(e, F, aborts[..]);
+}
+
+// ---- V15 -------------------------------------------------------------------------------------
+
+// The prelude's `fn t3(pair p) pair`: an aggregate result that owns nothing.
+string T3 = "fn main.t3(_1 (p): pair) -> pair";
+
+fn v15_no_second_store_into_an_aggregate_result() void {
+    env mut* own e = make();
+    defer drop_made(move(e));
+    string[1] twice = {"bb0: { _0 = move _1; _0 = const zero holder; return; }"};
+    flow_red(e, KEEP, twice[..], 15, fir_verify.V15_TWICE, 0, 1);
+    // a store of the zero value is a store
+    string[1] zeros = {"bb0: { _0 = const zero holder; _0 = const zero holder; return; }"};
+    flow_red(e, KEEP, zeros[..], 15, fir_verify.V15_TWICE, 0, 1);
+    // a store into a member is one too, before the whole store or after it
+    string[1] before = {"bb0: { _0.1 = const u64 1; _0 = move _1; return; }"};
+    flow_red(e, KEEP, before[..], 15, fir_verify.V15_TWICE, 0, 1);
+    string[1] after = {"bb0: { _0 = move _1; _0.1 = const u64 1; return; }"};
+    flow_red(e, KEEP, after[..], 15, fir_verify.V15_TWICE, 0, 1);
+    string[1] members = {"bb0: { _0.0 = move _1.0; _0.1 = copy _1.1; return; }"};
+    flow_red(e, KEEP, members[..], 15, fir_verify.V15_TWICE, 0, 1);
+    // a result that owns nothing, and a fixed array
+    string[1] pair = {"bb0: { _0 = copy _1; _0 = copy _1; return; }"};
+    flow_red(e, T3, pair[..], 15, fir_verify.V15_TWICE, 0, 1);
+    // the second store comes on one path only
+    string[4] arm = {
+        "bb0: { _0 = copy _1; switch(const true) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { goto bb3; }",
+        "bb2: { _0.0 = const i32 1; goto bb3; }",
+        "bb3: { return; }",
+    };
+    flow_red(e, T3, arm[..], 15, fir_verify.V15_TWICE, 2, 0);
+    // a loop stores on each turn
+    string[3] loop = {
+        "let _2: bool; bb0: { _2 = const true; goto bb1; }",
+        "bb1: { _0 = copy _1; switch(copy _2) -> [true: bb1, otherwise: bb2]; }",
+        "bb2: { return; }",
+    };
+    flow_red(e, T3, loop[..], 15, fir_verify.V15_TWICE, 1, 0);
+    // one store on each path
+    string[1] once = {"bb0: { _0 = move _1; return; }"};
+    flow_green(e, KEEP, once[..]);
+    string[4] arms = {
+        "let _2: bool; bb0: { _2 = const true; switch(copy _2) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _0 = copy _1; goto bb3; }",
+        "bb2: { _0 = const zero pair; goto bb3; }",
+        "bb3: { return; }",
+    };
+    flow_green(e, T3, arms[..]);
+}
+
+fn v15_each_return_has_a_store_of_the_aggregate_result() void {
+    env mut* own e = make();
+    defer drop_made(move(e));
+    string[1] none = {"bb0: { return; }"};
+    flow_red(e, KEEP, none[..], 15, fir_verify.V15_NONE, 0, 0);
+    flow_red(e, T3, none[..], 15, fir_verify.V15_NONE, 0, 0);
+    // a store into a member is no store of the whole result
+    string[1] member = {"bb0: { _0.1 = const u64 1; return; }"};
+    flow_red(e, KEEP, member[..], 15, fir_verify.V15_NONE, 0, 1);
+    // one arm stores, and the join returns
+    string[4] arm = {
+        "let _2: bool; bb0: { _2 = const true; switch(copy _2) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _0 = copy _1; goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { return; }",
+    };
+    flow_red(e, T3, arm[..], 15, fir_verify.V15_NONE, 3, 0);
+    // a block that no edge reaches comes after no entry, so its `return` passes
+    string[2] alone = {"bb0: { _0 = copy _1; return; }", "bb1: { return; }"};
+    flow_green(e, T3, alone[..]);
+    // a `trap` returns nothing
+    string[3] trap = {
+        "let _2: bool; bb0: { _2 = const true; switch(copy _2) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _0 = copy _1; return; }",
+        "bb2: { trap; }",
+    };
+    flow_green(e, T3, trap[..]);
+}
+
+fn v15_keeps_a_result_of_no_aggregate_type() void {
+    env mut* own e = make();
+    defer drop_made(move(e));
+    string[1] twice = {"bb0: { _0 = const i32 0; _0 = const i32 1; return; }"};
+    flow_green(e, F, twice[..]);
+    string[1] none = {"bb0: { return; }"};
+    flow_green(e, F, none[..]);
+    flow_green(e, NOTHING, none[..]);
+    // an aggregate temporary and an aggregate named local are no result
+    string[3] local = {
+        "let _2: pair; let _3 (q): pair;",
+        "bb0: { _2 = copy _1; _2 = copy _1; _3 = copy _1; _3.0 = const i32 1;",
+        "_0 = copy _3; return; }",
+    };
+    flow_green(e, T3, local[..]);
+}
+
+// ---- V16 -------------------------------------------------------------------------------------
+
+// The prelude's `fn grab() u8 mut* own`: `_0` is a scratch local.
+string GRABS = "fn main.grab() -> u8 mut* own";
+
+fn v16_no_store_over_a_live_scratch_local() void {
+    env mut* own e = make();
+    defer drop_made(move(e));
+    string[3] twice = {OWNED, GRAB, "_1 = call fn main.grab(); del(move _1); return; }"};
+    flow_red(e, NOTHING, twice[..], 16, fir_verify.V16_LIVE, 0, 1);
+    // a store of the zero value over a live local loses the allocation too
+    string[3] zero = {OWNED, GRAB, "_1 = const null u8 mut* own; return; }"};
+    flow_red(e, NOTHING, zero[..], 16, fir_verify.V16_LIVE, 0, 1);
+    // a copy empties nothing
+    string[3] lent = {OWNED, GRAB, "_3 = copy _1; _1 = call fn main.grab(); return; }"};
+    flow_red(e, NOTHING, lent[..], 16, fir_verify.V16_LIVE, 0, 2);
+    // the overwrite check before the store removes no violation: the local is live
+    string[4] checked = {
+        OWNED, GRAB, "check(overwrite: _1) -> bb1; }",
+        "bb1: { _1 = call fn main.grab(); del(move _1); return; }",
+    };
+    flow_red(e, NOTHING, checked[..], 16, fir_verify.V16_LIVE, 1, 0);
+    // a `move` of the local in the rvalue of the store empties it before the store
+    string[3] self = {OWNED, GRAB, "_1 = move _1; del(move _1); return; }"};
+    flow_green(e, NOTHING, self[..]);
+    // `_0` of an `own` reference type is a scratch local
+    string[1] result = {"bb0: { _0 = call fn main.t6(); _0 = call fn main.t6(); return; }"};
+    flow_red(e, GRABS, result[..], 16, fir_verify.V16_LIVE, 0, 1);
+    // a `move`, a `del` and a call that takes the value empty the local
+    string[5] emptied = {
+        OWNED, GRAB, "_2 = move _1; _1 = call fn main.grab(); del(move _1);",
+        "_1 = call fn main.grab(); _4 = call fn main.take(move _1); _1 = move _2;",
+        "del(move _1); return; }",
+    };
+    flow_green(e, NOTHING, emptied[..]);
+    // a store of a zero rvalue into an empty local leaves it empty
+    string[4] nulls = {
+        OWNED, "bb0: { _1 = const null u8 mut* own; _1 = const zero u8 mut* own;",
+        "_1 = call fn main.grab(); del(move _1);", "return; }",
+    };
+    flow_green(e, NOTHING, nulls[..]);
+}
+
+fn v16_follows_the_values_of_every_path() void {
+    env mut* own e = make();
+    defer drop_made(move(e));
+    string lets = "let _2: u8 mut* own; let _3: void;";
+    // a loop stores on each turn and empties nothing
+    string[4] loop = {
+        lets, "bb0: { goto bb1; }",
+        "bb1: { _2 = call fn main.grab(); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb2: { del(move _2); _0 = const i32 0; return; }",
+    };
+    flow_red(e, F, loop[..], 16, fir_verify.V16_LIVE, 1, 0);
+    // one arm empties the local, and the join stores
+    string[5] arm = {
+        lets, "bb0: { _2 = call fn main.grab(); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { del(move _2); goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _2 = call fn main.grab(); del(move _2); _0 = const i32 0; return; }",
+    };
+    flow_red(e, F, arm[..], 16, fir_verify.V16_LIVE, 3, 0);
+    // a path can start in a block that nothing names
+    string[4] alone = {
+        lets, "bb0: { _0 = const i32 0; return; }", "bb1: { _2 = call fn main.grab(); goto bb2; }",
+        "bb2: { _2 = call fn main.grab(); del(move _2); _0 = const i32 0; return; }",
+    };
+    flow_red(e, F, alone[..], 16, fir_verify.V16_LIVE, 2, 0);
+    // each arm empties the local, and each turn of the loop does
+    string[5] arms = {
+        lets, "bb0: { _2 = call fn main.grab(); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { del(move _2); goto bb3; }",
+        "bb2: { _3 = call fn main.take(move _2); goto bb3; }",
+        "bb3: { _2 = call fn main.grab(); del(move _2); _0 = const i32 0; return; }",
+    };
+    flow_green(e, F, arms[..]);
+    string[5] turns = {
+        lets, "bb0: { goto bb1; }",
+        "bb1: { _2 = call fn main.grab(); del(move _2);",
+        "switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb2: { _0 = const i32 0; return; }",
+    };
+    flow_green(e, F, turns[..]);
+}
+
+fn v16_no_return_with_a_live_scratch_temporary() void {
+    env mut* own e = make();
+    defer drop_made(move(e));
+    string[3] kept = {OWNED, GRAB, "return; }"};
+    flow_red(e, NOTHING, kept[..], 16, fir_verify.V16_RETURN, 0, 1);
+    string[3] lent = {OWNED, GRAB, "_3 = copy _1; return; }"};
+    flow_red(e, NOTHING, lent[..], 16, fir_verify.V16_RETURN, 0, 2);
+    // one arm empties the temporary, and the join returns
+    string[5] arm = {
+        "let _2: u8 mut* own;",
+        "bb0: { _2 = call fn main.grab(); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { del(move _2); goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    flow_red(e, F, arm[..], 16, fir_verify.V16_RETURN, 3, 1);
+    // an `own` span and a `string own` are scratch temporaries too
+    string[2] span = {
+        "let _1: string own; let _2: string own;",
+        "bb0: { _1 = const zero string own; _2 = move _1; return; }",
+    };
+    flow_red(e, NOTHING, span[..], 16, fir_verify.V16_RETURN, 0, 2);
+    // `_0` passes its value to the caller
+    string[2] result = {
+        "let _1: u8 mut* own;", "bb0: { _1 = call fn main.t6(); _0 = move _1; return; }",
+    };
+    flow_green(e, GRABS, result[..]);
+    // a `trap` returns nothing
+    string[3] trap = {OWNED, GRAB, "trap; }"};
+    flow_green(e, NOTHING, trap[..]);
+    // a temporary that holds the zero value is not live
+    string[2] null_only = {OWNED, "bb0: { _1 = const null u8 mut* own; return; }"};
+    flow_green(e, NOTHING, null_only[..]);
+}
+
+fn v16_keeps_what_is_no_scratch_local() void {
+    env mut* own e = make();
+    defer drop_made(move(e));
+    // a temporary whose address a statement takes is a memory local, and owner.prover proves
+    // each store into it
+    string[3] memory = {
+        "let _1: u8 mut* own; let _2: u8 mut* own mut*;",
+        "bb0: { _1 = call fn main.grab(); _1 = call fn main.grab(); _2 = addr mut(_1);",
+        "return; }",
+    };
+    flow_green(e, NOTHING, memory[..]);
+    // a temporary of a type that is no `own` reference: a lent pointer and an owning struct
+    string[3] plain = {
+        "let _1: u8 mut*; let _2: holder; let _3: i32;",
+        "bb0: { _1 = call fn main.peek(); _1 = call fn main.peek(); _2 = const zero holder;",
+        "_2.0 = call fn main.grab(); _2.0 = call fn main.grab(); _3 = const i32 0; return; }",
+    };
+    flow_green(e, NOTHING, plain[..]);
+    // a store through the pointer writes no scratch local
+    string[3] through = {
+        "let _1: u8 mut* own; let _2: u8;",
+        "bb0: { _1 = call fn main.grab(); _2 = const u8 1; (*_1) = copy _2; (*_1) = copy _2;",
+        "del(move _1); return; }",
+    };
+    flow_green(e, NOTHING, through[..]);
+    // a parameter and a named local: V16 names none of them
+    string[3] named = {
+        "let _2 (q): u8 mut* own;",
+        "bb0: { live(_2); _2 = call fn main.grab(); _2 = call fn main.grab();",
+        "_1 = call fn main.grab(); dead(_2); return; }",
+    };
+    flow_green(e, "fn main.take(_1 (p): u8 mut* own) -> void", named[..]);
+}
+
+// ---- the order of V14, V15 and V16 -----------------------------------------------------------
+
+fn the_premise_rules_report_in_number_order() void {
+    env mut* own e = make();
+    defer drop_made(move(e));
+    // V16 in bb0 and V14 in bb1: the lower rule wins over the earlier block
+    string[4] scope = {
+        "let _1: u8 mut* own; let _2 (p): u8 mut* own;",
+        "bb0: { _1 = call fn main.grab(); _1 = call fn main.grab(); del(move _1); goto bb1; }",
+        "bb1: { live(_2); return; }",
+        "bb1: { live(_2); dead(_2); return; }",
+    };
+    flow_red(e, NOTHING, scope[..3], 14, fir_verify.V14_OPEN, 1, 1);
+    string[3] store = {scope[0], scope[1], scope[3]};
+    flow_red(e, NOTHING, store[..], 16, fir_verify.V16_LIVE, 0, 1);
+    // V16 at statement 1 and V15 at statement 3 of one block
+    string[3] result = {
+        "let _2: u8 mut* own;",
+        "bb0: { _2 = call fn main.grab(); _2 = call fn main.grab(); _0 = copy _1;",
+        "_0 = copy _1; del(move _2); return; }",
+    };
+    flow_red(e, T3, result[..], 15, fir_verify.V15_TWICE, 0, 3);
+    // the three clauses of one `return`: V14, then V15, then V16
+    string[2] all = {
+        "let _2: u8 mut* own; let _3 (q): u8 mut* own;",
+        "bb0: { _2 = call fn main.grab(); live(_3); return; }",
+    };
+    flow_red(e, T3, all[..], 14, fir_verify.V14_OPEN, 0, 2);
+    string[2] two = {"let _2: u8 mut* own;", "bb0: { _2 = call fn main.grab(); return; }"};
+    flow_red(e, T3, two[..], 15, fir_verify.V15_NONE, 0, 1);
+    // the first violation of one rule stays: the one of the first block, and in it of the first
+    // statement
+    string[3] first = {
+        "let _1: u8 mut* own;",
+        "bb0: { _1 = call fn main.grab(); _1 = call fn main.grab(); _1 = call fn main.grab();",
+        "goto bb1; } bb1: { _1 = call fn main.grab(); del(move _1); return; }",
+    };
+    flow_red(e, NOTHING, first[..], 16, fir_verify.V16_LIVE, 0, 1);
+    // a rule before V14 wins: V12 reads `_1` after its move, and V13 reads `_3` unassigned
+    string[3] moved = {
+        "let _1: u8 mut* own; let _2 (p): u8 mut* own; let _3: u8 mut*;",
+        "bb0: { live(_2); return; }",
+        "bb1: { _1 = call fn main.grab(); del(move _1); _3 = copy _1; return; }",
+    };
+    flow_red(e, NOTHING, moved[..], 12, fir_verify.V12_MOVED, 1, 2);
+    string[3] unassigned = {
+        "let _1: u8 mut* own; let _2 (p): u8 mut* own; let _3: u8 mut* own;",
+        "bb0: { live(_2); _1 = call fn main.grab(); _1 = call fn main.grab(); del(move _1);",
+        "_1 = move _3; return; }",
+    };
+    flow_red(e, NOTHING, unassigned[..], 13, fir_verify.V13_UNASSIGNED, 0, 4);
+}
+
 // ---- the flow rules on larger graphs ---------------------------------------------------------
 
 fn flow_rules_follow_an_irreducible_loop() void {
@@ -2490,6 +3023,31 @@ fn flow_rules_follow_an_irreducible_loop() void {
         "bb3: { _0 = const i32 0; return; }",
     };
     flow_red(e, F, moved[..], 12, fir_verify.V12_MOVED, 1, 0);
+    // V16: bb1 stores into `_2`, and the back edge from bb2 carries the value to that store
+    string[5] stored = {
+        "let _2: u8 mut* own;",
+        "bb0: { _2 = const null u8 mut* own; switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _2 = call fn main.grab(); goto bb2; }",
+        "bb2: { switch(copy _1) -> [true: bb1, otherwise: bb3]; }",
+        "bb3: { del(move _2); _0 = const i32 0; return; }",
+    };
+    flow_red(e, F, stored[..], 16, fir_verify.V16_LIVE, 1, 0);
+    // bb2 empties `_2` on each turn
+    string[5] emptied = {
+        stored[0], stored[1], stored[2],
+        "bb2: { del(move _2); switch(copy _1) -> [true: bb1, otherwise: bb3]; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    flow_green(e, F, emptied[..]);
+    // V14: bb1 opens the scope of `_2`, and only the edge from bb1 to bb2 passes a `dead`
+    string[5] scoped = {
+        "let _2 (p): u8 mut* own;",
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { live(_2); switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb2: { dead(_2); switch(copy _1) -> [true: bb1, otherwise: bb3]; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    flow_red(e, F, scoped[..], 14, fir_verify.V14_OPEN, 3, 1);
 }
 
 fn flow_rules_follow_nested_loops() void {
@@ -2539,6 +3097,35 @@ fn flow_rules_follow_nested_loops() void {
         "bb4: { del(move _2); _0 = const i32 0; return; }",
     };
     flow_red(e, F, twice[..], 12, fir_verify.V12_MOVED, 3, 0);
+    // V14: the inner body bb3 opens the scope of `_2`, and the outer latch bb4 ends it, so each
+    // path to the `return` of bb5 passes the `dead`
+    string[7] scoped = {
+        "let _2 (p): u8 mut* own;",
+        "bb0: { goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb5]; }",
+        "bb2: { switch(copy _1) -> [true: bb3, otherwise: bb4]; }",
+        "bb3: { live(_2); goto bb2; }",
+        "bb4: { dead(_2); goto bb1; }",
+        "bb5: { _0 = const i32 0; return; }",
+    };
+    flow_green(e, F, scoped[..]);
+    // the inner body goes to the outer head and skips the latch
+    string[7] skipped = {
+        scoped[0], scoped[1], scoped[2], scoped[3], "bb3: { live(_2); goto bb1; }", scoped[5],
+        scoped[6],
+    };
+    flow_red(e, F, skipped[..], 14, fir_verify.V14_OPEN, 5, 1);
+    // V15: the inner body stores the aggregate `_0` on each turn
+    string[7] stores = {
+        "let _2: bool;",
+        "bb0: { _2 = const true; goto bb1; }",
+        "bb1: { switch(copy _2) -> [true: bb2, otherwise: bb5]; }",
+        "bb2: { switch(copy _2) -> [true: bb3, otherwise: bb4]; }",
+        "bb3: { _0 = copy _1; goto bb2; }",
+        "bb4: { goto bb1; }",
+        "bb5: { return; }",
+    };
+    flow_red(e, T3, stores[..], 15, fir_verify.V15_TWICE, 3, 0);
 }
 
 fn flow_rules_scale_to_a_long_chain() void {
@@ -2559,6 +3146,63 @@ fn flow_rules_scale_to_a_long_chain() void {
     strbuf.append(&b, "bb999: { unreachable; }");
     string[1] chain = {strbuf.view(&b)};
     flow_red(e, F, chain[..], 9, fir_verify.V9_REACHED, 999, 0);
+}
+
+// Writes into `b` a function body of 1000 blocks: bb0 holds `first`, bb0 to bb998 each go to the
+// next block, and bb999 holds `last`.
+fn write_chain(strbuf.str_buf mut* b, string lets, string first, string last) void {
+    strbuf.clear(b);
+    strbuf.append(b, lets);
+    strbuf.append(b, "\nbb0: { ");
+    strbuf.append(b, first);
+    strbuf.append(b, " goto bb1; }\n");
+    u32 mut k = 1;
+    while (k < 999) {
+        strbuf.append(b, "bb");
+        strbuf.append_u64(b, cast(k, u64));
+        strbuf.append(b, ": { goto bb");
+        strbuf.append_u64(b, cast(k + 1, u64));
+        strbuf.append(b, "; }\n");
+        k += 1;
+    }
+    strbuf.append(b, "bb999: { ");
+    strbuf.append(b, last);
+    strbuf.append(b, " }");
+}
+
+fn premise_rules_scale_to_a_long_chain() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    // V14: bb0 opens a scope, and the `return` of bb999 stands in it
+    string scoped = "let _2 (p): u8 mut* own;";
+    write_chain(&b, scoped, "live(_2);", "_0 = const i32 0; return;");
+    string[1] open = {strbuf.view(&b)};
+    flow_red(e, F, open[..], 14, fir_verify.V14_OPEN, 999, 1);
+    write_chain(&b, scoped, "live(_2);", "dead(_2); _0 = const i32 0; return;");
+    string[1] closed = {strbuf.view(&b)};
+    flow_green(e, F, closed[..]);
+    // V15: bb0 stores the aggregate `_0`, and bb999 stores it again
+    write_chain(&b, "", "_0 = copy _1;", "_0 = copy _1; return;");
+    string[1] twice = {strbuf.view(&b)};
+    flow_red(e, T3, twice[..], 15, fir_verify.V15_TWICE, 999, 0);
+    write_chain(&b, "", "", "return;");
+    string[1] none = {strbuf.view(&b)};
+    flow_red(e, T3, none[..], 15, fir_verify.V15_NONE, 999, 0);
+    // V16: bb0 fills a scratch temporary, and bb999 stores over it or returns with it
+    string owned = "let _2: u8 mut* own;";
+    string grab = "_2 = call fn main.grab();";
+    string last = "_2 = call fn main.grab(); del(move _2); _0 = const i32 0; return;";
+    write_chain(&b, owned, grab, last);
+    string[1] over = {strbuf.view(&b)};
+    flow_red(e, F, over[..], 16, fir_verify.V16_LIVE, 999, 0);
+    write_chain(&b, owned, grab, "_0 = const i32 0; return;");
+    string[1] kept = {strbuf.view(&b)};
+    flow_red(e, F, kept[..], 16, fir_verify.V16_RETURN, 999, 1);
+    write_chain(&b, owned, grab, "del(move _2); _0 = const i32 0; return;");
+    string[1] freed = {strbuf.view(&b)};
+    flow_green(e, F, freed[..]);
 }
 
 // ---- the report ------------------------------------------------------------------------------
@@ -2621,6 +3265,28 @@ fn verify_report_writes_the_first_violation() void {
     expect_report(e, NOTHING, first[..],
                   "fir.verify: V13 a read of a temporary before an assignment of it: ",
                   "main.nothing bb0 statement 0 (s7)");
+    string[2] scope = {
+        "let _1 (p): u8 mut* own;", "bb0: { live(_1) #2:5 s4; return #3:5 s6; }",
+    };
+    expect_report(e, NOTHING, scope[..],
+                  "fir.verify: V14 a return in the scope of a named owner local: ",
+                  "main.nothing bb0 statement 1 (s6)");
+    string[1] twice = {"bb0: { _0 = move _1 #2:5 s1; _0.1 = const u64 1 #3:5 s2; return; }"};
+    expect_report(e, KEEP, twice[..], "fir.verify: V15 a second store into an aggregate result: ",
+                  "main.keep bb0 statement 1 (s2)");
+    string[1] none = {"bb0: { return #2:5 s9; }"};
+    expect_report(e, KEEP, none[..],
+                  "fir.verify: V15 a return with no store of the aggregate result: ",
+                  "main.keep bb0 statement 0 (s9)");
+    string[3] over = {
+        OWNED, "bb0: { _1 = call fn main.grab() #1:1 s1; _1 = call fn main.grab() #2:1 s2;",
+        "del(move _1) #3:1 s3; return; }",
+    };
+    expect_report(e, NOTHING, over[..], "fir.verify: V16 a store over a live scratch local: ",
+                  "main.nothing bb0 statement 1 (s2)");
+    string[2] kept = {OWNED, "bb0: { _1 = call fn main.grab() #1:1 s1; return #2:1 s8; }"};
+    expect_report(e, NOTHING, kept[..], "fir.verify: V16 a return with a live scratch temporary: ",
+                  "main.nothing bb0 statement 1 (s8)");
     // a local rule in a later block comes before a flow rule in an earlier block
     string[3] local = {
         "let _1: i32; let _2: i64;", "bb0: { unreachable; }", "bb1: { _1 = copy _2; return; }",
@@ -2717,9 +3383,26 @@ fn main() i32 {
     v13_keeps_the_temporaries_of_the_lowering();
     v13_keeps_what_the_rule_does_not_name();
     println("V13 ok");
+    v14_no_return_in_the_scope_of_a_named_owner_local();
+    v14_reads_each_named_local_that_can_hold_an_allocation();
+    v14_an_address_opens_the_scope();
+    v14_follows_the_scopes_of_every_path();
+    v14_keeps_what_the_rule_does_not_name();
+    println("V14 ok");
+    v15_no_second_store_into_an_aggregate_result();
+    v15_each_return_has_a_store_of_the_aggregate_result();
+    v15_keeps_a_result_of_no_aggregate_type();
+    println("V15 ok");
+    v16_no_store_over_a_live_scratch_local();
+    v16_follows_the_values_of_every_path();
+    v16_no_return_with_a_live_scratch_temporary();
+    v16_keeps_what_is_no_scratch_local();
+    the_premise_rules_report_in_number_order();
+    println("V16 ok");
     flow_rules_follow_an_irreducible_loop();
     flow_rules_follow_nested_loops();
     flow_rules_scale_to_a_long_chain();
+    premise_rules_scale_to_a_long_chain();
     println("graphs ok");
     verify_report_writes_the_first_violation();
     println("report ok");

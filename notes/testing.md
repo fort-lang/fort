@@ -675,6 +675,20 @@ bullet at a time and without a rewrite.
   `green` and `green_func` accept a flow violation, and `flow_green` accepts none. A green `.fir`
   file keeps every rule, because the pass `verify` runs them all. `//! panic:` matches a
   substring, so a red file whose text passes 100 columns drops the prefix `fir.verify: ` (T-233).
+  **The premise rules V14, V15 and V16 run last, and a hand-written text of an ownership suite
+  may break them.** `flow_green` and a green `.fir` file keep them, and so do the FIR corpus, the
+  pass suites and the interpreter suite. The subject of many cases of the ownership suites is a
+  state that the lowering never writes: a `return` with a live owner, a second store into `_0`.
+  `pass_env.verified_but_premises` and `run_env.parse_but_premises_made` hold V1 to V13 for such
+  a text and accept a violation of V14, V15 or V16; `parse_batch` of `owner/oracle_test.ft` does
+  the same. Use the strict helpers `verified` and `parse_made` for each new text whose subject is
+  no such state. Measured on 2026-11-11, the functions that break a premise rule: 87 in
+  `fir/shadow_test.ft`, 44 in `owner/alias_test.ft`, 41 in `owner/oracle_test.ft`, 1 in
+  `owner/prover_aggregate_test.ft`, 106 in `owner/prover_test.ft` and 40 in
+  `owner/prover_use_test.ft`. `test/fort/fir_lower_premise_test.ft` holds the rules on functions
+  that the lowering writes: it removes or repeats one statement at a time and holds the rule
+  that the verifier reports, so a case fails when the lowering changes the count of its `dead`
+  statements. `tools/mutations/verify_fort.json` holds the mutants of the three rules.
   **The pass `run` writes a report in place of the module** (`test/fir/run/`, `spec/fir.md`
   16.3): what the run wrote to the descriptors 1 and 2, then one line for its end. The tests run
   with the real `--std-dir`, so a failed check writes the message of `std.rt`. `run_tests.py

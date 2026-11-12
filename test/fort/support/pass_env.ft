@@ -84,12 +84,28 @@ fn parse(lower_env.env mut* e, string@ prelude, string@ text) fir.module {
 fn verified(lower_env.env mut* e, fir.func* f, string what) void {
     fir_verify.violation mut v = fir_verify.violation{};
     if (fir_verify.find_violation(f, &e->rt, &v)) {
-        strbuf.clear(&e->text);
-        fir_print.print_function(f, &e->text);
-        fir_verify.violation_text(f, &v, &e->text);
-        eprintln(strbuf.view(&e->text));
-        panic(what);
+        refuse(e, f, &v, what);
     }
+}
+
+/// Holds that `f` keeps each rule of the verifier before the premise rules V14 to V16 (spec/fir.md
+/// 10). It is for a text that a test of an ownership pass writes by hand: the test holds what the
+/// pass says of a function that breaks a premise of the lowering, which the lowering does not
+/// write. The premise rules run last, so a violation of one says that `f` keeps each other rule.
+fn verified_but_premises(lower_env.env mut* e, fir.func* f, string what) void {
+    fir_verify.violation mut v = fir_verify.violation{};
+    if (fir_verify.find_violation(f, &e->rt, &v) && v.rule < fir_verify.RULE_V14) {
+        refuse(e, f, &v, what);
+    }
+}
+
+// Prints `f` and its violation `v`, and stops the test with `what`.
+fn refuse(lower_env.env mut* e, fir.func* f, fir_verify.violation* v, string what) void {
+    strbuf.clear(&e->text);
+    fir_print.print_function(f, &e->text);
+    fir_verify.violation_text(f, v, &e->text);
+    eprintln(strbuf.view(&e->text));
+    panic(what);
 }
 
 /// Runs the emptiness pass on `f` for its proof, which reports nothing, and then the build-mode

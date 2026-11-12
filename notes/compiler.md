@@ -739,6 +739,18 @@ came here.
   `p` in `check(overwrite: p)` is the one read with `is_use` false (`spec/fir.md` 14), so an
   ownership analysis such as T-182 skips it, and V12 and V13 test every read. The pointers that
   the address of `p` loads come before it as uses (T-259): skip the test and not those loads.
+- **The verifier holds the three premises that owner.prover takes from the lowering**
+  (`spec/fir.md` 10, rules V14 to V16). `has_return_obligation` gives a `return` no obligation
+  for a named owner local, because the lowering writes its `dead` first: V14 refuses a `return`
+  in the scope of such a local. `needs_proof` asks no proof for a store into an aggregate `_0`
+  that no check guards: V15 refuses a second store on a path and a `return` with no whole store.
+  `judge` and `pass_exits` accept a store and an exit of a scratch local past the work limit:
+  V16 refuses a store over a live scratch local and a `return` with a live scratch temporary.
+  `gen_fir.check_proved` runs `fir_verify.verify` before `prover.prove_made`, so the pass reads
+  no function that breaks a premise. The three rules share one union dataflow of `count + 1`
+  bits over `fir.func_predecessors` (`fir_verify.v14_premises`). Each rule is stricter than its
+  premise: a `live` opens the scope of V14, and a zero store over a live scratch local breaks V16.
+  A change of one of the four prover functions needs a new reading of the matching rule.
 - **The FIR lowering takes each type from the checker and derives none** (T-236):
   `fir_lower.lower_function` gives a temporary the type that the checker gave its node. So a `?:`
   whose arms lend takes the lent type and a copy fills it, and an owning `?:` or `cast` is read by

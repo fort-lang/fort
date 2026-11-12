@@ -320,11 +320,30 @@ fn parse_unverified_made(env mut* e, string@ text) fir.module mut* own {
 /// rule of the verifier.
 fn parse_made(env mut* e, string@ text) fir.module mut* own {
     fir.module mut* own m = parse_unverified_made(e, text);
+    hold_rules(e, m, true);
+    return m;
+}
+
+/// Parses `text` as parse_unverified_made does, and holds that each of its functions keeps each
+/// rule of the verifier before the premise rules V14 to V16 (spec/fir.md 10). It is for a text
+/// that a test of the shadow memory writes by hand: the test holds the event of a function that
+/// breaks a premise of the lowering, which the lowering does not write. The premise rules run
+/// last, so a violation of one says that the function keeps each other rule.
+fn parse_but_premises_made(env mut* e, string@ text) fir.module mut* own {
+    fir.module mut* own m = parse_unverified_made(e, text);
+    hold_rules(e, m, false);
+    return m;
+}
+
+// Holds that no function of `m` breaks a rule of the verifier: each rule with `premises`, and else
+// each rule before the premise rules V14 to V16.
+fn hold_rules(env mut* e, fir.module* m, bool premises) void {
     fir_verify.runtime rt = fir_verify.runtime_of(&e->c.ck);
     u64 mut i = 0;
     while (i < m->funcs.len) {
         fir_verify.violation mut v = fir_verify.violation{};
-        if (fir_verify.find_violation(&m->funcs.items[i], &rt, &v)) {
+        if (fir_verify.find_violation(&m->funcs.items[i], &rt, &v)
+            && (premises || v.rule < fir_verify.RULE_V14)) {
             strbuf.clear(&e->text);
             fir_verify.violation_text(&m->funcs.items[i], &v, &e->text);
             eprintln(strbuf.view(&e->text));
@@ -332,7 +351,6 @@ fn parse_made(env mut* e, string@ text) fir.module mut* own {
         }
         i += 1;
     }
-    return m;
 }
 
 // Whether `name` is the bare name or the dotted name of `s`. `b` holds the dotted name.

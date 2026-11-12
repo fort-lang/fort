@@ -815,6 +815,25 @@ statement index.
   the empty set and every other block with the set of all temporaries, so a block that no edge
   reaches, such as the block after a terminator (D14.2), passes. V13 follows every edge, the edge
   that V9 prunes on a constant `switch` included.
+- **V14**: no `return` stands in the open scope of a named owner local, on any path. A named
+  owner local is a named local whose type is an `own` reference or an owning aggregate (D17.7).
+  Three items open the scope of `_n`: `live(_n)`; an assignment whose place designates fixed
+  storage of `_n` and whose rvalue is no zero rvalue; and an `addr`, or a `slice` of a fixed
+  array, whose place designates fixed storage of `_n`. Only `dead(_n)` closes the scope. A zero
+  rvalue is a `use` or an `aggregate` whose operands are all `zero T` or `null T`.
+- **V15**: no assignment into fixed storage of an aggregate `_0` comes after another one, on any
+  path. An assignment into a member of `_0` is such an assignment. Each path from `bb0` to a
+  `return` holds an assignment of the whole `_0`. The rule reads `_0` of each aggregate type
+  (5.3), whether the type owns or not.
+- **V16**: no assignment writes a whole scratch local while the local is live, on any path, and
+  no `return` comes while a scratch temporary is live. A scratch local is a temporary, or a `_0`
+  of no aggregate type, whose type is an `own` reference and whose storage no `addr` and no
+  `slice` of a fixed array names (section 11, **Scratch**). An assignment into the local makes
+  it live, but an assignment of a zero rvalue into an empty local leaves it empty. A `move`
+  operand whose place is the whole local leaves it empty, the operand of a `del` included. The
+  verifier tests an assignment after the `move` operands of its own statement. A
+  `check(overwrite: p)` right before the assignment changes nothing. A `_0` passes its value to
+  the caller, so the second clause names temporaries only.
 V9 closes the termination gap of section 1. The direct path wrote `unreachable` at the end of a
 body because `check_terminates` said that the body terminates, and the translator writes the
 `unreachable` that the lowering puts there for the same reason. With V9, a disagreement is an
@@ -825,6 +844,27 @@ because `while (true)` lowers to `switch(const true)`, and D8.4 counts that loop
 in a terminating statement, and that no `break` targets. T-210 added the last condition: before
 it, a `break` inside such a clause left the `switch`, the body fell off its end, and V9 reported
 it. The implementation must measure V9 over the corpus before it trusts the rule (section 16).
+
+V14, V15 and V16 are the premise rules. The emptiness pass (section 11) takes three premises from
+the lowering, and each rule holds one of them on FIR text that no lowering made:
+
+- V14 holds the premise of 9.5: the lowering writes the `dead` of each named local of each scope
+  that a `return` leaves. Past the leak work limit, the pass gives a named local no exit at a
+  `return` (section 11, the leak rule).
+- V15 holds the premise of 9.6: the lowering stores into an aggregate `_0` once on each path to
+  `return`. The pass gives such a store no proof (section 11, **Proof**).
+- V16 holds the premise of D17.8: the lowering writes no store over a live scratch local and no
+  `return` while a scratch temporary holds an allocation. Past its work limits, the pass counts
+  each store into a whole scratch local and each exit of a scratch local as proved.
+
+The scope of V14 is open wherever the pass could not prove that the local holds no allocation, and
+after each `live` too. The verifier tests the three rules last, with one forward dataflow over the
+blocks: one bit for each named owner local, each scratch local and the aggregate `_0`, and one bit
+that says that no assignment of the whole `_0` came yet. The join is the union, and each block
+starts with the empty set. `bb0` starts with the last bit set for an aggregate `_0`. So a block
+that no edge reaches passes the second clause of V15. The dataflow follows every edge, the edge
+that V9 prunes on a constant `switch` included. The three rules report in number order, as each
+other rule does. A violation of one of them says that the function keeps V1 to V13.
 
 V7 closes the gap of T-072. The lowering takes the fort type of a runtime entry from the
 declaration in `std/rt.ft` that the checker checked. The declaration and each call then have one
