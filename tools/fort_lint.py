@@ -8,15 +8,18 @@ The rows of D9.8: each `extern fn` of a trusted module has a declaration row, th
 each function of a trusted module count each call of an `extern fn`, of a boundary function and
 through a function value, and a name of a boundary function goes only to C (row_problems).
 A call row that cites `the gives: of <callee>` or `the writes: of <callee>` names a callee that
-the body calls, whose row holds a line with that word (citation_problems). A function that is no
-boundary function gives no `mut` global whose type reaches a byte pointer to a call of C
-(mut_global_to_c).
+the body calls, a fort function of a trusted module whose row holds a line with that word
+(citation_problems). A function that is no boundary function gives no `mut` global whose type
+reaches a byte pointer to a call of C (mut_global_to_c).
 
 The lint does not read the sources of a row. It does not check a bound, a length or a NUL: a row
 that claims the bound of the whole array for `&g[0][1][0]` of a `char@[1][2] g` passes, and a
-reviewer reads it against rule 2. It sees a `mut` global only by its name in the arguments of
-the call: a value that a local copies from a `mut` global first, and a length or a NUL of a `mut`
-global of another type, go past it.
+reviewer reads it against rule 2. It sees a `mut` global only by its name between the brackets
+of the call, at each depth: as an argument, and inside a cast, a nested call, an index, or a
+struct or array literal there. It does not see a value that a local copies from a `mut` global
+first, a value that another function takes from a `mut` global and returns or stores, as
+`strlen(get())` for `fn get() char* { return name; }`, or a length or a NUL of a `mut` global
+whose type reaches no byte pointer.
 
 A boundary function is found by the types of its parameters in the source, with the structs that
 the index records resolve, so the answer is the checker's own for each struct and each name
@@ -1299,11 +1302,13 @@ CITATION = re.compile(r"\b(?i:the) (gives|writes): of "
                       r"([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)")
 
 
-def citation_problems(rows, source, record, called):
+def citation_problems(rows, source, record, called, externs):
     """The problems of the citations in the call rows of one function of a trusted module: each
     cited callee is called in the body (`called` maps the callee as the body spells it to the key
-    of its declaration), and the row of that function, its `//` lines directly above it, holds a
-    line that starts with the cited word (D9.8 rule 3)."""
+    of its declaration), it is a fort function of a trusted module, and the row of that function,
+    its `//` lines directly above it, holds a line that starts with the cited word (D9.8 rule 3).
+    `externs` holds each `extern fn` that the body calls, as the body spells it: the citation
+    form names no extern, and the message says so."""
     at = source.offset(record["line"], record["col"])
     start = keyword_before(source.code, at, "fn")
     run = comment_run(source, source.line_of(start if start >= 0 else at))
@@ -1317,10 +1322,20 @@ def citation_problems(rows, source, record, called):
     for found in CITATION.finditer(joined):
         line = [number for offset, number in starts if offset <= found.start()][-1]
         word, callee = found.group(1) + ":", found.group(2)
+        if callee in externs:
+            problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', which is an "
+                             "`extern fn`: a citation names a fort function of a trusted module "
+                             "(rule 3) (%s)" % (record["name"], word, callee, ROWS)))
+            continue
         key = called.get(callee)
         if key is None:
             problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', which its "
                              "body does not call (%s)" % (record["name"], word, callee, ROWS)))
+            continue
+        if not rows.trusted(key[0]):
+            problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', a function "
+                             "of a module that is not trusted: no audit holds its row (rule 3) "
+                             "(%s)" % (record["name"], word, callee, ROWS)))
             continue
         if not cited_word_stands(rows, key, word):
             problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', and the row "
@@ -1344,7 +1359,10 @@ def cited_word_stands(rows, key, word):
 
 def enclosing_opens(code, start, stop):
     """The offsets of the `(` of each call whose argument list holds the offset `start`, inner
-    first, up to the statement and not before `stop`."""
+    first, up to the statement and not before `stop`. An open `[` of an index and an open `{` of
+    a struct or array literal do not end the search: the offset is still inside the call that
+    holds them. The `{` of a block does not end it either, and each `(` before a block is closed,
+    so a block adds no call."""
     opens = []
     depth = 0
     i = start - 1
@@ -1357,8 +1375,6 @@ def enclosing_opens(code, start, stop):
                 depth -= 1
             elif c == "(":
                 opens.append(i)
-            else:
-                break
         elif c == ";" and depth == 0:
             break
         i -= 1
@@ -1367,7 +1383,8 @@ def enclosing_opens(code, start, stop):
 
 def mut_global_to_c(rows, path, source, use, stop):
     """Whether the use record `use` of a global names a `mut` global whose type reaches a byte
-    pointer, inside the arguments of a call of an `extern fn` or of a boundary function."""
+    pointer, between the brackets of a call of an `extern fn` or of a boundary function, at each
+    depth."""
     # The index names a `mut` global `global` and a module constant `constant`, so each record of
     # kind `global` is a `mut` global.
     key = rows.decl_key(use)
@@ -1414,6 +1431,7 @@ def row_problems(rows, path, records):
     uses = []
     globals_used = []
     fn_calls = []
+    extern_calls = []
     for record in records:
         if record.get("is_decl"):
             if rows.decl_key(record) != (path, record["line"], record["col"]):
@@ -1432,6 +1450,9 @@ def row_problems(rows, path, records):
             globals_used.append(record)
         if record["kind"] == "extern fn":
             uses.append((record, False))
+            start = source.offset(record["line"], record["col"])
+            if next_char(source.code, start + len(record["name"]))[0] == "(":
+                extern_calls.append((start, spelled_callee(source.code, start)[1]))
         elif record["kind"] == "fn":
             key = rows.decl_key(record)
             start = source.offset(record["line"], record["col"])
@@ -1464,7 +1485,8 @@ def row_problems(rows, path, records):
                 values.add(callee)
         problems.extend(function_row_problems(rows, path, source, record, calls, values))
         called = {callee: key for at, callee, key in fn_calls if body_open < at < body_close}
-        problems.extend(citation_problems(rows, source, record, called))
+        externs = {callee for at, callee in extern_calls if body_open < at < body_close}
+        problems.extend(citation_problems(rows, source, record, called, externs))
         if not rows.is_boundary((path, record["line"], record["col"])):
             for use in globals_used:
                 at = source.offset(use["line"], use["col"])

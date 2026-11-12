@@ -459,6 +459,68 @@ class Rules(unittest.TestCase):
                    [("user.ft", cite, "cites the gives: of 'maker.other', which its body does not "
                      "call")])
 
+    def test_a_citation_names_a_callee_that_its_own_body_calls(self):
+        # The body of the function that holds the citing row calls the callee: a call in another
+        # function of the same file is no call of that body.
+        maker = ("import extern;\n\n/// Gives a value.\n// gives: 4 zero bytes, never null.\n"
+                 "fn make() u64 {\n    return 4;\n}\n")
+        user = ("import extern;\nimport maker;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                "// C call labs: the gives: of maker.make states 4 bytes.\n"
+                "fn use() i64 {\n    return labs(4) + other();\n}\n\n"
+                "fn other() i64 {\n    return cast(maker.make(), i64);\n}\n")
+        cite = lines_of(user, "// C call labs")[0]
+        self.check({"maker.ft": maker, "user.ft": user},
+                   [("user.ft", cite, "cites the gives: of 'maker.make', which its body does not "
+                     "call")])
+        # The same call before the function, and not after it.
+        before = user.replace("fn other() i64 {\n    return cast(maker.make(), i64);\n}\n", "")
+        before = before.replace("// C call labs:", "fn other() i64 {\n    return cast(maker.make("
+                                "), i64);\n}\n\n// C call labs:")
+        self.check({"maker.ft": maker, "user.ft": before},
+                   [("user.ft", lines_of(before, "// C call labs")[0],
+                     "cites the gives: of 'maker.make', which its body does not call")])
+
+    def test_a_citation_of_an_extern_is_reported_as_one(self):
+        # The citation form of rule 3 names a fort function. The body calls the extern, so the
+        # message does not say that the body does not call it.
+        user = ("import extern;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                "// C call labs x2: the gives: of labs states a long.\n"
+                "fn use() i64 {\n    return labs(labs(4));\n}\n")
+        cite = lines_of(user, "// C call labs")[0]
+        output = self.check({"user.ft": user}, [
+            ("user.ft", cite, "cites the gives: of 'labs', which is an `extern fn`")])
+        self.assertNotIn("does not call", output)
+        # An extern that the body does not call keeps the message of a callee with no call.
+        absent = user.replace("the gives: of labs states", "the gives: of llabs states")
+        absent = absent.replace("extern fn labs(i64 v) i64;\n", "extern fn labs(i64 v) i64;\n"
+                                + ROW.replace("labs", "llabs") + "extern fn llabs(i64 v) i64;\n")
+        self.check({"user.ft": absent}, [
+            ("user.ft", lines_of(absent, "// C call labs")[0],
+             "cites the gives: of 'llabs', which its body does not call")])
+        # A call of the extern in another function of the file is no call of this body.
+        other = user.replace("return labs(labs(4));\n}\n", "return 4 + other();\n}\n\n"
+                             "// C call labs x2: 4 is no pointer.\nfn other() i64 {\n"
+                             "    return labs(labs(4));\n}\n")
+        other = other.replace("// C call labs x2: the gives:", "// The gives:")
+        self.check({"user.ft": other}, [
+            ("user.ft", lines_of(other, "// The gives: of labs")[0],
+             "cites the gives: of 'labs', which its body does not call")])
+
+    def test_a_citation_of_a_function_of_a_module_that_is_not_trusted_is_reported(self):
+        # Rule 3 trusts the row of a fort function of a trusted module only: no audit holds a
+        # `// gives:` line in a module that is not trusted.
+        maker = ("/// Gives a value.\n// gives: 4 zero bytes, never null.\n"
+                 "fn make() u64 {\n    return 4;\n}\n")
+        user = ("import extern;\nimport maker;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                "// C call labs: the gives: of maker.make states 4 bytes.\n"
+                "fn use() i64 {\n    return labs(cast(maker.make(), i64));\n}\n")
+        cite = lines_of(user, "// C call labs")[0]
+        self.check({"maker.ft": maker, "user.ft": user}, [
+            ("user.ft", cite, "cites the gives: of 'maker.make', a function of a module that is "
+             "not trusted")])
+        # The same row of the same function passes when the module of the callee is trusted.
+        self.check({"maker.ft": "import extern;\n\n" + maker, "user.ft": user}, [])
+
     def test_the_cited_rows_of_std_are_checked(self):
         # Each row of std that a row of test/lang cites: deleting its line, or its word, gives a
         # problem in the file that cites it, and in std.sys for the gives: of rt.args.
@@ -535,6 +597,79 @@ class Rules(unittest.TestCase):
         self.check({"globals.ft": called}, [
             ("globals.ft", lines_of(called, "return strlen(pick(name));")[0],
              "fn 'plain' gives the `mut` global 'name'")])
+
+    # The head of a module with `mut` globals of each kind that the tests below name.
+    GLOBALS = ("import extern;\nimport std.libc;\n\n// C: strlen, ISO C11 7.24.6.3, strlen(3).\n"
+               "// gives: a count. writes: nothing. keeps: no pointer.\n"
+               "// calls: no fort function. frees: nothing.\nextern fn strlen(char* s) u64;\n\n"
+               "struct holder {\n    char* p;\n    u64 n;\n}\n\nchar* mut name = null;\n"
+               "char*[2] mut names = {};\nu64 mut count = 0;\n\n")
+
+    def test_a_mut_global_in_a_literal_or_an_index_of_an_argument_is_reported(self):
+        # The search for the call of a name does not stop at the `{` of a struct or array
+        # literal or at the `[` of an index: the name is still in the arguments of the call.
+        take = ("// C call strlen: h.p is a parameter source.\nfn take(holder h) u64 {\n"
+                "    return strlen(h.p);\n}\n\n")
+        struct = (self.GLOBALS + take + "// C call take: a holder of name.\nfn f() u64 {\n"
+                  "    return take(holder{.p = name, .n = 0});\n}\n")
+        self.check({"globals.ft": struct}, [
+            ("globals.ft", lines_of(struct, "return take(holder{")[0],
+             "fn 'f' gives the `mut` global 'name'")])
+        array = (self.GLOBALS + "// C call strlen: h[0].p is a parameter source.\n"
+                 "fn take(holder[1] h) u64 {\n    return strlen(h[0].p);\n}\n\n"
+                 "// C call take: a holder of name.\nfn f() u64 {\n"
+                 "    return take(holder[1]{{.p = name, .n = 0}});\n}\n")
+        self.check({"globals.ft": array}, [
+            ("globals.ft", lines_of(array, "return take(holder[1]{{")[0],
+             "fn 'f' gives the `mut` global 'name'")])
+        index = (self.GLOBALS + "// C call strlen: an element of two.\nfn f() u64 {\n"
+                 "    char*[2] mut two = {};\n    two[0] = &\"a\"[0];\n    two[1] = two[0];\n"
+                 "    return strlen(two[names[1] == null ? 0 : 1]);\n}\n")
+        self.check({"globals.ft": index}, [
+            ("globals.ft", lines_of(index, "return strlen(two[")[0],
+             "fn 'f' gives the `mut` global 'names'")])
+        # A block is no argument list: a name in the block of an `if` whose condition calls C
+        # stands in no call, and a statement ends the search.
+        block = (self.GLOBALS + "// C call strlen: a literal with its NUL (rule 4).\n"
+                 "fn f() char* {\n    if (strlen(&\"a\"[0]) > 0) {\n        return name;\n    }\n"
+                 "    return names[0];\n}\n")
+        self.check({"globals.ft": block}, [])
+
+    def test_a_mut_global_is_searched_through_each_enclosing_call(self):
+        # `cast(` is the innermost call of each name and it is no call of C: the search goes on
+        # to the call of the extern that encloses it, once for each name.
+        both = (self.GLOBALS + "// C call libc.memcmp: name twice, 0 bytes.\nfn f() i32 {\n"
+                "    return libc.memcmp(cast(name, u8*), cast(name, u8*), 0);\n}\n")
+        line = lines_of(both, "return libc.memcmp(")[0]
+        self.check({"globals.ft": both}, [
+            ("globals.ft", line, "fn 'f' gives the `mut` global 'name'"),
+            ("globals.ft", line, "fn 'f' gives the `mut` global 'name'")])
+        # A fort function that is no boundary function between the name and the extern.
+        deep = (self.GLOBALS + "fn same(u64 v) u64 {\n    return v;\n}\n\n"
+                "// C call strlen: an element of names.\nfn f() u64 {\n"
+                "    return strlen(names[same(names[1] == null ? 0 : 1)]);\n}\n")
+        line = lines_of(deep, "return strlen(names[same(")[0]
+        self.check({"globals.ft": deep}, [
+            ("globals.ft", line, "fn 'f' gives the `mut` global 'names'"),
+            ("globals.ft", line, "fn 'f' gives the `mut` global 'names'")])
+
+    def test_the_forms_of_a_mut_global_that_the_lint_does_not_see(self):
+        # D9.8, "The lint", names these forms: the lint reads the name of the global between
+        # the brackets of the call and nothing else. Each one is a parameter source by rule 1,
+        # and a reviewer finds it. A change that closes one of them changes that text too.
+        forms = {
+            "a local copy": ("// C call strlen: p.\nfn f() u64 {\n    char* p = name;\n"
+                             "    return strlen(p);\n}\n"),
+            "the result of a function": ("fn get() char* {\n    return name;\n}\n\n"
+                                         "// C call strlen: get().\nfn f() u64 {\n"
+                                         "    return strlen(get());\n}\n"),
+            "a length of another type": ("// C call libc.memcmp: a literal twice, count bytes.\n"
+                                         "fn f() i32 {\n    return libc.memcmp(cast(&\"a\"[0], "
+                                         "u8*), cast(&\"a\"[0], u8*), count);\n}\n"),
+        }
+        for form, body in forms.items():
+            with self.subTest(form=form):
+                self.check({"globals.ft": self.GLOBALS + body}, [])
 
     def test_a_row_in_the_standard_library_is_checked(self):
         # A module of std/ is trusted by its root (D9.8). The test removes the declaration row
