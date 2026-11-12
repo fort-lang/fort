@@ -910,6 +910,76 @@ bullet at a time and without a rewrite.
   run forever: a removed `del`, or an inserted store into the tested place when the places line
   names it, keeps the test true. The first `while_test` hung the test for 30 minutes; its loop now
   has a second exit, a `break`.
+- **The typed family judges each function that the compiler takes with exit 0 against the runs of
+  the oracle** (`test/fort/owner/typed/`, `test/fort/support/judgement.ft`).
+  `test/fort/support/generator.ft` builds the family from three tables: `TYPES`, `STORAGES` and
+  `OPERATIONS`. A function tests one place, a value of a type in a storage class, and each
+  statement of it is an operation. A text of a table holds codes: `%P` is the place, `%R` its
+  release, `%F` a value with a live owner. A code whose form is the empty text has no form in that
+  cell, and an operation that names it does not apply there. An operation whose statement repeats
+  the statement of an earlier row in a cell does not apply there. So a new type, storage class or
+  operation is one row, and the expected stdout of `count_test.ft` shows what the row adds: the
+  count of the cells, the vocabulary of each cell, the cells of each operation and the functions
+  of 0 to 3 operations. Each storage class takes the input `live`: the place holds an owner at
+  the entry when it is true, and the empty value when it is false.
+  **The judgement is closed-world.** `judgement.ft` checks a batch of 200 functions of one cell,
+  lowers each, and gives each a verdict as a build with `--whole-store-report --leak-report
+  --span-del-report` does: `refused` by the checker, the lowering or the verifier, `rejected` by
+  a pass of `owner.prover` or by the release-only rule of D17.9, `reported` by a report line, or
+  `accepted`. The compiler exits 0 for `accepted` and for `reported`, and the judgement runs each
+  such function with each input that it reads. Each event of such a run goes through the gate of
+  the oracle tests first (`disposition.is_error`), and `judgement.rule` gives it a ruling. The
+  gate takes two events as no error: a `leak` at a `dead` of a block that ends in an abort
+  (D17.20), and a `leak at exit` of a cycle of owners. The gate does not judge the six kinds that
+  its table trusts. The judgement takes an event of such a kind as an error, so each of the ten
+  kinds of `fir.shadow` is an error here. Three report rules take an error of the gate: a `leak`
+  or a `leak at exit` in a function with a line of `--leak-report`; an `overwrite` in a function
+  with a line of `--whole-store-report`; a `leak` on the line of a `del` that
+  `--span-del-report` lists. No report option owns another kind, so no report line takes a `use
+  after move` or a `use after release`. A run that ends in a fault other than `null dereference`
+  with no error event is an error too. A function with an error is a failure.
+  **The family gives 4 of the 10 event kinds.** Its runs give `overwrite`, `leak`, `use after
+  release` and `use after move`. They give no `leak at exit`, `double release`, `invalid
+  release`, `use after scope`, `duplicate owner` and `forged`, so a count of 0 for one of those 6
+  kinds says that no function reaches the kind, and not that the compiler holds its rule. The
+  expected stdout of each `part_<k>_test.ft` holds the count of the events of each kind, of the
+  errors of each kind, of the errors that the gate judges and of those of a kind that it trusts,
+  of the events that each other ruling takes, and of the runs by their end.
+  **Each known failure has a class and a key.** `judgement.class_of` gives a failure a row of
+  `judgement.CLASSES` from the kind of its first error, the operation at the line of that error
+  and the names of the statements of its function. The expected stdout of each
+  `part_<k>_test.ft` holds the count of each class and two lines for each failure. The first line
+  holds the key of the function: the names of its type, of its storage class and of its
+  operations, so a new row of a table moves the key of no function. The second line holds the
+  class, the first error and the verdict. A function that enters the list, one that
+  leaves it and one that changes its class each change a line, and a failure with no class gives
+  the exit status 1. So a change that adds a failure of a known class must bless a longer list
+  in its own diff, and the review of that diff is what refuses it; no test compares the list
+  with the list of an earlier commit. A class is a use that no rule of the compiler refuses:
+  D17.21 gives an owner that is no local no obligation, and no rule holds a view or a pointer
+  into an `own` span after the release of its allocation. No class takes a `del` of the
+  collection in the body of its range loop, because the checker refuses that function (D17.10).
+  **`judgement_test.ft` holds the judgement itself.** It prints `rule` for each kind in each of
+  its cases, `at_abort`, `end_of`, `is_silent`, `class_of` and `exit_of` over tables, and judges
+  a batch of functions that it writes: each rule that the typed family does not reach
+  has a function there. Each row `judgement-*` of `tools/mutations/generator.json` changes one
+  rule, and each other row takes one row out of a table; `count_test.ft` and `judgement_test.ft`
+  are the stage.
+  **The 8 parts are the 2-operation family.** Batch `j` of the family belongs to part `j` modulo
+  8. The compile of a part and its run each take less than 30 s in the VM with 4 parts at a time,
+  against the 60 s limit of the harness for each step. `cells_test.ft` judges the functions of 0
+  and of 1 operation of each cell apart: the compiler accepts the declarations of each cell and
+  its function with no operation, and a declaration that it does not accept stops a test with
+  the text of the batch. Run each compiled test from a directory of its own: `check_env` makes
+  `sandbox<N>` in the working directory, and two tests in one directory read the files of each
+  other.
+  **The 3-operation mode is not in PR CI.** A compiled `part_<k>_test` with the arguments
+  `<operations> <part> <parts>` judges that part of the family of that many operations. It prints
+  the same lines, then the text of the first function of each class and of each function with no
+  class, and it exits 1 only when a failure has no class. Compile `part_1_test.ft` once and run
+  `<binary> 3 <k> 400` for each `k` from 1 to 400. Functions of 3 operations reach the classes
+  `view` and `moved value`, which the 2-operation family does not reach, so those two classes
+  have the count 0 in each `part_<k>_test.ft` and `judgement_test.ft` holds their rules.
 - **The suites of fir.interpreter derive each expected value apart from the interpreter**
   (`test/fort/fir/interpreter_test.ft`, `interpreter_source_test.ft`). Python's integers and IEEE
   doubles gave each value at each boundary of each type when the cases were written: the wrap at
