@@ -10,19 +10,20 @@ through a function value, and a name of a boundary function goes only to C (row_
 A call row that cites `the gives: of <callee>` or `the writes: of <callee>` names a callee that
 the body calls, a fort function of a trusted module whose row holds a line with that word
 (citation_problems). Text that starts a citation and that the lint cannot read as one is a
-problem too. A function that is no boundary function gives no `mut` global whose type reaches a
-byte pointer to a call of C (mut_global_to_c).
+problem too, and its message names that text. A function that is no boundary function gives no
+`mut` global whose type reaches a byte pointer to a call of C (mut_global_to_c).
 
-The lint does not read the sources of a row. It does not check a bound, a length or a NUL: a row
-that claims the bound of the whole array for `&g[0][1][0]` of a `char@[1][2] g` passes, and a
-reviewer reads it against rule 2. It sees a `mut` global only by its name, anywhere between the
-brackets of the call: as an argument, and inside a cast, a nested call, an index, or a struct or
-array literal there. It does not see a value that a local copies from a `mut` global
-first, a value that another function takes from a `mut` global and returns or stores, as
-`strlen(get())` for `fn get() char* { return name; }`, a length or a NUL of a `mut` global
-whose type reaches no byte pointer, or a `mut` global between the brackets of a call through a
-function pointer that C gave. It does see a `mut` global between the brackets of a call whose
-callee holds a boundary function as a value, as `(first ? take : other)(name)`.
+The lint does not read the sources of a row. It does not check a bound, a length or a NUL. A
+row that claims the bound of the whole array for `&g[0][1][0]` of a `char@[1][2] g` passes. A
+reviewer reads that row against rule 2. The lint sees a `mut` global only by its name, anywhere
+between the brackets of the call. The name can be an argument, or stand inside a cast, a nested
+call, an index, or a struct or array literal. The lint does not see a value that a local copies
+from a `mut` global first. It does not see a value that another function takes from a `mut`
+global and returns or stores, as `strlen(get())` for `fn get() char* { return name; }`. It does
+not see a length or a NUL of a `mut` global whose type reaches no byte pointer. It does not see
+a `mut` global between the brackets of a call through a function pointer that C gave. It does
+see a `mut` global between the brackets of a call whose callee holds a boundary function as a
+value, as `(first ? take : other)(name)`.
 
 One function reads the callee of a call, through each group around it (call_callee), and each
 check takes the callee from it: `(strlen)(name)` is a call of `strlen` for each check, and its
@@ -47,6 +48,9 @@ The files of `test/lang/run` and `test/lang/programs` get the checks of D9.8 onl
 exercises the language, so the names, the width and the rules of notes/style.md 3.1 do not
 apply to it (ROWS_ONLY). Each such file is indexed with the `--cfg` options of the `//! flags:`
 directive of its test (lang_options).
+
+Source is UTF-8 (D2.1). The lint reports the first byte of a file that is no UTF-8 text, and
+makes each other check of that file too (source_text).
 
 The naming checks of notes/style.md 3.1 apply to a file of `src/fort`, `src/lsp` and `std`
 by its path. The prefix check applies in each directory of those roots. The function and
@@ -517,6 +521,28 @@ def index_document(fort, root, relative, includes=(), std_dir=None, options=()):
     return document, None
 
 
+def source_text(data):
+    """The text of the bytes `data` of one file, and the problem of its first byte that is no
+    UTF-8 text, or None (D2.1).
+
+    The decoder gives U+FFFD for each such byte, so the text has each line of the file and the
+    other checks read it. The column of the problem is a byte column, as a column of the index
+    is (D20.3). A line end of the text is `\n`, also where the file holds `\r\n` or `\r`, as a
+    read in text mode gives it.
+    """
+    problem = None
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        at = error.start
+        line = data.count(b"\n", 0, at) + 1
+        col = at - data.rfind(b"\n", 0, at)
+        problem = (line, col, "byte 0x%02x is no UTF-8 text: fort source is UTF-8 (D2.1)"
+                   % data[at])
+        text = data.decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n"), problem
+
+
 def rows_only(relative):
     """Whether the file `relative` gets the checks of D9.8 only (ROWS_ONLY)."""
     name = Path(relative).as_posix()
@@ -535,7 +561,8 @@ def lang_options(root, relative):
     `run/modules/<name>/dep.ft` or a module in a directory below it, takes the directive of the
     nearest `main.ft` above it. The header is the leading run of `//!`, `//<` and `//|` lines, as
     the harness reads it (test/lang/run_tests.py). A key that the options do not set stops the
-    compile of its `$if` (D21.1), so the index needs them."""
+    compile of its `$if` (D21.1), so the index needs them. A byte of the file that is no UTF-8
+    text changes no directive: the lint reports it for a file that it checks (source_text)."""
     if not rows_only(relative):
         return ()
     path = Path(root) / relative
@@ -547,7 +574,7 @@ def lang_options(root, relative):
             break
         folder = folder.parent
     options = []
-    for line in path.read_text(encoding="utf-8").split("\n"):
+    for line in source_text(path.read_bytes())[0].split("\n"):
         if line[:3] not in HEADER_MARKERS:
             break
         found = FLAGS_DIRECTIVE.match(line)
@@ -1424,6 +1451,10 @@ CITATION_START = re.compile(
     .replace("_", CITATION_GAP))
 # The callee of a citation with no group: a name with its module path.
 CITED_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+# The start of a number. A number is no name, so `(0)` cites no callee, as `0` cites none.
+CITED_NUMBER = re.compile(r"[0-9]")
+# The text where the callee of a citation stands, for a message: up to the next white space.
+CITED_TEXT = re.compile(r"\S*")
 
 
 def cited_callee(text, at):
@@ -1445,7 +1476,37 @@ def cited_callee(text, at):
     callee = call_callee(spelled + "(", len(spelled))
     if callee is None or callee.name_at < 0:
         return None
+    if CITED_NUMBER.match(callee.name) is not None:
+        return None
     return callee.name
+
+
+def unread_citation(text, start, stop, reads):
+    """The words of the message for text that starts a citation and that the lint cannot read:
+    the text from `start` to `stop`. When the text reads to the end of `the gives: of`
+    (`reads`), the words hold the text where the callee stands too, up to the next white space.
+    A line end in the text is a space in the message, and the message says that a line end is
+    there."""
+    if reads:
+        stop = CITED_TEXT.match(text, stop).end()
+    found = text[start:stop].strip()
+    words = "'%s'" % " ".join(found.split())
+    return words + " with a line end" if "\n" in found else words
+
+
+def cut_callee(text, at, callee, called):
+    """The callee that the body calls and that a line end cuts in a citation, or None. The
+    citation names `callee` at `at` of the text of a row, as `maker` of `the gives: of maker.`
+    with `good` at the start of the next line: a citation holds its callee on one line, so the
+    reader takes `maker`. `called` holds each callee that the body calls."""
+    end = at + len(callee)
+    if text[at:end] != callee or text[end:end + 2] != ".\n":
+        return None
+    rest = CITED_NAME.match(text, end + 2)
+    if rest is None:
+        return None
+    whole = callee + "." + rest.group(0)
+    return whole if whole in called else None
 
 
 def citation_problems(rows, source, record, called, externs):
@@ -1471,10 +1532,14 @@ def citation_problems(rows, source, record, called, externs):
         found = CITATION.match(joined, start.start())
         callee = cited_callee(joined, found.end()) if found is not None else None
         if callee is None:
+            reads = found is not None
+            stop = found.end() if reads else start.end()
             problems.append((line, 1, "a call row of fn '%s' starts a citation that the lint "
-                             "cannot read: write 'the gives: of <the callee>' or 'the writes: of "
-                             "<the callee>', with the callee a name as the body spells it "
-                             "(rule 3) (%s)" % (record["name"], ROWS)))
+                             "cannot read, %s: write 'the gives: of <the callee>' or 'the "
+                             "writes: of <the callee>', with the callee a name as the body "
+                             "spells it (rule 3) (%s)"
+                             % (record["name"],
+                                unread_citation(joined, start.start(), stop, reads), ROWS)))
             continue
         word = found.group(1) + ":"
         if callee in externs:
@@ -1484,8 +1549,12 @@ def citation_problems(rows, source, record, called, externs):
             continue
         key = called.get(callee)
         if key is None:
+            whole = cut_callee(joined, found.end(), callee, called)
+            cut = "" if whole is None else (": a line end stands inside the callee '%s', and a "
+                                            "citation holds its callee on one line" % whole)
             problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', which its "
-                             "body does not call (%s)" % (record["name"], word, callee, ROWS)))
+                             "body does not call%s (%s)"
+                             % (record["name"], word, callee, cut, ROWS)))
             continue
         if not rows.trusted(key[0]):
             problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', a function "
@@ -1724,7 +1793,8 @@ def std_documents(fort, root, entries, cache, target):
     (indexes, records by real path, diagnostics, error), one item for each run.
     """
     groups = {}
-    for index, (relative, _, _, _) in enumerate(entries):
+    for index, entry in enumerate(entries):
+        relative = entry[0]
         module = std_module(relative)
         if module is not None:
             groups.setdefault(std_target(relative, target), []).append((index, module))
@@ -1789,16 +1859,16 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
     entries = []
     for path, includes in files:
         relative = os.path.relpath(str(path), str(root))
-        text = Path(path).read_text(encoding="utf-8")
+        text, no_utf8 = source_text(Path(path).read_bytes())
         # A run judges a file only when its roots and its options agree, so the pair is its key.
         given = (tuple(includes), lang_options(root, relative))
-        entries.append((relative, given, real_path(root, relative, cache), text))
+        entries.append((relative, given, real_path(root, relative, cache), text, no_utf8))
     reports = [None] * len(entries)
     runs = 0
     for indexes, buckets, diagnostics, error in std_documents(fort, root, entries, cache, target):
         runs += 1
         for index in indexes:
-            relative, _, path, text = entries[index]
+            relative, _, path, text, _ = entries[index]
             if error is not None:
                 reports[index] = [(1, 1, error)]
                 continue
@@ -1807,7 +1877,7 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
                                            module_segments(relative), not rows_only(relative))
             rows = Rows(root, buckets, cache, std_roots, memo)
             reports[index].extend(row_problems(rows, path, records))
-    for index, (relative, given, _, _) in enumerate(entries):
+    for index, (relative, given, _, _, _) in enumerate(entries):
         if reports[index] is not None:
             continue
         includes, options = given
@@ -1841,8 +1911,11 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
                                            not rows_only(entries[other][0]))
             reports[other].extend(row_problems(rows, entries[other][2], records or []))
     lines = []
-    for index, (relative, _, _, text) in enumerate(entries):
+    for index, (relative, _, _, text, no_utf8) in enumerate(entries):
         problems = [] if rows_only(relative) else text_problems(relative, text, root)
+        if no_utf8 is not None:
+            # Each file of the run gets this check, a file of ROWS_ONLY too.
+            problems.append(no_utf8)
         problems += reports[index]
         problems.sort(key=lambda problem: (problem[0], problem[1]))
         lines.append(

@@ -53,10 +53,11 @@ def lint(root, files):
 
 
 def write(root, name, text):
+    """Write the file `name` below `root`: `text` as UTF-8, or the bytes of `text` as they are."""
     path = os.path.join(root, name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(text)
+    with open(path, "wb") as handle:
+        handle.write(text if isinstance(text, bytes) else text.encode("utf-8"))
     return name
 
 
@@ -1144,6 +1145,159 @@ class Rules(unittest.TestCase):
                      % (row, number))
         self.check({"maker.ft": self.MAKER, "user.ft": text}, [])
 
+    def test_text_that_does_not_read_as_a_citation_is_named_in_its_message(self):
+        # The message of text that starts a citation names the text that the reader found: the
+        # start, the `of` when it reads, and the text where the callee stands, up to the next
+        # white space. A line end in that text is a space in the message, and the message says
+        # that a line end is there.
+        cannot = "starts a citation that the lint cannot read, "
+        rows = (
+            # A row line that ends with `the` before a row line that starts with `gives:` starts
+            # a citation: the lint does not tell it from a citation that wraps there.
+            ("s reads the\n// gives: nothing here.", cannot + "'the gives:' with a line end: "),
+            ("s reads the\n// writes: of good.", cannot + "'the writes:' with a line end: "),
+            # A number is no callee, alone and in a group: one message for the two forms.
+            ("the gives: of 0.", cannot + "'the gives: of 0.': "),
+            ("the gives: of (0).", cannot + "'the gives: of (0).': "),
+            ("the gives: of (4good).", cannot + "'the gives: of (4good).': "),
+            ("the gives: of (0x10).", cannot + "'the gives: of (0x10).': "),
+            ("the gives: of\n// (0).", cannot + "'the gives: of (0).' with a line end: "),
+            ("The writes: of `good`.", cannot + "'The writes: of `good`.': "),
+            ("the gives: of", cannot + "'the gives: of': "),
+            ("the `gives:` of good.", cannot + "'the `gives:': "),
+            ("its gives: of good.", cannot + "'gives: of': "),
+            ("the gives: of (good + good).", cannot + "'the gives: of (good': "),
+            ("the gives: of (good.", cannot + "'the gives: of (good.': "),
+            # A citation that wraps inside the module path of its callee reads the first name.
+            # The body calls the whole path, and the message says where the line ends.
+            ("the gives: of maker.\n// good.",
+             "cites the gives: of 'maker', which its body does not call: a line end stands "
+             "inside the callee 'maker.good', and a citation holds its callee on one line (D9.8)"),
+            ("the writes: of maker.\n// good, and more.",
+             "cites the writes: of 'maker', which its body does not call: a line end stands "
+             "inside the callee 'maker.good', and a citation holds its callee on one line (D9.8)"),
+            # The text after the line end is no part of a callee that the body calls: a sentence
+            # ends there, and the message stays the plain one.
+            ("the gives: of maker.\n// Then more.",
+             "cites the gives: of 'maker', which its body does not call (D9.8)"),
+            ("the gives: of maker.\n// bare.",
+             "cites the gives: of 'maker', which its body does not call (D9.8)"),
+            ("the gives: of maker.other.",
+             "cites the gives: of 'maker.other', which its body does not call (D9.8)"),
+        )
+        text = "import extern;\nimport maker;\n"
+        expected = []
+        for row, message in rows:
+            line = text.count("\n") + 2
+            text += ("\n// A row of text: %s\nfn f%d() u64 {\n    return maker.good();\n}\n"
+                     % (row, line))
+            expected.append(("user.ft", line, "a call row of fn 'f%d' %s" % (line, message)))
+        self.assertEqual(len(expected), 18)
+        output = self.check({"maker.ft": self.MAKER, "user.ft": text}, expected)
+        # Each message is one whole line of the output, so no other text stands in it.
+        tails = [line.split(": ", 1)[1] for line in output.splitlines()
+                 if line.startswith("user.ft:")]
+        self.assertEqual(len(tails), 18)
+        for tail, (_, _, message) in zip(tails, expected):
+            self.assertTrue(tail.startswith(message), tail)
+            self.assertTrue(tail.endswith("(D9.8)"), tail)
+
+    # A file with one byte that is no UTF-8 text, as (name, bytes, line, byte column, byte). 0xe9
+    # is the `é` of Latin-1 and needs a continuation byte in UTF-8; 0xff and 0xc0 start no
+    # sequence; 0x80 continues no sequence; 0xc3 at the end of the file has no continuation
+    # byte; 0xed 0xa0 0x80 is a surrogate. The first 4 files are trusted modules, with the byte in
+    # a comment, in a call row, in a declaration row and in a string literal. The other 6 are
+    # modules that are not trusted. Each file has no other problem.
+    TRUSTED_HEAD = b"import extern;\n\n" + ROW.encode() + b"extern fn labs(i64 v) i64;\n\n"
+    NO_UTF8 = (
+        ("trusted_comment.ft", TRUSTED_HEAD + b"// caf\xe9 here.\nfn one() i64 {\n"
+         b"    return 1;\n}\n", 8, 7, 0xe9),
+        ("trusted_row.ft", TRUSTED_HEAD + b"// C call labs: v \xe9 is no pointer.\n"
+         b"fn one(i64 v) i64 {\n    return labs(v);\n}\n", 8, 19, 0xe9),
+        ("trusted_declaration.ft", b"import extern;\n\n// C: labs, ISO C11 7.22.6.1 \xff, "
+         b"labs(3).\n" + ROW.encode().split(b"\n", 1)[1] + b"extern fn labs(i64 v) i64;\n",
+         3, 30, 0xff),
+        ("trusted_string.ft", TRUSTED_HEAD + b"fn text() string {\n    return \"caf\xe9\";\n}\n",
+         9, 16, 0xe9),
+        ("plain_comment.ft", b"// caf\xe9 \xff\nfn one() i64 {\n    return 1;\n}\n", 1, 7, 0xe9),
+        ("plain_string.ft", b"fn text() string {\n    return \"\xc0\x80\";\n}\n", 2, 13, 0xc0),
+        ("plain_continuation.ft", b"fn one() i64 {\n    return 1; // \x80\n}\n", 2, 18, 0x80),
+        ("plain_end.ft", b"fn one() i64 {\n    return 1;\n}\n// \xc3", 4, 4, 0xc3),
+        ("plain_surrogate.ft", b"fn one() i64 {\n    return 1;\n}\n// \xed\xa0\x80\n", 4, 4, 0xed),
+        # The column is a byte column: the `é` and the `中` before the byte are 2 and 3 bytes.
+        ("plain_column.ft", "fn one() i64 {\n    return 1;\n}\n// é中 ".encode("utf-8")
+         + b"\xff\n", 4, 10, 0xff),
+    )
+
+    def no_utf8_line(self, name, line, col, byte):
+        return ("%s:%d:%d: byte 0x%02x is no UTF-8 text: fort source is UTF-8 (D2.1)"
+                % (name, line, col, byte))
+
+    def test_a_file_that_is_no_utf8_is_reported(self):
+        # D2.1: source is UTF-8. The lint reports the first byte of a file that is no UTF-8
+        # text, with the file, the line and the byte column, and exits 1. It reports it for a
+        # trusted module and for a module that is not trusted, and no error of the decoder
+        # reaches the caller.
+        self.assertEqual(len(self.NO_UTF8), 10)
+        for name, data, line, col, byte in self.NO_UTF8:
+            with self.subTest(name=name):
+                self.assertEqual(data.split(b"\n")[line - 1][col - 1], byte)
+                with self.assertRaises(UnicodeDecodeError):
+                    data.decode("utf-8")
+                output = self.check({name: data}, [(name, line, "is no UTF-8 text")])
+                self.assertNotIn("Traceback", output)
+                self.assertNotIn("UnicodeDecodeError", output)
+                self.assertEqual(output.splitlines()[0], self.no_utf8_line(name, line, col, byte))
+                self.assertIn("fort_lint: 1 problem(s) in 1 of 1 file(s)", output)
+        # One run over the 10 files and a file of UTF-8 text reports each of the 10 once.
+        files = {name: data for name, data, _, _, _ in self.NO_UTF8}
+        files["good.ft"] = "// é中\U0001f600\nfn one() i64 {\n    return 1; // é\n}\n"
+        output = self.check(files, [(name, line, "byte 0x%02x is no UTF-8 text" % byte)
+                                    for name, _, line, _, byte in self.NO_UTF8])
+        self.assertNotIn("Traceback", output)
+        self.assertIn("fort_lint: 10 problem(s) in 10 of 11 file(s)", output)
+
+    def test_a_file_of_utf8_text_and_a_byte_order_mark_pass(self):
+        # UTF-8 text of 2, 3 and 4 bytes in a comment and in a string literal is no problem,
+        # and the byte order mark that D2.1 permits is none.
+        text = ("// é中\U0001f600\nfn text() string {\n"
+                "    return \"é中\U0001f600\"; // é\n}\n")
+        self.check({"good.ft": text, "mark.ft": b"\xef\xbb\xbf" + text.encode("utf-8")}, [])
+
+    def test_a_file_that_is_no_utf8_keeps_its_other_problems(self):
+        # The byte stops no other check: the file gets the checks of the names, of the width and
+        # of the rows too, and a file of test/lang/run gets the checks of D9.8.
+        text = (b"import extern;\n\n// caf\xe9 " + b"x" * 100 + b"\nstruct Bad_Name {\n"
+                b"    i64 v;\n}\n\nextern fn labs(i64 v) i64;\n")
+        output = self.check({"other/bad.ft": text, "test/lang/run/ffi/001_bad.ft": text}, [
+            ("other/bad.ft", 3, "byte 0xe9 is no UTF-8 text"),
+            ("other/bad.ft", 3, "line is 108 columns"),
+            ("other/bad.ft", 4, "struct 'Bad_Name' is not lower_case"),
+            ("other/bad.ft", 8, "extern 'labs' has no declaration row"),
+            ("test/lang/run/ffi/001_bad.ft", 3, "byte 0xe9 is no UTF-8 text"),
+            ("test/lang/run/ffi/001_bad.ft", 8, "extern 'labs' has no declaration row")])
+        self.assertNotIn("Traceback", output)
+
+    def test_a_module_of_a_directory_test_reads_a_main_that_is_no_utf8(self):
+        # A module of a directory test takes the `--cfg` options of the main.ft beside it. A
+        # main.ft that is no UTF-8 text still gives its options, and the lint reports the byte
+        # when main.ft is a file of the run.
+        main = (b"//! run\n//! flags: --cfg mode=good\n// caf\xe9\nimport dep;\n\n"
+                b"fn main() i32 {\n    return cast(dep.KEY.len, i32);\n}\n")
+        dep = "string KEY = $cfg(mode);\n"
+        files = {"test/lang/run/modules/keyed/main.ft": main,
+                 "test/lang/run/modules/keyed/dep.ft": dep}
+        output = self.check(files, [("test/lang/run/modules/keyed/main.ft", 3,
+                                     "byte 0xe9 is no UTF-8 text")])
+        self.assertNotIn("Traceback", output)
+        with tempfile.TemporaryDirectory() as out:
+            root = os.path.realpath(out)
+            for name, text in files.items():
+                write(root, name, text)
+            status, output, problems = lint(root, ["test/lang/run/modules/keyed/dep.ft"])
+            self.assertEqual((status, problems), (0, []), output)
+            self.assertNotIn("Traceback", output)
+
     # A body that holds each keyword that fort code writes before a `(`, 11 of them: `fn`,
     # `cast`, `sizeof`, `defer`, `if`, `while`, `for`, `switch`, `case`, `new` and `return`.
     KEYWORD_BODY = (
@@ -1595,12 +1749,14 @@ class Parts(unittest.TestCase):
             ("`alloc`", None), ("(alloc", None), ("((alloc)", None), ("()", None), ("(())", None),
             ("(a + b)", None), ("(a, b)", None), ("(t[0])", None), ("(pick())", None),
             ("(c ? a : b)", None), ("if", None), ("(return)", None), ("(alloc]", None),
+            ("0", None), ("(0)", None), ("((0))", None), ("(0x)", None), ("(4x)", None),
+            ("( 0 )", None), ("(07.x)", None), ("(_0)", "_0"), ("(a0.b1)", "a0.b1"),
         )
         for text, want in cases:
             with self.subTest(text=text):
                 self.assertEqual(fort_lint.cited_callee(text, 0), want)
                 self.assertEqual(fort_lint.cited_callee("of " + text, 3), want)
-        self.assertEqual(len(cases), 33)
+        self.assertEqual(len(cases), 42)
 
     def test_an_offset_that_starts_no_name_is_the_callee_of_no_call(self):
         fort_lint = lint_module()
@@ -1748,10 +1904,44 @@ class Parts(unittest.TestCase):
                              ("--cfg", "late=1"))
             self.assertEqual(fort_lint.lang_options(root, "test/lang/run/modules/e/sub/leaf.ft"),
                              ("--cfg", "deep=1"))
-        self.assertTrue(fort_lint.rows_only("test/lang/programs/calc.ft"))
+        # A header with a byte that is no UTF-8 text still gives its options: the lint reports
+        # the byte of a file that it checks, and the options are ASCII text.
+        with tempfile.TemporaryDirectory() as out:
+            root = os.path.realpath(out)
+            write(root, "test/lang/run/c/001_byte.ft",
+                  b"//! run\n//! stdout:\n//| caf\xe9\n//! flags: --cfg byte=1\nfn main() i32 {}\n")
+            write(root, "test/lang/run/modules/f/main.ft", b"//! flags: --cfg m=1\n// \xff\n")
+            write(root, "test/lang/run/modules/f/dep.ft", "fn f() void {}\n")
+            self.assertEqual(fort_lint.lang_options(root, "test/lang/run/c/001_byte.ft"),
+                             ("--cfg", "byte=1"))
+            self.assertEqual(fort_lint.lang_options(root, "test/lang/run/modules/f/dep.ft"),
+                             ("--cfg", "m=1"))
         self.assertTrue(fort_lint.rows_only("test/lang/run/ffi/001_libc.ft"))
         self.assertFalse(fort_lint.rows_only("test/fort/lang_test.ft"))
         self.assertFalse(fort_lint.rows_only("std/rt.ft"))
+
+    def test_the_text_of_a_file_is_its_utf8_text_or_a_problem(self):
+        # The reader of a file gives its text and no problem, or the text with U+FFFD for each
+        # byte that is no UTF-8 text and the problem of the first one: its line, its byte
+        # column and the byte. A line end of the text is `\n`, as a read in text mode gives it.
+        fort_lint = lint_module()
+        message = "byte 0x%02x is no UTF-8 text: fort source is UTF-8 (D2.1)"
+        cases = (
+            (b"", "", None),
+            (b"fn f() void {}\n", "fn f() void {}\n", None),
+            ("// é中\U0001f600\n".encode("utf-8"), "// é中\U0001f600\n", None),
+            (b"a\r\nb\rc\n", "a\nb\nc\n", None),
+            (b"\xff", "\ufffd", (1, 1, message % 0xff)),
+            (b"ab\xe9cd\n", "ab\ufffdcd\n", (1, 3, message % 0xe9)),
+            (b"a\nb\n\n  \x80\xff\n", "a\nb\n\n  \ufffd\ufffd\n", (4, 3, message % 0x80)),
+            (b"a\r\n\xc3", "a\n\ufffd", (2, 1, message % 0xc3)),
+            (b"a\n\xc3\xa9\xc3(\n", "a\né\ufffd(\n", (2, 3, message % 0xc3)),
+            (b"\n\n\xf0\x9f\x98\n", "\n\n\ufffd\n", (3, 1, message % 0xf0)),
+        )
+        for data, text, problem in cases:
+            with self.subTest(data=data):
+                self.assertEqual(fort_lint.source_text(data), (text, problem))
+        self.assertEqual(len(cases), 10)
 
     def test_the_standard_roots_include_each_place_of_std(self):
         fort_lint = lint_module()
