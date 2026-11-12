@@ -18,6 +18,7 @@ parameter type, and one over each function of the standard library of the build.
 """
 
 import argparse
+import ast
 import os
 import re
 import shutil
@@ -69,6 +70,17 @@ ROW = """// C: labs, ISO C11 7.22.6.1, labs(3).
 def lines_of(text, needle):
     """The 1-based lines of `text` that hold `needle`."""
     return [i + 1 for i, line in enumerate(text.split("\n")) if needle in line]
+
+
+def grammar_words():
+    """The keywords and the reserved words of spec/grammar.md, as two lists."""
+    with open(os.path.join(OPTIONS.source, "spec", "grammar.md"), encoding="utf-8") as handle:
+        grammar = handle.read()
+    words = []
+    for rule in ("keyword", "reserved"):
+        body = re.search(r"^%s\s+=(.*?);" % rule, grammar, re.MULTILINE | re.DOTALL).group(1)
+        words.append(re.findall(r'"([a-z0-9]+)"', body))
+    return words
 
 
 class Rules(unittest.TestCase):
@@ -459,6 +471,76 @@ class Rules(unittest.TestCase):
                    [("user.ft", cite, "cites the gives: of 'maker.other', which its body does not "
                      "call")])
 
+    def test_a_citation_names_a_callee_that_its_own_body_calls(self):
+        # The body of the function that holds the citing row calls the callee: a call in another
+        # function of the same file is no call of that body.
+        maker = ("import extern;\n\n/// Gives a value.\n// gives: 4 zero bytes, never null.\n"
+                 "fn make() u64 {\n    return 4;\n}\n")
+        user = ("import extern;\nimport maker;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                "// C call labs: the gives: of maker.make states 4 bytes.\n"
+                "fn use() i64 {\n    return labs(4) + other();\n}\n\n"
+                "fn other() i64 {\n    return cast(maker.make(), i64);\n}\n")
+        cite = lines_of(user, "// C call labs")[0]
+        self.check({"maker.ft": maker, "user.ft": user},
+                   [("user.ft", cite, "cites the gives: of 'maker.make', which its body does not "
+                     "call")])
+        # The same call before the function, and not after it.
+        before = user.replace("fn other() i64 {\n    return cast(maker.make(), i64);\n}\n", "")
+        before = before.replace("// C call labs:", "fn other() i64 {\n    return cast(maker.make("
+                                "), i64);\n}\n\n// C call labs:")
+        self.check({"maker.ft": maker, "user.ft": before},
+                   [("user.ft", lines_of(before, "// C call labs")[0],
+                     "cites the gives: of 'maker.make', which its body does not call")])
+
+    def test_a_citation_of_an_extern_is_reported_as_one(self):
+        # The citation form of rule 3 names a fort function. The body calls the extern, so the
+        # message does not say that the body does not call it.
+        user = ("import extern;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                "// C call labs x2: the gives: of labs states a long.\n"
+                "fn use() i64 {\n    return labs(labs(4));\n}\n")
+        cite = lines_of(user, "// C call labs")[0]
+        output = self.check({"user.ft": user}, [
+            ("user.ft", cite, "cites the gives: of 'labs', which is an `extern fn`")])
+        self.assertNotIn("does not call", output)
+        # The citation names the extern as the body spells it, with its module path.
+        path = ("import extern;\nimport std.libc;\n\n"
+                "// C call libc.strlen: a literal; the gives: of libc.strlen states a count.\n"
+                "fn use() u64 {\n    return libc.strlen(&\"a\"[0]);\n}\n")
+        output = self.check({"user.ft": path}, [
+            ("user.ft", lines_of(path, "// C call libc.strlen")[0],
+             "cites the gives: of 'libc.strlen', which is an `extern fn`")])
+        self.assertNotIn("does not call", output)
+        # An extern that the body does not call keeps the message of a callee with no call.
+        absent = user.replace("the gives: of labs states", "the gives: of llabs states")
+        absent = absent.replace("extern fn labs(i64 v) i64;\n", "extern fn labs(i64 v) i64;\n"
+                                + ROW.replace("labs", "llabs") + "extern fn llabs(i64 v) i64;\n")
+        self.check({"user.ft": absent}, [
+            ("user.ft", lines_of(absent, "// C call labs")[0],
+             "cites the gives: of 'llabs', which its body does not call")])
+        # A call of the extern in another function of the file is no call of this body.
+        other = user.replace("return labs(labs(4));\n}\n", "return 4 + other();\n}\n\n"
+                             "// C call labs x2: 4 is no pointer.\nfn other() i64 {\n"
+                             "    return labs(labs(4));\n}\n")
+        other = other.replace("// C call labs x2: the gives:", "// The gives:")
+        self.check({"user.ft": other}, [
+            ("user.ft", lines_of(other, "// The gives: of labs")[0],
+             "cites the gives: of 'labs', which its body does not call")])
+
+    def test_a_citation_of_a_function_of_a_module_that_is_not_trusted_is_reported(self):
+        # Rule 3 trusts the row of a fort function of a trusted module only: no audit holds a
+        # `// gives:` line in a module that is not trusted.
+        maker = ("/// Gives a value.\n// gives: 4 zero bytes, never null.\n"
+                 "fn make() u64 {\n    return 4;\n}\n")
+        user = ("import extern;\nimport maker;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                "// C call labs: the gives: of maker.make states 4 bytes.\n"
+                "fn use() i64 {\n    return labs(cast(maker.make(), i64));\n}\n")
+        cite = lines_of(user, "// C call labs")[0]
+        self.check({"maker.ft": maker, "user.ft": user}, [
+            ("user.ft", cite, "cites the gives: of 'maker.make', a function of a module that is "
+             "not trusted")])
+        # The same row of the same function passes when the module of the callee is trusted.
+        self.check({"maker.ft": "import extern;\n\n" + maker, "user.ft": user}, [])
+
     def test_the_cited_rows_of_std_are_checked(self):
         # Each row of std that a row of test/lang cites: deleting its line, or its word, gives a
         # problem in the file that cites it, and in std.sys for the gives: of rt.args.
@@ -535,6 +617,610 @@ class Rules(unittest.TestCase):
         self.check({"globals.ft": called}, [
             ("globals.ft", lines_of(called, "return strlen(pick(name));")[0],
              "fn 'plain' gives the `mut` global 'name'")])
+
+    # The head of a module with `mut` globals of each kind that the tests below name.
+    GLOBALS = ("import extern;\nimport std.libc;\n\n// C: strlen, ISO C11 7.24.6.3, strlen(3).\n"
+               "// gives: a count. writes: nothing. keeps: no pointer.\n"
+               "// calls: no fort function. frees: nothing.\nextern fn strlen(char* s) u64;\n\n"
+               "struct holder {\n    char* p;\n    u64 n;\n}\n\nchar* mut name = null;\n"
+               "char*[2] mut names = {};\nu64 mut count = 0;\n\n")
+
+    def test_a_mut_global_in_a_literal_or_an_index_of_an_argument_is_reported(self):
+        # The search for the call of a name does not stop at the `{` of a struct or array
+        # literal or at the `[` of an index: the name is still in the arguments of the call.
+        take = ("// C call strlen: h.p is a parameter source.\nfn take(holder h) u64 {\n"
+                "    return strlen(h.p);\n}\n\n")
+        struct = (self.GLOBALS + take + "// C call take: a holder of name.\nfn f() u64 {\n"
+                  "    return take(holder{.p = name, .n = 0});\n}\n")
+        self.check({"globals.ft": struct}, [
+            ("globals.ft", lines_of(struct, "return take(holder{")[0],
+             "fn 'f' gives the `mut` global 'name'")])
+        array = (self.GLOBALS + "// C call strlen: h[0].p is a parameter source.\n"
+                 "fn take(holder[1] h) u64 {\n    return strlen(h[0].p);\n}\n\n"
+                 "// C call take: a holder of name.\nfn f() u64 {\n"
+                 "    return take(holder[1]{{.p = name, .n = 0}});\n}\n")
+        self.check({"globals.ft": array}, [
+            ("globals.ft", lines_of(array, "return take(holder[1]{{")[0],
+             "fn 'f' gives the `mut` global 'name'")])
+        index = (self.GLOBALS + "// C call strlen: an element of two.\nfn f() u64 {\n"
+                 "    char*[2] mut two = {};\n    two[0] = &\"a\"[0];\n    two[1] = two[0];\n"
+                 "    return strlen(two[names[1] == null ? 0 : 1]);\n}\n")
+        self.check({"globals.ft": index}, [
+            ("globals.ft", lines_of(index, "return strlen(two[")[0],
+             "fn 'f' gives the `mut` global 'names'")])
+        # A block is no argument list: a name in the block of an `if` whose condition calls C
+        # stands in no call, and a statement ends the search.
+        block = (self.GLOBALS + "// C call strlen: a literal with its NUL (rule 4).\n"
+                 "fn f() char* {\n    if (strlen(&\"a\"[0]) > 0) {\n        return name;\n    }\n"
+                 "    return names[0];\n}\n")
+        self.check({"globals.ft": block}, [])
+
+    def test_a_mut_global_is_searched_through_each_enclosing_call(self):
+        # `cast(` is the innermost call of each name and it is no call of C: the search goes on
+        # to the call of the extern that encloses it, once for each name.
+        both = (self.GLOBALS + "// C call libc.memcmp: name twice, 0 bytes.\nfn f() i32 {\n"
+                "    return libc.memcmp(cast(name, u8*), cast(name, u8*), 0);\n}\n")
+        line = lines_of(both, "return libc.memcmp(")[0]
+        self.check({"globals.ft": both}, [
+            ("globals.ft", line, "fn 'f' gives the `mut` global 'name'"),
+            ("globals.ft", line, "fn 'f' gives the `mut` global 'name'")])
+        # A fort function that is no boundary function between the name and the extern.
+        deep = (self.GLOBALS + "fn same(u64 v) u64 {\n    return v;\n}\n\n"
+                "// C call strlen: an element of names.\nfn f() u64 {\n"
+                "    return strlen(names[same(names[1] == null ? 0 : 1)]);\n}\n")
+        line = lines_of(deep, "return strlen(names[same(")[0]
+        self.check({"globals.ft": deep}, [
+            ("globals.ft", line, "fn 'f' gives the `mut` global 'names'"),
+            ("globals.ft", line, "fn 'f' gives the `mut` global 'names'")])
+
+    def test_the_forms_of_a_mut_global_that_the_lint_does_not_see(self):
+        # D9.8, "The lint", names these forms: the lint reads the name of the global between
+        # the brackets of the call and nothing else. Each one is a parameter source by rule 1,
+        # and a reviewer finds it. A change that closes one of them changes that text too.
+        forms = {
+            "a local copy": ("// C call strlen: p.\nfn f() u64 {\n    char* p = name;\n"
+                             "    return strlen(p);\n}\n"),
+            "the result of a function": ("fn get() char* {\n    return name;\n}\n\n"
+                                         "// C call strlen: get().\nfn f() u64 {\n"
+                                         "    return strlen(get());\n}\n"),
+            "a length of another type": ("// C call libc.memcmp: a literal twice, count bytes.\n"
+                                         "fn f() i32 {\n    return libc.memcmp(cast(&\"a\"[0], "
+                                         "u8*), cast(&\"a\"[0], u8*), count);\n}\n"),
+        }
+        forms["a function pointer that C gave"] = (
+            "// C: get_hook, a probe.\n// gives: a function pointer of C. writes: nothing. "
+            "keeps: no pointer.\n// calls: no fort function. frees: nothing.\n"
+            "extern fn get_hook() fn (char*) u64;\n\n// C call get_hook: no argument.\n"
+            "// C call hook: a function pointer that C gave.\nfn f() u64 {\n"
+            "    fn (char*) u64 hook = get_hook();\n    return hook(name);\n}\n")
+        for form, body in forms.items():
+            with self.subTest(form=form):
+                self.check({"globals.ft": self.GLOBALS + body}, [])
+
+    def test_a_callee_in_a_group_is_that_callee(self):
+        # `(strlen)(name)` calls `strlen`. Its call row names the callee as the body spells it,
+        # `(strlen)`, and the search for a `mut` global and a citation read through each group.
+        take = ("// C call strlen: h.p is a parameter source.\nfn take(holder h) u64 {\n"
+                "    return strlen(h.p);\n}\n\n")
+        forms = (("(strlen)", "    return (strlen)(name);\n", "u64", ""),
+                 ("((strlen))", "    return ((strlen))(name);\n", "u64", ""),
+                 ("( strlen )", "    return ( strlen ) (name);\n", "u64", ""),
+                 ("(libc.memcmp)", "    return (libc.memcmp)(cast(name, u8*), cast(&\"a\"[0], "
+                  "u8*), 0);\n", "i32", ""),
+                 ("(take)", "    return (take)(holder{.p = name, .n = 0});\n", "u64", take))
+        for callee, body, result, before in forms:
+            with self.subTest(callee=callee):
+                module = (self.GLOBALS + before + "// C call %s: name.\nfn f() %s {\n%s}\n"
+                          % (callee.replace(" ", ""), result, body))
+                self.check({"globals.ft": module}, [
+                    ("globals.ft", lines_of(module, body.strip())[0],
+                     "fn 'f' gives the `mut` global 'name'")])
+        # A citation of an extern that the body calls in a group: the message of an extern.
+        user = ("import extern;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                "// C call (labs): the gives: of labs states a long.\n"
+                "fn use() i64 {\n    return (labs)(4);\n}\n")
+        output = self.check({"user.ft": user}, [
+            ("user.ft", lines_of(user, "// C call (labs)")[0],
+             "cites the gives: of 'labs', which is an `extern fn`")])
+        self.assertNotIn("does not call", output)
+        # A citation of a fort function that the body calls in a group stands.
+        maker = ("import extern;\n\n/// Gives a value.\n// gives: 4 zero bytes, never null.\n"
+                 "fn make() u64 {\n    return 4;\n}\n")
+        user = ("import extern;\nimport maker;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                "// C call labs: the gives: of maker.make states 4 bytes.\n"
+                "// C call (maker.make): a function of fort code.\n"
+                "fn use() i64 {\n    return labs(cast((maker.make)(), i64));\n}\n")
+        self.check({"maker.ft": maker, "user.ft": user}, [])
+
+    # The module that the programs of the callee forms import: externs, boundary functions and
+    # a function that is no boundary function. The row of `takep` has no `// gives:` line.
+    FORMS_MODULE = (
+        "import extern;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+        "// C: strlen, ISO C11 7.24.6.3, strlen(3).\n// gives: a count. writes: nothing. "
+        "keeps: no pointer.\n// calls: no fort function. frees: nothing.\n"
+        "extern fn strlen(char* s) u64;\n\n"
+        "// C: take_cb, a C function of the test, which calls cb with a C string.\n"
+        "// gives: no pointer. writes: nothing. keeps: no pointer.\n"
+        "// calls: cb, with a C string. frees: nothing.\n"
+        "extern fn take_cb(fn (char*) u64 cb) u64;\n\n"
+        "// C: get_hook, a C function of the test.\n// gives: a function pointer of C. "
+        "writes: nothing. keeps: no pointer.\n// calls: no fort function. frees: nothing.\n"
+        "extern fn get_hook() fn (char*) u64;\n\n"
+        "// C call strlen: p is a parameter source.\nfn takep(char* p) u64 {\n"
+        "    return strlen(p);\n}\n\n"
+        "fn keep(u64 n, fn (char*) u64 g) u64 {\n    return g == null ? n : n + 1;\n}\n\n"
+        "fn pick(fn (char*) u64 g) fn (char*) u64 {\n    return g;\n}\n")
+
+    # The forms of a callee at a call: (the form, the text before the argument list, the callee
+    # of the call row). `%s` takes a callee that is a name or a path. The plain form is first.
+    FORMS = (
+        ("plain", "%s", "%s"),
+        ("a group", "(%s)", "(%s)"),
+        ("two groups", "((%s))", "((%s))"),
+        ("white space", "( %s ) ", "(%s)"),
+        ("a comment and a new line before the list", "(%s) // a comment (\n        ", "(%s)"),
+        ("comments in the group", "( // )\n        %s // (\n        )", "(%s)"),
+        ("no group, with white space and a comment before the list", "%s // a comment (\n        ",
+         "%s"),
+    )
+
+    # A struct with a field of each function type that a program calls through.
+    HOOKS = ("struct hooks {\n    fn (i64) i64 g;\n    fn (fn (char*) u64) u64 cb;\n}\n\n")
+    A_ROW = "// C call %(row)s: the row of the call.\n"
+
+    # One program for each place of the lint that takes the callee of a call: (the site, as the
+    # function of the lint and the reader that it calls; the two callees, a name and a path;
+    # the text above the rows; the rows; the head of the function; the argument list; the
+    # problems, as (a part of the line, a part of the message)). `%(row)s` is the callee of the
+    # row and `%(name)s` is the callee with no group. Parts.test_each_place_takes_its_callee_
+    # from_the_one_reader holds the sites against the lint.
+    PLACES = (
+        # A call through a function value needs its row.
+        (("value_calls", "call_callee"), ("g", "h.g"), HOOKS, "",
+         "fn f(fn (i64) i64 g, hooks h) i64", "(1)",
+         [("fn f(", "fn 'f' has 1 call(s) through the function value '%(row)s' and no call row")]),
+        # A boundary function as the callee of a call goes to no value.
+        (("goes_to_c", "named_call"), ("takep", "m.takep"), "", A_ROW,
+         "fn f() u64", "(&\"a\"[0])", []),
+        # A citation names an extern that the body calls.
+        (("row_problems", "named_call", "extern_calls"), ("labs", "m.labs"), "",
+         "// C call %(row)s: the gives: of %(name)s states a long.\n", "fn f() i64", "(4)",
+         [("// C call", "cites the gives: of '%(name)s', which is an `extern fn`")]),
+        # A citation names a fort function that the body calls, whose row lacks the word.
+        (("row_problems", "named_call", "fn_calls"), ("takep", "m.takep"), "",
+         "// C call %(row)s: the gives: of %(name)s states a count.\n", "fn f() u64",
+         "(&\"a\"[0])",
+         [("// C call", "cites the gives: of '%(name)s', and the row of '%(name)s' has no line")]),
+        # A boundary function as an argument: the callee is a fort function, an extern, a value.
+        (("goes_to_c", "call_callee", "a fort function"), ("keep", "m.keep"), "", A_ROW,
+         "fn f() u64", "(0, m.takep)",
+         [("(0, m.takep)", "boundary function 'm.takep' goes here as a value")]),
+        (("goes_to_c", "call_callee", "an extern"), ("take_cb", "m.take_cb"), "", A_ROW,
+         "fn f() u64", "(m.takep)", []),
+        (("goes_to_c", "call_callee", "a function value"), ("cb", "h.cb"), HOOKS, A_ROW,
+         "fn f(fn (fn (char*) u64) u64 cb, hooks h) u64", "(m.takep)", []),
+        # A `mut` global between the brackets of a call of an extern and of a boundary function.
+        (("mut_global_to_c", "call_callee", "an extern"), ("strlen", "m.strlen"),
+         "char* mut name = null;\n\n", A_ROW, "fn f() u64", "(name)",
+         [("(name)", "fn 'f' gives the `mut` global 'name'")]),
+        (("mut_global_to_c", "call_callee", "a boundary function"), ("takep", "m.takep"),
+         "char* mut name = null;\n\n", A_ROW, "fn f() u64", "(name)",
+         [("(name)", "fn 'f' gives the `mut` global 'name'")]),
+        # The callee of a call inside the callee: the call is through its result, a function
+        # pointer, and D9.8 names the `mut` global there as not seen.
+        (("mut_global_to_c", "named_call"), ("pick", "m.pick"), "char* mut name = null;\n\n",
+         "// C call m.get_hook: no argument.\n" + A_ROW +
+         "// C call %(row)s(hook): a function pointer that C gave.\n",
+         "fn f() u64", "(hook)(name)", []),
+        # A call of an extern needs its row, and the rows count the calls that the body holds.
+        (("row_problems", "named_call", "the count of a call"), ("labs", "m.labs"), "", "",
+         "fn f() i64", "(4)",
+         [("fn f(", "'%(row)s' and no call row for it: write '// C call %(row)s: ...'")]),
+        (("text_calls", "call_callee"), ("labs", "m.labs"), "",
+         "// C call %(row)s x2: no pointer argument.\n", "fn f() i64", "(4)",
+         [("// C call", "count 2 call(s) of '%(row)s', and its body holds 1")]),
+        # A citation names its callee as the body spells it, in the groups of the row.
+        (("cited_callee", "call_callee"), ("takep", "m.takep"), "",
+         "// C call %(row)s: the gives: of %(row)s states a count.\n", "fn f() u64",
+         "(&\"a\"[0])",
+         [("// C call", "cites the gives: of '%(name)s', and the row of '%(name)s' has no line")]),
+    )
+
+    def test_each_place_reads_a_callee_through_each_group(self):
+        # D9.8, "The lint": the lint reads the callee of a call through each group around it.
+        # Each place gives each form the problems of its plain form, with the callee of the row
+        # as the body spells it: 13 programs, each with 2 callees in 7 forms, so 182 modules,
+        # 156 with another form against 26 with the plain form. 5 of the forms have a group.
+        # The last form has none: the place that counts a call of an extern or of a boundary
+        # function reads that form only, and leaves a callee in a group to `value_calls`.
+        cells = 0
+        for site, callees, above, rows, head, arguments, wanted in self.PLACES:
+            files = {"m.ft": self.FORMS_MODULE}
+            expected = {}
+            for callee in callees:
+                for number, (form, before, row) in enumerate(self.FORMS):
+                    spelled = callee.replace(".", " . ") if "white space" in form else callee
+                    names = {"row": row % callee, "name": callee}
+                    text = "import extern;\nimport m;\n"
+                    if "." not in callee and not above.startswith("struct"):
+                        text += "import m.%s;\n" % callee
+                    text += "\n" + above + rows % names + head + " {\n"
+                    if "hook" in arguments:
+                        text += "    fn (char*) u64 hook = m.get_hook();\n"
+                    text += "    return " + before % spelled + arguments + ";\n}\n"
+                    name = "%s%d.ft" % ("path" if "." in callee else "name", number)
+                    files[name] = text
+                    expected[(name, form, callee)] = [
+                        (lines_of(text, part)[0], message % names) for part, message in wanted]
+                    cells += 1
+            with tempfile.TemporaryDirectory() as out:
+                root = os.path.realpath(out)
+                status, output, problems = lint(root, [write(root, name, text)
+                                                       for name, text in files.items()])
+            self.assertEqual(status, 1 if wanted else 0, (site, output))
+            for (name, form, callee), want in expected.items():
+                with self.subTest(site=site, form=form, callee=callee):
+                    got = sorted((line, message) for f, line, message in problems if f == name)
+                    self.assertEqual([line for line, _ in got], [line for line, _ in want], got)
+                    for (_, message), (_, part) in zip(got, want):
+                        self.assertIn(part, message)
+        self.assertEqual(len(self.PLACES), 13)
+        self.assertEqual(len(self.FORMS), 7)
+        self.assertEqual(cells, 182)
+
+    def test_a_boundary_function_to_a_callee_in_a_group_is_judged_by_that_callee(self):
+        # `(keep)(0, takep)` gives `takep` to `keep`, a fort function, as `keep(0, takep)`
+        # does: a group around a callee makes no function pointer of it. The call in a group
+        # needs its row as a function value too (D9.8, "The lint").
+        other = "fn run(fn (char*) u64 g, u64 n) u64 {\n    return g == null ? n : n + 1;\n}\n"
+        head = ("import extern;\nimport other;\n\n// C: strlen, ISO C11 7.24.6.3, strlen(3).\n"
+                "// gives: a count. writes: nothing. keeps: no pointer.\n"
+                "// calls: no fort function. frees: nothing.\nextern fn strlen(char* s) u64;\n\n"
+                "// C call strlen: p is a parameter source.\nfn takep(char* p) u64 {\n"
+                "    return strlen(p);\n}\n\n"
+                "fn keep(u64 n, fn (char*) u64 g) u64 {\n    return g == null ? n : n + 1;\n}\n\n")
+        value = "boundary function 'takep' goes here as a value"
+        forms = (
+            # (the rows, the call, the count of problems of a row)
+            ("", "other.run(takep, 0)", 0),
+            ("// C call (other.run): a function of fort code.\n", "(other.run)(takep, 0)", 0),
+            ("// C call ((other.run)): a function of fort code.\n", "((other.run))(takep, 0)", 0),
+            ("", "(other.run)(takep, 0)", 1),
+            ("// C call keep: a function of fort code.\n", "keep(0, takep)", 0),
+            ("// C call (keep): a function of fort code.\n", "(keep)(0, takep)", 0),
+            ("// C call ((keep)): a function of fort code.\n", "( ( keep ) ) (0, takep)", 0),
+        )
+        for rows, call, row_problems in forms:
+            with self.subTest(call=call, rows=rows):
+                text = head + rows + "fn f() u64 {\n    return %s;\n}\n" % call
+                expected = [("globals.ft", lines_of(text, call)[0], value)]
+                if row_problems:
+                    expected.append(("globals.ft", lines_of(text, "fn f()")[0],
+                                     "through the function value '(other.run)' and no call row"))
+                self.check({"other.ft": other, "globals.ft": text}, expected)
+
+    def test_a_boundary_function_alone_in_a_group_is_a_value(self):
+        # A group with no argument list after it is no call: the name in it is a value, as
+        # the result of a function, in a local and as an argument of a fort function. The
+        # list of a `cast` is the argument list of no callee, so the name in it is a value too.
+        other = "fn run(fn (char*) u64 g, u64 n) u64 {\n    return g == null ? n : n + 1;\n}\n"
+        head = ("import extern;\nimport other;\n\n// C: strlen, ISO C11 7.24.6.3, strlen(3).\n"
+                "// gives: a count. writes: nothing. keeps: no pointer.\n"
+                "// calls: no fort function. frees: nothing.\nextern fn strlen(char* s) u64;\n\n"
+                "// C call strlen: p is a parameter source.\nfn takep(char* p) u64 {\n"
+                "    return strlen(p);\n}\n\n")
+        cast = "cast(takep, fn (char*) u64)"
+        forms = (("fn (char*) u64", "    return (takep);\n"),
+                 ("u64", "    fn (char*) u64 g = (takep);\n    return g == null ? 0 : 1;\n"),
+                 ("u64", "    return other.run((takep), 0);\n"),
+                 ("u64", "    return other.run(((takep)), 0);\n"),
+                 ("u64", "    fn (char*) u64 g = %s;\n    return g == null ? 0 : 1;\n" % cast),
+                 ("u64", "    return other.run(%s, 0);\n" % cast))
+        for result, body in forms:
+            with self.subTest(body=body):
+                text = head + "fn f() %s {\n%s}\n" % (result, body)
+                self.check({"other.ft": other, "globals.ft": text}, [
+                    ("globals.ft", lines_of(text, "(takep")[0],
+                     "boundary function 'takep' goes here as a value")])
+        # The message names the function as one name, with its module path and no white space.
+        user = ("import extern;\nimport globals;\nimport other;\n\nfn f() u64 {\n"
+                "    return other.run(globals . takep, 0);\n}\n")
+        self.check({"other.ft": other, "globals.ft": head, "user.ft": user}, [
+            ("user.ft", lines_of(user, "globals . takep")[0],
+             "boundary function 'globals.takep' goes here as a value")])
+
+    def test_a_call_through_a_member_of_a_pointer_takes_its_whole_place(self):
+        # `p->g(1)` is a call through the function value `p->g`, and its row names that place.
+        text = ("import extern;\n\nstruct hooks {\n    fn (i64) i64 g;\n}\n\n"
+                "// C call p->g: a function value of fort code.\n"
+                "fn f(hooks* p) i64 {\n    return p->g(1);\n}\n")
+        self.check({"member.ft": text}, [])
+        bare = text.replace("// C call p->g: a function value of fort code.\n", "")
+        self.check({"member.ft": bare}, [
+            ("member.ft", lines_of(bare, "fn f(")[0],
+             "fn 'f' has 1 call(s) through the function value 'p->g' and no call row")])
+
+    def test_a_callee_in_two_groups_is_that_callee(self):
+        # Each check reads a callee through each group, and not through the first group only.
+        # A boundary function in two groups is the callee of its call and no value.
+        head = ("import extern;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                "// C: strlen, ISO C11 7.24.6.3, strlen(3).\n// gives: a count. writes: nothing. "
+                "keeps: no pointer.\n// calls: no fort function. frees: nothing.\n"
+                "extern fn strlen(char* s) u64;\n\n"
+                "// C call strlen: p is a parameter source.\nfn takep(char* p) u64 {\n"
+                "    return strlen(p);\n}\n\n")
+        callee = (head + "// C call ((takep)): a literal with its NUL (rule 4).\n"
+                  "fn f() u64 {\n    return ((takep))(&\"a\"[0]);\n}\n")
+        self.check({"two.ft": callee}, [])
+        # With no row, the call in two groups is the one problem, and the name is no value.
+        bare = callee.replace("// C call ((takep)): a literal with its NUL (rule 4).\n", "")
+        self.check({"two.ft": bare}, [
+            ("two.ft", lines_of(bare, "fn f()")[0],
+             "fn 'f' has 1 call(s) through the function value '((takep))' and no call row")])
+        # A citation of an extern that the body calls in two groups: the message of an extern.
+        cited = (head + "// C call ((labs)): the gives: of labs states a long.\n"
+                 "fn f() i64 {\n    return ((labs))(4);\n}\n")
+        self.check({"two.ft": cited}, [
+            ("two.ft", lines_of(cited, "// C call ((labs))")[0],
+             "cites the gives: of 'labs', which is an `extern fn`")])
+        # A citation of a fort function that the body calls in two groups stands.
+        stands = (head.replace("// C call strlen: p is a parameter source.\n",
+                               "// C call strlen: p is a parameter source.\n"
+                               "// gives: a count and no pointer.\n") +
+                  "// C call ((takep)): the gives: of takep states a count.\n"
+                  "fn f() u64 {\n    return ((takep))(&\"a\"[0]);\n}\n")
+        self.check({"two.ft": stands}, [])
+
+    def test_a_mut_global_to_a_callee_that_holds_a_boundary_function_is_reported(self):
+        # A callee that is no name can hold a boundary function as a value, and the call can
+        # reach it. The lint reports the `mut` global for each such callee. It reports each
+        # boundary function there as a value too, and the call needs a row. The compiler
+        # refuses an `extern fn` as a value, so no callee holds one.
+        other = "fn plain(char* p) u64 {\n    return p == null ? 0 : 1;\n}\n"
+        head = (self.GLOBALS.replace("import std.libc;\n", "import other;\n") +
+                "// C call strlen: p is a parameter source.\nfn takep(char* p) u64 {\n"
+                "    return strlen(p);\n}\n\n")
+        value = "boundary function 'takep' goes here as a value"
+        for first, second, values in (("takep", "other.plain", 1), ("other.plain", "takep", 1),
+                                      ("takep", "takep", 2)):
+            with self.subTest(first=first, second=second):
+                call = "(count > 0 ? %s : %s)" % (first, second)
+                module = (head + "// C call %s: a function value.\n"
+                          "fn f() u64 {\n    return %s(name);\n}\n"
+                          % (call.replace(" ", ""), call))
+                line = lines_of(module, "    return " + call)[0]
+                self.check({"other.ft": other, "globals.ft": module}, [
+                    ("globals.ft", line, "fn 'f' gives the `mut` global 'name'")] +
+                    [("globals.ft", line, value)] * values)
+        # No boundary function in the callee: a call through a function value, which D9.8
+        # names as not seen.
+        module = (head + "// C call (count>0?other.plain:other.plain): a function value.\n"
+                  "fn f() u64 {\n    return (count > 0 ? other.plain : other.plain)(name);\n}\n")
+        self.check({"other.ft": other, "globals.ft": module}, [])
+        # The callee of a call inside the callee: the call is through its result, a function
+        # pointer that C gave, in each group form of that inner callee.
+        hook = ("// C: get_hook, a probe.\n// gives: a function pointer of C. writes: nothing. "
+                "keeps: no pointer.\n// calls: no fort function. frees: nothing.\n"
+                "extern fn get_hook() fn (char*) u64;\n\n")
+        for inner in ("get_hook", "(get_hook)", "((get_hook))"):
+            with self.subTest(inner=inner):
+                rows = "// C call %s: no argument.\n// C call %s(): C gave it.\n" % (inner, inner)
+                module = (self.GLOBALS + hook + rows + "fn f() u64 {\n    return %s()(name);\n}\n"
+                          % inner)
+                self.check({"globals.ft": module}, [])
+
+    def test_an_argument_in_a_group_is_that_argument(self):
+        # `take_cb((takep))` gives what `take_cb(takep)` gives: a group around an argument
+        # changes no verdict. 4 callees, 2 spellings of the argument and 5 forms of it: 40
+        # modules. An extern and a function value take the boundary function to C, and a fort
+        # function takes it as a value, as its last argument and as its first one.
+        forms = ("%s", "(%s)", "((%s))", "( %s )", "( // (\n        %s // )\n        )")
+        kinds = (
+            ("m.take_cb(%s)", "// C call m.take_cb: C calls takep in the call.\n", "fn f() u64",
+             False),
+            ("cb(%s)", "// C call cb: a function pointer that C gave.\n",
+             "fn f(fn (fn (char*) u64) u64 cb) u64", False),
+            ("m.keep(0, %s)", "// C call m.keep: a function of fort code.\n", "fn f() u64", True),
+            ("m.keep2(%s, 0)", "// C call m.keep2: a function of fort code.\n", "fn f() u64",
+             True),
+        )
+        module = self.FORMS_MODULE + ("\nfn keep2(fn (char*) u64 g, u64 n) u64 {\n"
+                                      "    return g == null ? n : n + 1;\n}\n")
+        files = {"m.ft": module}
+        expected = []
+        for kind, (call, rows, head, value) in enumerate(kinds):
+            for argument in ("takep", "m.takep"):
+                for number, form in enumerate(forms):
+                    spelled = form % (argument.replace(".", " . ") if " %s " in form else argument)
+                    text = "import extern;\nimport m;\n"
+                    if "." not in argument:
+                        text += "import m.takep;\n"
+                    text += "\n" + rows + head + " {\n    return " + call % spelled + ";\n}\n"
+                    name = "k%d_%s%d.ft" % (kind, "path" if "." in argument else "name", number)
+                    files[name] = text
+                    if value:
+                        expected.append((name, lines_of(text, argument.split(".")[-1])[-1],
+                                         "boundary function '%s' goes here as a value" % argument))
+        self.assertEqual((len(files) - 1, len(expected)), (40, 20))
+        self.check(files, expected)
+
+    # A trusted module with a function whose row holds each word and one whose row holds none.
+    MAKER = ("import extern;\n\n/// Gives a value.\n// gives: 4, and no pointer.\n"
+             "// writes: no storage.\nfn good() u64 {\n    return 4;\n}\n\n"
+             "fn bare() u64 {\n    return 4;\n}\n")
+
+    def test_a_citation_reads_in_each_form_that_the_lint_accepts(self):
+        # D9.8 rule 3 writes a citation as `the gives: of <the callee>` or `the writes: of <the
+        # callee>`, with the callee as the body spells it. The lint accepts 128 forms of that
+        # text: `the` or `The`, 2 words, a space or a line wrap after the colon, a space or a
+        # line wrap after `of`, the callee plain, in a group, in two groups and in a group with
+        # white space, and the callee a name or a name with its module path. Each form cites
+        # `good`, whose row holds each word, and `bare`, whose row holds none: 256 functions.
+        text = "import extern;\nimport maker;\nimport maker.good;\nimport maker.bare;\n"
+        expected = []
+        forms = set()
+        for the in ("the", "The"):
+            for word in ("gives", "writes"):
+                for first in (" ", "\n// "):
+                    for second in (" ", "\n// "):
+                        for group in ("%s", "(%s)", "((%s))", "( %s )"):
+                            for path in ("", "maker."):
+                                forms.add((the, word, first, second, group, path))
+                                for name in ("good", "bare"):
+                                    callee = path + name
+                                    spelled = group % (callee.replace(".", " . ")
+                                                       if " %s " in group else callee)
+                                    line = text.count("\n") + 2
+                                    text += ("\n// A row of text: %s %s:%sof%s%s states it.\n"
+                                             "fn f%d() u64 {\n    return %s();\n}\n"
+                                             % (the, word, first, second, spelled, line, callee))
+                                    if name == "bare":
+                                        expected.append(("user.ft", line, "cites the %s: of '%s', "
+                                                         "and the row of '%s' has no line '// %s: "
+                                                         "...'" % (word, callee, callee, word)))
+        self.assertEqual((len(forms), len(expected)), (128, 128))
+        self.check({"maker.ft": self.MAKER, "user.ft": text}, expected)
+
+    def test_text_that_starts_a_citation_and_does_not_read_as_one_is_reported(self):
+        # A row that a reviewer takes for a citation and that the lint does not read is a
+        # problem, and never silence. Text starts a citation when it holds `the gives:`,
+        # `the gives of` or `gives: of`, or the same with `writes`, in each case, with white
+        # space and quote characters between the words. Each of the 48 rows below starts one
+        # and is no form of the 128.
+        unread = (
+            "THE gives: of good.", "tHe writes: of good.", "the Gives: of good.",
+            "the WRITES: of good.", "the gives : of good.", "the  gives: of good.",
+            "the\tgives: of good.", "the gives:  of good.", "the gives: of  good.",
+            "the gives:of good.", "the gives: Of good.", "the gives: of\tgood.",
+            "the gives of good.", "The writes of good.", "the gives\n// of good.",
+            "its gives: of good.", "Writes: of good.", "gives:of good.", "its gives : of good.",
+            "the\n// gives: of good.", "the gives\n// : of good.", "the gives:\n//\n// of good.",
+            "the gives: of", "the gives: of 3.", "the gives: of 4good.", "the gives: of (good.",
+            "the gives: of ().", "the gives: of (good + good).", "the gives: of (good, good).",
+            "the gives: of (good()).", "the gives: of (table[0]).", "the gives: of .good.",
+            "the gives: of `good`.", "the gives: of 'good'.", "the gives: of $cfg.",
+            "the gives: of <good>.", "the gives: for good.", "the gives: good.",
+            "the gives: of ((good).", "the gives: of [good].",
+            "the `gives:` of good.", "the 'writes:' of good.", "the \"gives:\" of good.",
+            "the `gives: of` good.", "the `gives`: of good.", "the `gives` of good.",
+            "`gives:` of good.", "The \"writes\" : 'of' good.",
+        )
+        text = "import extern;\nimport maker;\nimport maker.good;\n"
+        expected = []
+        for row in unread:
+            line = text.count("\n") + 2
+            text += ("\n// A row of text: %s\nfn f%d() u64 {\n    return good();\n}\n"
+                     % (row, line))
+            expected.append(("user.ft", line, "starts a citation that the lint cannot read"))
+        self.assertEqual(len(expected), 48)
+        self.check({"maker.ft": self.MAKER, "user.ft": text}, expected)
+        # A citation that reads, of a callee that the body does not call: the callee is the
+        # name that the reader takes, and the message names it.
+        others = (("the gives: of table[0].", "table"), ("the gives: of the function good.", "the"),
+                  ("the gives: of good.x.", "good.x"), ("the gives: of (p->good).", "p->good"),
+                  ("the gives: of goody.", "goody"), ("the gives: of maker.bare.", "maker.bare"),
+                  ("the gives: of (good)(1).", None), ("the gives: of good().", None),
+                  ("The writes: of good, and the gives: of good.", None))
+        text = "import extern;\nimport maker;\nimport maker.good;\n"
+        expected = []
+        for row, callee in others:
+            line = text.count("\n") + 2
+            text += ("\n// A row of text: %s\nfn f%d() u64 {\n    return good();\n}\n"
+                     % (row, line))
+            if callee is not None:
+                expected.append(("user.ft", line, "cites the gives: of '%s', which its body does "
+                                 "not call" % callee))
+        self.check({"maker.ft": self.MAKER, "user.ft": text}, expected)
+        # Text with one of the words that starts no citation is no problem.
+        plain = ("the writes stay inside the buffer.", "a caller flushes between the writes. Then",
+                 "it gives: a count.", "writes: nothing of its own.", "C gives of its own storage.",
+                 "the row holds the `// gives:` line.", "what the function gives: 4 bytes.",
+                 "the function gives or writes: nothing of note.", "bathe gives. writes of C.",
+                 "the gives and the writes.", "the giver: of good.", "the gives_: of good.",
+                 "the (gives:) of good.", "the gives, of good.", "gives: - of good.")
+        text = "import extern;\nimport maker;\nimport maker.good;\n"
+        for number, row in enumerate(plain):
+            text += ("\n// A row of text: %s\nfn f%d() u64 {\n    return good();\n}\n"
+                     % (row, number))
+        self.check({"maker.ft": self.MAKER, "user.ft": text}, [])
+
+    # A body that holds each keyword that fort code writes before a `(`, 11 of them: `fn`,
+    # `cast`, `sizeof`, `defer`, `if`, `while`, `for`, `switch`, `case`, `new` and `return`.
+    KEYWORD_BODY = (
+        "    fn (u64) u64 g = same;\n    u64 mut total = cast(sizeof(u64), u64);\n"
+        "    defer (none)();\n    if (n > 0) {\n        total += 1;\n    } else if (n > 1) {\n"
+        "        total += 2;\n    }\n    while (total > 9) {\n        total -= 1;\n    }\n"
+        "    do {\n        total += 1;\n    } while (total < 2);\n"
+        "    for (u64 mut i = 0; i < n; i++) {\n        total += i;\n    }\n"
+        "    switch (n) {\n        case (1):\n            total += 1;\n        default:\n"
+        "            total += 2;\n    }\n    u64 mut* own q = new(u64);\n"
+        "    *q = g == null ? 0 : 1;\n    total += *q;\n    del(q);\n"
+        "    return (strlen(p) + total);\n")
+
+    def test_a_keyword_is_the_callee_of_no_row_and_no_citation(self):
+        # A keyword is no name, so it is the callee of no call: a call row that names one counts
+        # a call that the body does not hold, and a citation that names one does not read. The
+        # test names each of the 41 keywords and the 10 reserved words of spec/grammar.md in a
+        # row and in a citation. The body holds 11 of them before a `(`.
+        words = sorted(sum(grammar_words(), []))
+        self.assertEqual(len(words), 51)
+        held = [word for word in words
+                if re.search(r"(?<![A-Za-z0-9_$])%s ?\(" % word, self.KEYWORD_BODY)]
+        self.assertEqual(held, ["case", "cast", "defer", "fn", "for", "if", "new", "return",
+                                "sizeof", "switch", "while"])
+        head = ("import extern;\n\n// C: strlen, ISO C11 7.24.6.3, strlen(3).\n"
+                "// gives: a count. writes: nothing. keeps: no pointer.\n"
+                "// calls: no fort function. frees: nothing.\nextern fn strlen(char* s) u64;\n\n"
+                "fn same(u64 v) u64 {\n    return v;\n}\n\nfn none() void {\n}\n\n")
+        rows = ("// C call strlen: p is a parameter source.\n"
+                "// C call (none): a function of fort code.\n")
+        self.check({"kw.ft": head + rows + "fn f(char* p, u64 n) u64 {\n" + self.KEYWORD_BODY
+                    + "}\n"}, [])
+        text = (head + rows + "".join("// C call %s: a keyword.\n" % word for word in words)
+                + "fn f(char* p, u64 n) u64 {\n" + self.KEYWORD_BODY + "}\n")
+        self.check({"kw.ft": text}, [
+            ("kw.ft", lines_of(text, "// C call %s: a keyword." % word)[0],
+             "the call rows of fn 'f' count 1 call(s) of '%s', and its body holds 0" % word)
+            for word in words])
+        text = (head + rows + "".join("// It has the gives: of %s here.\n" % word
+                                      for word in words)
+                + "fn f(char* p, u64 n) u64 {\n" + self.KEYWORD_BODY + "}\n")
+        self.check({"kw.ft": text}, [
+            ("kw.ft", lines_of(text, "the gives: of %s here." % word)[0],
+             "starts a citation that the lint cannot read") for word in words])
+
+    def test_a_compiler_form_is_the_callee_of_no_row(self):
+        # `$if (...)` and `$cfg(key)` are compiler forms (D21.1, D21.2) and no call: a call row
+        # that names `if` or `cfg` counts a call that the body does not hold.
+        main = ("//! run\n//! flags: --release --cfg mode=good\nimport extern;\n\n" + ROW +
+                "extern fn labs(i64 v) i64;\n\n// C call labs: no pointer argument.\n%s"
+                "fn main() i32 {\n    $if ($cfg(mode) == \"good\") {\n"
+                "        return cast(labs(4), i32);\n    }\n}\n")
+        self.check({"test/lang/run/x/001_form.ft": main % ""}, [])
+        rows = main % "// C call cfg: a compiler form.\n// C call if: a compiler form.\n"
+        self.check({"test/lang/run/x/001_form.ft": rows}, [
+            ("test/lang/run/x/001_form.ft", lines_of(rows, "// C call %s:" % word)[0],
+             "the call rows of fn 'main' count 1 call(s) of '%s', and its body holds 0" % word)
+            for word in ("cfg", "if")])
+
+    def test_a_name_between_the_brackets_of_a_keyword_goes_to_no_call(self):
+        # The `(` after a keyword opens no argument list. A `mut` global there goes to no call
+        # of C, and a boundary function there is a value.
+        takep = ("// C call strlen: p is a parameter source.\nfn takep(char* p) u64 {\n"
+                 "    return strlen(p);\n}\n\n")
+        text = (self.GLOBALS + takep + "fn f() u64 {\n    if (name == null) {\n        return 0;\n"
+                "    }\n    while (names[0] != null) {\n        names[0] = null;\n    }\n"
+                "    u8* raw = cast(name, u8*);\n    switch (count) {\n        case (1):\n"
+                "            count = 2;\n        default:\n            count = 3;\n    }\n"
+                "    for (u64 mut i = 0; names[1] != null; i++) {\n        names[1] = null;\n"
+                "    }\n"
+                "    return (raw == null ? cast(sizeof(char*), u64) : 1);\n}\n")
+        self.check({"globals.ft": text}, [])
+        value = "boundary function 'takep' goes here as a value"
+        text = (self.GLOBALS + takep + "fn f() fn (char*) u64 {\n    if (takep == null) {\n"
+                "        return (takep);\n    }\n    return (takep);\n}\n")
+        self.check({"globals.ft": text}, [
+            ("globals.ft", line, value) for line in lines_of(text, "(takep")])
 
     def test_a_row_in_the_standard_library_is_checked(self):
         # A module of std/ is trusted by its root (D9.8). The test removes the declaration row
@@ -717,17 +1403,75 @@ class Parts(unittest.TestCase):
         self.assertEqual(fort_lint.function_row_problems(None, "f.ft", source, record,
                                                          {"k": 1}, {"k"}), [])
 
-    def test_the_callee_of_a_call_through_a_value_is_its_whole_place(self):
+    def test_the_callee_of_a_call_is_read_at_its_open_bracket(self):
+        # `^` marks the `(` that the test reads. The result is (the callee as the body spells
+        # it, the count of groups, the callee in the groups, the name that holds the record).
         fort_lint = lint_module()
-        code = ("if (cmp(&a[i], b) < 0 && t [0](x) + pick()(y) + h.on(z) + p->f(w) + "
-                "z->introspect->enumerator(v) + (g)(u) + q[0..r(s)]); return (k)(x); "
-                "cast(m, n)(o); t[0] [1](x); defer (d)(y);")
-        wants = ["if", "cmp", "t[0]", "pick", "pick()", "h.on", "p->f",
-                 "z->introspect->enumerator", "(g)", "r", "(k)", "cast(m,n)", "t[0][1]", "(d)"]
-        opens = [i for i, c in enumerate(code) if c == "(" and code[i - 1] != "&"]
-        got = [fort_lint.callee_text(code, at) for at in opens]
-        for want in wants:
-            self.assertIn(want, got)
+        cases = (
+            ("strlen^(p)", ("strlen", 0, "strlen", "strlen")),
+            ("libc . strlen ^(p)", ("libc.strlen", 0, "libc.strlen", "strlen")),
+            ("(strlen)^(p)", ("(strlen)", 1, "strlen", "strlen")),
+            ("x = (strlen)\n    ^(p)", ("(strlen)", 1, "strlen", "strlen")),
+            ("( ( libc . strlen ) ) ^(p)", ("((libc.strlen))", 2, "libc.strlen", "strlen")),
+            ("(((strlen)))^(p)", ("(((strlen)))", 3, "strlen", "strlen")),
+            ("if (cmp^(&a[i], b) < 0)", ("cmp", 0, "cmp", "cmp")),
+            ("t [0]^(x)", ("t[0]", 0, "t[0]", None)),
+            ("t[0] [1]^(x)", ("t[0][1]", 0, "t[0][1]", None)),
+            ("pick()^(y)", ("pick()", 0, "pick()", None)),
+            ("pick ( ) ^(y)", ("pick()", 0, "pick()", None)),
+            ("cast(m, n)^(o)", ("cast(m,n)", 0, "cast(m,n)", None)),
+            ("(pick())^(y)", ("(pick())", 1, "pick()", None)),
+            ("(t[0])^(y)", ("(t[0])", 1, "t[0]", None)),
+            ("(a + f)^(x)", ("(a+f)", 1, "a+f", None)),
+            ("(f, g)^(x)", ("(f,g)", 1, "f,g", None)),
+            ("(c ? f : g)^(x)", ("(c?f:g)", 1, "c?f:g", None)),
+            ("((f) + 1)^(x)", ("((f)+1)", 1, "(f)+1", None)),
+            ("(f)(g)^(x)", ("(f)(g)", 0, "(f)(g)", None)),
+            ("((f)(g))^(x)", ("((f)(g))", 1, "(f)(g)", None)),
+            ("h.on^(z)", ("h.on", 0, "h.on", "on")),
+            ("(h . on)^(z)", ("(h.on)", 1, "h.on", "on")),
+            ("p->f^(w)", ("p->f", 0, "p->f", "f")),
+            ("z->introspect->enumerator^(v)",
+             ("z->introspect->enumerator", 0, "z->introspect->enumerator", "enumerator")),
+            ("x.libc.write^(i)", ("x.libc.write", 0, "x.libc.write", "write")),
+            ("q[0..r^(s)]", ("r", 0, "r", "r")),
+            ("q[0..(r)^(s)]", ("(r)", 1, "r", "r")),
+            ("return (k)^(x)", ("(k)", 1, "k", "k")),
+            ("defer (d)^(y)", ("(d)", 1, "d", "d")),
+            ("returned(k)^(x)", ("returned(k)", 0, "returned(k)", None)),
+            ("returned^(k)(x)", ("returned", 0, "returned", "returned")),
+            ("iffy^(n)", ("iffy", 0, "iffy", "iffy")), ("m.cfg^(n)", ("m.cfg", 0, "m.cfg", "cfg")),
+            ("x.sizeof_^(n)", ("x.sizeof_", 0, "x.sizeof_", "sizeof_")),
+            # A keyword is no name: the `(` after it opens no argument list of a callee.
+            ("return ^(strlen)(p)", None), ("defer ^(strlen)(fd)", None), ("if ^(n > 0) {", None),
+            ("x = cast^(m, n)(o)", None), ("x = sizeof^(u64)", None), ("p = new^(u64)", None),
+            ("fn ^(char*) u64 g", None), ("(if)^(n)", None), ("((while))^(n)", None),
+            ("m.if^(n)", None), ("p->return^(n)", None),
+            # A compiler form is no call.
+            ("$cfg^(mode)", None), ("$if ^($cfg(mode) == x) {", None), ("$if ($cfg^(mode) == x) {",
+                                                                        None),
+            # A group: no name, `)` or `]` stands before the `(`.
+            ("^(strlen)(p)", None), ("x = ^(strlen)(p)", None),
+            ("f(^(strlen)(p))", None), ("a, ^(strlen)(p)", None),
+            ("1 + ^(strlen)(p)", None), ("~^(strlen)(p)", None), ("c ? ^(f)(x) : 0", None),
+            ("q[^(f)(x)]", None), ("{ ^(f)(x); }", None), ("q[0..^(r)(s)]", None),
+            ("(^(strlen))(p)", None),
+            # The list of a function type and its grouped result are no call.
+            ("fn () ^(void) g", None), ("fn (char*) ^(fn (i64) i64) g", None),
+        )
+        for marked, want in cases:
+            with self.subTest(code=marked):
+                code = marked.replace("^", "")
+                callee = fort_lint.call_callee(code, marked.index("^"))
+                if want is None:
+                    self.assertIsNone(callee)
+                    continue
+                name = None
+                if callee.name_at >= 0:
+                    name = fort_lint.IDENTIFIER.match(code, callee.name_at).group(0)
+                self.assertEqual((callee.text, callee.groups, callee.name, name), want)
+                self.assertEqual(re.sub(r"\s+", "", code[callee.begin:callee.end]), callee.text)
+        self.assertEqual(len(cases), 61)
 
     def test_an_import_is_no_place_of_a_value(self):
         fort_lint = lint_module()
@@ -757,6 +1501,213 @@ class Parts(unittest.TestCase):
         self.assertEqual(fort_lint.matching_close(code, 1), code.index(") x"))
         self.assertEqual(fort_lint.matching_close("f(a]", 1), -1)
         self.assertEqual(fort_lint.matching_close("f(a", 1), -1)
+
+    def test_a_name_is_the_callee_of_a_call_through_each_group(self):
+        # The name is `strlen`. The result is the callee of the call as the body spells it, or
+        # None when `strlen` is the callee of no call.
+        fort_lint = lint_module()
+        cases = (
+            ("strlen(p)", "strlen"), ("strlen (p)", "strlen"), ("strlen\n    (p)", "strlen"),
+            ("libc.strlen(p)", "libc.strlen"), ("(strlen)(p)", "(strlen)"),
+            ("(strlen) (p)", "(strlen)"), ("( ( strlen ) ) (p)", "((strlen))"),
+            ("(((strlen)))(p)", "(((strlen)))"), ("(libc.strlen)(p)", "(libc.strlen)"),
+            ("((libc . strlen))(p)", "((libc.strlen))"), ("f((strlen)(p))", "(strlen)"),
+            ("return (strlen)(p)", "(strlen)"), ("x[0..(strlen)(p)]", "(strlen)"),
+            ("f(strlen)", None), ("(strlen)", None), ("((strlen))", None),
+            ("(strlen) + 1", None), ("f((strlen))", None), ("f((strlen), 1)(p)", None),
+            ("pick(strlen)(p)", None), ("cast(strlen)(p)", None), ("t[0](strlen)(p)", None),
+            ("f()(strlen)(p)", None), ("returned(strlen)(p)", None),
+            ("(strlen, x)(p)", None), ("(x + strlen)(p)", None), ("((strlen) + 1)(p)", None),
+            ("(x, (strlen))(p)", None), ("(strlen)[0](p)", None), ("(strlen.x)(p)", None),
+            ("strlen.x(p)", None), ("strlen[0](p)", None), ("(c ? strlen : strlen)(p)", None),
+            ("fn () (strlen) g", None),
+        )
+        for code, want in cases:
+            with self.subTest(code=code):
+                start = code.index("strlen")
+                callee = fort_lint.named_call(code, start)
+                self.assertEqual(None if callee is None else callee.text, want)
+                if callee is not None:
+                    self.assertEqual(callee.name_at, start)
+        self.assertEqual(len(cases), 34)
+
+    def test_the_keywords_of_the_lint_are_the_ones_of_the_grammar(self):
+        # The lint has one list of the words that are no name, and the reader reads it. The list
+        # is the 41 keywords and the 10 reserved words of spec/grammar.md.
+        fort_lint = lint_module()
+        keywords, reserved = grammar_words()
+        self.assertEqual((len(keywords), len(reserved)), (41, 10))
+        self.assertEqual(sorted(fort_lint.KEYWORDS), sorted(keywords + reserved))
+        self.assertEqual(len(fort_lint.KEYWORDS), 51)
+        self.assertEqual(fort_lint.STATEMENT_KEYWORDS, ("return", "defer"))
+        self.assertLessEqual(set(fort_lint.STATEMENT_KEYWORDS), fort_lint.KEYWORDS)
+        with open(os.path.join(OPTIONS.source, "tools", "fort_lint.py"), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        readers = sorted(function.name for function in tree.body
+                         if isinstance(function, ast.FunctionDef) and
+                         any(isinstance(node, ast.Name) and node.id == "KEYWORDS"
+                             for node in ast.walk(function)))
+        self.assertEqual(readers, ["call_callee"])
+
+    def test_a_keyword_is_the_callee_of_no_call_for_each_reader(self):
+        # Each word of the list, at each function that reads a callee: the reader at the `(`,
+        # the reader from the name, the count of the calls in a text and the reader of a
+        # citation. 51 words in 11 forms. The same word with one more letter is a name.
+        fort_lint = lint_module()
+        cells = 0
+        for word in sorted(fort_lint.KEYWORDS):
+            with self.subTest(word=word):
+                for before in ("%s", "x = %s ", "(%s)", "( ( %s ) ) ", "m.%s", "$%s"):
+                    code = before % word + "(a)"
+                    self.assertIsNone(fort_lint.call_callee(code, code.index("(a)")), code)
+                    cells += 1
+                for code in ("%s(a)", "(%s)(a)"):
+                    code = code % word
+                    self.assertIsNone(fort_lint.named_call(code, code.index(word)), code)
+                    cells += 1
+                code = "%s (a); %s(b); (%s)(c);" % (word, word, word)
+                for callee in (word, "(%s)" % word):
+                    self.assertEqual(fort_lint.text_calls(code, callee, 0, len(code)), 0, code)
+                    cells += 1
+                self.assertIsNone(fort_lint.cited_callee(word + " states", 0))
+                self.assertIsNone(fort_lint.cited_callee("(%s) states" % word, 0))
+                self.assertIsNone(fort_lint.cited_callee("m.%s states" % word, 0))
+                cells += 1
+                name = word + "_"
+                code = "x = %s (a) + (%s)(b);" % (name, name)
+                self.assertEqual(fort_lint.call_callee(code, code.index("(a)")).text, name)
+                self.assertEqual(fort_lint.named_call(code, code.index(name)).text, name)
+                self.assertEqual(fort_lint.text_calls(code, name, 0, len(code)), 1)
+                self.assertEqual(fort_lint.text_calls(code, "(%s)" % name, 0, len(code)), 1)
+                self.assertEqual(fort_lint.cited_callee(name + " states", 0), name)
+        self.assertEqual(cells, 51 * 11)
+
+    def test_a_citation_names_its_callee_as_a_body_spells_it(self):
+        # The reader of a citation gives the callee with no group and no white space, or None.
+        fort_lint = lint_module()
+        cases = (
+            ("rt.alloc states", "rt.alloc"), ("alloc.", "alloc"), ("alloc", "alloc"),
+            ("alloc, and", "alloc"), ("rt.alloc. Then", "rt.alloc"), ("a.b.c d", "a.b.c"),
+            ("(rt.alloc) states", "rt.alloc"), ("((alloc)).", "alloc"),
+            ("(( rt . alloc )) x", "rt.alloc"), ("( alloc )", "alloc"), ("rt.alloc()", "rt.alloc"),
+            ("(alloc)(1)", "alloc"), ("(p->f)", "p->f"), ("iffy", "iffy"), ("table[0]", "table"),
+            ("", None), (" alloc", None), ("3", None), ("4x", None), (".alloc", None),
+            ("`alloc`", None), ("(alloc", None), ("((alloc)", None), ("()", None), ("(())", None),
+            ("(a + b)", None), ("(a, b)", None), ("(t[0])", None), ("(pick())", None),
+            ("(c ? a : b)", None), ("if", None), ("(return)", None), ("(alloc]", None),
+        )
+        for text, want in cases:
+            with self.subTest(text=text):
+                self.assertEqual(fort_lint.cited_callee(text, 0), want)
+                self.assertEqual(fort_lint.cited_callee("of " + text, 3), want)
+        self.assertEqual(len(cases), 33)
+
+    def test_an_offset_that_starts_no_name_is_the_callee_of_no_call(self):
+        fort_lint = lint_module()
+        for code, start in (("(x)", 0), ("f(x)", 1), ("f (x)", 1), ("1(x)", 0), ("", 0), ("f(", 2)):
+            with self.subTest(code=code, start=start):
+                self.assertIsNone(fort_lint.named_call(code, start))
+
+    def test_each_place_takes_its_callee_from_the_one_reader(self):
+        # D9.8, "The lint": the lint reads the callee of a call through each group around it.
+        # One function, `call_callee`, reads a callee, at the `(` of the call. `named_call`
+        # asks it for the call of a name. This test counts the places that take a callee from
+        # the two functions, and Rules.PLACES has a program for each one, in each form of a
+        # group. It also counts the means that read a callee with no reader: a text of
+        # brackets, a step to the next character, a pattern that ends at an offset, a walk by
+        # one character, and a pattern that matches a bracket.
+        # The test is no proof. It fails for 16 measured mutants: 10 that change one place to
+        # another reader, and 6 that add a place with one of those means. A new
+        # place that reads a callee by another means passes here, and a reviewer finds it.
+        # For a new place that asks the reader: add it to `sites` and give it a program.
+        with open(os.path.join(OPTIONS.source, "tools", "fort_lint.py"), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        functions = []
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                functions.append((node.name, node))
+            elif isinstance(node, ast.ClassDef):
+                functions.extend(("%s.%s" % (node.name, item.name), item) for item in node.body
+                                 if isinstance(item, ast.FunctionDef))
+        sites = {}
+        brackets = set()
+        steps = set()
+        ends = set()
+        walks = set()
+        for name, function in functions:
+            for node in ast.walk(function):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    if node.func.id in ("call_callee", "named_call"):
+                        sites[(name, node.func.id)] = sites.get((name, node.func.id), 0) + 1
+                    if node.func.id in ("callee_span", "prev_char", "next_char"):
+                        steps.add((name, node.func.id))
+                # A text of brackets and no word: the function looks at a bracket of the code.
+                if isinstance(node, ast.Constant) and isinstance(node.value, str) and \
+                        re.search(r"[()]", node.value) and \
+                        not re.search(r"[A-Za-z0-9 %]", node.value):
+                    brackets.add(name)
+                # A pattern that ends at `\Z`: the function reads a word that ends at an offset.
+                if isinstance(node, ast.Constant) and isinstance(node.value, str) and \
+                        node.value.endswith("\\Z"):
+                    ends.add(name)
+                # A test of one character: the function walks the code by hand.
+                if isinstance(node, ast.Attribute) and node.attr in (
+                        "isspace", "isalnum", "isalpha", "isdigit", "isidentifier"):
+                    walks.add(name)
+                if isinstance(node, ast.Name) and node.id == "IDENTIFIER_CHAR":
+                    walks.add(name)
+        self.assertEqual(sites, {
+            ("named_call", "call_callee"): 1,
+            ("value_calls", "call_callee"): 1,
+            ("goes_to_c", "named_call"): 1,
+            ("goes_to_c", "call_callee"): 1,
+            ("text_calls", "call_callee"): 1,
+            ("mut_global_to_c", "call_callee"): 1,
+            ("mut_global_to_c", "named_call"): 1,
+            ("row_problems", "named_call"): 3,
+            ("cited_callee", "call_callee"): 1,
+        })
+        # 10 places: each call above but the one of `named_call` itself. Each has a program.
+        places = sum(count for (name, _), count in sites.items() if name != "named_call")
+        self.assertEqual(places, 10)
+        held = {}
+        for site, *_ in Rules.PLACES:
+            held.setdefault(site[:2], set()).add(site)
+        self.assertEqual({site: len(programs) for site, programs in held.items()}, {
+            ("value_calls", "call_callee"): 1,
+            ("goes_to_c", "named_call"): 1,
+            ("goes_to_c", "call_callee"): 3,
+            ("text_calls", "call_callee"): 1,
+            ("mut_global_to_c", "call_callee"): 2,
+            ("mut_global_to_c", "named_call"): 1,
+            ("row_problems", "named_call"): 3,
+            ("cited_callee", "call_callee"): 1,
+        })
+        # No other function reads a callee. Each function that looks at a bracket of the code
+        # is the reader, a place that asks the reader, or one of these: the two that pair
+        # brackets, the two that find the `(` around an offset, and the four that read a type.
+        self.assertEqual(brackets, {
+            "callee_span", "call_callee", "named_call",
+            "value_calls", "goes_to_c", "text_calls", "cited_callee",
+            "matching_open", "matching_close", "call_open", "enclosing_opens",
+            "TypeParser.parse_base", "type_start", "is_function_type", "Rows.is_boundary"})
+        # Only the reader walks a callee. `spelled_callee` steps back over the module path of
+        # a name for a message and for the start of an argument, and `goes_to_c` looks at the
+        # `(` or `,` before an argument and the `,` or `)` after it.
+        self.assertEqual(steps, {
+            ("call_callee", "callee_span"), ("named_call", "next_char"),
+            ("spelled_callee", "prev_char"), ("goes_to_c", "prev_char"),
+            ("goes_to_c", "next_char")})
+        # A pattern that ends at an offset reads the word before a `.`, a `(` or a group: the
+        # module path of a name, and the keyword that the reader looks for.
+        self.assertEqual(ends, {"spelled_callee", "callee_span", "call_callee"})
+        # The reader and the two steps walk the code by one character, and the tokens of a type.
+        self.assertEqual(walks, {"callee_span", "call_callee", "next_char", "prev_char",
+                                 "type_tokens"})
+        # No pattern of the lint matches a bracket: a callee is no match of a pattern.
+        patterns = [node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and
+                    isinstance(node.value, str) and re.search(r"\\[()]", node.value)]
+        self.assertEqual(patterns, [])
 
     def test_the_trust_form_is_the_first_item(self):
         fort_lint = lint_module()

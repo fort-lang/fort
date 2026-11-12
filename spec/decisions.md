@@ -1685,8 +1685,10 @@ Sections:
      its `///` text, and it holds a line that starts with `// gives:` or `// writes:` for each word
      that a call row cites. A call row cites the word as `the gives: of <the callee>` or
      `the writes: of <the callee>`, with the callee as the body spells it, and the body calls
-     that callee. The lint reports a citation of a callee that the body does not call, or whose
-     row has no line with the cited word.
+     that callee. The lint reports a citation of a callee that the body does not call. It reports
+     a citation of a callee that is an `extern fn` or a function of a module that is not trusted.
+     It reports a citation of a callee whose row has no line with the cited word. It also reports
+     text that starts a citation and that it cannot read as one.
   4. A NUL: the NUL of a string literal (D3.7), also through a global that is no `mut` global and
      that a literal initializes; the NUL of a buffer that `str.to_cstr` gave; or a NUL that the
      function, or a fort function of the same module that it calls, stores by a checked index
@@ -1783,26 +1785,44 @@ Sections:
   function and through a function value in its body, or count a call that the body does not hold. A
   row counts the calls that the body spells with its callee, and the count of the index is the
   authority: a callee whose calls the index counts more often than the text is an error. It reports
-  a citation of rule 3 of a callee that the body does not call, or whose row lacks the cited word.
-  It reports a `mut` global whose type reaches a byte pointer, named in an argument of a call of an
-  `extern fn` or of a boundary function, in a function that is no boundary function; a value that a
-  local copies from a `mut` global first goes past it, and it checks no bound, length or NUL. It
-  reports
-  a name of a boundary function, outside an import, that stands neither as the callee of a call nor
-  as an argument of a call whose callee is an `extern fn` or a function pointer. A boundary function
-  as a value, and a function pointer that C gave, go only to C, as the callee or as an argument of
-  such a call. The call row says so, and a reviewer checks it, because the lint does not tell a
-  function pointer that C gave from a function pointer of fort code. So each call through a function
-  value in a trusted module has a row: a trusted module that gives a boundary function to a function
-  value of fort code, through a local or an element of a table, gives a module that is not trusted a
-  function that trusts its caller. A program of `test/lang/fail` does not run, and a program that a
-  test suite holds as text is outside the files of the lint, so they need no row. The interface file
-  of a library writes `import extern;` first in the section of each trusted module that is not of
-  `std` (D9.11). The reason: no rule can check C, so each compile rule on a declaration checked a
-  part of A7, and each review found one more route past it. A call outside the trusted set kept the
-  same unchecked condition one step further out: a length that fits its buffer, a NUL inside its
-  storage. A small trusted set, with a row for each declaration and for each call, makes A7 a
-  question that a reviewer answers for one row at a time.
+  a citation of rule 3 of a callee that the body does not call. It reports one of a callee that is
+  an `extern fn` or a function of a module that is not trusted. It reports one of a callee whose row
+  lacks the cited word. It reads a citation in the `//` lines directly above a function of a trusted
+  module. A citation starts with `the` or `The`, then `gives:` or `writes:`, then `of`, then the
+  callee. The callee is a name or a module path, with each group around it that the body spells. One
+  space stands between two of these parts. A line end can replace the space before `of` and the
+  space after it. The lint also reports text of those lines that starts a citation and that does not
+  read as one. Text starts a citation when it holds `the gives:`, `the gives of` or `gives: of`, or
+  the same with `writes`. The letters can have each case. Any number of white space characters and
+  of the quote characters `` ` ``, `'` and `"` can stand between the words and beside the colon. The
+  next check reads each function that is no boundary function. It reports a `mut` global whose type
+  reaches a byte pointer where the function names it between the brackets of a call. That call is a
+  call of an `extern fn` or of a boundary function. It reads the callee of that call through each
+  group around it, as `(strlen)(name)`. It sees the name anywhere between those brackets. The name
+  can be an argument, or stand inside a cast, a nested call, an index, or a struct or array literal.
+  It does not see a value that a local copies from a `mut` global first. It does not see a value
+  that another function takes from a `mut` global and returns or stores, as `strlen(get())` for
+  `fn get() char* { return name; }`. It does not see a length or a NUL of a `mut` global whose type
+  reaches no byte pointer. It does not see a `mut` global between the brackets of a call through a
+  function pointer that C gave. The reason: it does not tell a function pointer that C gave from a
+  function pointer of fort code. It does report the global when the callee of that call holds the
+  name of a boundary function as a value, as `(first ? take : other)(name)` or `g(takep)(name)`. It
+  checks no bound, length or NUL. It reports a name of a boundary function, outside an import, that
+  stands neither as the callee of a call nor as an argument of a call whose callee is an `extern fn`
+  or a function pointer. A group around an argument changes nothing: `take_cb((takep))` is
+  `take_cb(takep)`. A boundary function as a value, and a function pointer that C gave, go only to
+  C, as the callee or as an argument of such a call. The call row says so, and a reviewer checks it,
+  because the lint does not tell a function pointer that C gave from a function pointer of fort
+  code. So each call through a function value in a trusted module has a row: a trusted module that
+  gives a boundary function to a function value of fort code, through a local or an element of a
+  table, gives a module that is not trusted a function that trusts its caller. A program of
+  `test/lang/fail` does not run, and a program that a test suite holds as text is outside the files
+  of the lint, so they need no row. The interface file of a library writes `import extern;` first in
+  the section of each trusted module that is not of `std` (D9.11). The reason: no rule can check C,
+  so each compile rule on a declaration checked a part of A7, and each review found one more route
+  past it. A call outside the trusted set kept the same unchecked condition one step further out: a
+  length that fits its buffer, a NUL inside its storage. A small trusted set, with a row for each
+  declaration and for each call, makes A7 a question that a reviewer answers for one row at a time.
   Linux x86-64 uses the System V C ABI. Mac arm64 uses the Apple arm64 C ABI.
   The signature may use integers, floats, `bool`, `char`, enums, pointers and function pointers.
   The signature excludes spans, strings, structs and arrays by value.
