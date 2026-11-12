@@ -119,6 +119,14 @@ came here.
   Trusted extern calls retain their D17.13 contracts. The user cancelled the planned loan proof
   on 2026-10-22, so this refusal stays the rule. The T-263 ticket records the probes and the cost.
   Do not treat this AST check as exact loan proof.
+  `del(s, d)` is a `del` of `s` there and a call of the fort function `d`.
+  The walk reports the span operand `s` as it reports each other operand.
+  It reports `d` only when the walk of `s` gave no report, as for `del(new(...), d)`.
+  So `del(s, d)`, `del(move(s), d)` and `del(make(), d)` give one report each.
+  The check read only the one-operand forms before.
+  Then `--check` accepted `for (e : x) { del(x, d); }` and `--fir-run` gave `use after release`.
+  `test/fort/check_range_test.ft` holds each storage form and the report counts.
+  The fail tests 100 to 107 of `test/lang/fail/ownership/` hold the goldens.
 - **`src/fort` carries the `mut` in the declaration, where the C casts a `const` away.** The
   bootstrap holds a tree of `const ast_node_t*` and a record of `const sym_t*` and casts the
   qualifier off at each of the ten places the resolution writes through one. T-085 made a

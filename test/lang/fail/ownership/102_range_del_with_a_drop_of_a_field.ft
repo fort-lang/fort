@@ -1,0 +1,44 @@
+//! fail
+// The loan of a range loop refuses `del(s, d)` of a span field in the body (D17.10): through a
+// pointer, through a second pointer to the same struct, and in a local struct.
+struct holder {
+    i32 mut* own mut@ own items;
+}
+
+fn drop_ptr(i32 mut* own p) void {
+    del(p);
+}
+
+fn through(holder mut* h) void {
+    for (i32 mut* e : h->items) {
+        del(h->items, drop_ptr); //! error: cannot change collection storage
+    }
+}
+
+fn aliased(holder mut* h) void {
+    holder mut* q = h;
+    for (i32 mut* e : h->items) {
+        del(q->items, drop_ptr); //! error: cannot change collection storage
+    }
+}
+
+fn local() void {
+    holder mut h = holder{.items = new(i32 mut* own, 2)};
+    for (i32 mut* e : h.items) {
+        del(h.items, drop_ptr); //! error: cannot change collection storage
+    }
+    del(h.items, drop_ptr);
+}
+
+fn main() i32 {
+    i32 mut* own mut@ own items = new(i32 mut* own, 2);
+    holder mut* own h = new(holder);
+    h->items = move(items);
+    through(h);
+    aliased(h);
+    i32 mut* own mut@ own last = move(h->items);
+    del(h);
+    del(last, drop_ptr);
+    local();
+    return 0;
+}
