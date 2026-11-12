@@ -1497,10 +1497,12 @@ def memcpy_lines(text):
 
     The emitter copies each aggregate with `llvm.memmove`, because the two ranges of a copy can
     overlap in part (D6.3, D19.3). A line that starts with `@` defines a global: the bytes of a
-    string constant are no call, so such a line does not count.
+    string constant are no call, so such a line does not count. The search text has no `@`,
+    because LLVM permits the name in quotes: `@"llvm.memcpy.p0.p0.i64"` is the same intrinsic.
+    So each other line that holds the text `llvm.memcpy.` counts, also in a name of the program.
     """
     return [line for line in text.splitlines()
-            if "@llvm.memcpy." in line and not line.startswith("@")]
+            if "llvm.memcpy." in line and not line.startswith("@")]
 
 
 def verify_module(config, test, workdir, env, procs):

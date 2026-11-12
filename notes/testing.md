@@ -43,27 +43,27 @@ bullet at a time and without a rewrite.
   with a control tree);
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fir-run`,
   `library-interface`, `library-artifact`, `library-use`, `library-cache`, `fixpoint`,
-  `leak-sites`, `tty`, `stack_depth` and `lsp-binary`; bootstrap0 has none, since building
-  bootstrap-1 proves the C compiler. `leak-sites` (`test/leak_sites_test.py`) runs `--leak-report`
-  on both targets over each suite of test/fort and test/lsp, a program that imports each module of
-  test/fort/support, each program of test/library and each entry of test/lang. It holds each run at
-  no error (a fail entry of test/lang excepted), each line of a report at a known form, the sites
-  of part 2 of the leak rule in the test trees at its list, and a control program at one site.
-  Part 1 is a compile error on the owner locals and on the owning aggregate locals, so a drop of a
-  support module that misses a release leaves an error at its exit, which the test reads also in a
-  module that no suite imports. It replaced nine ctests of the report of the owning aggregate
-  locals, one for each test tree, and `aggregate-sites`, which held that report in src/fort,
-  src/lsp and std. Those three trees take the error from other steps: the last pin builds src/fort
-  and has no such error, so `fixpoint`, whose stage3 the compiler of HEAD builds, holds src/fort,
-  and so does `leak-sites` through each suite that imports a module of src/fort; the build of
-  `fort-lsp` with the compiler of HEAD holds src/lsp; and each test build holds the std modules
+  `leak-sites`, `ir-flags` (6 below), `tty`, `stack_depth` and `lsp-binary`; bootstrap0 has none,
+  since building bootstrap-1 proves the C compiler. `leak-sites` (`test/leak_sites_test.py`) runs
+  `--leak-report` on both targets over each suite of test/fort and test/lsp, a program that imports
+  each module of test/fort/support, each program of test/library and each entry of test/lang. It
+  holds each run at no error (a fail entry of test/lang excepted), each line of a report at a known
+  form, the sites of part 2 of the leak rule in the test trees at its list, and a control program at
+  one site. Part 1 is a compile error on the owner locals and on the owning aggregate locals, so a
+  drop of a support module that misses a release leaves an error at its exit, which the test reads
+  also in a module that no suite imports. It replaced nine ctests of the report of the owning
+  aggregate locals, one for each test tree, and `aggregate-sites`, which held that report in
+  src/fort, src/lsp and std. Those three trees take the error from other steps: the last pin builds
+  src/fort and has no such error, so `fixpoint`, whose stage3 the compiler of HEAD builds, holds
+  src/fort, and so does `leak-sites` through each suite that imports a module of src/fort; the build
+  of `fort-lsp` with the compiler of HEAD holds src/lsp; and each test build holds the std modules
   that it imports. The label `libraries` holds `library-compiler` and `fort-modules-libraries`,
-  which carry no step label, so `unit` and `integration` leave them out; the CI job `libraries`
-  runs them (`notes/environment.md` 7). `stack_depth` gives each compiler of the build a 1 MB
-  stack and a type of 254 nested groups (D2.11). Before the checkers kept their suffixes on a
-  stack of their own, that type needed 1792 KB in a darwin debug build. The unit tests of the
-  tools (`lang_selftest`, `fort_lint_selftest`, `mutate_selftest`) went on 2026-09-26.
-  On linux each target runs as `tools/vm <target>`.
+  which carry no step label, so `unit` and `integration` leave them out; the CI job `libraries` runs
+  them (`notes/environment.md` 7). `stack_depth` gives each compiler of the build a 1 MB stack and a
+  type of 254 nested groups (D2.11). Before the checkers kept their suffixes on a stack of their
+  own, that type needed 1792 KB in a darwin debug build. The unit tests of the tools
+  (`lang_selftest`, `fort_lint_selftest`, `mutate_selftest`) went on 2026-09-26. On linux each
+  target runs as `tools/vm <target>`.
 - **GitHub PR CI supplies the merge gate** (2026-10-01; T-306).
   `.github/workflows/ci.yml` runs on PRs against the repository.
   The `bootstrap0` and `fort` jobs call component workflows. `ci-status` requires both to pass.
@@ -1372,14 +1372,15 @@ bullet at a time and without a rewrite.
   test that compiles, and every emitter suite verifies each module it emits. Under that option
   the harness also fails a module that calls or declares `llvm.memcpy`: each copy of an
   aggregate is `llvm.memmove` (D19.3). It reads each line that does not start with `@`, so the
-  text of a string constant does not count. The worked examples
-  of `spec/toolchain.md` 6 are held by the goldens of `bootstrap0/test/gen_module_test.c`. Until
-  2026-09-25 hand-written modules under `test/ir/` and `test/pipeline_test.sh` ran the pipeline
-  over them, and four host scripts (`core`, `net-layout`, `allocation-failure`, `abi-probe`)
-  compared the std with the C headers and read clang's assembly; each fact they held that the
-  corpus did not is a corpus test now (`run/ffi/013` writes the BSD `sin_len`, `run/errors/034`
-  and `run/modes/031` request a block nothing reads), and the rest was covered by `run/ffi`,
-  `run/stdlib`, `test/fort/gen_*_test.ft` and `fixpoint`.
+  text of a string constant does not count. It searches for the text `llvm.memcpy.` with no `@`
+  before it, so the name in quotes counts also: LLVM reads `@"llvm.memcpy.p0.p0.i64"` as the
+  intrinsic. The worked examples of `spec/toolchain.md` 6 are held by the goldens of
+  `bootstrap0/test/gen_module_test.c`. Until 2026-09-25 hand-written modules under `test/ir/` and
+  `test/pipeline_test.sh` ran the pipeline over them, and four host scripts (`core`, `net-layout`,
+  `allocation-failure`, `abi-probe`) compared the std with the C headers and read clang's assembly;
+  each fact they held that the corpus did not is a corpus test now (`run/ffi/013` writes the BSD
+  `sin_len`, `run/errors/034` and `run/modes/031` request a block nothing reads), and the rest was
+  covered by `run/ffi`, `run/stdlib`, `test/fort/gen_*_test.ft` and `fixpoint`.
 - **The gen suites emit with no runtime in the closure**, so the calls the emitter writes into it
   reach a name the module neither defines nor declares, which LLVM rejects as a forward reference
   to nothing. `verified()` appends a `declare` for every row of `runtime_sig.h` to the file the
@@ -1468,6 +1469,45 @@ bullet at a time and without a rewrite.
   violation, and exits 0.
   `.tickets/evidence/T253/v9_report.sh` runs it and `-S --fir-stats` over `test/lang`,
   `src/fort`, `src/lsp` and `std` in the three modes.
+- **`ir-flags` holds the text of each emitted module against the census of `notes/compiler.md` 9**
+  (`test/ir_flags_test.py`, 2026-11-12). It compiles with `-S` each run entry of test/lang (the
+  directories `run` and `programs`), `src/fort/main.ft` and `src/lsp/main.ft`, for the Linux and the
+  Darwin target, in the checked and in the release mode. Each module holds the functions of `std`
+  that its program reaches. The test does not compile test/fort, because each suite holds the
+  modules of the compiler again. It reads each line of each module, and each line must have a kind
+  that the test knows: a type, a global, a definition, a declaration, an `attributes` line, a label,
+  an instruction, a case of a `switch`. It holds 0 of each token of its list `ZERO` (`nsw`,
+  `noundef`, `noalias`, `undef`, `poison`, a plain `fptosi`, `phi`, `inttoptr` and more) on each
+  line of each kind. Each kind has a form and a list of the words that it can hold (`PERMITTED`),
+  and a word outside the list is a problem. So an attribute, a calling convention, a linkage or a
+  flag that the emitter starts to write turns the test red, on a `declare`, a `define`, a `call` or
+  a global line also. A global has one of 4 forms. Each `attributes` line and each declaration of an
+  intrinsic has one exact text, so a token of `HEADER_ONLY` (`willreturn`, `memory`, `nocapture` and
+  more) stands only there. The test holds each `inbounds` at one of 3 forms, and the count of the
+  word in a module is the count of the lines of the 3 forms. It holds each `unreachable` after a
+  failure entry of `std.rt`, after `llvm.trap`, or in a block that no path from `entry` reaches. It
+  holds each `alloca` at a fixed size in the block `entry`, an alignment on each `load` and each
+  `store`, no `load` of the type `i1`, and a fixed length on each call of the copy intrinsic and
+  each `llvm.memset`. The copy intrinsic is `llvm.memmove` (D19.3): no line outside a global holds
+  the text `llvm.memcpy`, as for `run_tests.py --verify-ir` (the first bullet of this section). No
+  line holds the name of an intrinsic in quotes: LLVM reads `@"llvm.memcpy.p0.p0.i64"` as the
+  intrinsic. A fort module with the name `llvm` gives each of its functions and globals such a name,
+  and no run entry has one (`notes/compiler.md` 9.3, the row of the name of a fort function). It
+  pins the set of the forms that the corpus shows (`EXPECTED_SHAPES`) and not a count of
+  occurrences: an occurrence count changes with each new entry and with each edit of `std`. The test
+  prints the counts of each target and mode. `RUN_ENTRIES` is a floor and not an equal value, and no
+  note holds the count of the entries: two changes that each add a run entry must both stay green
+  after the merge. A control module holds each token as a name, in a string and in a comment, and
+  the list `FOREIGN` holds a line that is a problem for each line kind, so a scan that counts
+  nothing or counts a name fails. Ten mutants of the emitter each turned the test red: `add nsw` in
+  place of `add`, no `llvm.trap` before `unreachable`, no alignment on a `load`, `mustprogress` in
+  the attribute group 0, `noundef` on each parameter of an `extern` declaration, `fastcc` on each
+  `define` line, `fastcc` on each call of a fort function, `thread_local` on each mutable global,
+  `llvm.memcpy` in `gen.COPY_INTRINSIC`, and the same name in quotes. The test has the labels `fort`
+  and `integration`, so the CI job `bootstrap (<os>)` of `.github/workflows/fort.yml` runs it. A
+  change that makes the emitter write a new word or a new form must change the test and the census
+  in one commit. The test cannot see a property that needs a run: the value of an index, a null
+  pointer, two places that overlap.
 
 ## 7. What a test cannot see
 
