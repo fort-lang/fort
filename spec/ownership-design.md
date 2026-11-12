@@ -1296,7 +1296,7 @@ digits   = "0" | nonzero { digit } ;
   The count of the oracle is `wc -l` of the two modules of 3.1, as the coordinator ratified on
   2026-10-27: 3,421 with the event `forged` (measured). Amended 2026-11-07: the user ruled "Raise
   cap to 9,000". Before, the cap of `src/fort/owner/` was 8,000 lines and the caps gave 11,500;
-  the analysis measured 8,441 lines before refinement R11 and 8,680 after it and gen rule 7 of
+  the analysis measured 8,441 lines before refinement R11 and 8,673 after it and gen rule 7 of
   D17.11 (`wc -l src/fort/owner/*.ft`). A change that would pass 9,000 goes to the user.
 - Each PR writes `wc -l` of `src/fort/owner/*.ft` and of the oracle in its ticket; a PR that
   would pass a cap goes to the user. The test ratio stays above `agents/lines.py --min 3.0`.
