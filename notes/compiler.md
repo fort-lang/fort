@@ -1345,6 +1345,14 @@ came here.
     and terminator ends the owners still in transit and reports a count of 0 as a `leak`. A
     `return` tests with `_0` in transit, and the items of the `std.rt.free` that a `del` calls
     test nothing, so an owner inside a freed object leaks at the `del`.
+  - The test of `leak at exit` (`test_exit`) tags an allocation as of a cycle or not. It counts,
+    for each live allocation that no global reaches, the owner slots inside such allocations that
+    hold it (`range.holders`). It then ends the slots of each allocation with a count of 0 and
+    repeats: each allocation that this reaches hangs below a leaked allocation with no holder, and
+    its event has no tag. Each allocation that keeps a count above 0 is in a cycle of owners or
+    below one, and its event has `cycle` set (` of a cycle` in the line). `cycle` is a part of the
+    key that makes an event unique, so one run gives at most one line of each sort. The cases
+    `SELF`, `BELOW`, `LONG` and `BOTH` of `test/fort/fir/shadow_test.ft` hold the four shapes.
   - The tags of a value stand in `sh.value` while it is in flight and in the record of its word in
     memory. A value holds one owner tag or lend (`o`) and one frame or moved tag (`f`), and a
     binary rvalue keeps each part of both operands; of two owner tags it keeps the first. A load
