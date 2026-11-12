@@ -25,13 +25,19 @@ import std.sys;
 // isatty.
 string MISSING = "no-such-file-here";
 
-fn open_write(string path) i32 {
-    return libc.open(path.ptr, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o644);
+// C call libc.open: path and its NUL are parameter sources (D9.8 rule 1), so open_write is a
+// boundary function, and each caller gives a name with its NUL.
+fn open_write(char* path) i32 {
+    return libc.open(path, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o644);
 }
 
+// C call open_write x2: &"c.txt"[0] and &"f.txt"[0], literals with their NULs (D9.8 rule 4).
+// C call libc.open x4: MISSING.ptr names the global MISSING, no mut global, which a literal
+// initializes, and open reads it to the NUL of that literal (rule 4).
+// C call libc.close x2: no pointer argument.
 fn main() i32 {
-    i32 c_fd = open_write("c.txt");
-    i32 f_fd = open_write("f.txt");
+    i32 c_fd = open_write(&"c.txt"[0]);
+    i32 f_fd = open_write(&"f.txt"[0]);
 
     // c_fd has no buffer yet, so this print asks isatty about it. errno must
     // come out as the open left it.

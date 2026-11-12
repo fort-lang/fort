@@ -1618,23 +1618,45 @@ Sections:
      function, whose callers are trusted.
   2. An own bound, for a value that no call of C in the function gave: a span or a string, `.len`
      elements from its `.ptr`; the address `&e[i]` of an element of a fixed array, a span or a
-     string `e`, the elements from `i` to the end, `e.len - i`; the address `&x` of another place,
-     one object of the type of `x`; a typed pointer to a type other than `char`, `u8` or `void`,
-     one object of its pointee type. A pointer keeps the bound of the value that it comes from
+     string `e`, the elements from `i` to the end, `e.len - i`; the address `&e[i]...[k]` of an
+     element, where `e` is a fixed array or a span whose elements are fixed arrays and each index
+     after the first selects an element of a fixed array, the elements from that element to the
+     end of the whole storage of `e`, because the elements of a fixed array lie one after the
+     other (`type-system.md` 3.1, `memory-model.md` 5): `&m[0][0]` of an `i32[2][3] m` keeps 6
+     `i32`. A span that an index selects keeps its own `.len`, and not the storage of the array
+     that holds it: `&g[0][1][0]` of a `char@[1][2] g` keeps `g[0][1].len` chars, by the form
+     `&e[i]` with `e` the span `g[0][1]`. The address `&x` of another place keeps one object of
+     the type of `x`, and a typed pointer to a type other than `char`, `u8` or `void` keeps one
+     object of its pointee type. A pointer keeps the bound of the value that it comes from
      through each cast, as A8 follows a value through a cast (D3.14): `cast(&bits, u8 mut*)` for a
      `u64 bits` keeps 8 bytes. A typed pointer can be `null` or dangling (D10.7), so the row says
      why it names a live object where the contract of C needs one.
   3. Storage that C gave: a value that a call of C in the same function returned or wrote, and a
      pointer that the function makes from it by a cast, with the size and the NUL that the
      declaration row of that call states. By A7 that size is never less than the pointee of the
-     type that the declaration gives.
+     type that the declaration gives. Storage that a call in the function of a fort function of a
+     trusted module gave or wrote is such storage too, with the size and the NUL that the row of
+     that function states by its word `gives:` or `writes:`, or by a contract of `stdlib.md` that
+     the row cites: `rt.alloc` gives `elem_size * count` zeroed bytes. That row is audited too,
+     and it has a fixed form: the row of the function is its `//` lines directly above it, below
+     its `///` text, and it holds a line that starts with `// gives:` or `// writes:` for each word
+     that a call row cites. A call row cites the word as `the gives: of <the callee>` or
+     `the writes: of <the callee>`, with the callee as the body spells it, and the body calls
+     that callee. The lint reports a citation of a callee that the body does not call, or whose
+     row has no line with the cited word.
   4. A NUL: the NUL of a string literal (D3.7), also through a global that is no `mut` global and
      that a literal initializes; the NUL of a buffer that `str.to_cstr` gave; or a NUL that the
      function, or a fort function of the same module that it calls, stores by a checked index
      (D10.6) into the fixed array or the span that the pointer comes from, at or after the element
      that the pointer names, and that no store changes before the call. The last element of a
      fixed array is such a place, and so is `text[n]`, where `decimal_text` of `std.rt` ends the
-     text that `strtod` reads. A null pointer that is stored the same way as the last item of an
+     text that `strtod` reads. The initializer of a local fixed array stores each element by a
+     fixed index, so a NUL that it stores is such a NUL: `char[4] abc = {'a', 'b', 'c',
+     cast(0, char)}` ends in a NUL at `abc[3]`. A NUL that the row of another trusted function
+     states by its word `gives:` or `writes:`, or by a contract of `stdlib.md` that the row cites,
+     is a NUL too, cited in the form of rule 3: `rt.decimal_text` writes one after its text into
+     the span that it gets, and each element of `sys.args()` ends in a NUL (`stdlib.md` 2.1).
+     A null pointer that is stored the same way as the last item of an
      array of pointers that C reads to its null item, as the `argv` of `execvp`, is the NUL of
      that array. Another `string` has no NUL.
 
@@ -1650,13 +1672,20 @@ Sections:
   there.
 
   **The lint.** `tools/fort_lint.py` reads the `.ft` files of `std`, `src/fort`, `src/lsp`,
-  `test/fort`, `test/lsp`, `test/library` and `test/tty`. `test/lang/run` and `test/lang/programs`
-  join it when a later change writes their rows. It reports a trusted declaration with no row, a
+  `test/fort`, `test/lsp`, `test/library`, `test/tty`, `test/lang/run` and `test/lang/programs`. A
+  file of the last two gets the checks of this decision and the errors of the compiler, and no check
+  of D1.4, because a test exercises the language. The lint gives it the `--cfg` options of the
+  `//! flags:` directive of its test (D21.1). It reports a trusted declaration with no row, a
   declaration row whose first line names another symbol or that does not give each of the five words
   once, and a function whose call rows do not count each call of an `extern fn`, of a boundary
   function and through a function value in its body, or count a call that the body does not hold. A
   row counts the calls that the body spells with its callee, and the count of the index is the
   authority: a callee whose calls the index counts more often than the text is an error. It reports
+  a citation of rule 3 of a callee that the body does not call, or whose row lacks the cited word.
+  It reports a `mut` global whose type reaches a byte pointer, named in an argument of a call of an
+  `extern fn` or of a boundary function, in a function that is no boundary function; a value that a
+  local copies from a `mut` global first goes past it, and it checks no bound, length or NUL. It
+  reports
   a name of a boundary function, outside an import, that stands neither as the callee of a call nor
   as an argument of a call whose callee is an `extern fn` or a function pointer. A boundary function
   as a value, and a function pointer that C gave, go only to C, as the callee or as an argument of
@@ -1849,6 +1878,31 @@ Sections:
   `test/library`, `test/tty` and the other files of `test/fort` declare no extern, call none and
   name no boundary function. `rt.buffer_append` called `memcpy` with a span that a module can make
   of the buffer itself, so it calls `memmove` now.
+  Amended 2026-11-07: the lint reads `test/lang/run` and `test/lang/programs`, with the checks of
+  this decision only. A count at 5cec9672 (the records of `fort --index` on each target) found in
+  `test/lang/run` 153 declarations in 52 files, 311 calls of an extern on Linux and 308 on Darwin,
+  and 99 calls of a boundary function, and in `test/lang/programs` 3 calls of an extern. 7 tests
+  whose subject is not this decision declared a symbol of `std.libc`; they import `std.libc` now,
+  so 142 declarations in 45 files stay. 7 functions of 4 tests gave C a `string` parameter as a
+  path, which has no NUL; they take `char*` now, and they are boundary functions, so the calls of
+  a boundary function are 113.
+  Amended 2026-11-07, a second time (coordinator ruling, 2026-11-07): the rows of `test/lang/run`
+  met five values that no rule named: a NUL that the initializer of a local fixed array stores
+  (`run/ffi/018`), a NUL that `rt.decimal_text` of another module stores (`run/stdlib/095`), the
+  block of `rt.alloc` (`run/modes/014`, `run/stdlib/070`), the NUL of an element of `sys.args()`
+  (`run/stdlib/019`), and `&m[0][0]` of a nested array, of which C reads each row
+  (`run/ffi/011`). Rule 4 takes the NUL of an initializer; rules 3 and 4 take what the row of
+  another trusted function states by its word `gives:` or `writes:`, or by a contract of
+  `stdlib.md` that it cites, because that row is audited too; and rule 2 gives the address of an
+  element of a nested fixed array the rest of the whole storage (`type-system.md` 3.1,
+  `memory-model.md` 5), when each index after the first selects an element of a fixed array; a
+  span keeps its own `.len`. The rows of `rt.decimal_text`, `rt.alloc`, `rt.args` and `sys.args`
+  state those facts in the form of rule 3, and the lint checks each citation of them, because a
+  review found that deleting those 4 rows left the lint at 0 problems (probed). The same review
+  found rows of `run/stdlib/068` and `run/modes/014` that took the names of a `mut` global as
+  their own bound; those tests keep the table in a local now, and the lint reports a `mut` global
+  whose type reaches a byte pointer in an argument of a call of an `extern fn` or a boundary
+  function, in a function that is no boundary function.
 
 ### D9.9 The internal calling convention
 - owner: `module-system.md`.

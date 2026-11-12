@@ -26,25 +26,27 @@ import std.rt;
 // The powers of two are the values where a wrong search still looks right:
 // the interval of texts that read back is not centred on them, so the nearest
 // decimal of the shortest length can fall outside it while the next one up
-// falls inside (toolchain.md 5.1). Every one of both types is walked.
-extern fn strtod(char* s, char* mut* end) f64;
-extern fn strtof(char* s, char* mut* end) f32;
-extern fn memcpy(u8 mut* dst, u8* src, u64 n) void;
+// falls inside (toolchain.md 5.1). Every one of both types is walked. The
+// test calls the declarations of std.libc.
 
 // The bits of a float and a float of those bits: the one way a fort program
 // reaches every encoding, since a cast converts values and not patterns
 // (D3.14).
+// C call libc.memcpy: cast(&v, u8 mut*) and cast(&source, u8*) keep the bounds of the locals v and
+// source, 8 bytes each (D9.8 rule 2), and the length 8 fits both.
 fn f64_of_bits(u64 bits) f64 {
     f64 mut v = 0.0;
     u64 mut source = bits;
-    memcpy(cast(&v, u8 mut*), cast(&source, u8*), 8);
+    libc.memcpy(cast(&v, u8 mut*), cast(&source, u8*), 8);
     return v;
 }
 
+// C call libc.memcpy: cast(&v, u8 mut*) and cast(&source, u8*) keep the bounds of the locals v and
+// source, 4 bytes each (D9.8 rule 2), and the length 4 fits both.
 fn f32_of_bits(u32 bits) f32 {
     f32 mut v = 0.0;
     u32 mut source = bits;
-    memcpy(cast(&v, u8 mut*), cast(&source, u8*), 4);
+    libc.memcpy(cast(&v, u8 mut*), cast(&source, u8*), 4);
     return v;
 }
 
@@ -71,20 +73,26 @@ fn power_of_two_f32(i64 e) f32 {
 }
 
 // The text the module would print for a finite magnitude, NUL-terminated.
+// C call libc.strtod: &text[0] keeps the bound of text, 41 chars (D9.8 rule 2). The writes: of
+// rt.decimal_text states that it writes a NUL at text[n] after the text, so a NUL stands in text, a
+// local that lives until the call (rule 4). The end pointer is null, and C writes no pointer.
 fn reads_back_f64(f64 magnitude) bool {
     rt.decimal mut d = rt.decimal{};
     rt.decimal_f64(magnitude, &d);
     char[41] mut text = {};
     rt.decimal_text(&d, text[..]);
-    return strtod(&text[0], null) == magnitude;
+    return libc.strtod(&text[0], null) == magnitude;
 }
 
+// C call libc.strtof: &text[0] keeps the bound of text, 41 chars (D9.8 rule 2). The writes: of
+// rt.decimal_text states that it writes a NUL at text[n] after the text, so a NUL stands in text, a
+// local that lives until the call (rule 4). The end pointer is null, and C writes no pointer.
 fn reads_back_f32(f32 magnitude) bool {
     rt.decimal mut d = rt.decimal{};
     rt.decimal_f32(magnitude, &d);
     char[41] mut text = {};
     rt.decimal_text(&d, text[..]);
-    return strtof(&text[0], null) == magnitude;
+    return libc.strtof(&text[0], null) == magnitude;
 }
 
 // A finite magnitude, never negative and never a NaN, is what the search

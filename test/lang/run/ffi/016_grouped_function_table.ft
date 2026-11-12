@@ -19,11 +19,34 @@ struct dispatch {
     ((u8)) last;
 }
 
+// C: grouped_sizeof_dispatch, test/lang/ffi/grouped.c, which gives sizeof(struct dispatch).
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
 extern fn grouped_sizeof_dispatch() u64;
+// C: grouped_offsetof_dispatch, test/lang/ffi/grouped.c, which gives the offsetof of field number
+// field of struct dispatch.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
 extern fn grouped_offsetof_dispatch(i32 field) u64;
+// C: grouped_call, test/lang/ffi/grouped.c, which calls entry index of d->table with n and stores
+// the result at d->slot.
+// gives: the int32_t that the entry gives and no pointer. writes: one int32_t at d->slot; C reads
+// the one struct dispatch at d. calls: d->table[index] once, with n; the caller gives fort
+// functions in the table. keeps: no pointer. frees: nothing.
 extern fn grouped_call(dispatch* d, i32 index, i32 n) i32;
+// C: grouped_swap, test/lang/ffi/grouped.c, which swaps the two entries of d->table.
+// gives: no result. writes: the two entries of d->table; C reads them first. keeps: no pointer.
+// calls: no fort function. frees: nothing.
 extern fn grouped_swap(dispatch mut* d) void;
+// C: grouped_bytes, test/lang/ffi/grouped.c, which reads d->tag and d->last.
+// gives: an int32_t and no pointer. writes: nothing; C reads the one struct dispatch at d. keeps:
+// no pointer. calls: no fort function. frees: nothing.
 extern fn grouped_bytes(dispatch* d) i32;
+// C: grouped_sum, test/lang/ffi/grouped.c, which calls each of count entries at table with n and
+// sums the results.
+// gives: an int32_t and no pointer. writes: nothing; C reads count entries at table. calls: each of
+// the count entries once, with n; the caller gives fort functions. keeps: no pointer. frees:
+// nothing.
 extern fn grouped_sum((fn (i32) i32)* table, i32 count, i32 n) i32;
 
 fn triple(i32 x) i32 {
@@ -44,6 +67,23 @@ fn off(void* base, void* field) u64 {
     return cast(field, u64) - cast(base, u64);
 }
 
+// C call grouped_sizeof_dispatch: no argument.
+// C call grouped_offsetof_dispatch x4: no pointer argument.
+// C call grouped_call x2: &d, the address of the local d, one dispatch (D9.8 rule 2), with the
+// index 0 and 1 of its table of 2; its slot is &stored, the address of the local stored, one i32
+// (rule 2), and C writes one. The table holds triple and negate, fort functions that are no
+// boundary functions.
+// C call grouped_swap: &d, one dispatch (rule 2).
+// C call d.table[0]: negate, a fort function that grouped_swap moved to entry 0; no pointer
+// argument.
+// C call d.table[1]: triple, a fort function that grouped_swap moved to entry 1; no pointer
+// argument.
+// C call grouped_bytes: &d, one dispatch (rule 2).
+// C call grouped_sum x2: &table[0] keeps the bound of table from element 0, 3 entries, with the
+// count 3; &table[2], 1 entry, with the count 1 (rule 2). The entries are triple and same, fort
+// functions that are no boundary functions.
+// C call off x4: the addresses of a local and of its parts, cast to void*; off reads no byte at
+// them and subtracts them as integers (D3.11).
 fn main() i32 {
     i32 mut stored = 0;
     dispatch mut d = {7, {triple, negate}, &stored, 255};

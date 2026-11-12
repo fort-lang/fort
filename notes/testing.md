@@ -1453,8 +1453,11 @@ bullet at a time and without a rewrite.
   spacing, brace placement and blank lines in `.ft` are review's alone, since `.clang-format` has no
   fort equivalent; the lint sees only what the checker resolved, so an unresolved name is judged by
   nothing (D20.3 gives it no record), though the names around it in a file that fails to compile are
-  judged as usual and the error is reported beside them; `test/lang/**` is deliberately outside the
-  lint, because a test exercises the language rather than exemplifying the conventions; and nothing
+  judged as usual and the error is reported beside them; `test/lang/**` is outside the checks of
+  D1.4, of `notes/style.md` 3.1 and of the width, because a test exercises the language rather than
+  exemplifying the conventions, but `test/lang/run` and `test/lang/programs` get the audit rows of
+  D9.8 and the errors of the compiler, each file with the `--cfg` options of its `//! flags:`
+  (`ROWS_ONLY` and `lang_options` of `tools/fort_lint.py`); and nothing
   checks import order, doc comments or dead code. Block comments need no check: `/*` is a lexical
   error in the compiler itself (D2.2). A new fort source outside `std/`, `src/fort/`
   and `src/lsp/` is checked by nothing until a glob in `fort_lint.py` names it. A nested test

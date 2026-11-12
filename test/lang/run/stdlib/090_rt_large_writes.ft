@@ -24,12 +24,19 @@ string MARKER = "end-of-large-write\n";
 string F_PATH = "large-f.txt";
 string C_PATH = "large-c.txt";
 
-fn open_write(string path) i32 {
-    return libc.open(path.ptr, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o644);
+// C call libc.open: path and its NUL are parameter sources (D9.8 rule 1), so open_write is a
+// boundary function, and each caller gives a name with its NUL.
+fn open_write(char* path) i32 {
+    return libc.open(path, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o644);
 }
 
-fn read_file(string path, u8 mut@ buf) u64 {
-    i32 fd = libc.open(path.ptr, libc.O_RDONLY, 0);
+// C call libc.open: path and its NUL are parameter sources (D9.8 rule 1), so read_file is a
+// boundary function, and each caller gives a name with its NUL.
+// C call libc.read: buf[total..].ptr keeps the bound of the sub-span, buf.len - total bytes (D9.8
+// rule 2), and the length buf.len - total fits it.
+// C call libc.close: no pointer argument.
+fn read_file(char* path, u8 mut@ buf) u64 {
+    i32 fd = libc.open(path, libc.O_RDONLY, 0);
     if (fd < 0) {
         return 0;
     }
@@ -45,6 +52,11 @@ fn read_file(string path, u8 mut@ buf) u64 {
     return total;
 }
 
+// C call open_write x2: &F_PATH[0] names the global F_PATH, no mut global, which a literal
+// initializes, with the NUL of that literal (D9.8 rule 4), and &C_PATH[0], the same for C_PATH.
+// C call read_file x2: &F_PATH[0] and &C_PATH[0], as for open_write; the spans keep their own
+// bounds.
+// C call libc.close x2: no pointer argument.
 fn main() i32 {
     u64 n = 200000;
     char mut@ own block = new(char, n);
@@ -57,8 +69,8 @@ fn main() i32 {
     string text = cast(block[..], string);
 
     // One call for each destination. No buffer can hold a block this large.
-    i32 f_fd = open_write(F_PATH);
-    i32 c_fd = open_write(C_PATH);
+    i32 f_fd = open_write(&F_PATH[0]);
+    i32 c_fd = open_write(&C_PATH[0]);
     rt.print_str(f_fd, text);
     fprint(c_fd, text);
     rt.print_str(2, text);
@@ -72,8 +84,8 @@ fn main() i32 {
     u64 room = 262144;
     u8 mut@ own f_bytes = new(u8, room);
     u8 mut@ own c_bytes = new(u8, room);
-    u64 f_len = read_file(F_PATH, f_bytes);
-    u64 c_len = read_file(C_PATH, c_bytes);
+    u64 f_len = read_file(&F_PATH[0], f_bytes);
+    u64 c_len = read_file(&C_PATH[0], c_bytes);
     println(f_len, " ", c_len, " ", mem.equal(f_bytes[..f_len], c_bytes[..c_len]));
 
     // Every byte arrived, and in order. The marker stands at the end, and

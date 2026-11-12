@@ -24,13 +24,6 @@ import std.strbuf;
 // DT_FIFO, the same value on both targets; std.libc does not define it.
 u8 DT_FIFO = 1;
 
-// mkfifo(3), whose mode_t is a u32 on Linux and a u16 on Mac (D9.8).
-$if ($cfg(target_os) == "linux") {
-    extern fn mkfifo(char* path, u32 mode) i32;
-} else {
-    extern fn mkfifo(char* path, u16 mode) i32;
-}
-
 fn kind_word(u8 kind) string {
     if (kind == libc.DT_REG) {
         return "file";
@@ -95,13 +88,17 @@ fn file_name(strbuf.str_buf mut* b, u64 i) string {
     return strbuf.view(b);
 }
 
+// C call libc.mkfifo: c_fifo.ptr names the buffer that str.to_cstr gave, with its NUL (D9.8 rule
+// 4).
+// C call libc.symlink: c_target.ptr and c_link.ptr name the buffers that str.to_cstr gave, each
+// with its NUL (rule 4).
 fn main() i32 {
     os.make_dir("t-kinds", 0o700);
     os.make_dir("t-kinds/sub", 0o700);
     io.write_file("t-kinds/a.ft", cast("a", u8@));
     char mut@ own c_fifo = str.to_cstr("t-kinds/fifo");
     defer del(c_fifo);
-    mkfifo(c_fifo.ptr, 0o600);
+    libc.mkfifo(c_fifo.ptr, 0o600);
     char mut@ own c_target = str.to_cstr("no/such/target");
     defer del(c_target);
     char mut@ own c_link = str.to_cstr("t-kinds/link");
