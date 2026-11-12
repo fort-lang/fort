@@ -1642,8 +1642,9 @@ Sections:
      its `///` text, and it holds a line that starts with `// gives:` or `// writes:` for each word
      that a call row cites. A call row cites the word as `the gives: of <the callee>` or
      `the writes: of <the callee>`, with the callee as the body spells it, and the body calls
-     that callee. The lint reports a citation of a callee that the body does not call, or whose
-     row has no line with the cited word.
+     that callee. The lint reports a citation of a callee that the body does not call, that is an
+     `extern fn` or a function of a module that is not trusted, or whose row has no line with the
+     cited word.
   4. A NUL: the NUL of a string literal (D3.7), also through a global that is no `mut` global and
      that a literal initializes; the NUL of a buffer that `str.to_cstr` gave; or a NUL that the
      function, or a fort function of the same module that it calls, stores by a checked index
@@ -1681,13 +1682,20 @@ Sections:
   function and through a function value in its body, or count a call that the body does not hold. A
   row counts the calls that the body spells with its callee, and the count of the index is the
   authority: a callee whose calls the index counts more often than the text is an error. It reports
-  a citation of rule 3 of a callee that the body does not call, or whose row lacks the cited word.
-  It reports a `mut` global whose type reaches a byte pointer, named in an argument of a call of an
-  `extern fn` or of a boundary function, in a function that is no boundary function; a value that a
-  local copies from a `mut` global first goes past it, and it checks no bound, length or NUL. It
-  reports
-  a name of a boundary function, outside an import, that stands neither as the callee of a call nor
-  as an argument of a call whose callee is an `extern fn` or a function pointer. A boundary function
+  a citation of rule 3 of a callee that the body does not call, that is an `extern fn` or a function
+  of a module that is not trusted, or whose row lacks the cited word. It reports a `mut` global
+  whose type reaches a byte pointer, in a function that is no boundary function, where the function
+  names it between the brackets of a call of an `extern fn` or of a boundary function. It reads the
+  callee of that call through each group around it, as `(strlen)(name)`. It sees the name at each
+  depth there: as an argument, and inside a cast, a nested call, an index, or a struct or array
+  literal. It does not see a value that a local copies from a `mut` global first. It does not see a
+  value that another function takes from a `mut` global and returns or stores, as `strlen(get())`
+  for `fn get() char* { return name; }`. It does not see a length or a NUL of a `mut` global whose
+  type reaches no byte pointer. It does not see a `mut` global between the brackets of a call
+  through a function pointer that C gave, because it does not tell a function pointer that C gave
+  from a function pointer of fort code. It checks no bound, length or NUL. It reports a name of a
+  boundary function, outside an import, that stands neither as the callee of a call nor as an
+  argument of a call whose callee is an `extern fn` or a function pointer. A boundary function
   as a value, and a function pointer that C gave, go only to C, as the callee or as an argument of
   such a call. The call row says so, and a reviewer checks it, because the lint does not tell a
   function pointer that C gave from a function pointer of fort code. So each call through a function

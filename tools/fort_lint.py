@@ -8,15 +8,20 @@ The rows of D9.8: each `extern fn` of a trusted module has a declaration row, th
 each function of a trusted module count each call of an `extern fn`, of a boundary function and
 through a function value, and a name of a boundary function goes only to C (row_problems).
 A call row that cites `the gives: of <callee>` or `the writes: of <callee>` names a callee that
-the body calls, whose row holds a line with that word (citation_problems). A function that is no
-boundary function gives no `mut` global whose type reaches a byte pointer to a call of C
-(mut_global_to_c).
+the body calls, a fort function of a trusted module whose row holds a line with that word
+(citation_problems). A function that is no boundary function gives no `mut` global whose type
+reaches a byte pointer to a call of C (mut_global_to_c).
 
 The lint does not read the sources of a row. It does not check a bound, a length or a NUL: a row
 that claims the bound of the whole array for `&g[0][1][0]` of a `char@[1][2] g` passes, and a
-reviewer reads it against rule 2. It sees a `mut` global only by its name in the arguments of
-the call: a value that a local copies from a `mut` global first, and a length or a NUL of a `mut`
-global of another type, go past it.
+reviewer reads it against rule 2. It sees a `mut` global only by its name between the brackets
+of the call, at each depth: as an argument, and inside a cast, a nested call, an index, or a
+struct or array literal there. It does not see a value that a local copies from a `mut` global
+first, a value that another function takes from a `mut` global and returns or stores, as
+`strlen(get())` for `fn get() char* { return name; }`, a length or a NUL of a `mut` global
+whose type reaches no byte pointer, or a `mut` global between the brackets of a call through a
+function pointer that C gave. It reads a callee through each group: `(strlen)(name)` is a call
+of `strlen` for this check and for a citation, and its call row names the callee `(strlen)`.
 
 A boundary function is found by the types of its parameters in the source, with the structs that
 the index records resolve, so the answer is the checker's own for each struct and each name
@@ -1122,6 +1127,31 @@ def prev_char(code, offset):
     return (code[i], i) if i >= 0 else ("", -1)
 
 
+def is_group_open(code, open_at):
+    """Whether the `(` at `open_at` opens a group and not the argument list of a call or of
+    `cast`: no name, `)` or `]` stands before it, or a statement keyword does."""
+    before, before_at = prev_char(code, open_at)
+    if before in ")]" and before:
+        return False
+    if before.isalnum() or before == "_":
+        word = re.search(r"[A-Za-z_][A-Za-z0-9_]*\Z", code[:before_at + 1])
+        return word is not None and word.group(0) in STATEMENT_KEYWORDS
+    return True
+
+
+def is_callee(code, begin, end):
+    """Whether the qualified name `code[begin:end]` is the callee of a call, plain or through
+    each group around it: `strlen(`, `(strlen)(`, `((libc.memcmp))(`."""
+    while True:
+        after, after_at = next_char(code, end)
+        if after == "(":
+            return True
+        before, before_at = prev_char(code, begin)
+        if after != ")" or before != "(" or not is_group_open(code, before_at):
+            return False
+        begin, end = before_at, after_at + 1
+
+
 def call_open(code, before):
     """The offset of the `(` of the call whose argument list holds `before`, an offset just
     after a `(` or a `,`, or -1 when no bracket opens it."""
@@ -1146,9 +1176,9 @@ def goes_to_c(rows, path, source, start, end):
     whole argument of a call whose callee is an `extern fn` or a function pointer (D9.8)."""
     code = source.code
     after, after_at = next_char(code, end)
-    if after == "(":
-        return True
     begin, _ = spelled_callee(code, start)
+    if is_callee(code, begin, end):
+        return True
     before, before_at = prev_char(code, begin)
     if before not in "(," or after not in ",)" or not before:
         return False
@@ -1299,11 +1329,13 @@ CITATION = re.compile(r"\b(?i:the) (gives|writes): of "
                       r"([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)")
 
 
-def citation_problems(rows, source, record, called):
+def citation_problems(rows, source, record, called, externs):
     """The problems of the citations in the call rows of one function of a trusted module: each
     cited callee is called in the body (`called` maps the callee as the body spells it to the key
-    of its declaration), and the row of that function, its `//` lines directly above it, holds a
-    line that starts with the cited word (D9.8 rule 3)."""
+    of its declaration), it is a fort function of a trusted module, and the row of that function,
+    its `//` lines directly above it, holds a line that starts with the cited word (D9.8 rule 3).
+    `externs` holds each `extern fn` that the body calls, as the body spells it: the citation
+    form names no extern, and the message says so."""
     at = source.offset(record["line"], record["col"])
     start = keyword_before(source.code, at, "fn")
     run = comment_run(source, source.line_of(start if start >= 0 else at))
@@ -1317,10 +1349,20 @@ def citation_problems(rows, source, record, called):
     for found in CITATION.finditer(joined):
         line = [number for offset, number in starts if offset <= found.start()][-1]
         word, callee = found.group(1) + ":", found.group(2)
+        if callee in externs:
+            problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', which is an "
+                             "`extern fn`: a citation names a fort function of a trusted module "
+                             "(rule 3) (%s)" % (record["name"], word, callee, ROWS)))
+            continue
         key = called.get(callee)
         if key is None:
             problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', which its "
                              "body does not call (%s)" % (record["name"], word, callee, ROWS)))
+            continue
+        if not rows.trusted(key[0]):
+            problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', a function "
+                             "of a module that is not trusted: no audit holds its row (rule 3) "
+                             "(%s)" % (record["name"], word, callee, ROWS)))
             continue
         if not cited_word_stands(rows, key, word):
             problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', and the row "
@@ -1344,7 +1386,10 @@ def cited_word_stands(rows, key, word):
 
 def enclosing_opens(code, start, stop):
     """The offsets of the `(` of each call whose argument list holds the offset `start`, inner
-    first, up to the statement and not before `stop`."""
+    first, up to the statement and not before `stop`. An open `[` of an index and an open `{` of
+    a struct or array literal do not end the search: the offset is still inside the call that
+    holds them. The `{` of a block does not end it either, and each `(` before a block is closed,
+    so a block adds no call."""
     opens = []
     depth = 0
     i = start - 1
@@ -1357,9 +1402,8 @@ def enclosing_opens(code, start, stop):
                 depth -= 1
             elif c == "(":
                 opens.append(i)
-            else:
-                break
         elif c == ";" and depth == 0:
+            # The stop bounds the work to one statement. It changes no verdict.
             break
         i -= 1
     return opens
@@ -1367,7 +1411,8 @@ def enclosing_opens(code, start, stop):
 
 def mut_global_to_c(rows, path, source, use, stop):
     """Whether the use record `use` of a global names a `mut` global whose type reaches a byte
-    pointer, inside the arguments of a call of an `extern fn` or of a boundary function."""
+    pointer, between the brackets of a call of an `extern fn` or of a boundary function, at each
+    depth."""
     # The index names a `mut` global `global` and a module constant `constant`, so each record of
     # kind `global` is a `mut` global.
     key = rows.decl_key(use)
@@ -1382,6 +1427,9 @@ def mut_global_to_c(rows, path, source, use, stop):
     code = source.code
     for open_at in enclosing_opens(code, source.offset(use["line"], use["col"]), stop):
         callee, callee_at = prev_char(code, open_at)
+        # A callee in a group, `(strlen)(name)` or `((libc.memcmp))(...)`, is that callee.
+        while callee == ")" and is_group_open(code, matching_open(code, callee_at)):
+            callee, callee_at = prev_char(code, callee_at)
         word = re.search(r"[A-Za-z_][A-Za-z0-9_]*\Z", code[:callee_at + 1])
         if word is None:
             continue
@@ -1414,6 +1462,7 @@ def row_problems(rows, path, records):
     uses = []
     globals_used = []
     fn_calls = []
+    extern_calls = []
     for record in records:
         if record.get("is_decl"):
             if rows.decl_key(record) != (path, record["line"], record["col"]):
@@ -1432,11 +1481,16 @@ def row_problems(rows, path, records):
             globals_used.append(record)
         if record["kind"] == "extern fn":
             uses.append((record, False))
+            start = source.offset(record["line"], record["col"])
+            begin, spelled = spelled_callee(source.code, start)
+            if is_callee(source.code, begin, start + len(record["name"])):
+                extern_calls.append((start, spelled))
         elif record["kind"] == "fn":
             key = rows.decl_key(record)
             start = source.offset(record["line"], record["col"])
-            if key is not None and next_char(source.code, start + len(record["name"]))[0] == "(":
-                fn_calls.append((start, spelled_callee(source.code, start)[1], key))
+            begin, spelled = spelled_callee(source.code, start)
+            if key is not None and is_callee(source.code, begin, start + len(record["name"])):
+                fn_calls.append((start, spelled, key))
             if key is not None and rows.is_boundary(key):
                 uses.append((record, True))
     for record, boundary in uses:
@@ -1450,6 +1504,7 @@ def row_problems(rows, path, records):
                              % (spelled_callee(source.code, start)[1], ROWS)))
             continue
         if next_char(source.code, end)[0] != "(":
+            # A callee in a group counts below, as the function value that the brackets give.
             continue
         for body_open, body_close, _, calls in functions:
             if body_open < start < body_close:
@@ -1464,7 +1519,8 @@ def row_problems(rows, path, records):
                 values.add(callee)
         problems.extend(function_row_problems(rows, path, source, record, calls, values))
         called = {callee: key for at, callee, key in fn_calls if body_open < at < body_close}
-        problems.extend(citation_problems(rows, source, record, called))
+        externs = {callee for at, callee in extern_calls if body_open < at < body_close}
+        problems.extend(citation_problems(rows, source, record, called, externs))
         if not rows.is_boundary((path, record["line"], record["col"])):
             for use in globals_used:
                 at = source.offset(use["line"], use["col"])
