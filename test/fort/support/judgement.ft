@@ -1,0 +1,784 @@
+/// The closed-world judgement over the typed family of generator.ft: a function that the compiler
+/// accepts with no error and no report line gives no error event when the oracle of
+/// fir.interpreter runs it (spec/ownership-design.md 3.3, 3.4).
+//
+// A batch is the text of one entry module: the declarations of one cell and up to BATCH functions
+// of it. The judgement checks the batch, lowers each function, and gives each function a verdict
+// as a build with `--whole-store-report --leak-report --span-del-report` does: the passes of
+// fort.owner.prover, the report lines of fort.owner.report, the release-only bit of each drop of a
+// `del(s, d)` (D17.9), and the `del` of a span of owners with one operand. Then it runs each
+// function that the checker and the lowering take, with each input that the function reads, and
+// counts the events of the run by kind.
+//
+// Each of the ten event kinds is an error. One event has an excuse: a `leak` at a `dead` marker of
+// a block that ends in an abort, because a path that ends in a runtime error keeps its memory
+// (D17.20). An accepted function with an error event is a false accept, and the judgement keeps
+// one record for it, with the kind and the place of its first error event.
+import check_env;
+import fort.ast;
+import fort.check;
+import fort.diag;
+import fort.fir;
+import fort.fir.interpreter;
+import fort.fir.release;
+import fort.fir.shadow;
+import fort.fir_lower;
+import fort.fir_verify;
+import fort.owner.prover;
+import fort.owner.report;
+import generator;
+import modules_env;
+import run_env;
+import std.str;
+import std.strbuf;
+
+// No item.
+u64 NONE = 18446744073709551615;
+
+// The most rounds of prepare.
+u64 ROUNDS = 8;
+
+/// The most functions of a batch.
+u64 BATCH = 200;
+
+// The first line of the `dead` markers of a batch after relocate. No text of a batch has as many
+// lines.
+u32 DEAD_LINE = 1000000;
+
+/// What the compiler says about a function, in the order of VERDICT_TEXT: it accepts the function
+/// with no report line; it accepts it with a report line; a pass of the prover or the release-only
+/// rule gives an error; or the checker, the lowering or the verifier refuses it. A function takes
+/// the last verdict of this order that holds.
+enum verdict {
+    vd_accepted,
+    vd_reported,
+    vd_rejected,
+    vd_refused,
+}
+
+/// The count of the members of verdict.
+u64 VERDICTS = 4;
+string[VERDICTS] VERDICT_TEXT = {"accepted", "reported", "rejected", "refused"};
+
+/// The count of the members of shadow.event_kind and of interpreter.outcome_kind.
+u64 KINDS = 10;
+u64 ENDS = 7;
+string[ENDS] END_TEXT = {"none", "return", "exit", "abort", "trap", "outside", "fault"};
+
+/// Where the first error event of a false accept stands, when it stands on no statement of the
+/// function: on another line of the function, at a `dead` marker, which ends a scope, or in a
+/// declaration of the batch. A statement gives its row of generator.OPERATIONS.
+u64 AT_END = generator.OPERATION_COUNT;
+u64 AT_SCOPE = generator.OPERATION_COUNT + 1;
+u64 AT_CALLEE = generator.OPERATION_COUNT + 2;
+
+/// The count of the places of an event.
+u64 PLACES = generator.OPERATION_COUNT + 3;
+string[3] PLACE_TEXT = {"the end", "a scope end", "a callee"};
+
+/// A false accept: function `seq` of `n` operations of the cell of row `ty` of generator.TYPES and
+/// row `st` of generator.STORAGES, the kind of its first error event, and the place of that event.
+struct failure {
+    u64 ty;
+    u64 st;
+    u64 n;
+    u64 seq;
+    shadow.event_kind kind;
+    u64 at;
+}
+
+struct failure_vec {
+    failure mut@ own items;
+    u64 len;
+}
+
+/// The counts of the judgement. `verdicts` counts the functions by verdict, `ends` the runs by
+/// interpreter.outcome_kind, and `events` each event of each run by kind. `errors` counts the
+/// error events of the runs of the accepted functions by kind, and `excused` their `leak` events
+/// at an abort. `failures` holds one record for each false accept. A value lives in an allocation
+/// of make, so each step takes it by pointer.
+struct totals {
+    u64 functions;
+    u64[VERDICTS] verdicts;
+    u64 runs;
+    u64[ENDS] ends;
+    u64[KINDS] events;
+    u64[KINDS] errors;
+    u64 excused;
+    failure_vec failures;
+}
+
+/// Empty counts in an allocation of their own.
+fn make() totals mut* own {
+    return new(totals);
+}
+
+/// Ends counts of make that the caller moves in.
+fn drop_made(totals mut* own p) void {
+    totals kept = move(*p);
+    del(p);
+    del(kept.failures.items);
+}
+
+// A function of a batch: its index in the cell, its lines in the text, its verdict, whether it is
+// a false accept, its symbol, and what generator.write_typed says about it.
+struct item {
+    u64 seq;
+    u32 first;
+    u32 last;
+    verdict said;
+    bool failed;
+    ast.sym* sym;
+    generator.typed_shape shape;
+}
+
+// One batch: the cell, the count `n` of the operations of each function, the vocabulary of the
+// cell, the items, the text, the functions as the lowering makes them, and for each `dead` marker
+// whether its block ends in an abort.
+struct batch {
+    u64 ty;
+    u64 st;
+    u64 n;
+    u64[generator.OPERATION_COUNT] ops;
+    u64 size;
+    item mut@ own items;
+    strbuf.str_buf text;
+    fir.module m;
+    bool mut@ own aborts;
+    u64 deads;
+}
+
+// A batch of `count` functions of `n` operations of the cell, from function `first`, in an
+// allocation of its own: each step takes the batch by pointer.
+fn batch_make(u64 ty, u64 st, u64 n, u64 first, u64 count) batch mut* own {
+    batch mut* own bt = new(batch);
+    bt->ty = ty;
+    bt->st = st;
+    bt->n = n;
+    bt->items = new(item, count);
+    bt->size = generator.typed_vocabulary(ty, st, bt->ops[..]);
+    for (u64 mut k = 0; k < count; k++) {
+        bt->items[k].seq = first + k;
+    }
+    return bt;
+}
+
+// Frees a batch that the caller moves in.
+fn batch_drop(batch mut bt) void {
+    del(bt.items);
+    strbuf.drop(move(bt.text));
+    fir.module_drop(move(bt.m));
+    del(bt.aborts);
+}
+
+// Ends a batch of batch_make that the caller moves in: the value moves out before the `del` of the
+// allocation, and batch_drop frees it.
+fn batch_drop_made(batch mut* own p) void {
+    batch kept = move(*p);
+    del(p);
+    batch_drop(move(kept));
+}
+
+// Whether `s` is a function of the entry module of the batch.
+fn is_in_main(ast.sym* s) bool {
+    return s->owner != null && s->owner->name == "main";
+}
+
+// Advances *line over the newlines of `b` after *seen.
+fn count_lines(strbuf.str_buf* b, u64 mut* seen, u32 mut* line) void {
+    string text = strbuf.view(b);
+    for (u64 mut i = *seen; i < text.len; i++) {
+        if (text[i] == '\n') {
+            *line += 1;
+        }
+    }
+    *seen = text.len;
+}
+
+// Writes the text of `bt` with each item that the checker and the lowering take, and the lines of
+// each such item. The functions declare and call `oracle_keep` and its kin, so the text is trusted
+// (D9.8).
+fn write_batch(batch mut* bt) void {
+    strbuf.str_buf mut* b = &bt->text;
+    strbuf.clear(b);
+    strbuf.append(b, check_env.TRUST);
+    generator.write_typed_prelude(b, bt->ty, bt->st);
+    u64 mut seen = 0;
+    u32 mut line = 1;
+    count_lines(b, &seen, &line);
+    for (u64 mut k = 0; k < bt->items.len; k++) {
+        item mut* it = &bt->items[k];
+        if (it->said == verdict.vd_refused) {
+            continue;
+        }
+        it->first = line;
+        generator.write_typed(b, bt->ty, bt->st, bt->ops[..bt->size], bt->n, it->seq, it->seq,
+                              &it->shape);
+        count_lines(b, &seen, &line);
+        it->last = line - 1;
+    }
+}
+
+// The position in `bt->items` of the item whose lines hold `line`, or NONE.
+fn item_at(batch* bt, u32 line) u64 {
+    for (u64 mut k = 0; k < bt->items.len; k++) {
+        item* it = &bt->items[k];
+        if (it->said != verdict.vd_refused && it->first <= line && line <= it->last) {
+            return k;
+        }
+    }
+    return NONE;
+}
+
+// Gives the item whose lines hold `line` the verdict `said`, when its verdict comes before `said`
+// in the order of verdict. A line of no item is a declaration of the batch, which the compiler
+// must accept: the test stops there.
+fn mark(batch mut* bt, u32 line, verdict said) void {
+    u64 k = item_at(bt, line);
+    if (k == NONE) {
+        println(strbuf.view(&bt->text));
+        panic("judgement.mark: the compiler does not accept a declaration of the batch");
+    }
+    if (cast(bt->items[k].said, i32) < cast(said, i32)) {
+        bt->items[k].said = said;
+    }
+}
+
+// Checks the text of `bt` in a fresh sandbox, and gives whether it checks with no diagnostic. Each
+// item whose lines hold an error becomes refused.
+fn check_batch(check_env.env mut* c, batch mut* bt) bool {
+    check_env.reopen(c);
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    run_env.join(&b, run_env.RUNTIME[..]);
+    check_env.add(c, "std/rt.ft", strbuf.view(&b));
+    strbuf.clear(&b);
+    run_env.join(&b, run_env.LIBC[..]);
+    check_env.add(c, "std/libc.ft", strbuf.view(&b));
+    modules_env.std_dir_without_runtime(&c->m, "std");
+    c->want_main = false;
+    if (check_env.check_src(c, strbuf.view(&bt->text))) {
+        return true;
+    }
+    bool mut refused = false;
+    for (u64 mut i = 0; i < modules_env.reports(&c->m); i++) {
+        diag.record r = modules_env.report_at(&c->m, i);
+        if (r.severity == diag.severity.error && str.ends_with(r.loc.file, "main.ft")
+            && item_at(bt, r.loc.line) != NONE) {
+            mark(bt, r.loc.line, verdict.vd_refused);
+            refused = true;
+        }
+    }
+    if (!refused) {
+        eprintln(check_env.report_text(c, 0));
+        panic("judgement.check_batch: a declaration of the batch does not check");
+    }
+    return false;
+}
+
+// Lowers the function `s` into `bt->m`, and gives whether the lowering and the verifier accept
+// it. A refused function makes its item refused. The function reads `s` before it lends its own
+// FIR function, so the use rule of `move` and `del` holds each read.
+fn lower_one(check_env.env mut* c, batch mut* bt, ast.sym* s, fir_verify.runtime* rt) bool {
+    ast.node* body = s->node;
+    u32 line = s->decl.line;
+    bool in_main = is_in_main(s);
+    fir.func mut* own f = fir.func_make();
+    // an accepted function moves out into the module, and the drop ends the empty value
+    defer fir.func_drop_made(move(f));
+    fir_lower.report mut why = fir_lower.report{};
+    bool lowered = fir_lower.lower_function(&c->ck, body, f, &why);
+    fir_verify.violation mut v = fir_verify.violation{};
+    if (lowered && !fir_verify.find_violation(f, rt, &v)) {
+        fir.module_add_function(&bt->m, move(*f));
+        return true;
+    }
+    if (!in_main || item_at(bt, line) == NONE) {
+        panic("judgement.lower_one: the lowering or the verifier refuses a declaration");
+    }
+    mark(bt, line, verdict.vd_refused);
+    return false;
+}
+
+// Lowers each function with a body of the closure into `bt->m`, and gives whether the lowering
+// and the verifier accept each.
+fn lower_batch(check_env.env mut* c, batch mut* bt) bool {
+    fir_verify.runtime rt = fir_verify.runtime_of(&c->ck);
+    bool mut accepted = true;
+    for (u64 mut i = 0; i < check.check_sym_count(&c->ck); i++) {
+        ast.sym* s = check.check_sym_at(&c->ck, i);
+        if (s->kind == ast.sym_kind.s_fn && s->node != null && s->node->b != null
+            && !lower_one(c, bt, s, &rt)) {
+            accepted = false;
+        }
+    }
+    return accepted;
+}
+
+// Writes, checks and lowers `bt` until each item that is not refused checks, lowers and verifies.
+fn prepare(check_env.env mut* c, batch mut* bt) void {
+    for (u64 mut round = 0; round < ROUNDS; round++) {
+        fir.module_free(&bt->m);
+        bt->m = fir.module_new();
+        write_batch(bt);
+        if (check_batch(c, bt) && lower_batch(c, bt)) {
+            return;
+        }
+    }
+    panic("judgement.prepare: the batch does not settle");
+}
+
+// Gives the item of the function `f` its symbol and the verdict of the proof `p`: rejected after
+// an error of a pass, and reported when fort.owner.report writes a line for `--leak-report` or
+// `--whole-store-report`.
+fn prove_one(check_env.env mut* c, batch mut* bt, fir.func* f) void {
+    u32 line = f->sym->decl.line;
+    u64 k = item_at(bt, line);
+    if (k != NONE) {
+        bt->items[k].sym = f->sym;
+    }
+    prover.proof mut* own p = prover.prove_made(f);
+    defer prover.drop_made(move(p));
+    if (prover.has_error(p)) {
+        mark(bt, line, verdict.vd_rejected);
+    } else if (has_report(c, f, p)) {
+        mark(bt, line, verdict.vd_reported);
+    }
+}
+
+// Whether fort.owner.report writes a line for the proof `p` of `f`.
+fn has_report(check_env.env mut* c, fir.func* f, prover.proof* p) bool {
+    strbuf.str_buf mut lines = strbuf.create();
+    defer del(lines.data);
+    report.write_inners(f, p, &c->m.s, &lines);
+    report.write_wholes(f, p, &c->m.s, &lines);
+    return lines.len > 0;
+}
+
+// Gives each item its verdict, as overwrite_entry of fort.driver does with each report option:
+// the proof of each function of the entry module, then the release-only bit of the drop of each
+// `del(s, d)`, then each `del` of a span of owners with one operand.
+fn prove_batch(check_env.env mut* c, batch mut* bt) void {
+    release.table mut* own drops = release.make();
+    defer release.drop_made(move(drops));
+    for (u64 mut i = 0; i < bt->m.funcs.len; i++) {
+        fir.func* f = &bt->m.funcs.items[i];
+        release.scan(drops, f);
+        if (is_in_main(f->sym)) {
+            prove_one(c, bt, f);
+        }
+    }
+    release.solve(drops);
+    for (u64 mut i = 0; i < check.drain_count(&c->ck); i++) {
+        ast.node* d = ast.ast_child(check.drain_at(&c->ck, i), 1);
+        if (!release.is_release_only(drops, d->sym) && str.ends_with(d->loc.file, "main.ft")) {
+            mark(bt, d->loc.line, verdict.vd_rejected);
+        }
+    }
+    for (u64 mut i = 0; i < check.span_del_count(&c->ck); i++) {
+        diag.loc at = check.span_del_at(&c->ck, i)->a->loc;
+        if (str.ends_with(at.file, "main.ft")) {
+            mark(bt, at.line, verdict.vd_reported);
+        }
+    }
+}
+
+// Records whether the block of a `dead` marker ends in an abort.
+fn push_abort(batch mut* bt, bool abort) void {
+    if (bt->deads == bt->aborts.len) {
+        bool mut@ own bigger = new(bool, fir.grown_capacity(bt->deads, "judgement: capacity"));
+        for (u64 mut i = 0; i < bt->deads; i++) {
+            bigger[i] = bt->aborts[i];
+        }
+        del(bt->aborts);
+        bt->aborts = move(bigger);
+    }
+    bt->aborts[bt->deads] = abort;
+    bt->deads += 1;
+}
+
+// Moves each `dead` marker of each function of `bt` to its own line, DEAD_LINE and its position
+// in bt->aborts. The run gives the `leak` event of a `dead` at its location, so the line names the
+// marker. A `dead` changes no fact and no run, so the move changes no verdict and no other event.
+fn relocate(batch mut* bt) void {
+    bt->deads = 0;
+    for (u64 mut i = 0; i < bt->m.funcs.len; i++) {
+        fir.func mut* f = &bt->m.funcs.items[i];
+        for (u32 mut b = 0; b < fir.block_count(f); b++) {
+            fir.block mut* bl = fir.block_mut(f, b);
+            for (u64 mut k = 0; k < bl->statements.len; k++) {
+                fir.statement mut* st = &bl->statements.items[k];
+                if (st->kind != fir.stmt_kind.st_dead) {
+                    continue;
+                }
+                push_abort(bt, fir.term_is_abort(&bl->term));
+                st->loc.line = DEAD_LINE + cast(bt->deads - 1, u32);
+                st->loc.end_line = st->loc.line;
+            }
+        }
+    }
+}
+
+// Appends `add` to `v`.
+fn push_failure(failure_vec mut* v, failure add) void {
+    if (v->len == v->items.len) {
+        failure mut@ own bigger = new(failure, fir.grown_capacity(v->len, "judgement: capacity"));
+        for (u64 mut i = 0; i < v->len; i++) {
+            bigger[i] = v->items[i];
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = add;
+    v->len += 1;
+}
+
+// The place of the event `ev` of a run of the item `it` of `bt`: the row of generator.OPERATIONS
+// of the statement on its line, or AT_END, AT_SCOPE or AT_CALLEE.
+fn place_of(batch* bt, item* it, shadow.event* ev) u64 {
+    u32 start = it->first + it->shape.first;
+    if (ev->at.line >= DEAD_LINE) {
+        return AT_SCOPE;
+    } else if (ev->sym != it->sym) {
+        return AT_CALLEE;
+    } else if (ev->at.line >= start && cast(ev->at.line - start, u64) < bt->n) {
+        return it->shape.ops[cast(ev->at.line - start, u64)];
+    }
+    return AT_END;
+}
+
+// Whether the `leak` event `ev` stands at a `dead` marker of a block that ends in an abort.
+fn is_excused(batch* bt, shadow.event* ev) bool {
+    u64 at = cast(ev->at.line -% DEAD_LINE, u64);
+    return ev->kind == shadow.event_kind.ev_leak && ev->at.line >= DEAD_LINE && at < bt->deads
+        && bt->aborts[at];
+}
+
+// Counts the run of `run` of item `k` and its events. The first error event of an accepted
+// function makes it a false accept.
+fn collect(batch mut* bt, u64 k, interpreter.machine* run, totals mut* t) void {
+    item mut* it = &bt->items[k];
+    t->runs += 1;
+    if (run->end.kind == interpreter.outcome_kind.oc_none) {
+        panic("judgement.collect: a run did not end");
+    }
+    t->ends[cast(cast(run->end.kind, i32), u64)] += 1;
+    for (u64 mut e = 0; e < run->sh.events.len; e++) {
+        shadow.event* ev = &run->sh.events.items[e];
+        u64 kind = cast(cast(ev->kind, i32), u64);
+        t->events[kind] += 1;
+        if (it->said != verdict.vd_accepted) {
+            continue;
+        }
+        if (is_excused(bt, ev)) {
+            t->excused += 1;
+            continue;
+        }
+        t->errors[kind] += 1;
+        if (!it->failed) {
+            it->failed = true;
+            push_failure(&t->failures,
+                         failure{bt->ty, bt->st, bt->n, it->seq, ev->kind, place_of(bt, it, ev)});
+        }
+    }
+}
+
+// Runs item `k` with the input `input`: bit 0 is the `bool`, bit 1 the index, and bit 2 says that
+// the place holds an owner at the entry.
+fn run_drive(check_env.env mut* c, batch mut* bt, u64 k, u64 input, totals mut* t) void {
+    interpreter.machine mut* own run = interpreter.make(&c->ck, &bt->m, true);
+    defer interpreter.drop_made(move(run));
+    u64[4] mut args = {};
+    args[0] = interpreter.code_address(run, bt->items[k].sym);
+    for (u64 mut bit = 0; bit < 3; bit++) {
+        args[bit + 1] = (input >> bit) & 1;
+    }
+    interpreter.run_function(run, check_env.sym_main(c, generator.DRIVE), args[..]);
+    collect(bt, k, run, t);
+}
+
+// Whether the input `input` of run_drive changes only what a function with the inputs `reads`
+// does not read.
+fn is_unread(u64 input, u32 reads) bool {
+    return ((input & 1) != 0 && (reads & generator.READS_B) == 0)
+        || ((input & 2) != 0 && (reads & generator.READS_I) == 0)
+        || ((input & 4) != 0 && (reads & generator.READS_LIVE) == 0);
+}
+
+// Runs each item of `bt` that is not refused, with each input that it reads, and counts each item
+// by its verdict.
+fn run_batch(check_env.env mut* c, batch mut* bt, totals mut* t) void {
+    for (u64 mut k = 0; k < bt->items.len; k++) {
+        verdict said = bt->items[k].said;
+        u32 reads = bt->items[k].shape.reads;
+        t->functions += 1;
+        t->verdicts[cast(cast(said, i32), u64)] += 1;
+        if (said != verdict.vd_refused && bt->items[k].sym == null) {
+            panic("judgement.run_batch: the batch holds no function for an item");
+        }
+        for (u64 mut input = 0; said != verdict.vd_refused && input < 8; input++) {
+            if (!is_unread(input, reads)) {
+                run_drive(c, bt, k, input, t);
+            }
+        }
+    }
+}
+
+/// Judges the functions `first` to `first + count - 1` of `n` operations of the cell of row `ty`
+/// of generator.TYPES and row `st` of generator.STORAGES, as one batch, and adds its counts to
+/// `t`.
+fn judge_batch(check_env.env mut* c, u64 ty, u64 st, u64 n, u64 first, u64 count,
+               totals mut* t) void {
+    batch mut* own bt = batch_make(ty, st, n, first, count);
+    defer batch_drop_made(move(bt));
+    prepare(c, bt);
+    prove_batch(c, bt);
+    relocate(bt);
+    run_batch(c, bt, t);
+}
+
+/// Judges the functions of `n` operations of the cell of row `ty` of generator.TYPES and row `st`
+/// of generator.STORAGES, in batches of BATCH. `*turn` counts the batches of the family, and the
+/// call judges the batches whose count is `part` modulo `parts`, so `parts` calls with each
+/// `part` judge each function once.
+fn judge_cell(check_env.env mut* c, u64 ty, u64 st, u64 n, u64 part, u64 parts, u64 mut* turn,
+              totals mut* t) void {
+    if (!generator.typed_fits(ty, st)) {
+        return;
+    }
+    u64 total = generator.typed_cell_count(ty, st, n);
+    for (u64 mut first = 0; first < total; first += BATCH) {
+        u64 mut count = BATCH;
+        if (first + count > total) {
+            count = total - first;
+        }
+        if (*turn % parts == part) {
+            judge_batch(c, ty, st, n, first, count, t);
+        }
+        *turn += 1;
+    }
+}
+
+/// Judges part `part` of `parts` of the functions of `n` operations of the typed family: each cell
+/// in the order of the tables.
+fn judge_family(check_env.env mut* c, u64 n, u64 part, u64 parts, totals mut* t) void {
+    u64 mut turn = 0;
+    for (u64 mut ty = 0; ty < generator.TYPE_COUNT; ty++) {
+        for (u64 mut st = 0; st < generator.STORAGE_COUNT; st++) {
+            judge_cell(c, ty, st, n, part, parts, &turn, t);
+        }
+    }
+}
+
+// The text of the place `at` of an event.
+fn place_text(u64 at) string {
+    if (at < generator.OPERATION_COUNT) {
+        return generator.OPERATIONS[at].name;
+    }
+    return PLACE_TEXT[at - generator.OPERATION_COUNT];
+}
+
+/// Prints the counts of `t` under `name`: the functions by verdict, the runs by their end, the
+/// events by kind, and after `errors` the error events of the accepted functions by kind.
+fn print_totals(string name, totals* t) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    append_verdicts(&b, t);
+    println(name, strbuf.view(&b));
+    strbuf.clear(&b);
+    strbuf.append(&b, ": runs ");
+    strbuf.append_u64(&b, t->runs);
+    for (u64 mut k = 1; k < ENDS; k++) {
+        strbuf.append(&b, ", ");
+        strbuf.append(&b, END_TEXT[k]);
+        strbuf.push(&b, ' ');
+        strbuf.append_u64(&b, t->ends[k]);
+    }
+    println(name, strbuf.view(&b));
+    print_kinds(name, ": events: ", t->events[..]);
+    print_kinds(name, ": errors: ", t->errors[..]);
+    println(name, ": excused leaks at an abort ", t->excused, ", false accepts ",
+            t->failures.len);
+}
+
+// Appends the count of the functions of `t`, then the count of each verdict after its name.
+fn append_verdicts(strbuf.str_buf mut* b, totals* t) void {
+    strbuf.append(b, ": functions ");
+    strbuf.append_u64(b, t->functions);
+    for (u64 mut k = 0; k < VERDICTS; k++) {
+        strbuf.append(b, ", ");
+        strbuf.append(b, VERDICT_TEXT[k]);
+        strbuf.push(b, ' ');
+        strbuf.append_u64(b, t->verdicts[k]);
+    }
+}
+
+// Prints `counts` by event kind after `name` and `head`, on three lines.
+fn print_kinds(string name, string head, u64@ counts) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    for (u64 mut k = 0; k < KINDS; k++) {
+        strbuf.append(&b, shadow.EVENT_TEXT[k]);
+        strbuf.push(&b, ' ');
+        strbuf.append_u64(&b, counts[k]);
+        if (k == 3 || k == 6 || k + 1 == KINDS) {
+            println(name, head, strbuf.view(&b));
+            strbuf.clear(&b);
+        } else {
+            strbuf.append(&b, ", ");
+        }
+    }
+}
+
+/// Prints the false accepts of `t` under `name` by class, one line for each class that holds one:
+/// the kind and the place of the first error event, the count of the functions, and the sum of
+/// their identities, which changes when another function takes the place of one.
+fn print_classes(string name, totals* t) void {
+    for (u64 mut kind = 0; kind < KINDS; kind++) {
+        for (u64 mut at = 0; at < PLACES; at++) {
+            u64 mut count = 0;
+            u64 mut sum = 0;
+            for (u64 mut i = 0; i < t->failures.len; i++) {
+                failure* f = &t->failures.items[i];
+                if (cast(cast(f->kind, i32), u64) == kind && f->at == at) {
+                    count += 1;
+                    sum = sum +% identity(f);
+                }
+            }
+            if (count > 0) {
+                println(name, ": false accept: ", shadow.EVENT_TEXT[kind], " at ", place_text(at),
+                        ": functions ", count, ", sum ", sum);
+            }
+        }
+    }
+}
+
+// A number that names the function of `f` in its family.
+fn identity(failure* f) u64 {
+    return (f->ty * generator.STORAGE_COUNT + f->st + 1) *% 1000003 +% f->seq;
+}
+
+/// Appends the text of the function of the false accept `f`, after a line that names its cell.
+fn write_failure(strbuf.str_buf mut* b, failure* f) void {
+    u64[generator.OPERATION_COUNT] mut ops = {};
+    u64 size = generator.typed_vocabulary(f->ty, f->st, ops[..]);
+    generator.typed_shape mut shape = generator.typed_shape{};
+    strbuf.append(b, "// ");
+    strbuf.append(b, generator.TYPES[f->ty].name);
+    strbuf.push(b, '/');
+    strbuf.append(b, generator.STORAGES[f->st].name);
+    strbuf.push(b, '\n');
+    generator.write_typed(b, f->ty, f->st, ops[..size], f->n, f->seq, f->seq, &shape);
+}
+
+// Prints the first function of each class of the false accepts of `t`: the one with the lowest
+// cell and index, because the judgement goes through the family in that order.
+fn print_examples(totals* t) void {
+    for (u64 mut i = 0; i < t->failures.len; i++) {
+        failure* f = &t->failures.items[i];
+        bool mut first = true;
+        for (u64 mut k = 0; k < i; k++) {
+            failure* g = &t->failures.items[k];
+            if (g->kind == f->kind && g->at == f->at) {
+                first = false;
+            }
+        }
+        if (first) {
+            print_failure(f);
+        }
+    }
+}
+
+// Prints the function of the false accept `f` after its class.
+fn print_failure(failure* f) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    strbuf.append(&b, "// ");
+    strbuf.append(&b, shadow.EVENT_TEXT[cast(cast(f->kind, i32), u64)]);
+    strbuf.append(&b, " at ");
+    strbuf.append(&b, place_text(f->at));
+    strbuf.push(&b, '\n');
+    write_failure(&b, f);
+    print(strbuf.view(&b));
+}
+
+/// The count of the operations of each function of the family that PR CI judges, and the count of
+/// the parts that PR CI judges it in.
+u64 FAMILY = 2;
+u64 PARTS = 8;
+
+/// The main function of the test of part `part` of PARTS, from 1. With no argument it judges that
+/// part of the family of FAMILY operations, and prints its counts and its false accepts by class.
+/// The expected output of the test is the list of the known false accepts: a class that loses a
+/// function and a function that the list does not hold each change a line. With the arguments
+/// `<operations> <part> <parts>` it judges that part of that family, prints the first function of
+/// each class too, and gives 1 when the part holds a false accept, because no list holds that
+/// family.
+fn run_part(u64 part, string@ args) i32 {
+    u64 mut n = FAMILY;
+    u64 mut k = part;
+    u64 mut parts = PARTS;
+    bool chosen = args.len > 1;
+    if (chosen && !read_choice(args, &n, &k, &parts)) {
+        eprintln("usage: <test> [<operations> <part> <parts>]");
+        return 2;
+    }
+    check_env.env mut* own c = check_env.make();
+    defer check_env.drop_made(move(c));
+    totals mut* own t = make();
+    defer drop_made(move(t));
+    println("typed: operations ", n, ", part ", k, " of ", parts);
+    judge_family(c, n, k - 1, parts, t);
+    print_totals("typed", t);
+    print_classes("typed", t);
+    if (!chosen) {
+        return 0;
+    }
+    print_examples(t);
+    if (t->failures.len > 0) {
+        return 1;
+    }
+    return 0;
+}
+
+// Reads the three arguments of run_part, and gives whether they name a part of a family.
+fn read_choice(string@ args, u64 mut* n, u64 mut* part, u64 mut* parts) bool {
+    return args.len == 4 && str.parse_u64(args[1], 10, n) && str.parse_u64(args[2], 10, part)
+        && str.parse_u64(args[3], 10, parts) && *n <= generator.MOST_STATEMENTS && *part >= 1
+        && *part <= *parts;
+}
+
+/// Judges the functions of `n` operations of each cell apart, and prints one line for each cell:
+/// the size of its vocabulary, its functions by verdict and its false accepts. A cell whose
+/// declarations the compiler does not accept stops the test, and a cell that accepts no function
+/// shows in its line.
+fn print_cells(u64 n) void {
+    check_env.env mut* own c = check_env.make();
+    defer check_env.drop_made(move(c));
+    for (u64 mut ty = 0; ty < generator.TYPE_COUNT; ty++) {
+        for (u64 mut st = 0; st < generator.STORAGE_COUNT; st++) {
+            if (generator.typed_fits(ty, st)) {
+                print_cell(c, ty, st, n);
+            }
+        }
+    }
+}
+
+// Judges the functions of `n` operations of one cell, and prints its line.
+fn print_cell(check_env.env mut* c, u64 ty, u64 st, u64 n) void {
+    totals mut* own t = make();
+    defer drop_made(move(t));
+    u64 mut turn = 0;
+    judge_cell(c, ty, st, n, 0, 1, &turn, t);
+    print_cell_line(ty, st, t);
+}
+
+// Prints the line of the cell with the counts `t`. The buffer has a frame of its own, so no call
+// stands between its release and the end of the frame.
+fn print_cell_line(u64 ty, u64 st, totals* t) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    append_verdicts(&b, t);
+    println(generator.TYPES[ty].name, "/", generator.STORAGES[st].name, strbuf.view(&b),
+            ", false accepts ", t->failures.len);
+}

@@ -864,6 +864,42 @@ bullet at a time and without a rewrite.
   a removed `del`, or an inserted store into the tested place when the places line names it, keeps
   the test true. The first `while_test` hung the test for 30 minutes; its loop now has a second
   exit, a `break`.
+- **The typed family holds the whole owner check against the runs of the oracle**
+  (`test/fort/owner/typed/`, `test/fort/support/judgement.ft`). `test/fort/support/generator.ft`
+  builds the family from three tables: `TYPES` (7 rows), `STORAGES` (6 rows) and `OPERATIONS` (50
+  rows). A function tests one place, a value of a type in a storage class, and each statement of
+  it is an operation. A text of a table holds codes: `%P` is the place, `%R` its release, `%F` a
+  value with a live owner. A code whose form is the empty text has no form in that cell, and an
+  operation that names it does not apply there. So a new type, storage class or operation is one
+  row, and `count_test.ft` shows what the row adds: the family has 40 cells, 1,739 functions of 1
+  operation, 76,099 of 2 and 3,350,675 of 3 (`typed_count`). `tools/mutations/generator.json`
+  takes one row out of each table, and `count_test.ft` catches each of its 6 rows.
+  **The judgement is closed-world.** `judgement.ft` checks a batch of 200 functions of one cell,
+  lowers each, and gives each a verdict as a build with `--whole-store-report --leak-report
+  --span-del-report` does: `refused` by the checker, the lowering or the verifier, `rejected` by
+  a pass of `owner.prover` or by the release-only rule of D17.9, `reported` by a report line, or
+  `accepted`. It runs each function that is not refused with each input that it reads, and each
+  event of each of the ten kinds in a run of an accepted function is an error. One event has an
+  excuse: a `leak` at a `dead` of a block that ends in an abort. An accepted function with an
+  error event is a false accept. The judgement does not stop at one: it prints the false accepts
+  by class, the kind of the first error event and the operation at its line, with the count of
+  the functions and a sum of their numbers. The expected stdout of `part_<k>_test.ft` holds
+  those lines, so the list is red in both directions: a class that loses a function changes its
+  count, and another function in a class changes its sum. The list only shrinks. A change that
+  removes a false accept blesses the smaller list in the same commit.
+  **The 8 parts are the 2-operation family.** Batch `j` of the family belongs to part `j` modulo
+  8, and the 8 counts of functions sum to 76,099. A part takes 9 to 11 s to run and about 10 s to
+  compile in the VM, against the 60 s limit of the harness for each step. `cells_test.ft` judges
+  the functions of 0 and of 1 operation of each cell apart: the compiler accepts the declarations
+  of each cell and its function with no operation, and a declaration that it does not accept
+  stops a test with the text of the batch.
+  **The 3-operation family is not in PR CI.** Compile a part test into `build/` and run it from a
+  scratch directory with three arguments, the count of the operations, the part and the count of
+  the parts: `part_1_test 3 1 400` judges 8,400 functions in 12 s. With arguments the test prints
+  the first function of each class too, and exits 1 when the part holds a false accept, because
+  no list holds that family. Part 1 of 400 holds 31 false accepts, with two classes that the
+  2-operation family cannot reach: a load through a view after the release or the move of its
+  owner.
 - **The suites of fir.interpreter derive each expected value apart from the interpreter**
   (`test/fort/fir/interpreter_test.ft`, `interpreter_source_test.ft`). Python's integers and IEEE
   doubles gave each value at each boundary of each type when the cases were written: the wrap at
