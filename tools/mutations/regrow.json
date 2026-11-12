@@ -1,0 +1,271 @@
+{
+  "comment": [
+    "One row for each rule of the universe function `regrow` (D12.2) outside the runtime, whose rows",
+    "tools/mutations/rt_fort.json holds. The rows cover the checker (check_regrow in",
+    "src/fort/check.ft), the lowering (lower_regrow in src/fort/fir_lower.ft), the rules V4 and V6 of",
+    "the rvalue `regrow` (src/fort/fir_verify.ft and rvalue_owns in src/fort/fir.ft), the translation",
+    "(regrow_value in src/fort/fir_llvm.ft), the reference interpreter (regrow_from, regrow_back and",
+    "move_owners in src/fort/fir/interpreter.ft), and the prover. The prover has no line for",
+    "`regrow`: it reads the `move` of the operand in gen_reads and a store of a value that is not",
+    "zero in apply_store, and apply_call reads a `call` only. Each row D12.2-prove-* adds a wrong",
+    "reading of `regrow` to one of these three, and owner/prover_regrow_test.ft catches it. The first",
+    "stage runs the module suites, which compile the mutated sources themselves. The second stage",
+    "runs each program of test/lang whose name holds `regrow`. The table runs in the VM with the",
+    "default runner after `tools/vm configure` and `tools/vm build`. The md5 guard reads the product",
+    "compiler that the build links."
+  ],
+  "sources": [
+    "src/fort/check.ft",
+    "src/fort/fir.ft",
+    "src/fort/fir_lower.ft",
+    "src/fort/fir_verify.ft",
+    "src/fort/fir_llvm.ft",
+    "src/fort/fir/interpreter.ft",
+    "src/fort/owner/prover.ft"
+  ],
+  "binary": "build/Linux/debug/fort",
+  "build": "sleep 2 && touch src/fort/check.ft src/fort/fir.ft src/fort/fir_lower.ft src/fort/fir_verify.ft src/fort/fir_llvm.ft src/fort/fir/interpreter.ft src/fort/owner/prover.ft && ninja -C build/Linux/debug fort",
+  "stages": [
+    {
+      "name": "the module suites of regrow",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 600 -j 4 check_regrow_test fir_lower_regrow_test fir_verify_test fir_llvm_regrow_test fir/interpreter_regrow_test owner/prover_regrow_test"
+    },
+    {
+      "name": "the regrow programs of test/lang",
+      "command": "python3 test/lang/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --cc /usr/bin/clang --target x86_64-linux-gnu -j 4 regrow"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D12.2-check-own",
+      "file": "src/fort/check.ft",
+      "what": "a span that is no `own` passes",
+      "old": "    if (e.untyped || e.ty->kind != types.type_kind.k_span || !e.ty->is_own || !e.ty->is_mut) {",
+      "new": "    if (e.untyped || e.ty->kind != types.type_kind.k_span || !e.ty->is_mut) {"
+    },
+    {
+      "decision": "D12.2-check-mut",
+      "file": "src/fort/check.ft",
+      "what": "a span whose elements are not `mut` passes",
+      "old": "    if (e.untyped || e.ty->kind != types.type_kind.k_span || !e.ty->is_own || !e.ty->is_mut) {",
+      "new": "    if (e.untyped || e.ty->kind != types.type_kind.k_span || !e.ty->is_own) {"
+    },
+    {
+      "decision": "D12.2-check-element-span",
+      "file": "src/fort/check.ft",
+      "what": "a span of spans passes",
+      "old": "    if (elem->kind == types.type_kind.k_span\n        || (elem->kind == types.type_kind.k_string && elem->is_own)) {\n        check_msg_begin(ck);\n        msg_str(ck, \"'regrow' makes no span of \");",
+      "new": "    if (false\n        || (elem->kind == types.type_kind.k_string && elem->is_own)) {\n        check_msg_begin(ck);\n        msg_str(ck, \"'regrow' makes no span of \");"
+    },
+    {
+      "decision": "D12.2-check-element-string",
+      "file": "src/fort/check.ft",
+      "what": "a span of `own` strings passes",
+      "old": "    if (elem->kind == types.type_kind.k_span\n        || (elem->kind == types.type_kind.k_string && elem->is_own)) {\n        check_msg_begin(ck);\n        msg_str(ck, \"'regrow' makes no span of \");",
+      "new": "    if (elem->kind == types.type_kind.k_span\n        || false) {\n        check_msg_begin(ck);\n        msg_str(ck, \"'regrow' makes no span of \");"
+    },
+    {
+      "decision": "D12.2-check-move",
+      "file": "src/fort/check.ft",
+      "what": "an owning lvalue with no `move` passes",
+      "old": "    convert_ownership(ck, arg, &e, span, \"'regrow'\", false);\n",
+      "new": "    // the mutant makes no ownership conversion\n"
+    },
+    {
+      "decision": "D12.2-lower-signed",
+      "file": "src/fort/fir_lower.ft",
+      "what": "a signed count is read as a `u64`",
+      "old": "    bool is_signed = prim.prim_is_signed(amount->ty->prim);\n    types.node* bits = u64_ty(lw);",
+      "new": "    bool is_signed = false;\n    types.node* bits = u64_ty(lw);"
+    },
+    {
+      "decision": "D12.2-lower-order",
+      "file": "src/fort/fir_lower.ft",
+      "what": "the count is read before the `move` of the span",
+      "old": "    if (!owning_temp(lw, ast.ast_child(n, 0), &held)) {\n        return false;\n    }\n    ast.node* amount = ast.ast_child(n, 1);\n    fir.operand mut raw = fir.operand{};\n    if (!lower_operand(lw, amount, &raw)) {\n        return false;\n    }\n",
+      "new": "    ast.node* amount = ast.ast_child(n, 1);\n    fir.operand mut raw = fir.operand{};\n    if (!lower_operand(lw, amount, &raw)) {\n        return false;\n    }\n    if (!owning_temp(lw, ast.ast_child(n, 0), &held)) {\n        return false;\n    }\n"
+    },
+    {
+      "decision": "D12.2-lower-length",
+      "file": "src/fort/fir_lower.ft",
+      "what": "the new span takes the count before its cast to `u64`",
+      "old": "    fir.operand_push(lw->f, size);\n    assign(lw, dst, fir.rvalue_aggregate_new(n->ty, first, 2), at);",
+      "new": "    fir.operand_push(lw->f, count);\n    assign(lw, dst, fir.rvalue_aggregate_new(n->ty, first, 2), at);"
+    },
+    {
+      "decision": "D12.2-fir-owns",
+      "file": "src/fort/fir.ft",
+      "what": "the result of a `regrow` is no owning value",
+      "old": "    case rvalue_kind.rv_alloc, rvalue_kind.rv_regrow:\n        return true;",
+      "new": "    case rvalue_kind.rv_alloc:\n        return true;"
+    },
+    {
+      "decision": "V4-regrow-void",
+      "file": "src/fort/fir_verify.ft",
+      "what": "a `regrow` of `void` passes",
+      "old": "    if (r.ty->kind == types.type_kind.k_void) {\n        return V4_REGROW_VOID;",
+      "new": "    if (false) {\n        return V4_REGROW_VOID;"
+    },
+    {
+      "decision": "V4-regrow-element",
+      "file": "src/fort/fir_verify.ft",
+      "what": "a `regrow` of a span of spans passes",
+      "old": "    if (r.ty->kind == types.type_kind.k_span) {\n        return V4_REGROW_ELEMENT;",
+      "new": "    if (false) {\n        return V4_REGROW_ELEMENT;"
+    },
+    {
+      "decision": "V4-regrow-own",
+      "file": "src/fort/fir_verify.ft",
+      "what": "the operand is a span that is no `own`",
+      "old": "    if (span->kind != types.type_kind.k_span || !span->is_own || !span->is_mut\n        || !types_agree(span->elem, r.ty)) {\n        return V4_REGROW_SPAN;",
+      "new": "    if (span->kind != types.type_kind.k_span || !span->is_mut\n        || !types_agree(span->elem, r.ty)) {\n        return V4_REGROW_SPAN;"
+    },
+    {
+      "decision": "V4-regrow-mut",
+      "file": "src/fort/fir_verify.ft",
+      "what": "the operand is a span whose elements are not `mut`",
+      "old": "    if (span->kind != types.type_kind.k_span || !span->is_own || !span->is_mut\n        || !types_agree(span->elem, r.ty)) {\n        return V4_REGROW_SPAN;",
+      "new": "    if (span->kind != types.type_kind.k_span || !span->is_own\n        || !types_agree(span->elem, r.ty)) {\n        return V4_REGROW_SPAN;"
+    },
+    {
+      "decision": "V4-regrow-agree",
+      "file": "src/fort/fir_verify.ft",
+      "what": "the operand is a span of another element type",
+      "old": "    if (span->kind != types.type_kind.k_span || !span->is_own || !span->is_mut\n        || !types_agree(span->elem, r.ty)) {\n        return V4_REGROW_SPAN;",
+      "new": "    if (span->kind != types.type_kind.k_span || !span->is_own || !span->is_mut) {\n        return V4_REGROW_SPAN;"
+    },
+    {
+      "decision": "V4-regrow-count",
+      "file": "src/fort/fir_verify.ft",
+      "what": "a count of another type than `i64` and `u64` passes",
+      "old": "    if (!is_u64(count) && !is_prim(count, prim.prim_kind.prim_i64)) {\n        return V4_REGROW_COUNT;",
+      "new": "    if (false) {\n        return V4_REGROW_COUNT;"
+    },
+    {
+      "decision": "V4-regrow-count-i64",
+      "file": "src/fort/fir_verify.ft",
+      "what": "an `i64` count is refused",
+      "old": "    if (!is_u64(count) && !is_prim(count, prim.prim_kind.prim_i64)) {\n        return V4_REGROW_COUNT;",
+      "new": "    if (!is_u64(count)) {\n        return V4_REGROW_COUNT;"
+    },
+    {
+      "decision": "V6-regrow-move",
+      "file": "src/fort/fir_verify.ft",
+      "what": "a `regrow` of a `copy` operand passes",
+      "old": "    if (r.kind == fir.rvalue_kind.rv_regrow\n        && fir.rvalue_operand(w->f, r, 0).kind != fir.operand_kind.ok_move) {",
+      "new": "    if (false && r.kind == fir.rvalue_kind.rv_regrow\n        && fir.rvalue_operand(w->f, r, 0).kind != fir.operand_kind.ok_move) {"
+    },
+    {
+      "decision": "D12.2-llvm-signed",
+      "file": "src/fort/fir_llvm.ft",
+      "what": "the entry reads a signed count as unsigned",
+      "old": "        is_signed = \"true\";",
+      "new": "        is_signed = \"false\";"
+    },
+    {
+      "decision": "D12.2-llvm-move",
+      "file": "src/fort/fir_llvm.ft",
+      "what": "the compiled code moves no element",
+      "old": "    gen.gen_call_rt(g, runtime_sig.rt_entry.rt_regrow_move, moves);\n",
+      "new": "    // the mutant moves no element\n"
+    },
+    {
+      "decision": "D12.2-llvm-free",
+      "file": "src/fort/fir_llvm.ft",
+      "what": "the compiled code keeps the old storage",
+      "old": "    gen.gen_call_rt(g, runtime_sig.rt_entry.rt_free, frees);\n    if (!temporary_place(t, source.place)) {",
+      "new": "    if (!temporary_place(t, source.place)) {"
+    },
+    {
+      "decision": "D12.2-llvm-empty",
+      "file": "src/fort/fir_llvm.ft",
+      "what": "the place of the operand keeps the span after the `regrow`",
+      "old": "    if (!temporary_place(t, source.place)) {\n        memset_at(t, at, fir.operand_type(t->f, source));",
+      "new": "    if (false) {\n        memset_at(t, at, fir.operand_type(t->f, source));"
+    },
+    {
+      "decision": "D12.2-llvm-slots",
+      "file": "src/fort/fir_llvm.ft",
+      "what": "the compiled code gives no owner slot to the runtime",
+      "old": "owner_words_slot(t, elem, fir.owner_word_count(elem))",
+      "new": "owner_words_slot(t, elem, 0)"
+    },
+    {
+      "decision": "D12.2-llvm-old-bytes",
+      "file": "src/fort/fir_llvm.ft",
+      "what": "the byte length of the old span reads the new count",
+      "old": "    gen.gen_val old_bytes = gen.gen_binary(g, \"mul\", len, size);",
+      "new": "    gen.gen_val old_bytes = gen.gen_binary(g, \"mul\", count, size);"
+    },
+    {
+      "decision": "D12.2-run-operand",
+      "file": "src/fort/fir/interpreter.ft",
+      "what": "a pointer that starts no live allocation passes",
+      "old": "    if (old != 0 && heap_start(it, old) == NONE) {\n        fault(it, \"invalid release\");",
+      "new": "    if (false) {\n        fault(it, \"invalid release\");"
+    },
+    {
+      "decision": "D12.2-run-empty",
+      "file": "src/fort/fir/interpreter.ft",
+      "what": "the place of the operand keeps the span after the `regrow`",
+      "old": "    zero_bytes(it, addr, types.type_sizeof(span));\n    types.node* mut dt = null;",
+      "new": "    types.node* mut dt = null;"
+    },
+    {
+      "decision": "D12.2-run-copy",
+      "file": "src/fort/fir/interpreter.ft",
+      "what": "the new storage takes no element",
+      "old": "    copy_bytes(it, fresh, old, len *% each);\n",
+      "new": ""
+    },
+    {
+      "decision": "D12.2-run-signed",
+      "file": "src/fort/fir/interpreter.ft",
+      "what": "the entry reads a signed count as unsigned",
+      "old": "    values[4] = bool_bits(prim.prim_is_signed(ct->prim));",
+      "new": "    values[4] = 0;"
+    },
+    {
+      "decision": "D12.2-run-owner-zero",
+      "file": "src/fort/fir/interpreter.ft",
+      "what": "an owner slot of an old element keeps its value",
+      "old": "            zero_bytes(it, old, size_of(t));\n            shadow.claim(&it->sh, fresh, load(it, fresh, WORD));",
+      "new": "            shadow.claim(&it->sh, fresh, load(it, fresh, WORD));"
+    },
+    {
+      "decision": "D12.2-run-claim",
+      "file": "src/fort/fir/interpreter.ft",
+      "what": "the slot of the new element does not take the owner",
+      "old": "            zero_bytes(it, old, size_of(t));\n            shadow.claim(&it->sh, fresh, load(it, fresh, WORD));",
+      "new": "            zero_bytes(it, old, size_of(t));"
+    },
+    {
+      "decision": "D12.2-run-free",
+      "file": "src/fort/fir/interpreter.ft",
+      "what": "the run keeps the old storage",
+      "old": "    values[0] = old;\n    call_values(it, c, it->free_entry, values[..], from[..], wait_kind.wk_del);",
+      "new": "    values[0] = 0;\n    call_values(it, c, it->free_entry, values[..], from[..], wait_kind.wk_del);"
+    },
+    {
+      "decision": "D12.2-prove-move",
+      "file": "src/fort/owner/prover.ft",
+      "what": "the prover reads no `move` in the operand of a `regrow`",
+      "old": "        if (o.kind == fir.operand_kind.ok_move) {\n            place.path p = place.trace(&c->places, o.place, stale);\n            gen_below(c, p, pr);",
+      "new": "        if (o.kind == fir.operand_kind.ok_move && s->value.kind != fir.rvalue_kind.rv_regrow) {\n            place.path p = place.trace(&c->places, o.place, stale);\n            gen_below(c, p, pr);"
+    },
+    {
+      "decision": "D12.2-prove-fresh",
+      "file": "src/fort/owner/prover.ft",
+      "what": "the prover reads the result of a `regrow` as the zero value",
+      "old": "        if (place.is_zero_rvalue(&c->places, s->value)) {\n            gen_below(c, d, pr);",
+      "new": "        if (place.is_zero_rvalue(&c->places, s->value)\n            || s->value.kind == fir.rvalue_kind.rv_regrow) {\n            gen_below(c, d, pr);"
+    },
+    {
+      "decision": "D12.2-prove-no-call",
+      "file": "src/fort/owner/prover.ft",
+      "what": "the prover reads a `regrow` as a call, which ends the facts of each global",
+      "old": "    if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call) {\n        kill_call(c, fresh, pr);",
+      "new": "    if (s->kind == fir.stmt_kind.st_assign && (s->value.kind == fir.rvalue_kind.rv_call\n        || s->value.kind == fir.rvalue_kind.rv_regrow)) {\n        kill_call(c, fresh, pr);"
+    }
+  ]
+}

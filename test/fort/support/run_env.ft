@@ -3,11 +3,12 @@
 /// runs a function or the whole program with what the run writes captured, and gives the report.
 //
 // The runtime of the sandbox has the entries that a run calls: the entry of each check kind, the
-// print functions, `str_eq`, `alloc`, `free`, `args_init`, `args` and `flush_all`. A failed check
-// writes `<line>:<col>: <kind>` and its reported values to descriptor 2 and calls `abort`, so a
-// report names the entry and its arguments and no sandbox path. Its `std.libc` declares the
-// externs that the interpreter runs and the three model externs. The text of a run stays valid
-// until the next run.
+// print functions, `str_eq`, `alloc`, `free`, `regrow`, `args_init`, `args` and `flush_all`. A
+// failed check writes `<line>:<col>: <kind>` and its reported values to descriptor 2 and calls
+// `abort`, so a report names the entry and its arguments and no sandbox path. A failed test of
+// `regrow` writes `<line>:<col>: regrow <count> <length>` or `<line>:<col>: invalid release`.
+// Its `std.libc` declares the externs that the interpreter runs and the three model externs. The
+// text of a run stays valid until the next run.
 import fort.ast;
 import check_env;
 import fort.fir;
@@ -48,7 +49,11 @@ string[LIBC_LINES] LIBC = {
 };
 
 // The count of the lines of RUNTIME.
-u64 RUNTIME_LINES = 172;
+u64 RUNTIME_LINES = 190;
+
+/// The count of the last lines of RUNTIME that hold `regrow`. A test of a runtime that lacks the
+/// entry takes RUNTIME without them.
+u64 REGROW_LINES = 18;
 
 // The sandbox std/rt.ft.
 string[RUNTIME_LINES] RUNTIME = {
@@ -223,6 +228,24 @@ string[RUNTIME_LINES] RUNTIME = {
     "    return args_store;",
     "}",
     "fn flush_all() void {",
+    "}",
+    "fn regrow(void* old, u64 old_len, u64 elem_size, u64 count, bool is_signed, char* file,",
+    "          u32 line, u32 col) void mut* own {",
+    "    if (is_signed && count > 9223372036854775807) {",
+    "        fail_alloc_count(-cast(18446744073709551615 - count, i64) - 1, file, line, col);",
+    "    }",
+    "    if (count < old_len) {",
+    "        at(line, col, \"regrow \");",
+    "        put_u64(2, count);",
+    "        put(2, \" \");",
+    "        put_u64(2, old_len);",
+    "        stop();",
+    "    }",
+    "    if (old == null && old_len != 0) {",
+    "        at(line, col, \"invalid release\");",
+    "        stop();",
+    "    }",
+    "    return alloc(elem_size, count, file, line, col);",
     "}",
 };
 

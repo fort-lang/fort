@@ -77,6 +77,10 @@ string V4_SLICE_PTR_BOUND = "a slice_ptr bound that is not an integer";
 string V4_ALLOC_COUNT = "an alloc count that is not a u64";
 string V4_ALLOC_VOID = "an alloc of void";
 string V4_ALLOC_SPAN = "an alloc of a span";
+string V4_REGROW_VOID = "a regrow of void";
+string V4_REGROW_ELEMENT = "a regrow of a span of spans";
+string V4_REGROW_SPAN = "a regrow of a value that is not a T mut@ own of its element type";
+string V4_REGROW_COUNT = "a regrow count that is not an i64 or a u64";
 string V4_ADDR_VOID = "an addr of a place of type void";
 string V4_AGGREGATE = "an aggregate of a type with no members";
 string V4_MEMBER_COUNT = "an aggregate with the wrong count of members";
@@ -97,6 +101,7 @@ string V6_MEMBER = "an owning member takes a copy or a view";
 string V6_LANDS_PLACE = "an owning value in a place that does not own";
 string V6_LANDS_OPERAND = "a move where no owning position takes it";
 string V6_ADDS_OWN = "a copy or a move adds own";
+string V6_REGROW = "a regrow of a span that no move carries";
 string V7_ARGUMENTS = "a call with the wrong count of arguments";
 string V7_ARGUMENT = "an argument does not agree with its parameter";
 string V7_AGGREGATE = "an aggregate argument that is not a place";
@@ -521,7 +526,7 @@ fn form_arity(fir.rvalue_kind kind) i64 {
     switch (kind) {
     case fir.rvalue_kind.rv_addr:
         return 0;
-    case fir.rvalue_kind.rv_slice:
+    case fir.rvalue_kind.rv_slice, fir.rvalue_kind.rv_regrow:
         return 2;
     case fir.rvalue_kind.rv_slice_ptr:
         return 3;
@@ -614,6 +619,27 @@ fn slice_ptr_fault(fir.func* f, fir.rvalue r) string {
     return "";
 }
 
+// V4 for `regrow<T>(s, n)`: `T` is a type that `alloc` takes, `s` has the type `T mut@ own`, and
+// `n` is an `i64`, whose sign the runtime tests, or a `u64`.
+fn regrow_fault(fir.func* f, fir.rvalue r) string {
+    if (r.ty->kind == types.type_kind.k_void) {
+        return V4_REGROW_VOID;
+    }
+    if (r.ty->kind == types.type_kind.k_span) {
+        return V4_REGROW_ELEMENT;
+    }
+    types.node* span = operand_ty(f, r, 0);
+    if (span->kind != types.type_kind.k_span || !span->is_own || !span->is_mut
+        || !types_agree(span->elem, r.ty)) {
+        return V4_REGROW_SPAN;
+    }
+    types.node* count = operand_ty(f, r, 1);
+    if (!is_u64(count) && !is_prim(count, prim.prim_kind.prim_i64)) {
+        return V4_REGROW_COUNT;
+    }
+    return "";
+}
+
 /// The clause of V4 that the operands of `r` break, or the empty text when they have the types
 /// that spec/fir.md 6 requires. The count and the arguments of a `call` are V7's.
 fn rvalue_fault(fir.func* f, fir.rvalue r) string {
@@ -685,6 +711,8 @@ fn rvalue_fault(fir.func* f, fir.rvalue r) string {
             return V4_ALLOC_COUNT;
         }
         return "";
+    case fir.rvalue_kind.rv_regrow:
+        return regrow_fault(f, r);
     case fir.rvalue_kind.rv_aggregate:
         return aggregate_fault(f, r);
     case fir.rvalue_kind.rv_call:
@@ -841,13 +869,15 @@ fn position_type(fir.func* f, fir.rvalue r, u32 k) types.node* {
 }
 
 // Whether the position of operand `k` of `r` owns what it takes: an argument for a parameter
-// whose type owns, a member for a field or element whose type owns, or the operand of a `cast`
-// to a type that owns. The operand of an `rv_use` takes the position of the destination, which
-// the caller tests. Every other operand is read and never kept.
+// whose type owns, a member for a field or element whose type owns, the operand of a `cast`
+// to a type that owns, or the span of a `regrow`. The operand of an `rv_use` takes the position
+// of the destination, which the caller tests. Every other operand is read and never kept.
 fn position_owns(fir.func* f, fir.rvalue r, u32 k) bool {
     switch (r.kind) {
     case fir.rvalue_kind.rv_use:
         return true;
+    case fir.rvalue_kind.rv_regrow:
+        return k == 0;
     case fir.rvalue_kind.rv_cast:
         return fir.type_owning(r.ty);
     case fir.rvalue_kind.rv_aggregate, fir.rvalue_kind.rv_call:
@@ -872,10 +902,15 @@ fn adds_own(fir.func* f, fir.operand o, types.node* dst) bool {
 // V6 for the operands of `r`. A `cast` never adds `own`, whatever place it fills. An owning
 // parameter, field or element takes a `move`, `null` or `zero`. A `move` stands only in a
 // position that owns, because an owning value lands only where something owns it. No argument
-// and no member adds `own` at any level either (D3.14).
+// and no member adds `own` at any level either (D3.14). The span of a `regrow` is a `move`: the
+// `regrow` releases its storage, so no place keeps it.
 fn v6_rvalue(walk mut* w, fir.rvalue r, u32 b, u32 i) bool {
     if (r.kind == fir.rvalue_kind.rv_cast && cast_adds_own(w->f, r)) {
         return fail(w, RULE_V6, V6_CAST, b, i);
+    }
+    if (r.kind == fir.rvalue_kind.rv_regrow
+        && fir.rvalue_operand(w->f, r, 0).kind != fir.operand_kind.ok_move) {
+        return fail(w, RULE_V6, V6_REGROW, b, i);
     }
     bool keeps = r.kind == fir.rvalue_kind.rv_call || r.kind == fir.rvalue_kind.rv_aggregate;
     u32 mut k = 0;
@@ -900,9 +935,9 @@ fn v6_rvalue(walk mut* w, fir.rvalue r, u32 b, u32 i) bool {
 }
 
 // V6 for an assignment. A place whose type owns takes `null`, `zero` or an rvalue that produces
-// an owning value: a `move`, an `alloc`, or an `aggregate`, a `cast` or a `call` whose type
-// owns. A place that does not own takes no owning value, which nothing would then free. A copy
-// or a move adds no `own` at any level (D3.14).
+// an owning value: a `move`, an `alloc`, a `regrow`, or an `aggregate`, a `cast` or a `call`
+// whose type owns. A place that does not own takes no owning value, which nothing would then
+// free. A copy or a move adds no `own` at any level (D3.14).
 fn v6_statement(walk mut* w, fir.statement* s, u32 b, u32 i) bool {
     if (s->kind != fir.stmt_kind.st_assign) {
         return true;

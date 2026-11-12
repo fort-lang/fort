@@ -1,0 +1,213 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| ok
+/// The typing of the universe function `regrow` in check.ft (D12.2).
+///
+/// Each probe is a call statement of the function `probe`. check_env.probe_stmt checks the call
+/// alone, so a case reads the type of the call and the messages of its two arguments. The rule
+/// for a result that no owner takes belongs to the statement checker and to test/lang.
+import fort.ast;
+import fort.check;
+import check_env;
+import std.strbuf;
+import fort.types;
+
+// The declarations each probe reads. A probe has no block scope, so each source is a global.
+// fort does not join adjacent string literals, so the text is built in a buffer.
+fn open_probe(check_env.env mut* e, string calls) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    strbuf.append(&b, "struct leaf {\n    i32 v;\n}\n");
+    strbuf.append(&b, "struct vec {\n    i32 mut@ own items;\n    u64 len;\n}\n");
+    strbuf.append(&b, "struct rows {\n    i32 mut@ own mut@ own all;\n}\n");
+    strbuf.append(&b, "struct names {\n    string own mut@ own all;\n}\n");
+    strbuf.append(&b, "i32 mut@ own mut nums = {};\n");
+    strbuf.append(&b, "i32 mut@ own fixed = {};\n");
+    strbuf.append(&b, "leaf mut* own mut@ own mut leaves = {};\n");
+    strbuf.append(&b, "i32@ own mut frozen = {};\n");
+    strbuf.append(&b, "string own mut text = {};\n");
+    strbuf.append(&b, "i32 mut* own mut one = null;\n");
+    strbuf.append(&b, "i32[4] mut four = {};\n");
+    strbuf.append(&b, "vec mut v = {};\n");
+    strbuf.append(&b, "vec mut* pv = &v;\n");
+    strbuf.append(&b, "vec* qv = &v;\n");
+    strbuf.append(&b, "vec[2] mut pair = {};\n");
+    strbuf.append(&b, "rows mut r = {};\n");
+    strbuf.append(&b, "names mut ns = {};\n");
+    strbuf.append(&b, "i8 mut small = 1;\n");
+    strbuf.append(&b, "u64 mut wide = 1;\n");
+    strbuf.append(&b, "bool mut flag = false;\n");
+    strbuf.append(&b, "f64 mut real = 1.5;\n");
+    strbuf.append(&b, "fn view() i32 mut@ {\n    return four[0..4];\n}\n");
+    strbuf.append(&b, "fn fresh() i32 mut@ own {\n    return new(i32, 2);\n}\n");
+    strbuf.append(&b, "fn probe() void {\n");
+    strbuf.append(&b, calls);
+    strbuf.append(&b, "}\n");
+    strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
+    return check_env.open_module(e, strbuf.view(&b));
+}
+
+// The type of the one call `call`, which must give no error.
+fn accepts(string call, string ty) void {
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, call));
+    check.expr o = check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.errors(e) == 0);
+    assert(check_env.type_text(e, o.ty) == ty);
+    assert(!o.lvalue);
+    assert(check.check_owning(o.ty));
+}
+
+// The one call `call` gives exactly one error, which holds `text`, and the error type.
+fn refuses(string call, string text) void {
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    assert(open_probe(e, call));
+    check.expr o = check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.said(e, text));
+    assert(check_env.errors(e) == 1);
+    assert(o.ty->kind == types.type_kind.k_error);
+}
+
+// ---- the result --------------------------------------------------------------------
+
+fn a_regrow_gives_an_owning_rvalue_of_the_type_of_its_span() void {
+    accepts("    regrow(move(nums), 4);\n", "i32 mut@ own");
+    // An element type with an owner keeps its spelling.
+    accepts("    regrow(move(leaves), 4);\n", "leaf mut* own mut@ own");
+}
+
+fn the_source_is_a_global_a_field_or_an_element() void {
+    accepts("    regrow(move(v.items), 4);\n", "i32 mut@ own");
+    accepts("    regrow(move(pv->items), 4);\n", "i32 mut@ own");
+    accepts("    regrow(move(pair[1].items), 4);\n", "i32 mut@ own");
+}
+
+fn an_owning_rvalue_needs_no_move() void {
+    accepts("    regrow(new(i32, 2), 4);\n", "i32 mut@ own");
+    accepts("    regrow(fresh(), 4);\n", "i32 mut@ own");
+    // A `regrow` is an owning rvalue also.
+    accepts("    regrow(regrow(move(nums), 2), 4);\n", "i32 mut@ own");
+}
+
+fn the_count_has_any_integer_type() void {
+    accepts("    regrow(move(nums), 0);\n", "i32 mut@ own");
+    accepts("    regrow(move(nums), small);\n", "i32 mut@ own");
+    accepts("    regrow(move(nums), wide);\n", "i32 mut@ own");
+    accepts("    regrow(move(nums), nums.len * 2);\n", "i32 mut@ own");
+    // A negative count that is no constant is a matter of the run time.
+    accepts("    regrow(move(nums), -small);\n", "i32 mut@ own");
+}
+
+// ---- the span ----------------------------------------------------------------------
+
+fn an_owning_lvalue_takes_move() void {
+    refuses("    regrow(nums, 4);\n", "copying an owning value requires 'move': write move(nums)");
+    refuses("    regrow(v.items, 4);\n", "copying an owning value requires 'move'");
+    refuses("    regrow(pv->items, 4);\n", "copying an owning value requires 'move'");
+}
+
+fn the_move_follows_the_rules_of_move() void {
+    // The place of an immutable global and a place behind an immutable pointer stay full.
+    refuses("    regrow(move(fixed), 4);\n", "'move' cannot empty a module-level constant");
+    refuses("    regrow(move(qv->items), 4);\n", "'move' cannot empty an immutable indirection");
+}
+
+fn the_operand_is_a_span_of_the_type_t_mut_own() void {
+    refuses("    regrow(move(frozen), 4);\n",
+        "'regrow' needs a span of a type 'T mut@ own', not i32@ own");
+    refuses("    regrow(move(text), 4);\n",
+        "'regrow' needs a span of a type 'T mut@ own', not string own");
+    refuses("    regrow(move(one), 4);\n",
+        "'regrow' needs a span of a type 'T mut@ own', not i32 mut* own");
+    refuses("    regrow(view(), 4);\n",
+        "'regrow' needs a span of a type 'T mut@ own', not i32 mut@");
+    refuses("    regrow(four, 4);\n",
+        "'regrow' needs a span of a type 'T mut@ own', not i32[4]");
+    refuses("    regrow(wide, 4);\n",
+        "'regrow' needs a span of a type 'T mut@ own', not u64");
+    refuses("    regrow(null, 4);\n",
+        "'regrow' needs a span of a type 'T mut@ own', not a value with no type");
+}
+
+fn the_element_type_is_one_that_new_accepts() void {
+    refuses("    regrow(move(r.all), 4);\n",
+        "'regrow' makes no span of i32 mut@ own: 'new' accepts no such element type");
+    refuses("    regrow(move(ns.all), 4);\n",
+        "'regrow' makes no span of string own: 'new' accepts no such element type");
+}
+
+// ---- the count ---------------------------------------------------------------------
+
+fn the_count_is_an_integer() void {
+    refuses("    regrow(move(nums), flag);\n", "a count must be an integer, not bool");
+    refuses("    regrow(move(nums), real);\n", "a count must be an integer, not f64");
+    refuses("    regrow(move(nums), 1.5);\n", "a count must be an integer, not f64");
+    refuses("    regrow(move(nums), null);\n", "'null' needs a pointer-typed context");
+}
+
+fn a_constant_count_below_zero_is_refused() void {
+    refuses("    regrow(move(nums), -1);\n", "a negative count: -1");
+    refuses("    regrow(move(nums), 2 - 5);\n", "a negative count: -3");
+}
+
+// ---- the form ----------------------------------------------------------------------
+
+fn a_regrow_takes_two_arguments() void {
+    refuses("    regrow();\n", "'regrow' takes 2 arguments, 0 given");
+    refuses("    regrow(move(nums));\n", "'regrow' takes 2 arguments, 1 given");
+    refuses("    regrow(move(nums), 3, 4);\n", "'regrow' takes 2 arguments, 3 given");
+}
+
+// A wrong span and a wrong count give one error each: the checker reads the two arguments
+// before it judges the span.
+fn each_wrong_argument_gives_its_own_error(check_env.env mut* e) void {
+    assert(open_probe(e, "    regrow(move(one), flag);\n"));
+    check.expr o = check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.said(e, "'regrow' needs a span of a type 'T mut@ own', not i32 mut* own"));
+    assert(check_env.said(e, "a count must be an integer, not bool"));
+    assert(check_env.errors(e) == 2);
+    assert(o.ty->kind == types.type_kind.k_error);
+}
+
+// A name the checker does not know gives its own error and no second error from `regrow`.
+fn a_poisoned_span_adds_no_error(check_env.env mut* e) void {
+    assert(open_probe(e, "    regrow(absent, 4);\n"));
+    check.expr o = check_env.probe_stmt(e, "probe", 0);
+    assert(check_env.said(e, "unknown name 'absent'"));
+    assert(!check_env.said(e, "'regrow' needs"));
+    assert(check_env.errors(e) == 1);
+    assert(o.ty->kind == types.type_kind.k_error);
+}
+
+// The call node carries the universe symbol, so a later pass sees a builtin and no function.
+fn the_call_names_the_universe_symbol(check_env.env mut* e) void {
+    assert(open_probe(e, "    regrow(move(nums), 4);\n"));
+    ast.node mut* call = check_env.body_expr(e, "probe", 0);
+    assert(call->kind == ast.ast_kind.k_call);
+    check.expr o = check_env.probe_expr(e, call);
+    assert(o.sym != null);
+    assert(o.sym->name == "regrow");
+    assert(check_env.errors(e) == 0);
+}
+
+fn main() i32 {
+    a_regrow_gives_an_owning_rvalue_of_the_type_of_its_span();
+    the_source_is_a_global_a_field_or_an_element();
+    an_owning_rvalue_needs_no_move();
+    the_count_has_any_integer_type();
+    an_owning_lvalue_takes_move();
+    the_move_follows_the_rules_of_move();
+    the_operand_is_a_span_of_the_type_t_mut_own();
+    the_element_type_is_one_that_new_accepts();
+    the_count_is_an_integer();
+    a_constant_count_below_zero_is_refused();
+    a_regrow_takes_two_arguments();
+    check_env.run(each_wrong_argument_gives_its_own_error);
+    check_env.run(a_poisoned_span_adds_no_error);
+    check_env.run(the_call_names_the_universe_symbol);
+    println("ok");
+    return 0;
+}

@@ -37,6 +37,12 @@ u64 HEX_MAX = 18;
 // The largest u64. alloc divides it to test a product for overflow.
 u64 U64_MAX = 18446744073709551615;
 
+// The largest i64. regrow reads the bits of a signed count above it as a negative count.
+u64 I64_MAX = 9223372036854775807;
+
+// The bytes of one word of an owner slot, which regrow_move sets to zero.
+u64 WORD_BYTES = 8;
+
 // Pointer text uses lowercase digits.
 string HEX_DIGITS = "0123456789abcdef";
 
@@ -982,6 +988,70 @@ fn alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) void mut* own 
 // emits, or a trusted module by its row.
 fn free(void* own p) void {
     libc.free(move(p));
+}
+
+// Makes the five tests of `regrow` (D12.2) in their order and returns the new storage: a negative
+// count, a count below the length of the operand, the size, the operand, and the storage. old and
+// old_len are the pointer and the length of the operand. count holds the bits of the count, and
+// is_signed says that its type is signed. The test of the operand refuses a null pointer with a
+// length that is not 0: such a span is no zero span and starts no allocation. A pointer that is
+// not null goes to free, which the code that the compiler emits calls after regrow_move.
+// gives: a new allocation of alloc of count elements of elem_size bytes, all zero, that free
+// frees (A3); never null, because a failure ends the process (D9.8 rule 3).
+// C call fail_alloc_count: file and its NUL are parameter sources (D9.8 rule 1), so regrow is a
+// boundary function, and each caller gives a file name with its NUL: the code that the compiler
+// emits (A8), or a trusted module by its row.
+// C call fail_begin: file, as for fail_alloc_count.
+// C call fail_runtime x2: file, as for fail_alloc_count.
+// C call alloc: file, as for fail_alloc_count.
+fn regrow(void* old, u64 old_len, u64 elem_size, u64 count, bool is_signed, char* file, u32 line,
+          u32 col) void mut* own {
+    if (is_signed && count > I64_MAX) {
+        // count holds the bits of a negative i64 n, and U64_MAX - count is -n - 1.
+        fail_alloc_count(-cast(U64_MAX - count, i64) - 1, file, line, col);
+    }
+    if (count < old_len) {
+        fail_begin(file, line, col, "runtime error");
+        message_str("regrow count ");
+        message_u64(count);
+        message_str(" below length ");
+        message_u64(old_len);
+        fail_end();
+    }
+    if (elem_size != 0 && count > U64_MAX / elem_size) {
+        fail_runtime(file, line, col, "allocation size overflow");
+    }
+    if (old == null && old_len != 0) {
+        fail_runtime(file, line, col, "invalid release");
+    }
+    return alloc(elem_size, count, file, line, col);
+}
+
+// Moves the elements of `regrow` from old to fresh byte for byte: old holds the bytes of the old
+// elements, each of elem_size bytes, and fresh the bytes of the new storage. It then stores zero
+// into each word of each owner slot of each old element (D12.2, D17.11): slots holds the byte
+// offset of each such word in one element. It releases nothing: the caller calls free.
+// C call libc.memcpy: room.ptr and old.ptr keep the bounds of their spans (D9.8 rule 2). The
+// length is old.len, which is room.len. The two spans are in 2 allocations, because the caller
+// gives in fresh storage that regrow returned after the allocation of old.
+fn regrow_move(u8 mut@ fresh, u8 mut@ old, u64 elem_size, u64@ slots) void {
+    if (old.len == 0) {
+        // The empty span has a null pointer, which memcpy may not be given.
+        return;
+    }
+    u8 mut@ room = fresh[0..old.len];
+    libc.memcpy(room.ptr, old.ptr, old.len);
+    if (slots.len == 0 || elem_size == 0) {
+        return;
+    }
+    for (u64 mut start = 0; start < old.len; start += elem_size) {
+        for (u64 mut k = 0; k < slots.len; k++) {
+            u64 word = start + slots[k];
+            for (u64 mut b = 0; b < WORD_BYTES; b++) {
+                old[word + b] = 0;
+            }
+        }
+    }
 }
 
 // ---- strings ----------------------------------------------------------------

@@ -1,7 +1,7 @@
 //! run
 //! flags: -I ../../src -I support
 //! stdout:
-//| 94 spellings
+//| 96 spellings
 //| ok
 /// Checks that the FIR parser reads places, operands, constants and rvalues (spec/fir.md 5.5, 5.6,
 /// 6 and 13): each spelling that fir_print_value_test pins parses and prints back as it was, each
@@ -113,7 +113,7 @@ string[CONSTANT_COUNT] CONSTANTS = {
 };
 
 // One rvalue of each kind, in the order of fir.rvalue_kind.
-u64 RVALUE_COUNT = 33;
+u64 RVALUE_COUNT = 34;
 
 string[RVALUE_COUNT] RVALUES = {
     "copy _1",
@@ -147,13 +147,14 @@ string[RVALUE_COUNT] RVALUES = {
     "slice(_5, const u64 0, copy _6)",
     "slice_ptr(copy _13, const u64 1, copy _6)",
     "alloc<pair>(const u64 3)",
+    "regrow<i32>(move _8, copy _6)",
     "aggregate pair(copy _1, copy _6)",
     "call fn main.add(copy _1, copy _2)",
 };
 
 // The callees, the edge forms and the `mut` marks of fir_print_value_test. Its one text that
 // joins two printers, `<copy _2|false`, is no spelling of one form, so the list omits it.
-u64 EDGE_COUNT = 15;
+u64 EDGE_COUNT = 16;
 
 string[EDGE_COUNT] EDGES = {
     "call extern puts(const bytes \"hi\")",
@@ -167,6 +168,7 @@ string[EDGE_COUNT] EDGES = {
     "slice(_7, copy _6, copy _6)",
     "cast<i32 mut@>(copy _8)",
     "alloc<i32 mut* own>(copy _6)",
+    "regrow<i32 mut* own>(move _8, const i64 -1)",
     "addr mut(_3.1)",
     "addr mut((*_4))",
     "slice mut(_5, const u64 0, copy _6)",
@@ -366,6 +368,27 @@ fn symbol_names_resolve() void {
     assert(fir_env.errors(e) == 0);
 }
 
+// A `regrow` keeps its element type and its two operands in the order of the text: the span, a
+// `move`, and then the count.
+fn a_regrow_carries_its_element_type_and_two_operands() void {
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    fixture mut* own x = make(e);
+    defer drop_made(move(x));
+    fir_parse.fir_parser mut* own p = fir_parse.parser_make();
+    *p = fir_env.parser(e, "regrow<i32>(move _8, copy _6)");
+    defer fir_parse.parser_drop_made(move(p));
+    fir.rvalue mut r = fir.rvalue{};
+    assert(fir_parse.parse_rvalue(p, &x->f, &r));
+    assert(r.kind == fir.rvalue_kind.rv_regrow && r.ty == fir_env.i32_ty(e));
+    assert(r.ops_len == 2);
+    fir.operand span = fir.rvalue_operand(&x->f, r, 0);
+    assert(span.kind == fir.operand_kind.ok_move && span.place.local == 8);
+    fir.operand count = fir.rvalue_operand(&x->f, r, 1);
+    assert(count.kind == fir.operand_kind.ok_copy && count.place.local == 6);
+    assert(fir_env.errors(e) == 0);
+}
+
 fn an_unknown_symbol_is_one_diagnostic() void {
     fir_env.env mut* own e = fir_env.make();
     defer fir_env.drop_made(move(e));
@@ -398,6 +421,15 @@ fn malformed_text_is_one_diagnostic() void {
     bad(e, x, form.fm_rvalue, "add(copy _1)", "1:12: expected ',', found ')'");
     bad(e, x, form.fm_rvalue, "not(copy _1, copy _2)", "1:1: 'not' takes one operand");
     bad(e, x, form.fm_rvalue, "slice(_5, const u64 0)", "1:22: expected ',', found ')'");
+    // A regrow has a type in angle brackets and two operands.
+    bad(e, x, form.fm_rvalue, "regrow(move _8, copy _6)", "1:7: expected '<', found '('");
+    bad(e, x, form.fm_rvalue, "regrow<i32> move _8", "1:13: expected '(', found 'move'");
+    bad(e, x, form.fm_rvalue, "regrow<i32>(_8, copy _6)",
+        "1:13: expected an operand: 'copy', 'move' or 'const', found '_8'");
+    bad(e, x, form.fm_rvalue, "regrow<i32>(move _8)", "1:20: expected ',', found ')'");
+    bad(e, x, form.fm_rvalue, "regrow<i32>(move _8, copy _6, copy _6)",
+        "1:29: expected ')', found ','");
+    bad(e, x, form.fm_rvalue, "regrow<nope>(move _8, copy _6)", "1:8: unknown type 'nope'");
     bad(e, x, form.fm_rvalue, "call fn main.add(copy _1",
         "1:25: expected ',' or ')', found the end of the text");
     bad(e, x, form.fm_rvalue, "bogus(copy _1)", "1:1: expected an rvalue, found 'bogus'");
@@ -436,6 +468,7 @@ fn main() i32 {
     every_pinned_spelling_round_trips();
     constants_carry_their_type_and_value();
     symbol_names_resolve();
+    a_regrow_carries_its_element_type_and_two_operands();
     an_unknown_symbol_is_one_diagnostic();
     malformed_text_is_one_diagnostic();
     println("ok");

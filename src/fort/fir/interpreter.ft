@@ -184,6 +184,7 @@ enum wait_kind {
     wk_none,
     wk_assign, // the current statement stores the result of the callee
     wk_del, // the current `del` zeroes `size` bytes at `addr` after `std.rt.free`
+    wk_regrow, // the current `regrow` moves the elements of the span at `addr` to the result
     wk_noreturn, // the callee is the runtime entry of a failed check, which never returns
 }
 
@@ -239,6 +240,7 @@ struct machine {
     u64 ret;
     ast.sym* alloc_entry;
     ast.sym* free_entry;
+    ast.sym* regrow_entry;
     ast.sym* args_init_entry;
     ast.sym* args_entry;
     ast.sym* flush_entry;
@@ -251,7 +253,7 @@ struct machine {
 
 /// Fills `it` for a run of the functions of `m`, and of each function with a body of the closure
 /// that `ck` checked: the run lowers such a function when it meets it first. The closure must hold
-/// `std.rt`, whose `alloc`, `free`, `args_init`, `args` and `flush_all` the run calls.
+/// `std.rt`, whose `alloc`, `free`, `regrow`, `args_init`, `args` and `flush_all` the run calls.
 fn init(machine mut* it, check.checker mut* ck, fir.module* m, bool capture) void {
     it->ck = ck;
     it->m = m;
@@ -264,6 +266,7 @@ fn init(machine mut* it, check.checker mut* ck, fir.module* m, bool capture) voi
     it->alloc_entry = runtime_function(ck, "alloc");
     it->free_entry = runtime_function(ck, "free");
     it->sh.quiet = it->free_entry;
+    it->regrow_entry = runtime_function(ck, "regrow");
     it->args_init_entry = runtime_function(ck, "args_init");
     it->args_entry = runtime_function(ck, "args");
     it->flush_entry = runtime_function(ck, "flush_all");
@@ -1512,6 +1515,7 @@ fn evaluate_scalar(machine mut* it, u64 k, fir.rvalue r) u64 {
         }
         return a;
     case fir.rvalue_kind.rv_slice, fir.rvalue_kind.rv_slice_ptr, fir.rvalue_kind.rv_alloc,
+         fir.rvalue_kind.rv_regrow,
         fir.rvalue_kind.rv_aggregate, fir.rvalue_kind.rv_call:
         // rule V4 gives such an rvalue an aggregate place, and execute takes a call apart
         fault(it, "an aggregate rvalue in a scalar place");
@@ -1961,8 +1965,114 @@ fn del_from(machine mut* it, u64 k, fir.statement* s) void {
     it->frames.items[k].size = types.type_sizeof(t);
 }
 
-// Runs statement `s` of frame `k` (spec/fir.md 7). A call, an `alloc` and a `del` enter a frame,
-// and the statement ends when it returns.
+// `p = regrow<T>(move s, n)` (D12.2, spec/fir.md 12.2): `std.rt.regrow` with the pointer and the
+// length of `s`, the size of `T`, the bits of `n`, whether the type of `n` is signed, and the
+// file, the line and the column of the statement. The span stays in its place during the call, so
+// it keeps its owner: return_from moves the elements when the entry returns (regrow_back).
+fn regrow_from(machine mut* it, u64 k, fir.statement* s) void {
+    fir.func* f = it->frames.items[k].f;
+    types.node* mut t = null;
+    u64 addr = place_address(it, k, fir.rvalue_operand(f, s->value, 0).place, &t);
+    if (has_ended(it)) {
+        return;
+    }
+    u64 len = load(it, addr + WORD, WORD);
+    u64 old = load(it, addr, WORD);
+    shadow.derivation[1] mut from = {};
+    from[0] = it->sh.value.d;
+    types.node* mut ct = null;
+    u64 count = read_scalar(it, k, fir.rvalue_operand(f, s->value, 1), &ct);
+    if (has_ended(it)) {
+        return;
+    }
+    u64[8] mut values = {};
+    values[0] = old;
+    values[1] = len;
+    values[2] = types.type_sizeof(s->value.ty);
+    values[3] = count;
+    values[4] = bool_bits(prim.prim_is_signed(ct->prim));
+    values[5] = data_address(it, s->loc.file);
+    values[6] = cast(s->loc.line, u64);
+    values[7] = cast(s->loc.col, u64);
+    call_values(it, k, it->regrow_entry, values[..], from[..], wait_kind.wk_regrow);
+    it->frames.items[k].addr = addr;
+}
+
+// Moves the owners of the value of type `t` at `old` to its copy at `fresh`: the zero value goes
+// into each owner slot at `old` (D12.2), and the copy of the slot at `fresh` takes its owner.
+fn move_owners(machine mut* it, u64 fresh, u64 old, types.node* t) void {
+    if (has_ended(it)) {
+        return;
+    }
+    if (types.type_is_reference(t)) {
+        if (t->is_own) {
+            zero_bytes(it, old, size_of(t));
+            shadow.claim(&it->sh, fresh, load(it, fresh, WORD));
+        }
+    } else if (t->kind == types.type_kind.k_array && types.type_is_owning_aggregate(t)) {
+        u64 each = types.type_sizeof(t->elem);
+        for (u64 mut i = 0; i < t->len; i++) {
+            move_owners(it, fresh + i * each, old + i * each, t->elem);
+        }
+    } else if (t->kind == types.type_kind.k_struct && types.type_is_owning_aggregate(t)) {
+        for (u32 mut n = 0; n < fir.struct_field_count(t); n++) {
+            types.node* mut ft = null;
+            u64 at = field_at(t, n, &ft);
+            move_owners(it, fresh + at, old + at, ft);
+        }
+    }
+}
+
+// The rest of the `regrow` `s` of frame `c` after `std.rt.regrow` returned the new storage, whose
+// address and tag stand at offset 0 of `scratch` (D12.2). `callee` is the base of the frame that
+// returned. The span at `addr` gives its pointer and its length. The pointer is null or starts a
+// live allocation, else the run faults with `invalid release`. The place of the span takes the
+// zero value, as a `move` gives it, and the place of `s` takes the new storage. The elements go
+// to the new storage byte for byte, and each owner slot of an old element takes the zero value.
+// `std.rt.free` then releases the old storage, and the statement ends when it returns.
+fn regrow_back(machine mut* it, u64 c, fir.statement* s, u64 addr, u64 callee) void {
+    u64 len = load(it, addr + WORD, WORD);
+    u64 old = load(it, addr, WORD);
+    shadow.derivation[1] mut from = {};
+    from[0] = it->sh.value.d;
+    if (has_ended(it)) {
+        return;
+    }
+    shadow.free_through(&it->sh, addr, old);
+    if (old != 0 && heap_start(it, old) == NONE) {
+        fault(it, "invalid release");
+        return;
+    }
+    fir.func* f = it->frames.items[c].f;
+    types.node* span = fir.operand_type(f, fir.rvalue_operand(f, s->value, 0));
+    zero_bytes(it, addr, types.type_sizeof(span));
+    types.node* mut dt = null;
+    u64 dest = place_address(it, c, s->place, &dt);
+    if (has_ended(it)) {
+        return;
+    }
+    write_bytes(it, dest, it->scratch[..WORD]);
+    shadow.apply(&it->sh, dest, 0, WORD, callee, true);
+    settle(it, dest, dt, shadow.tag{});
+    u64 fresh = load(it, dest, WORD);
+    types.node* elem = s->value.ty;
+    u64 each = types.type_sizeof(elem);
+    copy_bytes(it, fresh, old, len *% each);
+    for (u64 mut i = 0; fir.type_owning(elem) && i < len; i++) {
+        move_owners(it, fresh + i * each, old + i * each, elem);
+    }
+    if (has_ended(it)) {
+        return;
+    }
+    u64[1] mut values = {};
+    values[0] = old;
+    call_values(it, c, it->free_entry, values[..], from[..], wait_kind.wk_del);
+    it->frames.items[c].addr = addr;
+    it->frames.items[c].size = 0;
+}
+
+// Runs statement `s` of frame `k` (spec/fir.md 7). A call, an `alloc`, a `regrow` and a `del`
+// enter a frame, and the statement ends when it returns.
 fn execute(machine mut* it, u64 k, fir.statement* s) void {
     switch (s->kind) {
     case fir.stmt_kind.st_assign:
@@ -1972,6 +2082,10 @@ fn execute(machine mut* it, u64 k, fir.statement* s) void {
         }
         if (s->value.kind == fir.rvalue_kind.rv_alloc) {
             alloc_from(it, k, s);
+            return;
+        }
+        if (s->value.kind == fir.rvalue_kind.rv_regrow) {
+            regrow_from(it, k, s);
             return;
         }
         assign(it, k, s);
@@ -2136,6 +2250,12 @@ fn return_from(machine mut* it, u64 k) void {
         }
     case wait_kind.wk_del:
         zero_bytes(it, caller->addr, caller->size);
+    case wait_kind.wk_regrow:
+        fir.block* bl = fir.block_at(caller->f, caller->block);
+        regrow_back(it, c, &bl->statements.items[cast(caller->next, u64)], caller->addr,
+                    callee.base);
+        // the statement ends when `std.rt.free` returns
+        return;
     case wait_kind.wk_noreturn:
         fault(it, "a noreturn runtime entry returned");
     case wait_kind.wk_none:
@@ -2321,14 +2441,23 @@ fn write_out(machine mut* it, i32 fd, u64 buf, u64 n) i64 {
     return written;
 }
 
+// The live heap region that starts at `p`, or NONE.
+fn heap_start(machine* it, u64 p) u64 {
+    u64 i = region_at(it, p);
+    if (i == NONE || it->regions.items[i].base != p
+        || it->regions.items[i].kind != region_kind.rk_heap || !it->regions.items[i].live) {
+        return NONE;
+    }
+    return i;
+}
+
 // `free(p)`: the end of the allocation that starts at `p`. A null `p` does nothing.
 fn release(machine mut* it, u64 p) void {
     if (p == 0) {
         return;
     }
-    u64 i = region_at(it, p);
-    if (i == NONE || it->regions.items[i].base != p
-        || it->regions.items[i].kind != region_kind.rk_heap || !it->regions.items[i].live) {
+    u64 i = heap_start(it, p);
+    if (i == NONE) {
         fault(it, "invalid release");
         return;
     }

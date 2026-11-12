@@ -708,6 +708,7 @@ enum rvalue_kind {
     rv_slice,
     rv_slice_ptr,
     rv_alloc,
+    rv_regrow,
     rv_aggregate,
     rv_call,
 }
@@ -720,9 +721,10 @@ enum callee_kind {
 }
 
 /// An rvalue. Its operands are entries `ops_first` to `ops_first + ops_len - 1` of the function's
-/// operand vector. `ty` is the target of a `cast`, the element type of an `alloc` and the type of
-/// an `aggregate`. `place` serves `addr` and `slice`. `is_mut` says whether `addr` and the `slice`
-/// of a fixed array give a `mut` reference. `callee`, `callee_sym` and `callee_op` serve `call`.
+/// operand vector. `ty` is the target of a `cast`, the element type of an `alloc` and of a
+/// `regrow`, and the type of an `aggregate`. `place` serves `addr` and `slice`. `is_mut` says
+/// whether `addr` and the `slice` of a fixed array give a `mut` reference. `callee`, `callee_sym`
+/// and `callee_op` serve `call`.
 struct rvalue {
     rvalue_kind kind;
     u32 ops_first;
@@ -891,6 +893,15 @@ fn rvalue_alloc(func mut* f, types.node* ty, operand n) rvalue {
     return r;
 }
 
+/// `regrow<ty>(s, n)`: `s` moves a span of `ty`, and `n` is the count of the new storage.
+fn rvalue_regrow(func mut* f, types.node* ty, operand s, operand n) rvalue {
+    rvalue mut r = rvalue_start(f, rvalue_kind.rv_regrow);
+    r.ty = ty;
+    rvalue_push(f, &r, s);
+    rvalue_push(f, &r, n);
+    return r;
+}
+
 /// `aggregate ty(...)` over the `len` operands that operand_push placed from `first`.
 // rvalue_aggregate is the query of the result, so the constructor takes this name.
 fn rvalue_aggregate_new(types.node* ty, u32 first, u32 len) rvalue {
@@ -969,7 +980,7 @@ fn rvalue_type(func* f, rvalue r) types.node* {
             panic("fir.rvalue_type: slice_ptr of a non-pointer");
         }
         return types.type_span(f->tt, ptr->elem, false, ptr->is_mut);
-    case rvalue_kind.rv_alloc:
+    case rvalue_kind.rv_alloc, rvalue_kind.rv_regrow:
         return types.type_ptr(f->tt, r.ty, true, true);
     case rvalue_kind.rv_call:
         return callee_type(f, r)->elem;
@@ -999,11 +1010,62 @@ fn type_owning(types.node* t) bool {
     return types.type_is_owning_aggregate(t);
 }
 
-/// Whether `r` produces an owning value: an `alloc`, an `aggregate`, `cast` or `call` whose type
-/// owns, and the use of a `move` operand.
+/// The count of the words of the owner slots in the fixed storage of a value of type `t` (D12.2,
+/// D17.11): 1 word for an `own` pointer, 2 words, the pointer and the length, for an `own` span or
+/// a `string own`, and the words of each field of a struct and of each element of a fixed array.
+/// An element of an `own` span is in another allocation, so it adds no word.
+fn owner_word_count(types.node* t) u64 {
+    if (types.type_is_reference(t)) {
+        if (!t->is_own) {
+            return 0;
+        }
+        if (t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string) {
+            return 2;
+        }
+        return 1;
+    }
+    if (!types.type_is_owning_aggregate(t)) {
+        return 0;
+    }
+    if (t->kind == types.type_kind.k_array) {
+        return t->len * owner_word_count(t->elem);
+    }
+    u64 mut sum = 0;
+    for (u32 mut k = 0; k < struct_field_count(t); k++) {
+        sum += owner_word_count(struct_field_type(t, k));
+    }
+    return sum;
+}
+
+/// The offset in a value of type `t` of word `k` of owner_word_count, in ascending order. A `k`
+/// at or past that count is a broken precondition.
+fn owner_word_at(types.node* t, u64 k) u64 {
+    if (k >= owner_word_count(t)) {
+        panic("fir.owner_word_at: a word past the owner slots of the type");
+    }
+    if (types.type_is_reference(t)) {
+        return k * gen.PTR_BYTES;
+    }
+    if (t->kind == types.type_kind.k_array) {
+        u64 each = owner_word_count(t->elem);
+        return k / each * types.type_sizeof(t->elem) + owner_word_at(t->elem, k % each);
+    }
+    // The test above holds `k` below the sum of the fields, so the loop ends at a field.
+    u64 mut before = 0;
+    u32 mut n = 0;
+    while (k - before >= owner_word_count(struct_field_type(t, n))) {
+        before += owner_word_count(struct_field_type(t, n));
+        n += 1;
+    }
+    types.field f = types.field_at(t, cast(n, u64));
+    return f.at + owner_word_at(f.ty, k - before);
+}
+
+/// Whether `r` produces an owning value: an `alloc`, a `regrow`, an `aggregate`, `cast` or `call`
+/// whose type owns, and the use of a `move` operand.
 fn rvalue_owns(func* f, rvalue r) bool {
     switch (r.kind) {
-    case rvalue_kind.rv_alloc:
+    case rvalue_kind.rv_alloc, rvalue_kind.rv_regrow:
         return true;
     case rvalue_kind.rv_aggregate, rvalue_kind.rv_cast, rvalue_kind.rv_call:
         return type_owning(rvalue_type(f, r));

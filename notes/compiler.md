@@ -1512,8 +1512,29 @@ came here.
   holds each declaration against the definition of a whole-program build of the same sources,
   and the ctest `library-artifact` does so for every declaration that the programs of
   `test/library/programs` reach in `std`.
+- **`regrow` is one rvalue and three runtime calls** (D12.2, `spec/fir.md` 6, 9.4 and 12.2). The
+  lowering writes `_s = move p`, `_p = regrow<T>(move _s, copy _c)` and `dst = aggregate T mut@
+  own(move _p, copy _u)`. The form is an rvalue and no call, so `src/fort/owner/` has no line for
+  it: the prover reads the `move` of the operand and a store of a value that is not zero.
+  `test/fort/owner/prover_regrow_test.ft` holds 14 functions of FIR text against the events of the
+  interpreter. `fir.rvalue_owns` names `rv_regrow`, which rule V6 reads. A change that makes a
+  `switch` over `fir.rvalue_kind` exhaustive in `owner/` gives `rv_regrow` the arm of each other
+  rvalue: `alias.add_rvalue` borrows the origins of its operands, and `place.is_fresh_new` is false
+  for it. `fir_llvm.regrow_value` calls `std.rt.regrow`, `std.rt.regrow_move` and `std.rt.free`, and
+  gives `regrow_move` a private constant table of the offsets of `fir.owner_word_at`.
+  `fir.interpreter` calls `std.rt.regrow` and `std.rt.free` and moves the elements and their owners
+  itself (`regrow_back`, `move_owners`), because the shadow gives each owner slot of the new storage
+  its owner there.
 
 ## 7. The runtime and the standard library
+
+- **`std.rt.regrow` takes the pointer and the length of the span, and no span** (D12.2,
+  `spec/toolchain.md` 5.1). The entry makes the tests in the order of D12.2. A null pointer with a
+  length that is not 0 is `invalid release`. The test of a pointer that is not null and starts no
+  live allocation needs the allocator of the runtime (D10.9): the change that adds the allocator
+  adds that test before the call of `alloc` in the body. The tests `180` to `184` of
+  `test/lang/run/stdlib` call `regrow` and `regrow_move` directly, and they hold the order of the
+  tests and the zero stores of `regrow_move`.
 
 - **Extern declarations keep allocator failure calls** (T-149).
   Apple clang `-O1` removes a `calloc` and matching `free` when the caller reads
