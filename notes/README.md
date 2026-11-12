@@ -50,7 +50,7 @@ the implementation; a difference between one of them and the code is a bug in on
 |---|---|
 | `environment.md` | the VM, `tools/vm`, the shared folder, the cross toolchain, the build |
 | `testing.md` | the merge gate, each test corpus, how to write a test, what a test cannot see |
-| `compiler.md` | the invariant of each pass, and the rules of the port to fort |
+| `compiler.md` | the invariant of each pass, the port to fort, the census of undefined states |
 | `style.md` | comments, C and fort conventions, markdown, shell, commit messages |
 
 T-098 created `environment.md`, `testing.md`, `compiler.md` and `style.md`; T-099 moved the text
