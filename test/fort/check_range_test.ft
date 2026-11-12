@@ -169,6 +169,151 @@ fn hidden_effects_and_aliases_need_ownership_proof() void {
             "for (holder mut* x : p->items) { del(p->items[0]); } }", OWN_PROOF);
 }
 
+string DROP = "fn drop_ptr(i32 mut* own p) void { del(p); } ";
+string OWNERS = "fn main() void { i32 mut* own mut@ own mut s = new(i32 mut* own, 2); ";
+string OWNERS_END = " del(s, drop_ptr); }";
+string BOX = "struct box { i32 mut* own mut@ own items; i32 mut* own mut@ own other; } ";
+string DROP_BOX =
+    "fn drop_box(box mut b) void { del(b.items, drop_ptr); del(b.other, drop_ptr); } ";
+string POOL = "i32 mut* own mut@ own mut POOL = {}; ";
+string NO_MAIN = " fn main() void {}";
+string EACH = "for (i32 mut* e : s) { ";
+
+// The checker refuses the source `DROP`, `first`, `body`, `more`, `suffix` with `message`.
+fn drop_refused(string first, string body, string more, string suffix, string message) void {
+    strbuf.str_buf mut prefix = strbuf.create();
+    defer del(prefix.data);
+    strbuf.append(&prefix, DROP);
+    strbuf.append(&prefix, first);
+    refused4(strbuf.view(&prefix), body, more, suffix, message);
+}
+
+// The checker accepts the source `DROP`, `first`, `body`, `more`, `suffix`.
+fn drop_accepted(string first, string body, string more, string suffix) void {
+    strbuf.str_buf mut prefix = strbuf.create();
+    defer del(prefix.data);
+    strbuf.append(&prefix, DROP);
+    strbuf.append(&prefix, first);
+    accepted4(strbuf.view(&prefix), body, more, suffix);
+}
+
+// The source `DROP`, `OWNERS`, `first`, `body`, `OWNERS_END` gives exactly one report, and `text`
+// is the whole of it: the position, then the message. The source is one line.
+fn refused_once(string first, string body, string text) void {
+    strbuf.str_buf mut source = strbuf.create();
+    defer del(source.data);
+    check_env.env mut* own e = check_env.make();
+    defer check_env.drop_made(move(e));
+    e->want_main = false;
+    strbuf.append(&source, DROP);
+    strbuf.append(&source, OWNERS);
+    strbuf.append(&source, first);
+    strbuf.append(&source, body);
+    strbuf.append(&source, OWNERS_END);
+    assert(!check_env.check_src(e, strbuf.view(&source)));
+    bool exact = check_env.reports(e) == 1 && check_env.report_text(e, 0) == text;
+    if (!exact) {
+        println(strbuf.view(&source));
+        println(check_env.reports(e), " ", check_env.report_text(e, 0));
+    }
+    assert(exact);
+}
+
+// `del(s, d)` vacates and frees `s` as `del(s)` does (D17.9), so the loan refuses it for each
+// storage that holds the collection (D17.10): a local, a parameter, a field, a global, and a span
+// whose element holds the collection.
+fn del_with_a_drop_of_the_storage_fails() void {
+    drop_refused(OWNERS, EACH, "del(s, drop_ptr); }", OWNERS_END, STORAGE);
+    drop_refused("fn f(i32 mut* own mut@ own s) void { ", EACH,
+                 "del(s, drop_ptr); } del(s, drop_ptr); }", NO_MAIN, STORAGE);
+    drop_refused(BOX, "fn f(box mut* b) void { for (i32 mut* e : b->items) { ",
+                 "del(b->items, drop_ptr); } }", NO_MAIN, STORAGE);
+    drop_refused(BOX, "fn main() void { box mut b = {}; for (i32 mut* e : b.items) { ",
+                 "del(b.items, drop_ptr); } del(b.items, drop_ptr); del(b.other, drop_ptr); }",
+                 "", STORAGE);
+    drop_refused(POOL, "fn main() void { for (i32 mut* e : POOL) { ",
+                 "del(POOL, drop_ptr); } }", "", STORAGE);
+    drop_refused("fn drop_pair(i32 mut* own[2] mut a) void { del(a[0]); del(a[1]); } ",
+                 "fn f(i32 mut* own[2] mut@ own many, u64 k) void { for (i32 mut* e : many[k]) { ",
+                 "del(many, drop_pair); } del(many, drop_pair); }", NO_MAIN, STORAGE);
+    drop_refused(BOX, DROP_BOX,
+                 "fn f(box mut@ own many, u64 k) void { for (i32 mut* e : many[k].items) { ",
+                 "del(many, drop_box); } del(many, drop_box); } fn main() void {}", STORAGE);
+}
+
+fn del_with_a_drop_through_an_alias_fails() void {
+    drop_refused(OWNERS, "i32 mut* own mut@ own mut* p = &s; ", EACH,
+                 "del(*p, drop_ptr); } del(s, drop_ptr); }", STORAGE);
+    drop_refused(OWNERS, "i32 mut* own mut@ own mut* p = &s; for (i32 mut* e : *p) { ",
+                 "del(s, drop_ptr); }", OWNERS_END, STORAGE);
+    drop_refused(OWNERS, "i32 mut* own mut@ v = s; for (i32 mut* e : v) { ",
+                 "del(s, drop_ptr); }", OWNERS_END, STORAGE);
+    drop_refused(POOL, "fn main() void { i32 mut* own mut@ own mut* p = &POOL; ",
+                 "for (i32 mut* e : POOL) { del(*p, drop_ptr); } }", "", STORAGE);
+    drop_refused(BOX, "fn f(box mut* b) void { box mut* q = b; ",
+                 "for (i32 mut* e : b->items) { del(q->items, drop_ptr); } }", NO_MAIN, STORAGE);
+}
+
+fn del_with_a_drop_under_nested_control_fails() void {
+    drop_refused(OWNERS, EACH, "if (e == null) { del(s, drop_ptr); } }", OWNERS_END, STORAGE);
+    drop_refused(OWNERS, EACH, "while (s.len != 0) { del(s, drop_ptr); } }", OWNERS_END,
+                 STORAGE);
+    drop_refused(OWNERS, EACH, "for (i32 mut* f : s) { del(s, drop_ptr); } }", OWNERS_END,
+                 STORAGE);
+    drop_refused(OWNERS, EACH, "defer del(s, drop_ptr); }", OWNERS_END, STORAGE);
+    drop_refused(OWNERS, EACH, "switch (s.len) { case 0: del(s, drop_ptr); } }", OWNERS_END,
+                 STORAGE);
+    drop_refused(OWNERS, EACH, "$if (true) { del(s, drop_ptr); } }", OWNERS_END, STORAGE);
+}
+
+// A `del(s, d)` of another span has no proof, as `del(s)` has none. The drop of a `del` whose
+// span is an rvalue is a fort call with no proof: it can free a collection that a global holds.
+fn del_with_a_drop_of_another_span_needs_proof() void {
+    string other = "i32 mut* own mut@ own t = new(i32 mut* own, 1); ";
+    drop_refused(OWNERS, other, EACH, "del(t, drop_ptr); } del(t, drop_ptr); del(s, drop_ptr); }",
+                 OWN_PROOF);
+    drop_refused(OWNERS, other, EACH,
+                 "del(move(t), drop_ptr); } del(t, drop_ptr); del(s, drop_ptr); }", OWN_PROOF);
+    drop_refused(BOX, "fn main() void { box mut b = {}; for (i32 mut* e : b.items) { ",
+                 "del(b.other, drop_ptr); } del(b.items, drop_ptr); del(b.other, drop_ptr); }",
+                 "", OWN_PROOF);
+    drop_refused(OWNERS, "i32 mut* own mut@ own mut* mut p = null; p = &s; ", EACH,
+                 "del(*p, drop_ptr); } del(s, drop_ptr); }", OWN_PROOF);
+    drop_refused(OWNERS, EACH, "del(new(i32 mut* own, 1), drop_ptr); }", OWNERS_END, LEND);
+    drop_refused(POOL, "fn drop_all(i32 mut* own p) void { del(p); del(POOL, drop_ptr); } ",
+                 "fn main() void { for (i32 mut* e : POOL) { ",
+                 "del(new(i32 mut* own, 1), drop_all); } }", LEND);
+    drop_refused("fn main() void { i32 mut* own[2] mut a = {}; ", "for (i32 mut* e : a) { ",
+                 "del(new(i32 mut* own, 1), drop_ptr); }", " del(a[0]); del(a[1]); }", LEND);
+}
+
+// Each `del(s, d)` in the body is one report: at `s` when `s` is an lvalue, and else at `d`.
+fn del_with_a_drop_is_one_report() void {
+    refused_once(EACH, "del(s, drop_ptr); }",
+                 "1:142: cannot change collection storage during a range loop");
+    refused_once("i32 mut* own mut@ own t = new(i32 mut* own, 1); for (i32 mut* e : s) { ",
+                 "del(t, drop_ptr); } del(t, drop_ptr);",
+                 "1:190: cannot prove ownership operation preserves collection storage");
+    refused_once(EACH, "del(new(i32 mut* own, 1), drop_ptr); }",
+                 "1:164: cannot prove call preserves collection storage");
+}
+
+// The loan ends with the loop, so `del(s, d)` after it is legal. A loop that frees its collection
+// is a `while`. A body that the build drops and a loop over an array that owns nothing hold no
+// loan.
+fn del_with_a_drop_outside_the_loan_stays_legal() void {
+    drop_accepted(OWNERS, EACH, "*e = 1; }", OWNERS_END);
+    drop_accepted(OWNERS, "while (s.len != 0) { del(s, drop_ptr); }", "", OWNERS_END);
+    drop_accepted(OWNERS, EACH, "$if (false) { del(s, drop_ptr); } }", OWNERS_END);
+    drop_accepted(OWNERS, "for (u64 mut i = 0; i < 2; i += 1) { del(s, drop_ptr); }", "",
+                  OWNERS_END);
+    drop_accepted(OWNERS, "u8[2] a = {}; for (u8 x : a) { del(s, drop_ptr); }", "", OWNERS_END);
+    drop_accepted(BOX, "fn f(box mut* b) void { for (i32 mut* e : b->items) { *e = 1; } ",
+                  "del(b->items, drop_ptr); }", NO_MAIN);
+    drop_accepted(POOL, "fn main() void { for (i32 mut* e : POOL) { *e = 1; } ",
+                  "del(POOL, drop_ptr); }", "");
+}
+
 fn main() i32 {
     direct_storage_writes_fail();
     nested_storage_writes_fail();
@@ -177,6 +322,12 @@ fn main() i32 {
     mutable_storage_calls_fail();
     scalar_elements_stay_legal_and_ownership_writes_need_proof();
     hidden_effects_and_aliases_need_ownership_proof();
+    del_with_a_drop_of_the_storage_fails();
+    del_with_a_drop_through_an_alias_fails();
+    del_with_a_drop_under_nested_control_fails();
+    del_with_a_drop_of_another_span_needs_proof();
+    del_with_a_drop_is_one_report();
+    del_with_a_drop_outside_the_loan_stays_legal();
     println("range checks ok");
     return 0;
 }

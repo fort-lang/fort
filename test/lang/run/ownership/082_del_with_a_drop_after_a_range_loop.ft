@@ -1,0 +1,124 @@
+//! run
+//! stdout:
+//| local 3
+//| parameter 7
+//| field 11
+//| global 15
+//| spanned 19
+//| while 2 0
+// The loan of a range loop ends with the loop (D17.10), so `del(s, d)` of the collection is legal
+// after it (D17.9): a local span, a span parameter, a span field, a global span, and a span whose
+// element holds the collection. A loop that frees its collection in its body is a `while`.
+// The last `del` of `emptied` frees nothing: no rule proves that the `while` left `s` empty
+// (D17.20). The run under fir.interpreter makes no ownership event.
+struct holder {
+    i32 mut* own mut@ own items;
+}
+
+i32 mut* own mut@ own mut POOL = {};
+
+fn drop_ptr(i32 mut* own p) void {
+    del(p);
+}
+
+fn drop_holder(holder mut h) void {
+    del(h.items, drop_ptr);
+}
+
+fn boxed(i32 v) i32 mut* own {
+    i32 mut* own p = new(i32);
+    *p = v;
+    return p;
+}
+
+// A span of two owners, which hold `v` and `v + 1`.
+fn pair(i32 v) i32 mut* own mut@ own {
+    i32 mut* own low = boxed(v);
+    i32 mut* own high = boxed(v + 1);
+    i32 mut* own mut@ own s = new(i32 mut* own, 2);
+    del(s[0]);
+    s[0] = move(low);
+    del(s[1]);
+    s[1] = move(high);
+    return s;
+}
+
+fn local() void {
+    i32 mut* own mut@ own s = pair(1);
+    i32 mut total = 0;
+    for (i32 mut* e : s) {
+        total += *e;
+    }
+    del(s, drop_ptr);
+    println("local ", total);
+}
+
+fn parameter(i32 mut* own mut@ own s) void {
+    i32 mut total = 0;
+    for (i32 mut* e : s) {
+        total += *e;
+    }
+    del(s, drop_ptr);
+    println("parameter ", total);
+}
+
+fn field() void {
+    i32 mut* own mut@ own items = pair(5);
+    holder mut* own h = new(holder);
+    h->items = move(items);
+    i32 mut total = 0;
+    for (i32 mut* e : h->items) {
+        total += *e;
+    }
+    del(h->items, drop_ptr);
+    del(h);
+    println("field ", total);
+}
+
+// A global has no fact at the entry of a function, so the `move` empties it before the store
+// (D17.11), and the drain of the old value comes after the store.
+fn global() void {
+    i32 mut* own mut@ own fresh = pair(7);
+    i32 mut* own mut@ own old = move(POOL);
+    POOL = move(fresh);
+    del(old, drop_ptr);
+    i32 mut total = 0;
+    for (i32 mut* e : POOL) {
+        total += *e;
+    }
+    del(POOL, drop_ptr);
+    println("global ", total);
+}
+
+fn spanned() void {
+    i32 mut* own mut@ own items = pair(9);
+    holder mut@ own many = new(holder, 2);
+    many[1] = holder{.items = move(items)};
+    i32 mut total = 0;
+    for (i32 mut* e : many[1].items) {
+        total += *e;
+    }
+    del(many, drop_holder);
+    println("spanned ", total);
+}
+
+fn emptied() void {
+    i32 mut* own mut@ own mut s = pair(1);
+    u64 mut seen = 0;
+    while (s.len != 0) {
+        seen += s.len;
+        del(s, drop_ptr);
+    }
+    println("while ", seen, " ", s.len);
+    del(s, drop_ptr);
+}
+
+fn main() i32 {
+    local();
+    parameter(pair(3));
+    field();
+    global();
+    spanned();
+    emptied();
+    return 0;
+}
