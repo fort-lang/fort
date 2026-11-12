@@ -1,0 +1,464 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| places ok
+//| slots ok
+//| holds ok
+/// Checks which intrinsic the FIR translator writes for the copy of an aggregate. Two places of a
+/// program can overlap in part, so a copy between them is `llvm.memmove`: the destination gets
+/// the bytes that the source held before the copy. A copy into a `%tmp` slot that `hold` makes,
+/// and a copy out of that slot, is `llvm.memcpy`: the slot is one whole object of the size of
+/// the copy, so the other range is the same range or has no byte in common with it.
+import fort.fir;
+import fir_env;
+import fort.fir_llvm;
+import fort.gen;
+import llvm_env;
+import pass_env;
+import std.strbuf;
+import fort.types;
+
+string[36] COPIES = {
+    "struct pair {",
+    "    i32 a;",
+    "    u64 b;",
+    "}",
+    "struct w {",
+    "    i32 x;",
+    "    i32[3] tail;",
+    "}",
+    "struct outer {",
+    "    pair p;",
+    "    pair q;",
+    "}",
+    "fn shift(i32[4] mut* big) void {",
+    "    w mut* shifted = cast(big, w mut*);",
+    "    i32[3]* head = cast(big, i32[3]*);",
+    "    shifted->tail = *head;",
+    "}",
+    "fn through(pair mut* to, pair* from) void {",
+    "    *to = *from;",
+    "}",
+    "fn give(pair p) pair {",
+    "    return p;",
+    "}",
+    "fn take(pair p) void {",
+    "}",
+    "fn pass(pair* from) void {",
+    "    take(*from);",
+    "}",
+    "fn nest(pair* from) outer {",
+    "    return outer{*from, *from};",
+    "}",
+    "fn keep(pair mut* to, pair* from) void {",
+    "    *to = give(*from);",
+    "}",
+    "fn local(pair* from) pair {",
+    "    pair mut x = *from;\n    x = *from;\n    return x;\n}",
+};
+
+// Whether the emitter of `e` recorded a call of `llvm.memcpy`, and of `llvm.memmove`.
+fn uses(llvm_env.env* e, bool memcpy, bool memmove) bool {
+    return gen.gen_uses_intrinsic(&e->g, gen.IN_MEMCPY) == memcpy
+        && gen.gen_uses_intrinsic(&e->g, gen.IN_MEMMOVE) == memmove;
+}
+
+// ---- a copy between two places ------------------------------------------------------------------
+
+// `shifted->tail` and `*head` are two views of one array: elements 1 to 3 and elements 0 to 2.
+// The two ranges of 12 bytes have 8 bytes in common, so the copy is `llvm.memmove`.
+fn a_store_through_two_views_is_a_memmove() void {
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
+    string[12] want = {
+        "entry:",
+        "  %big.0 = alloca ptr, align 8",
+        "  %shifted.1 = alloca ptr, align 8",
+        "  %head.2 = alloca ptr, align 8",
+        "  store ptr %big.in, ptr %big.0, align 8",
+        "  %t0 = load ptr, ptr %big.0, align 8",
+        "  store ptr %t0, ptr %shifted.1, align 8",
+        "  %t1 = load ptr, ptr %big.0, align 8",
+        "  store ptr %t1, ptr %head.2, align 8",
+        "  %t2 = load ptr, ptr %head.2, align 8",
+        "  %t3 = load ptr, ptr %shifted.1, align 8",
+        "  %t4 = getelementptr inbounds %struct.main.w, ptr %t3, i32 0, i32 1",
+    };
+    string[1] copy = {
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 4 %t4, ptr align 4 %t2, i64 12, i1 false)",
+    };
+    string got = llvm_env.lowered(e, COPIES[..], "shift", pass_env.CHECKED);
+    llvm_env.expect2(e, got, want[..], copy[..]);
+    assert(uses(e, false, true));
+    assert(gen.gen_uses_attr(&e->g, gen.ATTR_MEMCPY));
+}
+
+// `*to = *from` of two pointers that the caller gives: nothing proves that the two places are
+// apart, so the copy is `llvm.memmove`. No build mode changes that.
+fn a_store_through_two_pointers_is_a_memmove() void {
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
+    string[8] want = {
+        "entry:",
+        "  %to.0 = alloca ptr, align 8",
+        "  %from.1 = alloca ptr, align 8",
+        "  store ptr %to.in, ptr %to.0, align 8",
+        "  store ptr %from.in, ptr %from.1, align 8",
+        "  %t0 = load ptr, ptr %from.1, align 8",
+        "  %t1 = load ptr, ptr %to.0, align 8",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %t1, ptr align 8 %t0, i64 16, i1 false)",
+    };
+    llvm_env.expect(e, llvm_env.lowered(e, COPIES[..], "through", pass_env.CHECKED), want[..]);
+    assert(uses(e, false, true));
+    llvm_env.expect(e, llvm_env.lowered(e, COPIES[..], "through", pass_env.RELEASE), want[..]);
+    assert(uses(e, false, true));
+    llvm_env.expect(e, llvm_env.lowered(e, COPIES[..], "through", pass_env.NO_BOUNDS), want[..]);
+    assert(uses(e, false, true));
+}
+
+// `return p` copies the parameter into the result of the caller. The caller can give a result
+// place that overlaps the argument, so the copy is `llvm.memmove`.
+fn a_parameter_into_the_result_is_a_memmove() void {
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
+    string[3] want = {
+        "entry:",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %p.in, \\",
+        "i64 16, i1 false)",
+    };
+    llvm_env.expect(e, llvm_env.lowered(e, COPIES[..], "give", pass_env.CHECKED), want[..]);
+    assert(uses(e, false, true));
+}
+
+// A named local is a place of the program: a pointer of the program can hold its address. Each
+// copy into it and out of it is `llvm.memmove`.
+fn a_named_local_is_copied_with_a_memmove() void {
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
+    string[10] want = {
+        "entry:",
+        "  %from.0 = alloca ptr, align 8",
+        "  %x.1 = alloca %struct.main.pair, align 8",
+        "  store ptr %from.in, ptr %from.0, align 8",
+        "  %t0 = load ptr, ptr %from.0, align 8",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %x.1, ptr align 8 %t0, i64 16, i1 false)",
+        "  %t1 = load ptr, ptr %from.0, align 8",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %x.1, ptr align 8 %t1, i64 16, i1 false)",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %x.1, \\",
+        "i64 16, i1 false)",
+    };
+    llvm_env.expect(e, llvm_env.lowered(e, COPIES[..], "local", pass_env.CHECKED), want[..]);
+    assert(uses(e, false, true));
+}
+
+// ---- a copy into a slot and out of it -----------------------------------------------------------
+
+// An argument of an aggregate type goes into a new `%tmp` slot, and the callee gets the address
+// of the slot. The slot is whole and new, so the copy into it is `llvm.memcpy`.
+fn an_argument_slot_is_filled_with_a_memcpy() void {
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
+    string[7] want = {
+        "entry:",
+        "  %from.0 = alloca ptr, align 8",
+        "  %tmp0 = alloca %struct.main.pair, align 8",
+        "  store ptr %from.in, ptr %from.0, align 8",
+        "  %t0 = load ptr, ptr %from.0, align 8",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %t0, i64 16, i1 false)",
+        "  call void @\"main.take\"(ptr %tmp0)",
+    };
+    llvm_env.expect(e, llvm_env.lowered(e, COPIES[..], "pass", pass_env.CHECKED), want[..]);
+    assert(uses(e, true, false));
+    assert(gen.gen_uses_attr(&e->g, gen.ATTR_MEMCPY));
+}
+
+// The members of an aggregate value are read before the destination is written: each goes into a
+// slot of its own with `llvm.memcpy`, and each slot is then copied out with `llvm.memcpy`. The
+// destination can overlap `*from`; it cannot overlap a slot in part.
+fn the_members_of_an_aggregate_go_through_slots() void {
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
+    string[13] want = {
+        "entry:",
+        "  %from.0 = alloca ptr, align 8",
+        "  %tmp0 = alloca %struct.main.pair, align 8",
+        "  %tmp1 = alloca %struct.main.pair, align 8",
+        "  store ptr %from.in, ptr %from.0, align 8",
+        "  %t0 = load ptr, ptr %from.0, align 8",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %t0, i64 16, i1 false)",
+        "  %t1 = load ptr, ptr %from.0, align 8",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %t1, i64 16, i1 false)",
+        "  %t2 = getelementptr inbounds %struct.main.outer, ptr %ret.sret, i32 0, i32 0",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t2, ptr align 8 %tmp0, i64 16, i1 false)",
+        "  %t3 = getelementptr inbounds %struct.main.outer, ptr %ret.sret, i32 0, i32 1",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t3, ptr align 8 %tmp1, i64 16, i1 false)",
+    };
+    llvm_env.expect(e, llvm_env.lowered(e, COPIES[..], "nest", pass_env.CHECKED), want[..]);
+    assert(uses(e, true, false));
+}
+
+// `*to = give(*from)`: the argument goes into its slot with `llvm.memcpy`, and the callee writes
+// the result at `to`. This function holds no copy between two places of the program.
+fn a_call_result_into_a_place_copies_the_argument_only() void {
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
+    string[10] want = {
+        "entry:",
+        "  %to.0 = alloca ptr, align 8",
+        "  %from.1 = alloca ptr, align 8",
+        "  %tmp0 = alloca %struct.main.pair, align 8",
+        "  store ptr %to.in, ptr %to.0, align 8",
+        "  store ptr %from.in, ptr %from.1, align 8",
+        "  %t0 = load ptr, ptr %to.0, align 8",
+        "  %t1 = load ptr, ptr %from.1, align 8",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %t1, i64 16, i1 false)",
+        "  call void @\"main.give\"(ptr sret(%struct.main.pair) %t0, ptr %tmp0)",
+    };
+    llvm_env.expect(e, llvm_env.lowered(e, COPIES[..], "keep", pass_env.CHECKED), want[..]);
+    assert(uses(e, true, false));
+}
+
+// ---- hold and write_held ------------------------------------------------------------------------
+
+string[4] PRELUDE = {
+    "struct pair {",
+    "    i32 a;",
+    "    u64 b;",
+    "}",
+};
+
+// A function with an aggregate parameter, a pointer parameter, a named local and a temporary.
+string[11] HOLDS = {
+    "fn main.holds(_1 (p): pair, _2 (q): pair mut*) -> i32 {",
+    "    let _3 (x): pair;",
+    "    let _4: pair;",
+    "    let _5: i32;",
+    "",
+    "    bb0: {",
+    "        _4 = const zero pair #1:1 s1;",
+    "        _0 = const i32 1 #1:1 s1;",
+    "        return #1:1 s1;",
+    "    }",
+    "}",
+};
+
+// Whether `h` holds an aggregate at the address `addr`, with `slot` as given.
+fn held_at(fir_llvm.held* h, string addr, bool slot) bool {
+    return h->aggregate && !h->zero && !h->text && h->addr.val == addr && h->slot == slot;
+}
+
+// `hold` of a `copy` with no copy of its own gives the address of the place and writes nothing.
+// The write of it is a copy between two places: `llvm.memmove`. With a copy of its own, and for
+// a `move`, `hold` fills a new slot with `llvm.memcpy`, and the write out of the slot is
+// `llvm.memcpy` too. A `move` zeroes its place after the copy into the slot.
+fn a_held_place_and_a_held_slot() void {
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = llvm_env.parse(e, PRELUDE[..], HOLDS[..]);
+    defer fir.module_drop_made(move(m));
+    fir.func mut* f = &m->funcs.items[0];
+    llvm_env.begin(&e->g);
+    {
+        fir_llvm.translator mut t = fir_llvm.open(&e->g, f);
+        defer {
+            del(t.locals);
+            del(t.notes);
+            del(t.cont_of);
+            del(t.fail_label);
+        }
+        fir_llvm.write_locals(&t);
+        strbuf.clear(&e->g.body);
+        types.node* pairt = fir_env.local_type(f, 1);
+        fir.place p = fir.place_local(1);
+        fir.place x = fir.place_local(3);
+        gen.gen_val to = fir_llvm.place_addr(&t, p);
+        assert(to.val == "%p.in");
+
+        // a copy that the caller reads at once: no slot, and nothing written by hold
+        fir_llvm.held plain = fir_llvm.hold(&t, fir.operand_copy(x), pairt, false);
+        assert(held_at(&plain, "%x.2", false));
+        assert(strbuf.view(&e->g.body) == "");
+        assert(uses(e, false, false));
+        fir_llvm.write_held(&t, &plain, to);
+        string[2] first = {
+            "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %p.in, ptr align 8 %x.2, \\",
+            "i64 16, i1 false)",
+        };
+        llvm_env.expect(e, strbuf.view(&e->g.body), first[..]);
+        assert(uses(e, false, true));
+
+        // a copy of its own: a new slot, filled and read with llvm.memcpy
+        strbuf.clear(&e->g.body);
+        fir_llvm.held own_copy = fir_llvm.hold(&t, fir.operand_copy(x), pairt, true);
+        assert(held_at(&own_copy, "%tmp1", true));
+        fir_llvm.write_held(&t, &own_copy, to);
+        string[4] second = {
+            "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %x.2, \\",
+            "i64 16, i1 false)",
+            "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %p.in, ptr align 8 %tmp1, \\",
+            "i64 16, i1 false)",
+        };
+        llvm_env.expect(e, strbuf.view(&e->g.body), second[..]);
+        assert(uses(e, true, true));
+
+        // a move: a new slot, the zeroing of the place, then the write out of the slot
+        strbuf.clear(&e->g.body);
+        fir_llvm.held gone = fir_llvm.hold(&t, fir.operand_move(x), pairt, false);
+        assert(held_at(&gone, "%tmp2", true));
+        fir_llvm.write_held(&t, &gone, to);
+        string[5] third = {
+            "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp2, ptr align 8 %x.2, \\",
+            "i64 16, i1 false)",
+            "  call void @llvm.memset.p0.i64(ptr align 8 %x.2, i8 0, i64 16, i1 false)",
+            "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %p.in, ptr align 8 %tmp2, \\",
+            "i64 16, i1 false)",
+        };
+        llvm_env.expect(e, strbuf.view(&e->g.body), third[..]);
+    }
+}
+
+// A temporary of the lowering has a `%tmp` slot too, and `hold` makes no slot for it. The held
+// address can be a part of a larger temporary, so `hold` does not mark it, and its write is
+// `llvm.memmove`: for a `copy`, for a `copy` that asks for a copy of its own, and for a `move`,
+// which zeroes nothing.
+fn a_held_temporary_is_no_slot() void {
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = llvm_env.parse(e, PRELUDE[..], HOLDS[..]);
+    defer fir.module_drop_made(move(m));
+    fir.func mut* f = &m->funcs.items[0];
+    llvm_env.begin(&e->g);
+    {
+        fir_llvm.translator mut t = fir_llvm.open(&e->g, f);
+        defer {
+            del(t.locals);
+            del(t.notes);
+            del(t.cont_of);
+            del(t.fail_label);
+        }
+        fir_llvm.write_locals(&t);
+        strbuf.clear(&e->g.body);
+        types.node* pairt = fir_env.local_type(f, 1);
+        fir.place temp = fir.place_local(4);
+        gen.gen_val to = fir_llvm.place_addr(&t, fir.place_local(3));
+        fir_llvm.held a = fir_llvm.hold(&t, fir.operand_copy(temp), pairt, false);
+        fir_llvm.held b = fir_llvm.hold(&t, fir.operand_copy(temp), pairt, true);
+        fir_llvm.held c = fir_llvm.hold(&t, fir.operand_move(temp), pairt, false);
+        assert(held_at(&a, "%tmp0", false));
+        assert(held_at(&b, "%tmp0", false));
+        assert(held_at(&c, "%tmp0", false));
+        assert(strbuf.view(&e->g.body) == "");
+        fir_llvm.write_held(&t, &a, to);
+        fir_llvm.write_held(&t, &b, to);
+        fir_llvm.write_held(&t, &c, to);
+        string[6] want = {
+            "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %x.2, ptr align 8 %tmp0, \\",
+            "i64 16, i1 false)",
+            "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %x.2, ptr align 8 %tmp0, \\",
+            "i64 16, i1 false)",
+            "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %x.2, ptr align 8 %tmp0, \\",
+            "i64 16, i1 false)",
+        };
+        llvm_env.expect(e, strbuf.view(&e->g.body), want[..]);
+        assert(uses(e, false, true));
+    }
+}
+
+// A place behind a pointer: `hold` gives the loaded address with no slot, and the write is
+// `llvm.memmove` in each direction. With a copy of its own, the place goes through a slot.
+fn a_held_place_behind_a_pointer() void {
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = llvm_env.parse(e, PRELUDE[..], HOLDS[..]);
+    defer fir.module_drop_made(move(m));
+    fir.func mut* f = &m->funcs.items[0];
+    llvm_env.begin(&e->g);
+    {
+        fir_llvm.translator mut t = fir_llvm.open(&e->g, f);
+        defer {
+            del(t.locals);
+            del(t.notes);
+            del(t.cont_of);
+            del(t.fail_label);
+        }
+        fir_llvm.write_locals(&t);
+        strbuf.clear(&e->g.body);
+        types.node* pairt = fir_env.local_type(f, 1);
+        fir.place star = fir.place_deref(f, fir.place_local(2));
+        fir_llvm.held from = fir_llvm.hold(&t, fir.operand_copy(star), pairt, false);
+        assert(held_at(&from, "%t0", false));
+        fir_llvm.write_held(&t, &from, fir_llvm.place_addr(&t, star));
+        fir_llvm.held kept = fir_llvm.hold(&t, fir.operand_copy(star), pairt, true);
+        assert(held_at(&kept, "%tmp1", true));
+        fir_llvm.write_held(&t, &kept, fir_llvm.place_addr(&t, star));
+        string[10] want = {
+            "  %t0 = load ptr, ptr %q.1, align 8",
+            "  %t1 = load ptr, ptr %q.1, align 8",
+            "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %t1, ptr align 8 %t0, \\",
+            "i64 16, i1 false)",
+            "  %t2 = load ptr, ptr %q.1, align 8",
+            "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %t2, \\",
+            "i64 16, i1 false)",
+            "  %t3 = load ptr, ptr %q.1, align 8",
+            "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t3, ptr align 8 %tmp1, \\",
+            "i64 16, i1 false)",
+        };
+        llvm_env.expect(e, strbuf.view(&e->g.body), want[..]);
+        assert(uses(e, true, true));
+    }
+}
+
+// A value that is no place has no slot: a scalar goes into a register and a `zero` constant has
+// no read. Their writes are a store and `llvm.memset`, and no copy.
+fn a_scalar_and_a_zero_constant_have_no_slot() void {
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = llvm_env.parse(e, PRELUDE[..], HOLDS[..]);
+    defer fir.module_drop_made(move(m));
+    fir.func mut* f = &m->funcs.items[0];
+    llvm_env.begin(&e->g);
+    {
+        fir_llvm.translator mut t = fir_llvm.open(&e->g, f);
+        defer {
+            del(t.locals);
+            del(t.notes);
+            del(t.cont_of);
+            del(t.fail_label);
+        }
+        fir_llvm.write_locals(&t);
+        strbuf.clear(&e->g.body);
+        types.node* pairt = fir_env.local_type(f, 1);
+        fir.operand zero = fir.operand{.kind = fir.operand_kind.ok_const,
+                                       .value = fir.const_zero(pairt)};
+        fir_llvm.held z = fir_llvm.hold(&t, zero, pairt, true);
+        assert(z.aggregate && z.zero && !z.slot);
+        fir_llvm.write_held(&t, &z, fir_llvm.place_addr(&t, fir.place_local(3)));
+        string[1] want = {
+            "  call void @llvm.memset.p0.i64(ptr align 8 %x.2, i8 0, i64 16, i1 false)",
+        };
+        llvm_env.expect(e, strbuf.view(&e->g.body), want[..]);
+        assert(uses(e, false, false));
+    }
+}
+
+fn main() i32 {
+    a_store_through_two_views_is_a_memmove();
+    a_store_through_two_pointers_is_a_memmove();
+    a_parameter_into_the_result_is_a_memmove();
+    a_named_local_is_copied_with_a_memmove();
+    println("places ok");
+    an_argument_slot_is_filled_with_a_memcpy();
+    the_members_of_an_aggregate_go_through_slots();
+    a_call_result_into_a_place_copies_the_argument_only();
+    println("slots ok");
+    a_held_place_and_a_held_slot();
+    a_held_temporary_is_no_slot();
+    a_held_place_behind_a_pointer();
+    a_scalar_and_a_zero_constant_have_no_slot();
+    println("holds ok");
+    return 0;
+}

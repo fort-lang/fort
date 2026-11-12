@@ -148,8 +148,8 @@
     {
       "decision": "D3.15",
       "file": "src/fort/fir_llvm.ft",
-      "old": "    gen.gen_memcpy(t->g, to, align, from, align, types.type_sizeof(ty));",
-      "new": "    gen.gen_memcpy(t->g, to, align, from, align, types.type_sizeof(ty) - 1);",
+      "old": "    u64 size = types.type_sizeof(ty);\n    if (whole_slot) {",
+      "new": "    u64 size = types.type_sizeof(ty) - 1;\n    if (whole_slot) {",
       "what": "an aggregate copy moves one byte less than `sizeof` of its type; the checker folds `sizeof` itself, and this copy is one place where the emitter uses the D3.15 size"
     },
     {
@@ -186,6 +186,34 @@
       "old": "    u64 mut i = first;\n    while (i < ast.ast_len(n)) {\n        if (!lower_print_arg(lw, ast.ast_child(n, i), fd)) {\n            return false;\n        }\n        i += 1;\n    }",
       "new": "    u64 mut i = ast.ast_len(n);\n    while (i > first) {\n        i -= 1;\n        if (!lower_print_arg(lw, ast.ast_child(n, i), fd)) {\n            return false;\n        }\n    }",
       "what": "the print family evaluates its arguments right to left"
+    },
+    {
+      "decision": "D6.3b",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "        return;\n    }\n    gen.gen_memmove(t->g, to, align, from, align, size);",
+      "new": "        return;\n    }\n    gen.gen_memcpy(t->g, to, align, from, align, size);",
+      "what": "a store of an aggregate between two places of the program is `llvm.memcpy`, which gives no result when the two places overlap in part"
+    },
+    {
+      "decision": "D6.3c",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "        copy_to(t, to, h->addr, h->ty, h->slot);",
+      "new": "        copy_to(t, to, h->addr, h->ty, true);",
+      "what": "the write of a held operand is `llvm.memcpy` when the operand is a place of the program and no slot of `hold`"
+    },
+    {
+      "decision": "D6.3d",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    copy_to(t, place_addr(t, dst), from, ty, false);",
+      "new": "    copy_to(t, place_addr(t, dst), from, ty, true);",
+      "what": "`place_copy` copies between two places with `llvm.memcpy`"
+    },
+    {
+      "decision": "D6.3e",
+      "file": "src/fort/gen.ft",
+      "old": "    strbuf.append(&g->body, \"  call void @llvm.memmove.p0.p0.i64(ptr align \");",
+      "new": "    strbuf.append(&g->body, \"  call void @llvm.memcpy.p0.p0.i64(ptr align \");",
+      "what": "`gen_memmove` writes a call of `llvm.memcpy`"
     },
     {
       "decision": "D6.5",
@@ -664,6 +692,27 @@
       "what": "a fixed array is an SSA value and not memory"
     },
     {
+      "decision": "D19.3b",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    h.slot = true;\n    copy_to(t, h.addr, from, ty, true);",
+      "new": "    h.slot = true;\n    copy_to(t, h.addr, from, ty, false);",
+      "what": "the copy of an operand into the new slot of `hold` is `llvm.memmove`, although the slot is whole and new"
+    },
+    {
+      "decision": "D19.3c",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    h.slot = true;\n    copy_to(t, h.addr, from, ty, true);",
+      "new": "    copy_to(t, h.addr, from, ty, true);",
+      "what": "`hold` does not mark its slot, so the copy out of the slot is `llvm.memmove`"
+    },
+    {
+      "decision": "D19.3d",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    if (whole_slot) {\n        gen.gen_memcpy(t->g, to, align, from, align, size);\n        return;\n    }",
+      "new": "    if (!whole_slot) {\n        gen.gen_memcpy(t->g, to, align, from, align, size);\n        return;\n    }",
+      "what": "`copy_to` reads its flag the wrong way: `llvm.memcpy` between two places and `llvm.memmove` for a slot"
+    },
+    {
       "decision": "D19.4",
       "file": "src/fort/fir_llvm.ft",
       "old": "        case storage.sk_param, storage.sk_named:\n            st->addr = dotted(g, name, \"\", n - 1);\n            write_alloca(g, st->addr, l->ty);",
@@ -760,6 +809,34 @@
       "old": "    strbuf.append(out, \"declare \");\n    if (sig.ret_attr.len > 0) {",
       "new": "    strbuf.append(out, \"declare \");\n    if (false) {",
       "what": "an extern declaration loses the extension attribute of its result"
+    },
+    {
+      "decision": "item8b",
+      "file": "src/fort/gen_data.ft",
+      "old": "        strbuf.append(out, \"declare void @llvm.memmove.p0.p0.i64(ptr nocapture writeonly, \");\n        strbuf.append(out, \"ptr nocapture readonly, i64, i1 immarg) #5\\n\");",
+      "new": "        strbuf.append(out, \"declare void @llvm.memmove.p0.p0.i64(ptr noalias nocapture writeonly, \");\n        strbuf.append(out, \"ptr noalias nocapture readonly, i64, i1 immarg) #5\\n\");",
+      "what": "the declaration of `llvm.memmove` takes the `noalias` of `llvm.memcpy`, which tells LLVM that the two ranges do not overlap"
+    },
+    {
+      "decision": "item8c",
+      "file": "src/fort/gen.ft",
+      "old": "    gen_use_intrinsic(g, IN_MEMMOVE);\n    gen_use_attr(g, ATTR_MEMCPY);",
+      "new": "    gen_use_intrinsic(g, IN_MEMCPY);\n    gen_use_attr(g, ATTR_MEMCPY);",
+      "what": "a call of `llvm.memmove` records the declaration of `llvm.memcpy`, so the module does not declare `llvm.memmove`"
+    },
+    {
+      "decision": "item8d",
+      "file": "src/fort/gen.ft",
+      "old": "    gen_use_intrinsic(g, IN_MEMMOVE);\n    gen_use_attr(g, ATTR_MEMCPY);",
+      "new": "    gen_use_intrinsic(g, IN_MEMMOVE);",
+      "what": "a call of `llvm.memmove` does not record the attribute group `#5` of its declaration"
+    },
+    {
+      "decision": "item8e",
+      "file": "src/fort/gen.ft",
+      "old": "IN_MEMCPY = 0;\nu64 IN_MEMMOVE = 1;\nu64 IN_MEMSET = 2;",
+      "new": "IN_MEMCPY = 0;\nu64 IN_MEMMOVE = 2;\nu64 IN_MEMSET = 1;",
+      "what": "the module declares `llvm.memset` before `llvm.memmove`"
     },
     {
       "decision": "item9",

@@ -1417,6 +1417,33 @@ came here.
   or of the place of `check(overwrite)`. The review of T-249 probed those reads apart and found
   none out of dominance. Under `--release`, 1251 temporaries of `main.ft` have no storage, which
   is the count of T-247.
+- **A copy of an aggregate is `llvm.memmove`, and `llvm.memcpy` only for a slot of `hold`**
+  (D6.3, D19.3). `llvm.memcpy` of two ranges that overlap in part has no defined result, and a
+  view cast gives a program two such places (D3.14). `fir_llvm.copy_to` writes each copy and
+  takes one flag, `whole_slot`. `fir_llvm.hold` makes a `%tmp` slot for an aggregate operand
+  that is a place and fills it with `llvm.memcpy`. `fir_llvm.write_held` reads that slot with
+  `llvm.memcpy`. Each other copy is `llvm.memmove`: `write_held` of a place that `hold` did not
+  copy, which is the `copy` operand of a `use` or of a `cast`, `write_held` of a temporary, and
+  `place_copy`. The proof for the slot: the slot is an `alloca` of the type of the copy, so it
+  is one whole object of the size of the copy. The other range has that size and is in one
+  object. So the two ranges are the same range or have no byte in common. The proof does not
+  need a slot that no pointer of the program reaches. An argument slot is the parameter of the
+  callee, and the callee can keep its address. A later copy from that address into the same
+  slot is a copy of equal ranges. `hold` does not copy a temporary:
+  `fir_llvm.temporary_place` gives its storage, which can be a field of a larger temporary. The
+  proof does not hold for a part of an object, so `held.slot` stays `false` there. A whole
+  temporary and a whole named local have the same proof, and the translator does not use it for
+  them: 13730 of the 186369 `llvm.memmove` calls counted below copy from one `%tmp` to
+  another. The count, for the `-S` module of each of 2174 programs (`test/lang/run` in three
+  modes, `test/lang/programs`, `test/fort`, `test/library`, the compiler and the language
+  server) on the darwin target: 743320 `llvm.memcpy` calls of `hold`, 52130 of `write_held`
+  and 186369 `llvm.memmove` calls. Each `llvm.memcpy` has a slot operand, and each of the
+  743320 slots has four uses only: its `alloca`, the copy that fills it, a copy that reads it
+  and a plain `ptr` argument of a call. The Linux target gives the same `llvm.memcpy` counts
+  and 186025 `llvm.memmove` calls. `test/fort/fir_llvm_copy_test.ft` holds each case, and
+  `test/lang/run/casts/021` to `024` hold the result of a store through two views at `-O0`,
+  `-O1`, `-O2` and under `--release`. The interpreter gave that result before the translator
+  did. The frozen C compiler in `bootstrap0/` keeps `llvm.memcpy` for each copy.
 - **One signature map writes every definition, extern declaration and call** (T-251).
   `gen.signature_of` maps a fort function type to the result type and its extension attribute,
   the `sret` type, each parameter with its attribute, and the variadic flag of an `extern fn`.

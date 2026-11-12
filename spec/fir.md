@@ -16,7 +16,8 @@ local that an `&` names is in frame storage, and each `live` of it starts new st
 D10.1). Each byte of the storage of a local holds 0 when its `live` runs, and a `move` or a `del`
 leaves 0 in each byte of the place that it empties (sections 6 and 7, D10.1). A
 store of an aggregate reads the whole source before it changes the destination (section 6, D6.3,
-D19.3). The compiler implements the six in later changes. No other part of FIR changes.
+D19.3). The compiler implements the first five in later changes. The translator gives the
+sixth (section 12.1). No other part of FIR changes.
 
 ## 1. Why FIR exists
 
@@ -341,8 +342,7 @@ Rules:
 - A store of a `copy` or a `move` of an aggregate place reads the whole source before it changes
   the destination (D6.3). The two places can overlap in part, because two `cast`s of one pointer
   can name them (D3.14). The destination then holds the bytes that the source held before the
-  store. The interpreter gives this result. The translator gives it in the end state (section
-  12.1).
+  store. The interpreter and the translator give this result (section 12.1).
 - A store of an rvalue of aggregate type writes each byte of its destination, padding included.
   One rvalue is the exception: `aggregate T(a, ...)` with no `zeroed` writes its members and leaves
   each padding byte of the destination as it was.
@@ -1653,13 +1653,17 @@ does not read the tree and it does not read the build mode.
 - A place is its base address, then one `getelementptr inbounds` for each projection in the
   three shapes of item 3, then a `load` or a `store`. A `bool` loads as `i8` and `trunc` and
   stores as `zext` and `i8` (item 2).
-- `copy` or `move` of an aggregate place is `llvm.memcpy`; `const zero` of an aggregate is
-  `llvm.memset` (item 3). In the end state it is `llvm.memmove`, and `llvm.memcpy` only where the
-  translator proves that the source and the destination are equal or do not overlap, as for a
-  `%tmp` slot that no pointer of the program reaches (D19.3, section 6). For an `aggregate`, the
-  translator reads every operand before its
-  first store: it loads each scalar operand into a register and copies each aggregate operand
-  into a `%tmp` slot (section 6).
+- `copy` or `move` of an aggregate place is `llvm.memmove`; `const zero` of an aggregate is
+  `llvm.memset` (item 3). The copy is `llvm.memcpy` only where the translator proves that the
+  source and the destination are equal or do not overlap (D19.3, section 6). It proves that for
+  the copy of an operand into a `%tmp` slot that it makes for that operand, and for the copy out
+  of that slot. The slot is one whole object of the size of the copy, and the other range has
+  that size and is in one object. The proof does not need that no pointer of the program reaches
+  the slot: a callee can take the address of a parameter, which is the slot of the argument. The
+  storage of a FIR temporary is a `%tmp` slot too. The translator does not make that proof for
+  it, so a copy from it or to it is `llvm.memmove`. For an `aggregate`, the translator reads
+  every operand before its first store: it loads each scalar operand into a register and copies
+  each aggregate operand into a `%tmp` slot (section 6).
 - `move p` reads the value into a register or a `%tmp` slot, zeroes `p` with `store ptr null`
   or `llvm.memset`, and only then writes the destination, in every case, because the destination
   can be `p` itself (item 18, `notes/compiler.md` 6). A `move` or a `del` of a temporary prints
@@ -1682,7 +1686,7 @@ does not read the tree and it does not read the build mode.
 - `eq` to `ge` are `icmp` with the predicate the type selects, or `fcmp` for a float (item 15).
 - `cast<T>` is the instruction of item 12, or nothing when the LLVM value types are equal, in
   which case the result takes the name of its operand. A `cast` between aggregate types is a
-  `llvm.memcpy` of the header or the value.
+  copy of the header or the value, as `copy` and `move` are.
 - `addr(p)` is the address of `p` with no load.
 - `slice` and `slice_ptr` write the two header fields of the destination (item 16).
 - `alloc<T>(n)` is a call of `std.rt.alloc` with the size of `T`, `n`, and the file, line and
@@ -1789,8 +1793,9 @@ migration changed and as the rules of `tools/fir_diff.py` (16.2). Each is a diff
 - An aggregate reads every member before its first store (section 6): `pair{p.b, p.a}` loads
   both fields and then stores both, and `pair{f(), a + 1}` stores both members after the call
   and after the overflow check. An aggregate member of an aggregate goes into a `%tmp` slot
-  first and then into its field with `llvm.memcpy`. The direct path wrote each member into its
-  field as it read it, before the calls and the checks of the members after it.
+  first and then into its field with `llvm.memcpy`. A member that is a temporary is in its
+  `%tmp` slot already, and `llvm.memmove` copies it into its field. The direct path wrote each
+  member into its field as it read it, before the calls and the checks of the members after it.
 - A designated literal zeroes the whole value with `llvm.memset` after it reads its members,
   and the direct path did before; both then store the named fields. A member of a literal that FIR
   builds in a temporary of a type with padding is built in a zeroed temporary, which one
@@ -1798,7 +1803,7 @@ migration changed and as the rules of `tools/fir_diff.py` (16.2). Each is a diff
   the field, so the padding of that field is zero on the FIR path where the direct path left
   it as it was.
 - An aggregate rvalue goes through a `%tmp` slot: the result of a call, a `slice` and a `cast`
-  between aggregate types is a temporary, and an `llvm.memcpy` copies it into the place that
+  between aggregate types is a temporary, and an `llvm.memmove` copies it into the place that
   reads it. `return t` of a local of an owning aggregate type copies `t` into one more `%tmp`
   slot before it copies it into `%ret.sret`. The direct path wrote such a value into its
   destination.

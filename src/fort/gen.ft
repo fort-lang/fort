@@ -37,16 +37,17 @@ u32 BITS_PER_U64 = 64;
 u64 SPAN_FIELD_PTR = 0;
 u64 SPAN_FIELD_LEN = 1;
 
-// Lists intrinsics in a fixed order. memcpy and memset come first. Overflow intrinsics follow by
-// operation and width. Saturating conversions and llvm.trap come last. These values are module
-// constants, not an enum. Slot calculation uses family and width arithmetic, which an enum does not
-// support.
+// Lists intrinsics in a fixed order. memcpy, memmove and memset come first. Overflow intrinsics
+// follow by operation and width. Saturating conversions and llvm.trap come last. These values are
+// module constants, not an enum. Slot calculation uses family and width arithmetic, which an enum
+// does not support.
 u64 IN_MEMCPY = 0;
-u64 IN_MEMSET = 1;
-u64 IN_OVERFLOW_FIRST = 2;
-u64 IN_FPCONV_FIRST = 26;
-u64 IN_TRAP = 42;
-u64 IN_COUNT = 43;
+u64 IN_MEMMOVE = 1;
+u64 IN_MEMSET = 2;
+u64 IN_OVERFLOW_FIRST = 3;
+u64 IN_FPCONV_FIRST = 27;
+u64 IN_TRAP = 43;
+u64 IN_COUNT = 44;
 
 // The overflow intrinsics, in the order `sadd ssub smul uadd usub umul` and,
 // within each, the widths `i8 i16 i32 i64`.
@@ -77,7 +78,7 @@ u64 ATTR_FN_NORET = 1;  // #1, a `noreturn` definition
 u64 ATTR_UNUSED_2 = 2;  // #2, never emitted: it held the C runtime's declarations
 u64 ATTR_NOBUILTIN = 3; // #3, every extern call site
 u64 ATTR_OVERFLOW = 4;  // #4, the overflow and conversion intrinsics
-u64 ATTR_MEMCPY = 5;    // #5
+u64 ATTR_MEMCPY = 5;    // #5, llvm.memcpy and llvm.memmove
 u64 ATTR_MEMSET = 6;    // #6
 u64 ATTR_TRAP = 7;      // #7, llvm.trap
 u64 ATTR_RT_NORET = 8;  // #8, a cold `noreturn` runtime entry point
@@ -1125,13 +1126,32 @@ fn gen_span_init(emitter mut* g, gen_val base, gen_val ptr, gen_val len) void {
 
 // ---- aggregates ----------------------------------------------------------
 
-// `llvm.memcpy` of `size` bytes from `src` to `dst`, the copy of every
-// aggregate.
+// `llvm.memcpy` of `size` bytes from `src` to `dst`: the copy of an aggregate whose two ranges
+// of bytes are the same range or have no byte in common. The caller proves that. LLVM gives no
+// result for two ranges that overlap in part.
 fn gen_memcpy(emitter mut* g, gen_val dst, u64 dst_align, gen_val src, u64 src_align,
                    u64 size) void {
     gen_use_intrinsic(g, IN_MEMCPY);
     gen_use_attr(g, ATTR_MEMCPY);
     strbuf.append(&g->body, "  call void @llvm.memcpy.p0.p0.i64(ptr align ");
+    copy_operands(g, dst, dst_align, src, src_align, size);
+}
+
+// `llvm.memmove` of `size` bytes from `src` to `dst`: the copy of an aggregate whose two ranges
+// of bytes can overlap in part. The destination gets the bytes that the source held before the
+// copy.
+fn gen_memmove(emitter mut* g, gen_val dst, u64 dst_align, gen_val src, u64 src_align,
+                    u64 size) void {
+    gen_use_intrinsic(g, IN_MEMMOVE);
+    gen_use_attr(g, ATTR_MEMCPY);
+    strbuf.append(&g->body, "  call void @llvm.memmove.p0.p0.i64(ptr align ");
+    copy_operands(g, dst, dst_align, src, src_align, size);
+}
+
+// The operands of `llvm.memcpy` and of `llvm.memmove` after `ptr align `, to the end of the
+// line.
+fn copy_operands(emitter mut* g, gen_val dst, u64 dst_align, gen_val src, u64 src_align,
+                      u64 size) void {
     strbuf.append_u64(&g->body, dst_align);
     strbuf.push(&g->body, ' ');
     strbuf.append(&g->body, dst.val);

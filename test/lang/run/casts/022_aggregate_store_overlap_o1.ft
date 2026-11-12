@@ -1,0 +1,191 @@
+//! run
+//! flags: -Xcc -O1
+//! stdout:
+//| 1
+//| 1
+//| 2
+//| 3
+//| 0 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+//| 0 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+//| 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 16
+//| 0 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+//| true
+//| true
+//| true
+// A store of an aggregate reads the whole source before it changes the destination, so the
+// result is defined when the two places overlap in part. A view cast makes such places: each
+// pointee is no larger and no more aligned than the object.
+//   - `shift` stores bytes 0 to 12 of an array of four `i32` into bytes 4 to 16.
+//   - `up` and `up_through` store 128 bytes into the place 8 bytes above the source, in one
+//     function and through two pointer parameters. `down` stores into the place 8 bytes below.
+//   - `result` stores the result of `get` into the place 8 bytes above the place that `get`
+//     reads.
+//   - `sizes` stores 24, 128 and 4096 bytes into the place 8 bytes above the source.
+// The flags of this test select the optimization level, because the result of the copy that the
+// compiler wrote before differed between the levels.
+struct w {
+    i32 x;
+    i32[3] tail;
+}
+
+struct lo {
+    u64[16] a;
+    u64 tail;
+}
+
+struct hi {
+    u64 head;
+    u64[16] a;
+}
+
+struct wrap {
+    u64[16] a;
+}
+
+struct wrap_lo {
+    wrap inner;
+    u64 tail;
+}
+
+struct wrap_hi {
+    u64 head;
+    wrap inner;
+}
+
+struct lo3 {
+    u64[3] a;
+    u64 tail;
+}
+
+struct hi3 {
+    u64 head;
+    u64[3] a;
+}
+
+struct lo512 {
+    u64[512] a;
+    u64 tail;
+}
+
+struct hi512 {
+    u64 head;
+    u64[512] a;
+}
+
+fn shift(i32[4] mut* big) void {
+    w mut* shifted = cast(big, w mut*);
+    i32[3]* head = cast(big, i32[3]*);
+    shifted->tail = *head;
+}
+
+fn fill(u64 mut@ a) void {
+    u64 mut i = 0;
+    while (i < a.len) {
+        a[i] = i + 1;
+        i += 1;
+    }
+}
+
+fn show(u64 first, u64@ a) void {
+    print(first);
+    u64 mut i = 0;
+    while (i < a.len) {
+        print(" ");
+        print(a[i]);
+        i += 1;
+    }
+    println("");
+}
+
+fn up() void {
+    hi mut x = hi{};
+    fill(x.a[..]);
+    lo* p = cast(&x, lo*);
+    x.a = p->a;
+    show(x.head, x.a[..]);
+}
+
+fn store_through(hi mut* to, lo* from) void {
+    to->a = from->a;
+}
+
+fn up_through() void {
+    hi mut x = hi{};
+    fill(x.a[..]);
+    store_through(&x, cast(&x, lo*));
+    show(x.head, x.a[..]);
+}
+
+fn down() void {
+    hi mut x = hi{};
+    fill(x.a[..]);
+    lo mut* p = cast(&x, lo mut*);
+    p->a = x.a;
+    show(x.head, x.a[..]);
+}
+
+fn get(wrap_lo* p) wrap {
+    return p->inner;
+}
+
+fn result() void {
+    wrap_hi mut x = wrap_hi{};
+    fill(x.inner.a[..]);
+    x.inner = get(cast(&x, wrap_lo*));
+    show(x.head, x.inner.a[..]);
+}
+
+fn sum(u64@ a) u64 {
+    u64 mut s = 0;
+    u64 mut i = 0;
+    while (i < a.len) {
+        s = s *% 31 +% a[i];
+        i += 1;
+    }
+    return s;
+}
+
+// The sum of `0, 1, ..., n - 1`, which a store 8 bytes up leaves in an array that `fill` wrote
+// and whose `head` is 0.
+fn want(u64 n) u64 {
+    u64 mut s = 0;
+    u64 mut i = 0;
+    while (i < n) {
+        s = s *% 31 +% i;
+        i += 1;
+    }
+    return s;
+}
+
+fn sizes() void {
+    hi3 mut x = hi3{};
+    fill(x.a[..]);
+    lo3* px = cast(&x, lo3*);
+    x.a = px->a;
+    println(sum(x.a[..]) == want(3));
+    hi mut y = hi{};
+    fill(y.a[..]);
+    lo* py = cast(&y, lo*);
+    y.a = py->a;
+    println(sum(y.a[..]) == want(16));
+    hi512 mut z = hi512{};
+    fill(z.a[..]);
+    lo512* pz = cast(&z, lo512*);
+    z.a = pz->a;
+    println(sum(z.a[..]) == want(512));
+}
+
+fn main() i32 {
+    i32[4] mut big = i32[4]{1, 2, 3, 4};
+    shift(&big);
+    println(big[0]);
+    println(big[1]);
+    println(big[2]);
+    println(big[3]);
+    up();
+    up_through();
+    down();
+    result();
+    sizes();
+    return 0;
+}

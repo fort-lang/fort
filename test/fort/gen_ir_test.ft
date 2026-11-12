@@ -141,7 +141,49 @@ fn an_aggregate_is_copied_with_a_memcpy_of_its_own_size() void {
     // 8).
     assert(gen.gen_uses_intrinsic(&e->g, gen.IN_MEMCPY));
     assert(gen.gen_uses_attr(&e->g, gen.ATTR_MEMCPY));
+    assert(!gen.gen_uses_intrinsic(&e->g, gen.IN_MEMMOVE));
     assert(!gen.gen_uses_intrinsic(&e->g, gen.IN_MEMSET));
+}
+
+// A copy between two places that can overlap in part is `llvm.memmove`, with the operands of
+// `llvm.memcpy` in the same order. It records its own declaration and the attribute group that
+// the two intrinsics share, and it does not record `llvm.memcpy`.
+fn an_aggregate_that_can_overlap_is_copied_with_a_memmove() void {
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    gen.gen_memmove(&e->g, ptr_to("%d"), 4, ptr_to("%s"), 4, 12);
+    gen.gen_memmove(&e->g, ptr_to("%d2"), 8, ptr_to("%s2"), 8, 128);
+    gen_env.expect_text(
+        gen_env.body(e),
+        gen_env.join4(e, "  call void @llvm.memmove.p0.p0.i64(ptr align 4 %d, ",
+                      "ptr align 4 %s, i64 12, i1 false)\n",
+                      "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %d2, ",
+                      "ptr align 8 %s2, i64 128, i1 false)\n"));
+    assert(gen.gen_uses_intrinsic(&e->g, gen.IN_MEMMOVE));
+    assert(gen.gen_uses_attr(&e->g, gen.ATTR_MEMCPY));
+    assert(!gen.gen_uses_intrinsic(&e->g, gen.IN_MEMCPY));
+    assert(!gen.gen_uses_intrinsic(&e->g, gen.IN_MEMSET));
+    assert(!gen.gen_uses_attr(&e->g, gen.ATTR_MEMSET));
+}
+
+// The two copies of one emitter keep their two texts: each call writes its own intrinsic.
+fn a_memcpy_and_a_memmove_stand_side_by_side() void {
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    gen.gen_memcpy(&e->g, ptr_to("%tmp0"), 8, ptr_to("%s"), 8, 16);
+    gen.gen_memmove(&e->g, ptr_to("%d"), 8, ptr_to("%s"), 8, 16);
+    gen.gen_memcpy(&e->g, ptr_to("%d"), 8, ptr_to("%tmp0"), 8, 16);
+    string[6] mut want = {
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ",
+        "ptr align 8 %s, i64 16, i1 false)\n",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %d, ",
+        "ptr align 8 %s, i64 16, i1 false)\n",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %d, ",
+        "ptr align 8 %tmp0, i64 16, i1 false)\n",
+    };
+    gen_env.expect_text(gen_env.body(e), gen_env.join_lines(e, want[0..6]));
+    assert(gen.gen_uses_intrinsic(&e->g, gen.IN_MEMCPY));
+    assert(gen.gen_uses_intrinsic(&e->g, gen.IN_MEMMOVE));
 }
 
 fn a_place_is_zeroed_with_a_memset() void {
@@ -370,6 +412,8 @@ fn main() i32 {
     the_pointer_is_field_zero_of_a_header();
     a_header_is_written_pointer_first();
     an_aggregate_is_copied_with_a_memcpy_of_its_own_size();
+    an_aggregate_that_can_overlap_is_copied_with_a_memmove();
+    a_memcpy_and_a_memmove_stand_side_by_side();
     a_place_is_zeroed_with_a_memset();
     the_zero_value_of_an_owner_is_null_or_a_memset();
     println("shapes ok");

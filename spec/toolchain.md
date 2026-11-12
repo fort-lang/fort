@@ -11,11 +11,12 @@ the compiler has no option that removes a check (D10.6, D14.1). The compiler of 
 takes the option `--no-bounds-check`, which removes the index and span checks. The compiler removes
 the option in a later change. Bootstrap-0 is frozen, and it keeps its option (D10.6). Sections 5 and
 6 describe the runtime and the IR of that date. Later changes of the compiler and the runtime bring
-seven points to them: the allocator of the runtime (D10.3, D10.9), the check of `null` (D10.6), the
+six points to them: the allocator of the runtime (D10.3, D10.9), the check of `null` (D10.6), the
 entry of `regrow` (D12.2), frame storage (D10.9, D19.4), the release-only bit in `summaries/`
-(D9.11), the zero bytes of a local (D10.1) and `llvm.memmove` for a copy of an aggregate (D6.3,
-D19.3). Sections 2.2, 5.1 and 5.2, and items 3, 8 and 10 of section 6, name each point where it
-applies. D10.1 gives also the zero bytes of a global, of a place that a `move` or a `del` empties,
+(D9.11) and the zero bytes of a local (D10.1). Sections 2.2, 5.1 and 5.2, and item 10 of section
+6, name each point where it applies. The compiler gives one more point since 2026-11-12:
+`llvm.memmove` for a copy of an aggregate (D6.3, D19.3). Items 3 and 8 of section 6 state it.
+D10.1 gives also the zero bytes of a global, of a place that a `move` or a `del` empties,
 and of an element of `regrow`. A later change measures each lowering against that rule.
 
 Sections: 1 Command line; 2 Build pipeline; 3 Build modes; 4 Diagnostics; 5 The runtime;
@@ -1366,13 +1367,15 @@ emitter's text is a change here.
    rather than as `%struct.std.rt.enum_member`, one named type for one layout.
 
 3. **Aggregates live in memory** (D19.3). Only scalars are SSA values: a struct, fixed array,
-   span or `string` always occupies a place, is copied with `llvm.memcpy.p0.p0.i64`, zeroed
+   span or `string` always occupies a place, is copied with `llvm.memmove.p0.p0.i64`, zeroed
    (`{}`, `del`, `move`) with `llvm.memset.p0.i64`, and reached field by field or element by
-   element with `getelementptr`. In the end state a copy is `llvm.memmove.p0.p0.i64`, which reads
-   the whole source before it changes the destination (D6.3). It is `llvm.memcpy.p0.p0.i64` only
-   where the compiler proves that the source and the destination are equal or do not overlap, as
-   for the copies of items 7 and 18 into a slot that the compiler made (D19.3). The compiler
-   implements this in a later change.
+   element with `getelementptr`. `llvm.memmove` reads the whole source before it changes the
+   destination (D6.3). A copy is `llvm.memcpy.p0.p0.i64` only where the compiler proves that the
+   source and the destination are equal or do not overlap (D19.3). The compiler proves it for
+   two copies: the copy of a value into a `%tmpK` slot that the translator makes for that value,
+   as for the copies of items 7 and 18, and the copy out of that slot. The slot is one whole
+   object of the size of the copy. The other range has that size and is in one object. So the
+   two ranges are the same range or have no byte in common (`fir.md` 12.1).
    The emitter never loads or stores an aggregate as one value and
    never writes `insertvalue` or `extractvalue` on one; its only `extractvalue` takes apart the
    `{iN, i1}` of an overflow intrinsic (item 15). Exactly three `getelementptr` shapes exist,
@@ -1517,21 +1520,22 @@ emitter's text is a change here.
    ```llvm
    declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly,
        ptr noalias nocapture readonly, i64, i1 immarg) #5
+   declare void @llvm.memmove.p0.p0.i64(ptr nocapture writeonly,
+       ptr nocapture readonly, i64, i1 immarg) #5
    declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg) #6
    declare { i8, i1 } @llvm.sadd.with.overflow.i8(i8, i8) #4
    declare i32 @llvm.fptosi.sat.i32.f64(double) #4
    declare void @llvm.trap() #7
    ```
 
-   The `llvm.memcpy` declaration is one line in the module and is wrapped here only to fit the
-   page. The order is: `llvm.memcpy.p0.p0.i64`, then `llvm.memset.p0.i64`, then the overflow
+   The `llvm.memcpy` declaration and the `llvm.memmove` declaration are each one line in the
+   module and are wrapped here only to fit the page. `llvm.memmove` has no `noalias`: its two
+   ranges can overlap. The order is: `llvm.memcpy.p0.p0.i64`, then `llvm.memmove.p0.p0.i64`,
+   then `llvm.memset.p0.i64`, then the overflow
    family in the order `sadd ssub smul uadd usub umul` and, within each, the widths
    `i8 i16 i32 i64` (item 15), then `llvm.fptosi.sat.i<N>.f32`, `llvm.fptosi.sat.i<N>.f64`,
    `llvm.fptoui.sat.i<N>.f32` and `llvm.fptoui.sat.i<N>.f64` by ascending target width (item
    12), then `llvm.trap` (item 20). The parameter attributes shown are part of the spelling.
-   In the end state of item 3 the module also declares `llvm.memmove.p0.p0.i64`. The change that
-   implements D19.3 gives the line of that declaration, its attribute group and its position in
-   this order.
 
    Only referenced declarations are emitted, in a fixed order (D19.5): `extern` C functions in
    first-use order, which is the order of the first call of each in the text of the function
@@ -1828,7 +1832,8 @@ numbering are normal (D19.5):
 - `#4 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }` on the
   overflow intrinsics (item 15) and on `llvm.fptosi.sat` and `llvm.fptoui.sat` (item 12).
 - `#5 = { nocallback nofree nounwind willreturn memory(argmem: readwrite) }` on `llvm.memcpy`
-  and `#6 = { nocallback nofree nounwind willreturn memory(argmem: write) }` on `llvm.memset`.
+  and on `llvm.memmove`.
+- `#6 = { nocallback nofree nounwind willreturn memory(argmem: write) }` on `llvm.memset`.
 - `#7 = { cold noreturn nounwind memory(inaccessiblemem: write) }` on `llvm.trap` (item 20).
 - `#8 = { cold noreturn nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }`, `#1` plus
   `cold`, on the definitions of the `noreturn` entry points of section 5.1 (item 14).

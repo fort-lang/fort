@@ -485,8 +485,8 @@ fn place_store(translator mut* t, fir.place p, gen.gen_val v) void {
     gen.gen_store_place(t->g, gen.gen_place{place_addr(t, p), ty}, v);
 }
 
-/// Copies the value at `src` into `dst`: `llvm.memcpy` for an aggregate, whose source address
-/// comes first, and a load and a store for a scalar.
+/// Copies the value at `src` into `dst`: `llvm.memmove` for an aggregate, whose source address
+/// comes first, and a load and a store for a scalar. The two places can overlap in part.
 fn place_copy(translator mut* t, fir.place dst, fir.place src) void {
     types.node* ty = fir.place_type(t->f, dst);
     if (!fir.type_aggregate(ty)) {
@@ -494,7 +494,7 @@ fn place_copy(translator mut* t, fir.place dst, fir.place src) void {
         return;
     }
     gen.gen_val from = place_addr(t, src);
-    copy_to(t, place_addr(t, dst), from, ty);
+    copy_to(t, place_addr(t, dst), from, ty, false);
 }
 
 /// Writes the zero value of its type into the place `p`: `llvm.memset` for an aggregate, `store
@@ -508,10 +508,20 @@ fn place_zero(translator mut* t, fir.place p) void {
     place_store(t, p, zero_value(t->g, ty));
 }
 
-// `llvm.memcpy` of a value of type `ty` from `from` to `to`.
-fn copy_to(translator mut* t, gen.gen_val to, gen.gen_val from, types.node* ty) void {
+// The copy of a value of type `ty` from `from` to `to`. Two places of a program can overlap in
+// part, and the destination must get the bytes that the source held before the copy, so the copy
+// is `llvm.memmove`. `whole_slot` says that `from` or `to` is the whole of a `%tmp` slot that
+// `hold` made with the type `ty`. The other address then holds that many bytes of one object, so
+// it is the same slot or has no byte in common with it, and the copy is `llvm.memcpy`.
+fn copy_to(translator mut* t, gen.gen_val to, gen.gen_val from, types.node* ty,
+           bool whole_slot) void {
     u64 align = types.type_alignof(ty);
-    gen.gen_memcpy(t->g, to, align, from, align, types.type_sizeof(ty));
+    u64 size = types.type_sizeof(ty);
+    if (whole_slot) {
+        gen.gen_memcpy(t->g, to, align, from, align, size);
+        return;
+    }
+    gen.gen_memmove(t->g, to, align, from, align, size);
 }
 
 // `llvm.memset` of a value of type `ty` at `at` to zero.
@@ -592,7 +602,7 @@ fn operand_value(translator mut* t, fir.operand o) gen.gen_val {
 
 // An operand after its read: the scalar value, the `@.str.N` of a `string` constant, or the
 // address that holds an aggregate. `zero` is set for an aggregate `zero` constant, which has no
-// read.
+// read. `slot` is set when `addr` is the whole of a `%tmp` slot that `hold` made for this value.
 struct held {
     gen.gen_val value;
     gen.gen_val addr;
@@ -601,6 +611,7 @@ struct held {
     bool text;
     u64 len;
     bool zero;
+    bool slot;
 }
 
 // Reads the operand `o` of type `ty` before the destination is written (spec/fir.md 6). A scalar
@@ -633,7 +644,8 @@ fn hold(translator mut* t, fir.operand o, types.node* ty, bool own_copy) held {
     }
     gen.gen_val from = h.addr;
     h.addr = gen.gen_temp_place(t->g, ty).addr;
-    copy_to(t, h.addr, from, ty);
+    h.slot = true;
+    copy_to(t, h.addr, from, ty, true);
     if (moves) {
         memset_at(t, from, ty);
     }
@@ -649,7 +661,7 @@ fn write_held(translator mut* t, held* h, gen.gen_val to) void {
     } else if (h->text) {
         gen.gen_span_init(t->g, to, h->value, gen.gen_const_unsigned(t->g, "i64", h->len));
     } else {
-        copy_to(t, to, h->addr, h->ty);
+        copy_to(t, to, h->addr, h->ty, h->slot);
     }
 }
 
@@ -1081,7 +1093,7 @@ fn slice_ptr_into(translator mut* t, fir.rvalue r, fir.place dst) void {
 
 /// Writes the rvalue of aggregate type of the assignment `s` into its place (spec/fir.md 12.1,
 /// 12.2). The operands are read first, then the address of the place is computed, then the
-/// value is written: `copy` and a `cast` are `llvm.memcpy`, `move` goes through an intermediate,
+/// value is written: `copy` and a `cast` are `llvm.memmove`, `move` goes through an intermediate,
 /// `zero` is `llvm.memset`, a `string` constant writes the header, and `aggregate`, `slice` and
 /// `slice_ptr` write member by member.
 fn rvalue_into(translator mut* t, fir.statement* s) void {

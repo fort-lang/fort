@@ -330,20 +330,85 @@ fn the_intrinsic_table_is_in_the_order_item_eight_gives() void {
     gen_env.env mut* own e = gen_env.make();
     defer gen_env.drop_made(move(e));
     gen_data.emit_intrinsic(&out, gen.IN_MEMCPY);
+    gen_data.emit_intrinsic(&out, gen.IN_MEMMOVE);
     gen_data.emit_intrinsic(&out, gen.IN_MEMSET);
     gen_data.emit_intrinsic(&out, gen.IN_OVERFLOW_FIRST);
     gen_data.emit_intrinsic(&out, gen.IN_OVERFLOW_FIRST + gen.OVF_UMUL * gen.OVF_WIDTHS + 3);
     gen_data.emit_intrinsic(&out, gen.IN_TRAP);
-    string[7] mut want = {
+    // `llvm.memmove` takes no `noalias`: its two ranges can overlap.
+    string[9] mut want = {
         "declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ",
         "ptr noalias nocapture readonly, i64, i1 immarg) #5\n",
+        "declare void @llvm.memmove.p0.p0.i64(ptr nocapture writeonly, ",
+        "ptr nocapture readonly, i64, i1 immarg) #5\n",
         "declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg) #6\n",
         "declare { i8, i1 } @llvm.sadd.with.overflow.i8(i8, i8) #4\n",
         "declare { i64, i1 } @llvm.umul.with.overflow.i64(i64, i64) #4\n",
         "declare void @llvm.trap() #7\n",
         "",
     };
-    gen_env.expect_text(strbuf.view(&out), gen_env.join_lines(e, want[0..6]));
+    gen_env.expect_text(strbuf.view(&out), gen_env.join_lines(e, want[0..8]));
+    // the table holds the three intrinsics of memory first, then each family at its first slot
+    assert(gen.IN_MEMCPY < gen.IN_MEMMOVE && gen.IN_MEMMOVE < gen.IN_MEMSET);
+    assert(gen.IN_MEMSET < gen.IN_OVERFLOW_FIRST);
+    assert(gen.IN_FPCONV_FIRST == gen.IN_OVERFLOW_FIRST + 6 * gen.OVF_WIDTHS);
+    assert(gen.IN_TRAP == gen.IN_FPCONV_FIRST + 4 * gen.FP_WIDTHS);
+    assert(gen.IN_COUNT == gen.IN_TRAP + 1);
+}
+
+// A module declares `llvm.memcpy` and `llvm.memmove` each only when a function calls it, in
+// the order of the table, and the two share the group `#5`. `take(*from)` copies into the slot
+// of the argument, which is `llvm.memcpy`; `*to = *from` copies between two places of the
+// program, which is `llvm.memmove`.
+fn a_module_declares_each_copy_intrinsic_that_it_calls() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    strbuf.append(&b, "struct pair {\n    i32 a;\n    u64 b;\n}\n");
+    strbuf.append(&b, "fn take(pair p) void {\n}\n");
+    strbuf.append(&b, "fn pass(pair* from) void {\n    take(*from);\n}\n");
+    strbuf.append(&b, "fn through(pair mut* to, pair* from) void {\n    *to = *from;\n}\n");
+    strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
+    assert(gen_env.open_module_rt(e, strbuf.view(&b)));
+    assert(gen_fir.gen_program(&e->g, &e->c.ck, &e->c.m.set));
+    string got = gen_env.module_text(e);
+    gen_env.expect_blocks(e, got);
+    string[4] mut both = {
+        "declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ",
+        "ptr noalias nocapture readonly, i64, i1 immarg) #5\n",
+        "declare void @llvm.memmove.p0.p0.i64(ptr nocapture writeonly, ",
+        "ptr nocapture readonly, i64, i1 immarg) #5\n",
+    };
+    assert(str.find(got, gen_env.join_lines(e, both[0..4])) >= 0);
+    string group = "attributes #5 = { nocallback nofree nounwind willreturn ";
+    i64 at = str.find(got, group);
+    assert(at >= 0);
+    // the group stands once for the two declarations
+    assert(str.find(got[cast(at, u64) + group.len..got.len], "attributes #5 =") < 0);
+}
+
+// A module whose only copy is between two places of the program declares `llvm.memmove` and
+// its group, and no `llvm.memcpy`.
+fn a_module_with_one_memmove_declares_no_memcpy() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    strbuf.append(&b, "struct pair {\n    i32 a;\n    u64 b;\n}\n");
+    strbuf.append(&b, "fn through(pair mut* to, pair* from) void {\n    *to = *from;\n}\n");
+    strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
+    assert(gen_env.open_module(e, strbuf.view(&b)));
+    assert(gen_fir.gen_program(&e->g, &e->c.ck, &e->c.m.set));
+    string got = gen_env.module_text(e);
+    gen_env.expect_blocks(e, got);
+    string[2] mut one = {
+        "declare void @llvm.memmove.p0.p0.i64(ptr nocapture writeonly, ",
+        "ptr nocapture readonly, i64, i1 immarg) #5\n",
+    };
+    assert(str.find(got, gen_env.join_lines(e, one[0..2])) >= 0);
+    assert(str.find(got, "@llvm.memcpy") < 0);
+    assert(str.find(got, "attributes #5 = {") >= 0);
 }
 
 // A section a module does not need leaves no trace, and the ones it has are
@@ -374,6 +439,8 @@ fn main() i32 {
     mac_extern_declarations_protect_allocator_effects();
     every_attribute_group_has_its_text();
     the_intrinsic_table_is_in_the_order_item_eight_gives();
+    a_module_declares_each_copy_intrinsic_that_it_calls();
+    a_module_with_one_memmove_declares_no_memcpy();
     an_empty_section_is_left_out_entirely();
     println("declarations ok");
     println("ok");
