@@ -18,9 +18,22 @@ import std.strbuf;
 
 // posix_openpt(3), grantpt(3), unlockpt(3) and ptsname(3), which std.libc does not declare, and
 // O_NOCTTY of open(2) on each target.
+// C: posix_openpt, posix_openpt(3) of POSIX.1-2017.
+// gives: a new descriptor of the main side of a pseudo terminal, or -1. writes: no fort storage.
+// keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn posix_openpt(i32 flags) i32;
+// C: grantpt, grantpt(3) of POSIX.1-2017.
+// gives: 0 or -1. writes: no fort storage. keeps: no pointer. calls: no fort function. frees:
+// nothing.
 extern fn grantpt(i32 fd) i32;
+// C: unlockpt, unlockpt(3) of POSIX.1-2017.
+// gives: 0 or -1. writes: no fort storage. keeps: no pointer. calls: no fort function. frees:
+// nothing.
 extern fn unlockpt(i32 fd) i32;
+// C: ptsname, ptsname(3) of POSIX.1-2017.
+// gives: null, or the name of the subordinate side, a C string with its NUL in static storage of C
+// that a later ptsname can change; no `mut`, because fort code only reads it. writes: no fort
+// storage. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn ptsname(i32 fd) char*;
 $if ($cfg(target_os) == "linux") {
     i32 O_NOCTTY = 0o400;
@@ -29,6 +42,11 @@ $if ($cfg(target_os) == "linux") {
 }
 
 // Opens the subordinate side of the pseudo terminal whose main side is `main_fd`.
+// C call grantpt: no pointer argument.
+// C call unlockpt: no pointer argument.
+// C call ptsname: no pointer argument.
+// C call str.from_cstr: name, which ptsname gave in this function, not null, with its NUL (D9.8
+// rule 3); no call of C changes it before from_cstr reads it.
 fn open_terminal(i32 main_fd) i32 {
     if (grantpt(main_fd) != 0 || unlockpt(main_fd) != 0) {
         return -1;
@@ -64,6 +82,8 @@ fn read_lines(i32 main_fd, u64 lines, strbuf.str_buf mut* out) void {
     }
 }
 
+// C call posix_openpt: no pointer argument.
+// C call libc.dup2: no pointer argument.
 fn main() i32 {
     i32 main_fd = posix_openpt(libc.O_RDWR | O_NOCTTY);
     i32 terminal = open_terminal(main_fd);

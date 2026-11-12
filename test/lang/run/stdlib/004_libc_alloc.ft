@@ -17,8 +17,21 @@ import std.mem;
 
 // bcopy(3) copies bytes through a `void*`. No cast gives a type to a `void*`
 // (D3.14), so the test gives the block of malloc to C as it is.
+// C: bcopy, bcopy(3) of glibc and of macOS, <strings.h>; POSIX.1-2001, which POSIX.1-2008 removed.
+// writes: n bytes at destination, which it reads from n bytes at source; the two can overlap.
+// gives: no result. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn bcopy(void* source, void mut* destination, u64 n) void;
 
+// C call libc.malloc: no pointer argument; C gives 32 bytes or null.
+// C call bcopy: cast(&hello[0], void*) keeps the bound of hello from element 0, hello.len, 5 bytes
+// (D9.8 rule 2); block is the storage that malloc gave in this function, 32 bytes, not null (rule
+// 3). The length hello.len, 5, fits both.
+// C call bcopy: block, the 32 bytes that malloc gave (rule 3), and cast(&back, void mut*), which
+// keeps the bound of back, one u8[5], 5 bytes (rule 2). The length 5 fits both.
+// C call libc.free: cast(move(slot), void* own), the owner that new gave, which free takes (D10.3,
+// A3); free reads no byte of it.
+// C call libc.memcpy: dst[..].ptr and src[..].ptr keep the bounds of their spans, 8 bytes each
+// (rule 2), and the length 8 fits both. The two arrays do not overlap.
 fn main() i32 {
     // A block sized in bytes, which owns: no cast gives it a type (D3.14), so
     // bcopy writes the block and copies it back into a fixed array.

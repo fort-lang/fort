@@ -32,13 +32,20 @@ import std.rt;
 string C_PATH = "c.txt";
 string F_PATH = "f.txt";
 
-fn open_write(string path) i32 {
-    return libc.open(path.ptr, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o644);
+// C call libc.open: path and its NUL are parameter sources (D9.8 rule 1), so open_write is a
+// boundary function, and each caller gives a name with its NUL.
+fn open_write(char* path) i32 {
+    return libc.open(path, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, 0o644);
 }
 
 // Reads the whole file at path into buf. Answers with the byte count.
-fn read_file(string path, u8 mut@ buf) u64 {
-    i32 fd = libc.open(path.ptr, libc.O_RDONLY, 0);
+// C call libc.open: path and its NUL are parameter sources (D9.8 rule 1), so read_file is a
+// boundary function, and each caller gives a name with its NUL.
+// C call libc.read: buf[total..].ptr keeps the bound of the sub-span, buf.len - total bytes (D9.8
+// rule 2), and the length buf.len - total fits it.
+// C call libc.close: no pointer argument.
+fn read_file(char* path, u8 mut@ buf) u64 {
+    i32 fd = libc.open(path, libc.O_RDONLY, 0);
     if (fd < 0) {
         return 0;
     }
@@ -75,6 +82,8 @@ fn pair_i64(i64 v) void {
 // The bytes of the text of each address other than null, which the byte counts leave out.
 u64 mut address_bytes = 0;
 
+// C call rt.print_ptr: p is a parameter source (D9.8 rule 1), so pair_ptr is a boundary function;
+// print_ptr reads no byte at it.
 fn pair_ptr(void* p) void {
     fprint(c_fd, p, "\n");
     rt.print_ptr(f_fd, p);
@@ -100,9 +109,16 @@ fn pair_str(string s) void {
     written += 1;
 }
 
+// C call open_write x2: &C_PATH[0] names the global C_PATH, no mut global, which a literal
+// initializes, with the NUL of that literal (D9.8 rule 4), and &F_PATH[0], the same for F_PATH.
+// C call read_file x2: &C_PATH[0] and &F_PATH[0], as for open_write; the spans keep their own
+// bounds.
+// C call libc.close x2: no pointer argument.
+// C call pair_ptr x4: null, cast(&local, void*), cast(&written, void*) and cast(block, void*);
+// pair_ptr reads no byte at them.
 fn main() i32 {
-    c_fd = open_write(C_PATH);
-    f_fd = open_write(F_PATH);
+    c_fd = open_write(&C_PATH[0]);
+    f_fd = open_write(&F_PATH[0]);
     u64 u64_max = 18446744073709551615;
     i64 i64_max = 9223372036854775807;
     i64 i64_min = -9223372036854775808;
@@ -176,8 +192,8 @@ fn main() i32 {
 
     u8 mut@ own c_bytes = new(u8, 8192);
     u8 mut@ own f_bytes = new(u8, 8192);
-    u64 c_len = read_file(C_PATH, c_bytes);
-    u64 f_len = read_file(F_PATH, f_bytes);
+    u64 c_len = read_file(&C_PATH[0], c_bytes);
+    u64 f_len = read_file(&F_PATH[0], f_bytes);
     println(written, " ", mem.equal(c_bytes[..c_len], f_bytes[..f_len]), " ",
             c_len - address_bytes, " ", f_len - address_bytes);
     del(c_bytes);

@@ -24,9 +24,11 @@ enum color {
     blue = -1,
 }
 
-rt.enum_member[3] mut table = {};
-
-fn both_enum(color c) void {
+// C call rt.print_enum: table, a span parameter, keeps its own bound (D9.8 rule 2). The name of
+// each row, a place that the function reaches through the parameter, and its NUL are parameter
+// sources (rule 1), so both_enum is a boundary function, and each caller gives a table whose names
+// end in a NUL.
+fn both_enum(color c, rt.enum_member@ table) void {
     print(c, " ");
     rt.flush(1);
     rt.print_enum(1, cast(c, i32), table[..]);
@@ -34,7 +36,13 @@ fn both_enum(color c) void {
     rt.flush(1);
 }
 
+// C call both_enum x5: table[..], a span of the three rows of the local table (D9.8 rule 2). This
+// function stores each name as &"red"[0], &"green"[0] or &"blue"[0], which ends in the NUL of its
+// literal (rule 4), before the first call, and no store changes table after that.
+// C call rt.print_enum: table[0..0], an empty span of the local table (rule 2), so print_enum reads
+// no row.
 fn main() i32 {
+    rt.enum_member[3] mut table = {};
     // Each value comes from the enum itself and not from a repeated literal.
     // This table therefore cannot drift away from the compiler's.
     table[0].value = cast(color.red, i32);
@@ -46,9 +54,9 @@ fn main() i32 {
 
     // The first member, one in the middle, and the last. The last one holds a
     // negative value.
-    both_enum(color.red);
-    both_enum(color.green);
-    both_enum(color.blue);
+    both_enum(color.red, table[..]);
+    both_enum(color.green, table[..]);
+    both_enum(color.blue, table[..]);
 
     // A value that no member holds prints as a signed number (D11.7). The
     // second value below is negative for that reason, and it is not blue's -1.
@@ -56,8 +64,8 @@ fn main() i32 {
     // get the same value.
     i32 seven = 7;
     i32 minus_five = -5;
-    both_enum(cast(seven, color));
-    both_enum(cast(minus_five, color));
+    both_enum(cast(seven, color), table[..]);
+    both_enum(cast(minus_five, color), table[..]);
 
     // An empty table matches nothing, so every value prints as itself. No
     // fort enum is empty, so no builtin can ask this question.
