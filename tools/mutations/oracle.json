@@ -27,12 +27,51 @@
     "The rows D17.20 are the rows of tools/mutations/leak.json with the same anchor that make the",
     "pass prove an exit of part 1 of the leak rule (D17.20) that a run leaks at; the test prints a",
     "false accept of rule (c) part 1 for each. The rows D17.20-inner are the rows of",
-    "tools/mutations/leak.json with the same anchor for part 2 of the leak rule: six make the pass",
-    "prove a site of part 2 that a run leaks at, and the test prints a false accept of part 2 for",
-    "each (D17.20-inner-del, -cast, -walk, -fact, -owners, -element). D17.20-inner-local and",
-    "D17.20-inner-memory change only a count: no run of the sets breaks a proof that they add (the",
-    "logs of the rounds); a store through a pointer and a call kill each fact through a memory",
-    "pointer local, as for D17.11-memory-pointer.",
+    "tools/mutations/leak.json with the same anchor for part 2 of the leak rule. D17.20-inner-del,",
+    "-cast, -walk, -fact, -owners, -element and -local make the pass prove a site of part 2 that a",
+    "run leaks at. The test prints a false accept of part 2 for each. D17.20-inner-local needs the",
+    "case `inner` of the gate, which frees an object through a field of a base pointer. The first",
+    "owner of the object of that pointer is empty, and the mutant reads that owner in place of the",
+    "owner of the object. D17.20-inner-memory changes only a count: no run of the sets breaks a",
+    "proof that it adds (the logs of the rounds). A store through a pointer and a call kill each",
+    "fact through a memory pointer local, as for D17.11-memory-pointer.",
+    "D17.11-held-memory needs the FIR case held_reach. A copy through the address of the held",
+    "address is a second pointer to its place. The mutant keeps the fact of the fresh base pointer",
+    "over a store through that copy. The test then prints a false accept at the next store.",
+    "The rows D17.20-check-exit and D17.20-abort hold the abort blocks of part 1 of the leak rule",
+    "(D17.20). D17.20-check-exit drops the obligation of a `dead` in a block that ends in a",
+    "`check`. The case `before_check` of the gate then fails the gate, and the test prints a false",
+    "accept. The rows D17.20-abort change fir.term_is_abort (src/fort/fir.ft). The pass and the",
+    "judge of the test both read that function, so the judge follows the pass. A case holds each",
+    "part of it. `before_check` holds a `check`, and `abort_block` holds a `fail`. The FIR case",
+    "leak_abort holds a `trap`, and the case `unreachable` of the gate holds an `unreachable`. A",
+    "row of FORCED stops the test for D17.20-abort-check, -fail, -none and -all. D17.20-abort-trap",
+    "and D17.20-abort-unreachable make the pass refuse an item that it accepts. The test then",
+    "stops below the row of the hand family in FLOORS.",
+    "The rows D17.20-owning change types.type_is_owning_aggregate, and the rows D17.1-reference",
+    "change types.type_is_reference (src/fort/types.ft). The pass and the judge both read these",
+    "functions too. Such a mutant is also in the compiler that builds the test, so a row can go",
+    "red before a case runs. To measure the cases alone, compile the test with a compiler with no",
+    "mutant, from a tree with the mutant in src/. The rest of this paragraph is that measurement.",
+    "The limit: a run of this table stops for 8 rows when the compiler with the mutant builds",
+    "std. The 8 rows are D17.20-owning-none and D17.20-owning-struct, the 5 rows D17.1-reference,",
+    "and D17.11-reads-none (src/fort/fir.ft). For these rows the run holds that the compiler with",
+    "the mutant does not build std. It does not hold the case of the row.",
+    "The case struct_move of the uses does not check for D17.20-owning-none and",
+    "D17.20-owning-struct. The hand case fa1 fails the gate for D17.20-owning-array and",
+    "D17.20-owning-direct, and the case `nested_array` of the gate for D17.20-owning-nested. The",
+    "sandbox runtime (test/fort/support/run_env.ft) does not check for D17.1-reference-none, -void",
+    "and -span, and the hand case fa1 for D17.1-reference-pointer. The case `string_owner` of the",
+    "gate does not check for D17.1-reference-string.",
+    "The rows D17.11-reads change fir.stmt_reads (src/fort/fir.ft), which gives each operand of a",
+    "statement. The pass reads it, and so does take_named of the judge. With D17.11-reads-none the",
+    "compiler refuses a declaration of the first batch. That is the measurement with a compiler",
+    "with no mutant. In a run of this table the row stops before that, at std (the limit above).",
+    "With D17.11-reads-callee the item of the",
+    "FIR case const_call takes no error of leak_temp, and fails the gate. D17.11-reads-del changes",
+    "only the stdout: the `del` of the FIR case del_join keeps its pointer fresh, and two false",
+    "rejects of that case go. Only the pass holds that row, because take_named reads a constant of",
+    "a function and a `del` reads a `move`.",
     "The rows D17.11-test are the rows of tools/mutations/emptiness.json with the same anchor that",
     "make a test against null prove too much: no kill after its read, the edge of the other value, a",
     "`not` that keeps the value, a store into a tested scratch local that keeps its bit, and an edge",
@@ -60,7 +99,8 @@
     "src/fort/owner/prover.ft",
     "src/fort/owner/report.ft",
     "src/fort/types.ft",
-    "src/fort/fir_flow.ft"
+    "src/fort/fir_flow.ft",
+    "src/fort/fir.ft"
   ],
   "binary": "build/Linux/debug/fort",
   "build": "ninja -C build/Linux/debug fort",
@@ -478,6 +518,55 @@
       "what": "the walk of an exit skips the statement right before it"
     },
     {
+      "decision": "D17.20-check-exit",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        while (i < count && !fir.term_is_abort(t)) {",
+      "new": "        while (i < count && !fir.term_is_abort(t) && t->kind != fir.term_kind.tk_check) {",
+      "what": "a `dead` marker in a block that ends in a `check` has no obligation"
+    },
+    {
+      "decision": "D17.20-abort-check",
+      "file": "src/fort/fir.ft",
+      "old": "    return t->kind == term_kind.tk_fail || t->kind == term_kind.tk_trap\n        || t->kind == term_kind.tk_unreachable;",
+      "new": "    return t->kind == term_kind.tk_fail || t->kind == term_kind.tk_trap\n        || t->kind == term_kind.tk_unreachable || t->kind == term_kind.tk_check;",
+      "what": "a block that ends in a `check` is an abort block, for the pass and for the judge"
+    },
+    {
+      "decision": "D17.20-abort-fail",
+      "file": "src/fort/fir.ft",
+      "old": "    return t->kind == term_kind.tk_fail || t->kind == term_kind.tk_trap\n        || t->kind == term_kind.tk_unreachable;",
+      "new": "    return t->kind == term_kind.tk_trap || t->kind == term_kind.tk_unreachable;",
+      "what": "a block that ends in a `fail` is no abort block, for the pass and for the judge"
+    },
+    {
+      "decision": "D17.20-abort-trap",
+      "file": "src/fort/fir.ft",
+      "old": "    return t->kind == term_kind.tk_fail || t->kind == term_kind.tk_trap\n        || t->kind == term_kind.tk_unreachable;",
+      "new": "    return t->kind == term_kind.tk_fail || t->kind == term_kind.tk_unreachable;",
+      "what": "a block that ends in a `trap` is no abort block, for the pass and for the judge"
+    },
+    {
+      "decision": "D17.20-abort-unreachable",
+      "file": "src/fort/fir.ft",
+      "old": "    return t->kind == term_kind.tk_fail || t->kind == term_kind.tk_trap\n        || t->kind == term_kind.tk_unreachable;",
+      "new": "    return t->kind == term_kind.tk_fail || t->kind == term_kind.tk_trap;",
+      "what": "a block that ends in `unreachable` is no abort block, for the pass and for the judge"
+    },
+    {
+      "decision": "D17.20-abort-none",
+      "file": "src/fort/fir.ft",
+      "old": "    return t->kind == term_kind.tk_fail || t->kind == term_kind.tk_trap\n        || t->kind == term_kind.tk_unreachable;",
+      "new": "    return t->kind == term_kind.tk_fail && false;",
+      "what": "no block is an abort block, for the pass and for the judge"
+    },
+    {
+      "decision": "D17.20-abort-all",
+      "file": "src/fort/fir.ft",
+      "old": "    return t->kind == term_kind.tk_fail || t->kind == term_kind.tk_trap\n        || t->kind == term_kind.tk_unreachable;",
+      "new": "    return t->kind == term_kind.tk_fail || true;",
+      "what": "each block is an abort block, for the pass and for the judge"
+    },
+    {
       "decision": "D17.20-inner-del",
       "file": "src/fort/owner/prover.ft",
       "old": "    if (s->kind == fir.stmt_kind.st_del) {\n        *out = s->place;",
@@ -805,6 +894,97 @@
       "old": "    return p->unproved > 0 || p->leaks > 0 || p->aggregate_leaks > 0 || p->use_unproved > 0;",
       "new": "    return p->unproved > 0 || p->leaks > 0 || p->use_unproved > 0;",
       "what": "an unproved exit of an owning aggregate is no error, so the oracle test rejects no such exit"
+    },
+    {
+      "decision": "D17.20-owning-none",
+      "file": "src/fort/types.ft",
+      "old": "fn type_is_owning_aggregate(node* t) bool {\n    if (t->kind == type_kind.k_array) {",
+      "new": "fn type_is_owning_aggregate(node* t) bool {\n    if (true) {\n        return false;\n    }\n    if (t->kind == type_kind.k_array) {",
+      "what": "no type is an owning aggregate, for the pass and for the judge"
+    },
+    {
+      "decision": "D17.20-owning-struct",
+      "file": "src/fort/types.ft",
+      "old": "    return t->layout->owning;",
+      "new": "    return t->layout->owning && false;",
+      "what": "no struct is an owning aggregate, for the pass and for the judge"
+    },
+    {
+      "decision": "D17.20-owning-array",
+      "file": "src/fort/types.ft",
+      "old": "        return (type_is_reference(e) && e->is_own) || type_is_owning_aggregate(e);",
+      "new": "        return false;",
+      "what": "no fixed array is an owning aggregate, for the pass and for the judge"
+    },
+    {
+      "decision": "D17.20-owning-nested",
+      "file": "src/fort/types.ft",
+      "old": "        return (type_is_reference(e) && e->is_own) || type_is_owning_aggregate(e);",
+      "new": "        return type_is_reference(e) && e->is_own;",
+      "what": "a fixed array of an owning aggregate is no owning aggregate"
+    },
+    {
+      "decision": "D17.20-owning-direct",
+      "file": "src/fort/types.ft",
+      "old": "        return (type_is_reference(e) && e->is_own) || type_is_owning_aggregate(e);",
+      "new": "        return type_is_owning_aggregate(e);",
+      "what": "a fixed array of `own` references is no owning aggregate"
+    },
+    {
+      "decision": "D17.1-reference-none",
+      "file": "src/fort/types.ft",
+      "old": "    return t->kind == type_kind.k_ptr || t->kind == type_kind.k_voidptr ||\n           t->kind == type_kind.k_span || t->kind == type_kind.k_string;",
+      "new": "    return t->kind == type_kind.k_ptr && false;",
+      "what": "no type is a reference, for the pass and for the judge"
+    },
+    {
+      "decision": "D17.1-reference-pointer",
+      "file": "src/fort/types.ft",
+      "old": "    return t->kind == type_kind.k_ptr || t->kind == type_kind.k_voidptr ||\n           t->kind == type_kind.k_span || t->kind == type_kind.k_string;",
+      "new": "    return t->kind == type_kind.k_voidptr ||\n           t->kind == type_kind.k_span || t->kind == type_kind.k_string;",
+      "what": "a pointer is no reference, for the pass and for the judge"
+    },
+    {
+      "decision": "D17.1-reference-void",
+      "file": "src/fort/types.ft",
+      "old": "    return t->kind == type_kind.k_ptr || t->kind == type_kind.k_voidptr ||\n           t->kind == type_kind.k_span || t->kind == type_kind.k_string;",
+      "new": "    return t->kind == type_kind.k_ptr ||\n           t->kind == type_kind.k_span || t->kind == type_kind.k_string;",
+      "what": "a `void*` is no reference, for the pass and for the judge"
+    },
+    {
+      "decision": "D17.1-reference-span",
+      "file": "src/fort/types.ft",
+      "old": "    return t->kind == type_kind.k_ptr || t->kind == type_kind.k_voidptr ||\n           t->kind == type_kind.k_span || t->kind == type_kind.k_string;",
+      "new": "    return t->kind == type_kind.k_ptr || t->kind == type_kind.k_voidptr ||\n           t->kind == type_kind.k_string;",
+      "what": "a span is no reference, for the pass and for the judge"
+    },
+    {
+      "decision": "D17.1-reference-string",
+      "file": "src/fort/types.ft",
+      "old": "    return t->kind == type_kind.k_ptr || t->kind == type_kind.k_voidptr ||\n           t->kind == type_kind.k_span || t->kind == type_kind.k_string;",
+      "new": "    return t->kind == type_kind.k_ptr || t->kind == type_kind.k_voidptr ||\n           t->kind == type_kind.k_span;",
+      "what": "a `string` is no reference, for the pass and for the judge"
+    },
+    {
+      "decision": "D17.11-reads-none",
+      "file": "src/fort/fir.ft",
+      "old": "fn stmt_reads(func* f, statement* s, u32 i, operand mut* out) bool {\n    if (s->kind == stmt_kind.st_del) {",
+      "new": "fn stmt_reads(func* f, statement* s, u32 i, operand mut* out) bool {\n    if (true) {\n        return false;\n    }\n    if (s->kind == stmt_kind.st_del) {",
+      "what": "a statement reads no operand, for the pass and for the judge"
+    },
+    {
+      "decision": "D17.11-reads-del",
+      "file": "src/fort/fir.ft",
+      "old": "        if (i != 0) {\n            return false;\n        }\n        *out = operand_move(s->place);",
+      "new": "        if (i != 0 || true) {\n            return false;\n        }\n        *out = operand_move(s->place);",
+      "what": "a `del` reads no operand, so it does not end the fresh state of its pointer"
+    },
+    {
+      "decision": "D17.11-reads-callee",
+      "file": "src/fort/fir.ft",
+      "old": "        if (at == 0) {\n            *out = r.callee_op;\n            return true;\n        }\n        at -= 1;",
+      "new": "        if (at == 0 && false) {\n            *out = r.callee_op;\n            return true;\n        }",
+      "what": "a call through a value reads its arguments and not its callee operand"
     }
   ]
 }
