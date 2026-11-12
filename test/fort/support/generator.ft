@@ -1,7 +1,8 @@
 /// Writes the fort source of the functions that test an ownership rule against the oracle, in the
 /// three families of spec/ownership-design.md 3.7: the exhaustive family, the seeded family and
 /// the shapes. A batch is the text of one entry module, and the oracle test checks it, lowers each
-/// function and runs it in fir.interpreter.
+/// function and runs it in fir.interpreter. The typed family, in the last part of the module,
+/// builds its functions from three tables: a type, a storage class and operations.
 //
 // A function of the exhaustive family takes the parameters `q`, `b` and `i` of design 3.7. The
 // function `drive` of PRELUDE builds `*q` and calls it, so a run can give each input: each value
@@ -930,3 +931,908 @@ fn write_seeded(strbuf.str_buf mut* b, string@ lines, u64 variant) void {
 
 // No point and no line.
 u64 NONE = 18446744073709551615;
+
+// ---- the typed family --------------------------------------------------------------------------
+
+// A function of the typed family tests one place: a value of a row of TYPES in the storage of a
+// row of STORAGES. Its statements are rows of OPERATIONS. A text of a table can hold a code, `%`
+// and a letter, which stands for a form of the cell of the function:
+//
+//   %P the place                      %T the type                  %N the name of the type
+//   %A the type as `new` takes it     %I the empty initializer     %Z the empty value
+//   %F a value with a live owner      %Y a test that an owner is live there
+//   %R a release of the place         %Q a release of `*p`         %B a pointer into the place
+//   %S the first inner owner          %O the second inner owner    %U the type of a view
+//   %E the empty view                 %L a lend of the place       %J a lend of type `i32*`
+//   %W a load through `v`             %V a load through the place  %X a store into a part
+//   %C a move through a cast          %H a shallow release         %G the head of a range loop
+//   %K a store into the key           %D a release of the container
+//   %M the arguments of a call of the function itself, before `false, i`
+//
+// `#` stands for the position of the statement, and `$` for the name of the function. A code
+// whose form is the empty text has no form in that cell, and an operation that names it does not
+// apply there. So a new type, a new storage class or a new operation is one row.
+
+/// A row of the type table: a type that holds an owner, and the forms of a place `%P` of it.
+struct type_row {
+    /// The word that names the type in `drop_<name>`, which TYPE_DECLS declares.
+    string name;
+    string text;
+    /// The type as the operand of `new(T, 2)`, or the empty text when `new` refuses the type.
+    string alloc;
+    string init;
+    string zero;
+    string fresh;
+    /// The statements that release each owner of `%P` in place.
+    string release;
+    /// A test that is true when `%P` holds an owner.
+    string holds;
+    /// A pointer that an owner of `%P` holds, or the address of its first element.
+    string probe;
+    /// The suffix of an owner of type `i32 mut* own` inside `%P`, and that of a second one.
+    string slot;
+    string other;
+    string view;
+    string blank;
+    string lend;
+    /// A lend of type `i32*`, which the extern `oracle_pass` takes.
+    string plain;
+    /// An expression of type `u64` that loads through the view `v`, and one through `%P`.
+    string load;
+    string read;
+    /// A store of a whole value into a part of `%P`.
+    string part;
+    /// The statements that move `%P` out through a cast of its `own` type.
+    string convert;
+    /// A `del` that releases the storage of `%P` and no owner inside it.
+    string shallow;
+    string each;
+}
+
+/// The count of the rows of TYPES.
+u64 TYPE_COUNT = 7;
+
+/// The type table: an owning pointer, a fixed array of owners, a struct with an owner field, an
+/// owner of a struct with owners, an owned string, a span of owners, and a struct with a struct
+/// field that holds an owner and a fixed array of owners.
+type_row[TYPE_COUNT] TYPES = {
+    {
+        .name = "ptr",
+        .text = "i32 mut* own",
+        .alloc = "i32 mut* own",
+        .init = "null",
+        .zero = "null",
+        .fresh = "new(i32)",
+        .release = "del(%P);",
+        .holds = "%P != null",
+        .probe = "%P",
+        .view = "i32*",
+        .blank = "null",
+        .lend = "%P",
+        .plain = "%P",
+        .load = "cast(*v, u64)",
+        .read = "cast(*%P, u64)",
+        .convert = "{ void mut* own t# = cast(move(%P), void mut* own); del(t#); }",
+    },
+    {
+        .name = "arr",
+        .text = "i32 mut* own[2]",
+        .alloc = "i32 mut* own[2]",
+        .init = "{}",
+        .zero = "zero_arr()",
+        .fresh = "fresh_arr()",
+        .release = "del(%P[0]); del(%P[1]);",
+        .holds = "%P[0] != null",
+        .probe = "%P[0]",
+        .slot = "[0]",
+        .other = "[i]",
+        .view = "i32*",
+        .blank = "null",
+        .lend = "%P[0]",
+        .plain = "%P[0]",
+        .load = "cast(*v, u64)",
+        .read = "cast(*%P[0], u64)",
+        .each = "for (i32 mut* n# : %P) {",
+    },
+    {
+        .name = "cell",
+        .text = "cell",
+        .alloc = "cell",
+        .init = "{}",
+        .zero = "cell{}",
+        .fresh = "cell{new(i32), null}",
+        .release = "del(%P.head);",
+        .holds = "%P.head != null",
+        .probe = "%P.head",
+        .slot = ".head",
+        .view = "i32*",
+        .blank = "null",
+        .lend = "%P.head",
+        .plain = "%P.head",
+        .load = "cast(*v, u64)",
+        .read = "cast(*%P.head, u64)",
+    },
+    {
+        .name = "box",
+        .text = "pair mut* own",
+        .alloc = "pair mut* own",
+        .init = "null",
+        .zero = "null",
+        .fresh = "fresh_box()",
+        .release = "if (%P != null) { pair mut t# = move(*%P); del(%P); del(t#.lo); del(t#.hi); }",
+        .holds = "%P != null",
+        .probe = "%P",
+        .slot = "->lo",
+        .other = "->hi",
+        .view = "i32*",
+        .blank = "null",
+        .lend = "%P->lo",
+        .plain = "%P->lo",
+        .load = "cast(*v, u64)",
+        .read = "cast(*%P->lo, u64)",
+        .part = "*%P = pair{new(i32), null};",
+        .convert = "{ void* own t# = cast(move(%P), void* own); del(t#); }",
+        .shallow = "del(%P);",
+    },
+    {
+        .name = "str",
+        .text = "string own",
+        .init = "{}",
+        .zero = "zero_str()",
+        .fresh = "fresh_str()",
+        .release = "del(%P);",
+        .holds = "%P.len != 0",
+        .probe = "&%P[0]",
+        .view = "string",
+        .blank = "\"\"",
+        .lend = "%P",
+        .load = "cast(v[0], u64)",
+        .read = "cast(%P[0], u64)",
+        .convert = "{ u8@ own t# = cast(move(%P), u8@ own); del(t#); }",
+        .each = "for (char n# : %P) {",
+    },
+    {
+        .name = "span",
+        .text = "i32 mut* own mut@ own",
+        .init = "{}",
+        .zero = "zero_span()",
+        .fresh = "fresh_span()",
+        .release = "del(%P, drop_ptr);",
+        .holds = "%P.len != 0",
+        .probe = "&%P[0]",
+        .slot = "[0]",
+        .other = "[i]",
+        .view = "i32*",
+        .blank = "null",
+        .lend = "%P[0]",
+        .plain = "%P[0]",
+        .load = "cast(*v, u64)",
+        .read = "cast(*%P[0], u64)",
+        .shallow = "del(%P);",
+        .each = "for (i32 mut* n# : %P) {",
+    },
+    {
+        .name = "nest",
+        .text = "nest",
+        .alloc = "nest",
+        .init = "{}",
+        .zero = "nest{}",
+        .fresh = "fresh_nest()",
+        .release = "del(%P.inner.head); del(%P.items[0]); del(%P.items[1]);",
+        .holds = "%P.inner.head != null",
+        .probe = "%P.inner.head",
+        .slot = ".inner.head",
+        .other = ".items[i]",
+        .view = "i32*",
+        .blank = "null",
+        .lend = "%P.inner.head",
+        .plain = "%P.inner.head",
+        .load = "cast(*v, u64)",
+        .read = "cast(*%P.inner.head, u64)",
+        .part = "%P.inner = cell{new(i32), null};",
+    },
+};
+
+/// The declarations of the rows of TYPES: the structs, a function that gives the empty value and
+/// one that gives a value with a live owner, where the row names them, and for each row
+/// `drop_<name>`, which releases a value that the caller moves in.
+u64 TYPE_DECL_LINES = 81;
+string[TYPE_DECL_LINES] TYPE_DECLS = {
+    "struct pair {",
+    "    i32 mut* own lo;",
+    "    i32 mut* own hi;",
+    "}",
+    "struct cell {",
+    "    i32 mut* own head;",
+    "    i32* seen;",
+    "}",
+    "struct nest {",
+    "    cell inner;",
+    "    i32 mut* own[2] items;",
+    "}",
+    "fn drop_ptr(i32 mut* own d) void {",
+    "    del(d);",
+    "}",
+    "fn zero_arr() i32 mut* own[2] {",
+    "    i32 mut* own[2] d = {};",
+    "    return d;",
+    "}",
+    "fn fresh_arr() i32 mut* own[2] {",
+    "    i32 mut* own[2] d = {new(i32), new(i32)};",
+    "    return d;",
+    "}",
+    "fn drop_arr(i32 mut* own[2] mut d) void {",
+    "    del(d[0]);",
+    "    del(d[1]);",
+    "}",
+    "fn drop_cell(cell mut d) void {",
+    "    del(d.head);",
+    "}",
+    "fn fresh_box() pair mut* own {",
+    "    pair mut* own d = new(pair);",
+    "    d->lo = new(i32);",
+    "    return d;",
+    "}",
+    "fn drop_box(pair mut* own mut d) void {",
+    "    if (d == null) {",
+    "        return;",
+    "    }",
+    "    pair mut t = move(*d);",
+    "    del(d);",
+    "    del(t.lo);",
+    "    del(t.hi);",
+    "}",
+    "fn zero_str() string own {",
+    "    string own d = {};",
+    "    return d;",
+    "}",
+    "fn fresh_str() string own {",
+    "    u8 mut@ own d = new(u8, 2);",
+    "    return cast(move(d), string own);",
+    "}",
+    "fn drop_str(string own d) void {",
+    "    del(d);",
+    "}",
+    "fn zero_span() i32 mut* own mut@ own {",
+    "    i32 mut* own mut@ own d = {};",
+    "    return d;",
+    "}",
+    "fn fresh_span() i32 mut* own mut@ own {",
+    "    i32 mut* own mut@ own d = new(i32 mut* own, 2);",
+    "    i32 mut* own nv = new(i32);",
+    "    i32 mut* own old = move(d[0]);",
+    "    d[0] = move(nv);",
+    "    del(old);",
+    "    return d;",
+    "}",
+    "fn drop_span(i32 mut* own mut@ own d) void {",
+    "    del(d, drop_ptr);",
+    "}",
+    "fn fresh_nest() nest {",
+    "    nest mut d = nest{};",
+    "    d.inner.head = new(i32);",
+    "    d.items[1] = new(i32);",
+    "    return d;",
+    "}",
+    "fn drop_nest(nest mut d) void {",
+    "    del(d.inner.head);",
+    "    del(d.items[0]);",
+    "    del(d.items[1]);",
+    "}",
+};
+
+/// A row of the storage table: where the place `%P` of a function stands, and what the function
+/// and `drive` need around it. A text of several statements has a newline between them.
+struct storage_row {
+    string name;
+    string place;
+    /// A declaration of the batch that the storage needs.
+    string decl;
+    /// The parameter of the function before `bool b, u64 i`, its type as a function type writes
+    /// it, and the argument that the function passes when it calls itself (`%M`).
+    string param;
+    string takes;
+    string again;
+    /// The locals of the storage, at the start of the function, and the places of the storage
+    /// that the function fills with DRIVE_FILL after them, one place on each line.
+    string local;
+    string entry;
+    string key;
+    string container;
+    /// The statements that release the place at the end of the function.
+    string end;
+    /// The place whose state at the entry `drive` sets before the call (DRIVE_FILL), and the
+    /// argument that `drive` passes. `live` is the input that says that the place holds an owner
+    /// at the entry: `drive` reads it there, and a function with the parameter `live` reads it in
+    /// `local` or fills each place of `entry` from it.
+    string fill;
+    string pass;
+    /// What the callback of `oracle_call` does to the storage.
+    string shared;
+}
+
+/// The count of the rows of STORAGES.
+u64 STORAGE_COUNT = 6;
+
+/// The storage table: a local, a parameter, a field through a pointer parameter, an element of a
+/// fixed array, an element of an `own` span whose deferred `del(s, d)` releases it, and a global.
+/// The place of each row holds an owner at the entry of the function when the input `live` is
+/// true, and the empty value when it is false.
+storage_row[STORAGE_COUNT] STORAGES = {
+    {
+        .name = "local",
+        .place = "x",
+        .param = "bool live, ",
+        .takes = "bool, ",
+        .again = "live, ",
+        .local = "%T mut x = make(live);",
+        .end = "drop_%N(move(x));",
+        .pass = "live, ",
+    },
+    {
+        .name = "parameter",
+        .place = "x",
+        .param = "%T mut x, ",
+        .takes = "%T, ",
+        .again = "move(x), ",
+        .end = "drop_%N(move(x));",
+        .pass = "make(live), ",
+    },
+    {
+        .name = "field",
+        .place = "q->held",
+        .decl = "struct hold {\n    %T held;\n    u64 count;\n}\nhold mut S = {};",
+        .param = "hold mut* q, ",
+        .takes = "hold mut*, ",
+        .again = "q, ",
+        .fill = "S.held",
+        .pass = "&S, ",
+        .shared = "put(&S.held);",
+    },
+    {
+        .name = "element",
+        .place = "row[k]",
+        .param = "bool live, ",
+        .takes = "bool, ",
+        .again = "live, ",
+        .local = "%T[2] mut row = {make(live), make(live)};\nu64 mut k = 0;",
+        .key = "k = i;",
+        .end = "drop_%N(move(row[0]));\ndrop_%N(move(row[1]));",
+        .pass = "live, ",
+    },
+    {
+        .name = "spanned",
+        .place = "many[k]",
+        .param = "bool live, ",
+        .takes = "bool, ",
+        .again = "live, ",
+        .local = "%T mut@ own mut many = new(%A, 2);\ndefer del(many, drop_%N);\nu64 mut k = 0;",
+        .entry = "many[0]\nmany[1]",
+        .key = "k = i;",
+        .container = "del(many, drop_%N);",
+        .pass = "live, ",
+    },
+    {
+        .name = "global",
+        .place = "G",
+        .fill = "G",
+        .shared = "put(&G);",
+    },
+};
+
+/// A row of the operation table: a statement over the place. A text that ends in `{` opens a
+/// block, which closes after the last statement.
+struct operation_row {
+    string name;
+    string text;
+}
+
+/// The count of the rows of OPERATIONS.
+u64 OPERATION_COUNT = 50;
+
+/// The operation table. The whole value: an `alloc`, a release, a store of the empty value, a
+/// `move` out and in, and a drop. The inner owners: the same on the first one, and an `alloc` and
+/// a `del` on the second one. The views: a lend, a load through the view, a load and a test
+/// through the place, and a lend through a callee. A deferred drop. The calls: an extern that
+/// keeps a pointer, one that returns its view, one that calls back into the batch, a callee that
+/// changes the place through a pointer, the function itself, and `panic`. A store into the key of
+/// the storage. The control flow: an `if`, a loop, a `return`, a test of the place on null in both
+/// senses, and a loop that releases. Then a cast of the owner, a call through a function value,
+/// `?:` with a `move` and with a load, a `switch` as a block and with two arms, a range loop, a
+/// release of the container, a `del` that keeps the inner owners, a whole store, a release and a
+/// `move` through a pointer to the place, a store into a part, and a `move` to and from a global.
+operation_row[OPERATION_COUNT] OPERATIONS = {
+    {"alloc", "%P = %F;"},
+    {"release", "%R"},
+    {"clear", "%P = %Z;"},
+    {"move out", "e = move(%P);"},
+    {"move in", "%P = move(y);"},
+    {"drop", "drop_%N(move(%P));"},
+    {"slot alloc", "%S = new(i32);"},
+    {"slot del", "del(%S);"},
+    {"slot clear", "%S = null;"},
+    {"slot move out", "m = move(%S);"},
+    {"slot move in", "%S = move(m);"},
+    {"other alloc", "%O = new(i32);"},
+    {"other del", "del(%O);"},
+    {"lend", "v = %L;"},
+    {"load", "u = %W;"},
+    {"read", "u = %V;"},
+    {"address", "u = cast(%B, u64);"},
+    {"lend call", "v = id(%L);"},
+    {"defer", "defer drop_%N(move(%P));"},
+    {"extern keep", "libc.oracle_keep(cast(%B, void*));"},
+    {"extern pass", "v = libc.oracle_pass(%J);"},
+    {"extern call", "libc.oracle_call(cb, 0);"},
+    {"put", "put(&%P);"},
+    {"self", "if (b) { $(%Mfalse, i); }"},
+    {"panic", "panic(\"stop\");"},
+    {"key", "%K"},
+    {"if", "if (b) {"},
+    {"loop", "for (u64 mut t# = 0; t# < 2; t#++) {"},
+    {"return", "return;"},
+    {"if empty", "if (!(%Y)) {"},
+    {"if live", "if (%Y) {"},
+    {"while", "while (%Y) { %R }"},
+    {"cast", "%C"},
+    {"function value", "{ fn (%T mut*) void f# = put; f#(&%P); }"},
+    {"choose", "%P = b ? move(y) : %F;"},
+    {"choose load", "u = %Y ? %V : 0;"},
+    {"switch", "switch (i) { case 0:"},
+    {"switch arms", "switch (i) { case 0: %R default: %P = move(y); }"},
+    {"range", "%G"},
+    {"container", "%D"},
+    {"shallow", "%H"},
+    {"store through", "*p = %F;"},
+    {"release through", "%Q"},
+    {"move through", "e = move(*p);"},
+    {"part", "%X"},
+    {"to global", "H = move(%P);"},
+    {"from global", "%P = move(H);"},
+    {"swap", "{ %T t# = move(%P); %P = move(y); drop_%N(move(t#)); }"},
+    {"take", "{ %T t# = move(%P); drop_%N(move(t#)); }"},
+    {"else", "if (b) { %R } else { %P = move(y); }"},
+};
+
+/// A local that a function of the typed family can declare, and its declaration. A function
+/// declares a local only when a statement names it.
+struct local_row {
+    string name;
+    string decl;
+}
+
+/// The count of the rows of TYPED_LOCALS.
+u64 TYPED_LOCAL_COUNT = 6;
+
+/// The locals: a value of the type with a live owner and an empty one, each with a deferred drop;
+/// an owning pointer for the inner owners, with a deferred `del`; a view; a `u64`; and a pointer to
+/// the place.
+local_row[TYPED_LOCAL_COUNT] TYPED_LOCALS = {
+    {"y", "%T mut y = %F;\ndefer drop_%N(move(y));"},
+    {"e", "%T mut e = %I;\ndefer drop_%N(move(e));"},
+    {"m", "i32 mut* own mut m = null;\ndefer del(m);"},
+    {"v", "%U mut v = %E;"},
+    {"u", "u64 mut u = 0;"},
+    {"p", "%T mut* p = &%P;"},
+};
+
+/// The declarations of a batch after TYPE_DECLS and the declaration of the storage: the two
+/// globals, a function that gives a live or an empty value, a callee that changes an owner through
+/// a pointer in the swap form, and a callee that returns its view.
+u64 TYPED_PRELUDE_LINES = 17;
+string[TYPED_PRELUDE_LINES] TYPED_PRELUDE = {
+    "%T mut G = %I;",
+    "%T mut H = %I;",
+    "fn make(bool live) %T {",
+    "    if (live) {",
+    "        return %F;",
+    "    }",
+    "    return %Z;",
+    "}",
+    "fn put(%T mut* s) void {",
+    "    %T nv = %F;",
+    "    %T old = move(*s);",
+    "    *s = move(nv);",
+    "    drop_%N(move(old));",
+    "}",
+    "fn id(%U w) %U {",
+    "    return w;",
+    "}",
+};
+
+/// How `drive` or the function gives the place `%P` its state at the entry: the swap form.
+string DRIVE_FILL = "%T nv = make(live);\n%T old = move(%P);\n%P = move(nv);\ndrop_%N(move(old));";
+
+/// The prefix of the name of a function of the typed family; its index follows.
+string TYPED_PREFIX = "typ";
+
+/// The input that says that the place holds an owner at the entry of the function.
+u32 READS_LIVE = 8;
+
+// What a text of a table expands over: the cell, the place, the position of the statement and
+// the index of the function.
+struct frame {
+    type_row* ty;
+    storage_row* st;
+    string place;
+    u64 pos;
+    u64 index;
+}
+
+// The form of the code `code` that is a text of the tables, or the empty text.
+fn form(char code, frame* fr) string {
+    switch (code) {
+        case 'T': return fr->ty->text;
+        case 'A': return fr->ty->alloc;
+        case 'Y': return fr->ty->holds;
+        case 'N': return fr->ty->name;
+        case 'I': return fr->ty->init;
+        case 'Z': return fr->ty->zero;
+        case 'F': return fr->ty->fresh;
+        case 'R': return fr->ty->release;
+        case 'B': return fr->ty->probe;
+        case 'U': return fr->ty->view;
+        case 'E': return fr->ty->blank;
+        case 'L': return fr->ty->lend;
+        case 'J': return fr->ty->plain;
+        case 'W': return fr->ty->load;
+        case 'V': return fr->ty->read;
+        case 'X': return fr->ty->part;
+        case 'C': return fr->ty->convert;
+        case 'H': return fr->ty->shallow;
+        case 'G': return fr->ty->each;
+        case 'K': return fr->st->key;
+        case 'D': return fr->st->container;
+        default: return "";
+    }
+}
+
+// Appends `text` with each code replaced by its form over `fr`. It gives false, with a part of
+// the text in `b`, when a code has no form there.
+fn expand(strbuf.str_buf mut* b, string text, frame* fr) bool {
+    for (u64 mut at = 0; at < text.len; at++) {
+        char c = text[at];
+        if (c == '#') {
+            strbuf.append_u64(b, fr->pos);
+        } else if (c == '$') {
+            append_name(b, TYPED_PREFIX, fr->index);
+        } else if (c != '%' || at + 1 == text.len) {
+            strbuf.push(b, c);
+        } else {
+            at += 1;
+            if (!expand_code(b, text[at], fr)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Appends the form of the code `code` over `fr`, and gives false when it has none.
+fn expand_code(strbuf.str_buf mut* b, char code, frame* fr) bool {
+    if (code == 'P') {
+        strbuf.append(b, fr->place);
+        return true;
+    } else if (code == 'M') {
+        return expand(b, fr->st->again, fr);
+    } else if (code == 'S' || code == 'O') {
+        string mut suffix = fr->ty->slot;
+        if (code == 'O') {
+            suffix = fr->ty->other;
+        }
+        strbuf.append(b, fr->place);
+        strbuf.append(b, suffix);
+        return suffix.len > 0;
+    } else if (code == 'Q') {
+        frame through = frame{fr->ty, fr->st, "(*p)", fr->pos, fr->index};
+        return expand(b, fr->ty->release, &through);
+    }
+    string text = form(code, fr);
+    return text.len > 0 && expand(b, text, fr);
+}
+
+// The frame of the cell of row `ty` of TYPES and row `st` of STORAGES.
+fn cell_frame(u64 ty, u64 st, u64 pos, u64 index) frame {
+    return frame{&TYPES[ty], &STORAGES[st], STORAGES[st].place, pos, index};
+}
+
+/// Whether the cell of row `ty` of TYPES and row `st` of STORAGES is a cell of the family: the
+/// type has a text, the storage has a place, and each code of the locals of the storage has a
+/// form there. A row with no text is no type, and a row with no place is no storage class.
+fn typed_fits(u64 ty, u64 st) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    frame fr = cell_frame(ty, st, 0, 0);
+    return TYPES[ty].text.len > 0 && STORAGES[st].place.len > 0
+        && expand(&b, STORAGES[st].local, &fr);
+}
+
+/// Whether row `op` of OPERATIONS applies to the cell of row `ty` of TYPES and row `st` of
+/// STORAGES: the row has a text, each code of the text has a form there, and no row before it
+/// gives the same statement there. A row with no text is no operation. For the type `cell` the
+/// rows `release` and `slot del` give one statement, `del(%P.head);`, and the second of two such
+/// rows adds only functions with the text of another function.
+fn typed_applies(u64 op, u64 ty, u64 st) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    frame fr = cell_frame(ty, st, 0, 0);
+    string text = OPERATIONS[op].text;
+    if (!typed_fits(ty, st) || text.len == 0 || !expand(&b, text, &fr)) {
+        return false;
+    }
+    strbuf.str_buf mut other = strbuf.create();
+    defer del(other.data);
+    return !is_repeat(&other, strbuf.view(&b), op, &fr);
+}
+
+// Whether a row of OPERATIONS before row `op` gives the statement `statement` over `fr`. `other`
+// is an empty buffer that the caller frees.
+fn is_repeat(strbuf.str_buf mut* other, string statement, u64 op, frame* fr) bool {
+    for (u64 mut before = 0; before < op; before++) {
+        strbuf.clear(other);
+        if (expand(other, OPERATIONS[before].text, fr) && strbuf.view(other) == statement) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The rows of OPERATIONS that apply to the cell, in the order of the table, into `ops`, and
+/// their count. `ops` holds OPERATION_COUNT elements.
+fn typed_vocabulary(u64 ty, u64 st, u64 mut@ ops) u64 {
+    u64 mut count = 0;
+    for (u64 mut op = 0; op < OPERATION_COUNT; op++) {
+        if (typed_applies(op, ty, st)) {
+            ops[count] = op;
+            count += 1;
+        }
+    }
+    return count;
+}
+
+/// The count of the functions of `n` operations of the cell: each sequence of `n` rows of its
+/// vocabulary, and 0 when the cell is no cell of the family.
+fn typed_cell_count(u64 ty, u64 st, u64 n) u64 {
+    u64[OPERATION_COUNT] mut ops = {};
+    u64 size = typed_vocabulary(ty, st, ops[..]);
+    if (!typed_fits(ty, st)) {
+        return 0;
+    }
+    u64 mut count = 1;
+    for (u64 mut k = 0; k < n; k++) {
+        count = count * size;
+    }
+    return count;
+}
+
+/// The count of the functions of `n` operations of the typed family: the sum over each cell.
+fn typed_count(u64 n) u64 {
+    u64 mut count = 0;
+    for (u64 mut ty = 0; ty < TYPE_COUNT; ty++) {
+        for (u64 mut st = 0; st < STORAGE_COUNT; st++) {
+            count += typed_cell_count(ty, st, n);
+        }
+    }
+    return count;
+}
+
+// Appends `lines` at `depth`, each line of it on a line of its own.
+fn append_lines(strbuf.str_buf mut* b, string lines, u64 depth) void {
+    indent(b, depth);
+    for (u64 mut at = 0; at < lines.len; at++) {
+        strbuf.push(b, lines[at]);
+        if (lines[at] == '\n') {
+            indent(b, depth);
+        }
+    }
+    strbuf.push(b, '\n');
+}
+
+// Appends `text` over `fr` at `depth`, each line of it on a line of its own. The empty text, and
+// a text with a code that has no form, append nothing. The use rule of `move` and `del` needs
+// the read of the buffer in a frame of its own (append_lines).
+fn write_block(strbuf.str_buf mut* b, string text, frame* fr, u64 depth) void {
+    strbuf.str_buf mut lines = strbuf.create();
+    defer del(lines.data);
+    if (text.len > 0 && expand(&lines, text, fr)) {
+        append_lines(b, strbuf.view(&lines), depth);
+    }
+}
+
+/// Appends the declarations of a batch of the cell of row `ty` of TYPES and row `st` of STORAGES:
+/// TYPE_DECLS, the declaration of the storage, TYPED_PRELUDE, the callback of `oracle_call`,
+/// which changes `H` and the storage, and `drive`, which gives the place its state at the entry
+/// and calls a function of the cell.
+fn write_typed_prelude(strbuf.str_buf mut* b, u64 ty, u64 st) void {
+    frame fr = cell_frame(ty, st, 0, 0);
+    strbuf.append(b, "import std.libc;\n");
+    write_lines(b, TYPE_DECLS[..]);
+    write_block(b, fr.st->decl, &fr, 0);
+    for (string line : TYPED_PRELUDE) {
+        write_block(b, line, &fr, 0);
+    }
+    strbuf.append(b, "fn cb(i32 n) i32 {\n    put(&H);\n");
+    write_block(b, fr.st->shared, &fr, 1);
+    strbuf.append(b, "    return n;\n}\n");
+    strbuf.append(b, "fn drive(fn (");
+    expand(b, fr.st->takes, &fr);
+    strbuf.append(b, "bool, u64) void f, bool b, u64 i, bool live) i32 {\n");
+    if (fr.st->fill.len > 0) {
+        frame outer = frame{fr.ty, fr.st, fr.st->fill, 0, 0};
+        write_block(b, DRIVE_FILL, &outer, 1);
+    }
+    strbuf.append(b, "    f(");
+    expand(b, fr.st->pass, &fr);
+    strbuf.append(b, "b, i);\n");
+    strbuf.append(b, "    return 0;\n}\n");
+}
+
+/// What write_typed says about a function: the inputs that it reads as READS bits, the count of
+/// its lines, the line of its first statement, where 0 is the line of its head, and the row of
+/// OPERATIONS of each statement. Statement `k` stands on line `first + k`.
+struct typed_shape {
+    u32 reads;
+    u32 lines;
+    u32 first;
+    u64[MOST_STATEMENTS] ops;
+}
+
+// The inputs that `text` reads, as READS bits, and the rows of TYPED_LOCALS that it names, as
+// bits of `names`.
+fn typed_scan(string text, u32 mut* names) u32 {
+    u32 mut reads = 0;
+    u64 mut at = 0;
+    while (at < text.len) {
+        if (!is_word(text[at])) {
+            at += 1;
+            continue;
+        }
+        u64 start = at;
+        while (at < text.len && is_word(text[at])) {
+            at += 1;
+        }
+        string word = text[start..at];
+        if (word == "b") {
+            reads = reads | READS_B;
+        } else if (word == "i") {
+            reads = reads | READS_I;
+        } else if (word == "live") {
+            reads = reads | READS_LIVE;
+        }
+        for (u64 mut k = 0; k < TYPED_LOCAL_COUNT; k++) {
+            if (word == TYPED_LOCALS[k].name) {
+                *names = *names | (cast(1, u32) << cast(k, u32));
+            }
+        }
+    }
+    return reads;
+}
+
+// The balance of the braces of `text`.
+fn brace_balance(string text) i64 {
+    i64 mut balance = 0;
+    for (char c : text) {
+        if (c == '{') {
+            balance += 1;
+        } else if (c == '}') {
+            balance -= 1;
+        }
+    }
+    return balance;
+}
+
+// Fills `shape->ops` with the `n` digits of `seq` in the base `ops.len`, as rows of OPERATIONS:
+// the first statement is the highest digit. A vocabulary with no row has no digit, so only the
+// function with no statement is a function of it.
+fn fill_digits(u64@ ops, u64 n, u64 seq, typed_shape mut* shape) void {
+    if (n > 0 && ops.len == 0) {
+        panic("generator.fill_digits: the vocabulary holds no operation");
+    }
+    u64 mut rest = seq;
+    for (u64 mut pos = n; pos > 0; pos--) {
+        shape->ops[pos - 1] = ops[rest % ops.len];
+        rest = rest / ops.len;
+    }
+}
+
+// Appends the text of each of the `n` statements of `shape` to `body`. Statement `pos` ends at
+// `cuts[pos + 1]`.
+fn expand_body(strbuf.str_buf mut* body, u64 ty, u64 st, u64 n, u64 index, typed_shape* shape,
+               u64 mut@ cuts) void {
+    for (u64 mut pos = 0; pos < n; pos++) {
+        frame fr = cell_frame(ty, st, pos, index);
+        expand(body, OPERATIONS[shape->ops[pos]].text, &fr);
+        cuts[pos + 1] = body->len;
+    }
+}
+
+// Appends the function `index` of the cell with the `n` statements of `body`, which `cuts` splits.
+fn write_function(strbuf.str_buf mut* b, u64 ty, u64 st, u64 n, u64 index, string body,
+                  u64@ cuts, typed_shape mut* shape) void {
+    frame fr = cell_frame(ty, st, 0, index);
+    u32 mut names = 0;
+    shape->reads = typed_scan(body, &names) | typed_scan(fr.st->pass, &names);
+    if (fr.st->fill.len > 0) {
+        shape->reads = shape->reads | READS_LIVE;
+    }
+    u64 start = b->len;
+    strbuf.append(b, "fn ");
+    append_name(b, TYPED_PREFIX, index);
+    strbuf.push(b, '(');
+    expand(b, fr.st->param, &fr);
+    strbuf.append(b, "bool b, u64 i) void {\n");
+    write_block(b, fr.st->local, &fr, 1);
+    write_entry(b, &fr);
+    for (u64 mut k = 0; k < TYPED_LOCAL_COUNT; k++) {
+        if ((names & (cast(1, u32) << cast(k, u32))) != 0) {
+            write_block(b, TYPED_LOCALS[k].decl, &fr, 1);
+        }
+    }
+    shape->first = count_newlines(strbuf.view(b)[start..]);
+    i64 mut depth = 1;
+    for (u64 mut pos = 0; pos < n; pos++) {
+        string text = body[cuts[pos]..cuts[pos + 1]];
+        indent(b, cast(depth, u64));
+        strbuf.append(b, text);
+        strbuf.push(b, '\n');
+        depth += brace_balance(text);
+    }
+    while (depth > 1) {
+        depth -= 1;
+        indent(b, cast(depth, u64));
+        strbuf.append(b, "}\n");
+    }
+    write_block(b, fr.st->end, &fr, 1);
+    strbuf.append(b, "}\n");
+    shape->lines = count_newlines(strbuf.view(b)[start..]);
+}
+
+// Appends a block for each place of the `entry` of the storage of `fr`: DRIVE_FILL over that
+// place. Each block has a scope of its own, so two blocks can declare the same names.
+fn write_entry(strbuf.str_buf mut* b, frame* fr) void {
+    string places = fr->st->entry;
+    u64 mut start = 0;
+    for (u64 mut at = 0; at <= places.len; at++) {
+        if (at < places.len && places[at] != '\n') {
+            continue;
+        }
+        if (at > start) {
+            frame inner = frame{fr->ty, fr->st, places[start..at], 0, fr->index};
+            strbuf.append(b, "    {\n");
+            write_block(b, DRIVE_FILL, &inner, 2);
+            strbuf.append(b, "    }\n");
+        }
+        start = at + 1;
+    }
+}
+
+/// Appends the function `index` of the cell of row `ty` of TYPES and row `st` of STORAGES, and
+/// fills `shape`. `ops` is the vocabulary of the cell, and the statements are the `n` digits of
+/// `seq` in the base `ops.len`, the first statement in the highest digit. The function declares
+/// the locals of the storage, fills each place of the `entry` of the storage, declares each row
+/// of TYPED_LOCALS that a statement names, closes each open block after the last statement, and
+/// ends with the release of the storage. A cell whose vocabulary holds no row has only the
+/// function with no statement.
+fn write_typed(strbuf.str_buf mut* b, u64 ty, u64 st, u64@ ops, u64 n, u64 seq, u64 index,
+               typed_shape mut* shape) void {
+    if (n > MOST_STATEMENTS) {
+        panic("generator.write_typed: too many statements");
+    }
+    fill_digits(ops, n, seq, shape);
+    strbuf.str_buf mut body = strbuf.create();
+    defer del(body.data);
+    u64[MOST_STATEMENTS + 1] mut cuts = {};
+    expand_body(&body, ty, st, n, index, shape, cuts[..]);
+    write_function(b, ty, st, n, index, strbuf.view(&body), cuts[..], shape);
+}
+
+// The count of the newlines of `text`.
+fn count_newlines(string text) u32 {
+    u32 mut count = 0;
+    for (char c : text) {
+        if (c == '\n') {
+            count += 1;
+        }
+    }
+    return count;
+}

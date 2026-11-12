@@ -743,6 +743,15 @@ set_tests_properties(long_imports_selftest PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# Hold tools/typed_pins.py to a small corpus: the lines it replaces, the files it writes, --check,
+# and a compile or a run that does not exit 0.
+add_test(NAME typed_pins_selftest
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/typed_pins_test.py"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(typed_pins_selftest PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # Hold the text that std/linux/os.ft and std/darwin/os.ft share after their marker line equal.
 add_test(NAME std_os_shared
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/std_os_shared_test.py"

@@ -35,7 +35,7 @@ bullet at a time and without a rewrite.
   the modules of both targets), `fort_lint_rows` (`test/fort_lint_rows_test.py`: each rule of the
   lint on the audit rows of D9.8, and the boundary functions of the lint against the ones that the
   compiler refuses, over a module of each parameter type and over the `std` of the build),
-  `panic_coverage`, `panic_coverage_selftest` and one
+  `panic_coverage`, `panic_coverage_selftest`, `typed_pins_selftest` (`tools/typed_pins.py`) and one
   `mutation_anchors_<table>` test for each table in `tools/mutations`, the three `mutate_`
   tests of `--check` over the fixture `test/mutate/strict_table.json`, and `drop-fields`
   (`test/drop_fields_test.py`: no function of src/fort, src/lsp, std, test/fort, test/lsp or
@@ -994,6 +994,91 @@ bullet at a time and without a rewrite.
   `dump <form> <class> <type>` prints the program of one cell, with each position from 0. Give the
   dump to `fort --check --whole-store-report --leak-report --span-del-report` to see the
   diagnostic of the driver.
+- **The typed family judges each function that the compiler takes with exit 0 against the runs of
+  the oracle** (`test/fort/owner/typed/`, `test/fort/support/judgement.ft`).
+  `test/fort/support/generator.ft` builds the family from three tables: `TYPES`, `STORAGES` and
+  `OPERATIONS`. A function tests one place, a value of a type in a storage class, and each statement
+  of it is an operation. A text of a table holds codes: `%P` is the place, `%R` its release, `%F` a
+  value with a live owner. A code whose form is the empty text has no form in that cell, and an
+  operation that names it does not apply there. An operation whose statement repeats the statement
+  of an earlier row in a cell does not apply there. So a new type, storage class or operation is one
+  row. The expected stdout of `count_test.ft` shows what the row adds. It holds the count of the
+  cells, the vocabulary of each cell, the cells of each operation and the functions of 0 to 3
+  operations. Each storage class takes the input `live`. The place holds an owner at the entry when
+  `live` is true, and the empty value when it is false.
+  **The judgement is closed-world.** `judgement.ft` checks a batch of 200 functions of one cell and
+  lowers each. It gives each a verdict as a build with
+  `--whole-store-report --leak-report --span-del-report` does. The checker, the lowering or the
+  verifier gives `refused`. A pass of `owner.prover` or the release-only rule of D17.9 gives
+  `rejected`. A report line gives `reported`, and each other function is `accepted`. The compiler
+  exits 0 for `accepted` and for `reported`, and the judgement runs each such function with each
+  input that it reads. Each event of such a run goes through the gate of the oracle tests first
+  (`disposition.is_error`), and `judgement.rule` gives it a ruling. The gate takes two events as no
+  error. The first is a `leak` at a `dead` of a block that ends in an abort (D17.20). The second is
+  a `leak at exit` of a cycle of owners. The gate does not judge the six kinds that its table
+  trusts. The judgement takes an event of such a kind as an error, so each of the ten kinds of
+  `fir.shadow` is an error here. Three report rules take an error of the gate, and each needs a
+  report line that names the line of the event. A line of `--leak-report` takes a `leak` or a
+  `leak at exit` on the line that it names. A line of `--whole-store-report` takes an `overwrite` on
+  the line that it names. `--span-del-report` takes a `leak` on the line of a `del` that it lists. A
+  report line takes no event on another line of its function, and the test compares the line and not
+  the column. No report option owns another kind, so no report line takes a `use after move` or a
+  `use after release`. A run that ends in a fault other than `null dereference` with no error event
+  is an error too. A function with an error is a failure.
+  **The family gives 4 of the 10 event kinds.** Its runs give `overwrite`, `leak`,
+  `use after release` and `use after move`. They give no `leak at exit`, `double release`,
+  `invalid release`, `use after scope`, `duplicate owner` and `forged`. So a count of 0 for one of
+  those 6 kinds says that no function reaches the kind. It does not say that the compiler holds the
+  rule of the kind. The expected stdout of each `part_<k>_test.ft` holds the counts of the part.
+  They are the events of each kind and the errors of each kind. The events are those of each run,
+  also of a rejected function. The errors are those of the functions with exit 0. Then come the
+  errors of the kinds that the gate judges, and those of the kinds that it trusts. Then come the
+  events that each other ruling takes, and the runs by their end.
+  **Each known failure has a class and a key.** `judgement.class_of` gives a failure a row of
+  `judgement.CLASSES`. It reads the kind of the first error, the operation at the line of that error
+  and the names of the statements of the function. It reads no run, so its test is necessary for the
+  cause of the class and does not prove the cause. The class `moved` has one more condition in the
+  storage classes `local`, `parameter` and `element`, and the class `moved value` has it in each
+  storage class. The place cannot be vacated at the error, in the sense of D17.21
+  (`judgement.is_vacated`). A statement of `judgement.VACATES` before the error vacates the whole
+  place. Two events end that state: a store into the place (`judgement.FILLS`), and the test of
+  `choose load` against `null`. A use of a place that can be vacated is a use of a moved local.
+  The use rule must reject it, so that failure has no class. The expected stdout of each
+  `part_<k>_test.ft` holds the count of each class and two lines for each failure. The first line
+  holds the key of the function: the names of its type, of its storage class and of its operations.
+  So a new row of a table moves the key of no function. The second line holds the class, the first
+  error, each other kind of error of the runs after `, also`, and the verdict. A function that
+  enters the list, one that leaves it and one that changes its class each change a line. A failure
+  with no class gives the exit status 1. So a change that adds a failure of a known class must bless
+  a longer list in its own diff. The review of that diff refuses it, and no test compares the list
+  with the list of an earlier commit. `python3 tools/typed_pins.py --fort <compiler>` writes the
+  `//|` lines of the 8 parts and of `cells_test.ft` from their runs. It writes no file for a test
+  that does not exit 0, and `--check` writes no file and exits 1 on a change. A test name after the
+  options, as `judgement_test`, makes it write that test only. The cause of a class is a use that no
+  rule of the compiler refuses. D17.21 gives an owner that is no local no obligation. No rule holds
+  a view or a pointer into an `own` span after the release of its allocation. No class takes a `del`
+  of the collection in the body of its range loop, because the checker refuses that function
+  (D17.10).
+  **`judgement_test.ft` holds the judgement itself.** It prints `rule` for each kind in each of its
+  cases. Then it prints `named_of`, `reports_at`, `at_abort`, `end_of`, `is_silent`, `is_vacate`,
+  `is_fill`, `class_of` and `exit_of` over tables. It judges a batch of functions that it writes:
+  each rule that the typed family does not reach has a function there. Each row `judgement-*` of
+  `tools/mutations/generator.json` changes one rule, and each other row takes one row out of a
+  table. `count_test.ft` and `judgement_test.ft` are the stage.
+  **The 8 parts are the 2-operation family.** Batch `j` of the family belongs to part `j` modulo 8.
+  The compile of a part and its run each take less than 30 s in the VM with 4 parts at a time. The
+  limit of the harness is 60 s for each step. `cells_test.ft` judges the functions of 0 and of 1
+  operation of each cell apart. The compiler accepts the declarations of each cell and its function
+  with no operation. A declaration that it does not accept stops a test with the text of the batch.
+  Run each compiled test from a directory of its own. `check_env` makes `sandbox<N>` in the working
+  directory, and two tests in one directory read the files of each other.
+  **The 3-operation mode is not in PR CI.** A compiled `part_<k>_test` with the arguments
+  `<operations> <part> <parts>` judges that part of the family of that many operations. It prints
+  the same lines, then the text of the first function of each class and of each function with no
+  class. It exits 1 only when a failure has no class. Compile `part_1_test.ft` once and run
+  `<binary> 3 <k> 400` for each `k` from 1 to 400. Functions of 3 operations reach the classes
+  `view` and `moved value`, which the 2-operation family does not reach. So those two classes have
+  the count 0 in each `part_<k>_test.ft`, and `judgement_test.ft` holds their rules.
 - **The suites of fir.interpreter derive each expected value apart from the interpreter**
   (`test/fort/fir/interpreter_test.ft`, `interpreter_source_test.ft`). Python's integers and IEEE
   doubles gave each value at each boundary of each type when the cases were written: the wrap at
@@ -1347,6 +1432,11 @@ bullet at a time and without a rewrite.
   with `touch` in the guest before `ninja`, and quote the md5 of its mutant. On 2026-10-24 the
   first two rounds of one run of that table read `stale` in VM slot 3, with the clocks equal:
   put two such rows before the rows that you measure.
+  **A stage that exits other than 0 reads `caught`, whatever the cause.** On 2026-11-12 the disk
+  was full during a run of `tools/mutations/generator.json`. The compiler could not write
+  its output in 34 of 50 rows, the harness printed a line `ERROR` and each row read `caught`. So
+  read the logs of `--log-dir` before you trust a run: `grep -l '^ERROR' <log dir>/*` must print no
+  file, and each log must hold a line `FAIL`.
   **Each table describes itself.** `ls tools/mutations/*.json` lists the tables.
   `jq -r '[input_filename] + .sources | join(" ")' tools/mutations/*.json` prints each table and
   the files that it covers. That is the `"sources"` list that the runner saves. The `comment` list

@@ -1,0 +1,389 @@
+{
+  "comment": [
+    "The table of the typed family of the tests: the three tables of",
+    "test/fort/support/generator.ft and the judgement of test/fort/support/judgement.ft. The",
+    "first 6 rows each take one row out of TYPES, STORAGES or OPERATIONS: a type with no text is",
+    "no type, a storage class with no place is no storage class, and an operation with no text is",
+    "no operation, so the mutant compiles and the family loses the cells or the statements of",
+    "that row. Two rows stand for each table, the first row and another one.",
+    "test/fort/owner/typed/count_test.ft prints the count of the cells, the vocabulary size of",
+    "each cell, the count of the cells of each operation and the count of the functions of 0 to",
+    "3 operations; a row is caught when a line changes. Each row `judgement-*` changes one",
+    "rule of the judgement: which verdicts it judges, what the gate of",
+    "test/fort/support/disposition.ft decides, which events are errors and which rule",
+    "takes an event, the line that a report line names, the `dead` markers of an abort, the",
+    "release-only bit of a drop, the verdict `reported`, the inputs of a run, the end of a run,",
+    "each kind of error of a failure, the class of a failure, the statements that vacate a",
+    "place and the events that end its vacated state, and the exit status.",
+    "test/fort/owner/typed/judgement_test.ft prints each of those",
+    "rules over tables and over a batch of functions that it writes. The sources are support",
+    "modules of the tests, so",
+    "the build only joins them into build/typed_support.txt, and the md5 guard reads that file.",
+    "The stage does not run the 8 parts of the family. The table runs in the Linux VM with the",
+    "debug preset after `tools/vm build`."
+  ],
+  "sources": [
+    "test/fort/support/generator.ft",
+    "test/fort/support/judgement.ft"
+  ],
+  "binary": "build/typed_support.txt",
+  "build": "cat test/fort/support/generator.ft test/fort/support/judgement.ft > build/typed_support.txt",
+  "stages": [
+    {
+      "name": "the count test and the judgement test of the typed family",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std -j 2 owner/typed/count_test owner/typed/judgement_test"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "typed-type-first",
+      "file": "test/fort/support/generator.ft",
+      "old": "        .name = \"ptr\",\n        .text = \"i32 mut* own\",",
+      "new": "        .name = \"ptr\",\n        .text = \"\",",
+      "what": "the type table loses its first row, the owning pointer"
+    },
+    {
+      "decision": "typed-type-nest",
+      "file": "test/fort/support/generator.ft",
+      "old": "        .name = \"nest\",\n        .text = \"nest\",",
+      "new": "        .name = \"nest\",\n        .text = \"\",",
+      "what": "the type table loses the nested aggregate"
+    },
+    {
+      "decision": "typed-storage-first",
+      "file": "test/fort/support/generator.ft",
+      "old": "        .name = \"local\",\n        .place = \"x\",",
+      "new": "        .name = \"local\",\n        .place = \"\",",
+      "what": "the storage table loses its first row, the local"
+    },
+    {
+      "decision": "typed-storage-global",
+      "file": "test/fort/support/generator.ft",
+      "old": "        .name = \"global\",\n        .place = \"G\",",
+      "new": "        .name = \"global\",\n        .place = \"\",",
+      "what": "the storage table loses the global"
+    },
+    {
+      "decision": "typed-operation-first",
+      "file": "test/fort/support/generator.ft",
+      "old": "    {\"alloc\", \"%P = %F;\"},",
+      "new": "    {\"alloc\", \"\"},",
+      "what": "the operation table loses its first row, the store of a fresh value"
+    },
+    {
+      "decision": "typed-operation-cast",
+      "file": "test/fort/support/generator.ft",
+      "old": "    {\"cast\", \"%C\"},",
+      "new": "    {\"cast\", \"\"},",
+      "what": "the operation table loses the move through a cast"
+    },
+    {
+      "decision": "judgement-leak-excuse-each",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    bool error = is_trusted(kind) || disposition.is_error(ev, at_abort);",
+      "new": "    bool error = is_trusted(kind) || disposition.is_error(ev, at_abort || leak);",
+      "what": "each leak is excused, also one that stands at no abort"
+    },
+    {
+      "decision": "judgement-trusted-as-gate",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    bool error = is_trusted(kind) || disposition.is_error(ev, at_abort);",
+      "new": "    bool error = disposition.is_error(ev, at_abort);",
+      "what": "an event of a kind that the gate of disposition.ft trusts is no error"
+    },
+    {
+      "decision": "judgement-cycle-error",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    bool error = is_trusted(kind) || disposition.is_error(ev, at_abort);",
+      "new": "    bool error = is_trusted(kind) || at_exit || disposition.is_error(ev, at_abort);",
+      "what": "a `leak at exit` of a cycle of owners is an error"
+    },
+    {
+      "decision": "judgement-no-gate",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    bool error = is_trusted(kind) || disposition.is_error(ev, at_abort);",
+      "new": "    bool error = true;",
+      "what": "no event goes through the gate of disposition.ft, so a leak at an abort is an error"
+    },
+    {
+      "decision": "judgement-error-kinds",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    return ruling.ru_error;",
+      "new": "    if (kind != shadow.event_kind.ev_use_after_release\n        && kind != shadow.event_kind.ev_use_after_move) {\n        return ruling.ru_excused;\n    }\n    return ruling.ru_error;",
+      "what": "only a use after release and a use after move are errors"
+    },
+    {
+      "decision": "judgement-no-relocate",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    prove_batch(c, bt);\n    relocate(bt);\n    run_batch(c, bt, t);",
+      "new": "    prove_batch(c, bt);\n    run_batch(c, bt, t);",
+      "what": "no `dead` marker moves to its own line, so no leak stands at an abort"
+    },
+    {
+      "decision": "judgement-abort-each-dead",
+      "file": "test/fort/support/judgement.ft",
+      "old": "        && aborts[cast(line - DEAD_LINE, u64)];",
+      "new": "        && (aborts[cast(line - DEAD_LINE, u64)] || !aborts[cast(line - DEAD_LINE, u64)]);",
+      "what": "each `dead` marker counts as one of an abort"
+    },
+    {
+      "decision": "judgement-abort-each-leak-of-run",
+      "file": "test/fort/support/judgement.ft",
+      "old": "        ruling said = rule(ev, at_abort(bt->aborts[..bt->deads], ev->at.line), reports,\n",
+      "new": "        bool ended = run->end.kind == interpreter.outcome_kind.oc_abort;\n        ruling said = rule(ev, ended || at_abort(bt->aborts[..bt->deads], ev->at.line), reports,\n",
+      "what": "each leak of a run that ends in an abort has the excuse, also one on a statement"
+    },
+    {
+      "decision": "judgement-no-release-only",
+      "file": "test/fort/support/judgement.ft",
+      "old": "        if (!release.is_release_only(drops, d->sym) && str.ends_with(d->loc.file, \"main.ft\")) {",
+      "new": "        if (false && !release.is_release_only(drops, d->sym) && str.ends_with(d->loc.file, \"main.ft\")) {",
+      "what": "a `del(s, d)` whose drop is not release-only rejects no function"
+    },
+    {
+      "decision": "judgement-accepted-only",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    bool judged = it->said == verdict.vd_accepted || it->said == verdict.vd_reported;",
+      "new": "    bool judged = it->said == verdict.vd_accepted;",
+      "what": "the judgement skips each function with a report line"
+    },
+    {
+      "decision": "judgement-report-each-kind",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    } else if ((leak || at_exit) && (reports & REPORT_LEAK) != 0) {",
+      "new": "    } else if ((reports & REPORT_LEAK) != 0) {",
+      "what": "a line of `--leak-report` takes an event of each kind"
+    },
+    {
+      "decision": "judgement-span-del-each-kind",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    } else if (leak && at_span_del) {",
+      "new": "    } else if (at_span_del) {",
+      "what": "a line of `--span-del-report` takes an event of each kind on its line"
+    },
+    {
+      "decision": "judgement-report-each-line",
+      "file": "test/fort/support/judgement.ft",
+      "old": "        if (named[k].line == line) {",
+      "new": "        if (line != 0) {",
+      "what": "a report line takes an event of its option on each line of the batch"
+    },
+    {
+      "decision": "judgement-report-each-file",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    for (u64 mut k = 0; str.ends_with(file, \"main.ft\") && k < named.len; k++) {",
+      "new": "    for (u64 mut k = 0; k < named.len; k++) {",
+      "what": "a report line takes an event on its line in another file"
+    },
+    {
+      "decision": "judgement-report-each-option",
+      "file": "test/fort/support/judgement.ft",
+      "old": "            bits = bits | named[k].bit;",
+      "new": "            bits = bits | REPORT_LEAK | REPORT_WHOLE;",
+      "what": "a line of one report option names its line for the other option too"
+    },
+    {
+      "decision": "judgement-report-names-each-file",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    if (colon < 0 || !str.ends_with(text[..cast(colon, u64)], \"main.ft\")) {",
+      "new": "    if (colon < 0) {",
+      "what": "a report line of another file names a line of the entry module"
+    },
+    {
+      "decision": "judgement-report-names-dead",
+      "file": "test/fort/support/judgement.ft",
+      "old": "        || line >= cast(DEAD_LINE, u64)) {",
+      "new": "        || line > cast(DEAD_LINE, u64)) {",
+      "what": "a report line names the line of the first `dead` marker after relocate"
+    },
+    {
+      "decision": "judgement-no-report-verdict",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    } else if (reported) {",
+      "new": "    } else if (false && reported) {",
+      "what": "a line of `--leak-report` or `--whole-store-report` gives no verdict `reported`"
+    },
+    {
+      "decision": "judgement-no-span-del-verdict",
+      "file": "test/fort/support/judgement.ft",
+      "old": "            mark(bt, at.line, verdict.vd_reported);",
+      "new": "            mark(bt, at.line, verdict.vd_accepted);",
+      "what": "a line of `--span-del-report` gives no verdict `reported`"
+    },
+    {
+      "decision": "judgement-skip-live",
+      "file": "test/fort/support/judgement.ft",
+      "old": "        for (u64 mut input = 0; said != verdict.vd_refused && input < 8; input++) {",
+      "new": "        for (u64 mut input = 0; said != verdict.vd_refused && input < 4; input++) {",
+      "what": "no run has the input `live`"
+    },
+    {
+      "decision": "judgement-silent-access",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    return (end == END_ACCESS || end == END_FAULT) && errors == 0;",
+      "new": "    return end == END_FAULT && errors == 0;",
+      "what": "a run that ends in `invalid access` with no error event is no failure"
+    },
+    {
+      "decision": "judgement-first-kind-only",
+      "file": "test/fort/support/judgement.ft",
+      "old": "        t->failures.items[it->record].kinds = t->failures.items[it->record].kinds | (bit << what);\n        return;",
+      "new": "        return;",
+      "what": "a failure keeps the kind of its first error only"
+    },
+    {
+      "decision": "judgement-class-moved-each",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    if (moved && is_far(f)) {",
+      "new": "    if (moved) {",
+      "what": "the class `moved` takes each use after move, also one of a local owner"
+    },
+    {
+      "decision": "judgement-class-moved-vacated",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    return (ty == \"box\" || ty == \"span\") && !is_vacated(f)\n",
+      "new": "    return (ty == \"box\" || ty == \"span\")\n",
+      "what": "the class `moved` takes a use after a statement that vacates the whole place"
+    },
+    {
+      "decision": "judgement-vacate-row",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    \"release through\", \"move through\", \"to global\", \"take\", \"else\",\n",
+      "new": "    \"release through\", \"move through\", \"to global\", \"take\", \"take\",\n",
+      "what": "`else` is no row of VACATES"
+    },
+    {
+      "decision": "judgement-vacate-self-each-storage",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    if (is_op(op, \"self\") && str.find(generator.STORAGES[f->st].again, \"move(\") < 0) {",
+      "new": "    if (false && is_op(op, \"self\")) {",
+      "what": "`self` vacates the place in a storage class whose call does not move it"
+    },
+    {
+      "decision": "judgement-vacate-defer-at-once",
+      "file": "test/fort/support/judgement.ft",
+      "old": "        bool direct = before && !is_op(f->ops[k], \"defer\");",
+      "new": "        bool direct = before;",
+      "what": "a `defer` before the error vacates the place at once, with no loop"
+    },
+    {
+      "decision": "judgement-vacate-no-turn",
+      "file": "test/fort/support/judgement.ft",
+      "old": "        } else if (!direct && is_turned(f, before ? k : f->pos)) {",
+      "new": "        } else if (false && is_turned(f, before ? k : f->pos)) {",
+      "what": "no statement vacates the place in a later turn of a loop"
+    },
+    {
+      "decision": "judgement-vacate-turn-of-error",
+      "file": "test/fort/support/judgement.ft",
+      "old": "        } else if (!direct && is_turned(f, before ? k : f->pos)) {",
+      "new": "        } else if (!direct && is_turned(f, f->pos)) {",
+      "what": "a `defer` before a loop runs its drop in each turn of that loop"
+    },
+    {
+      "decision": "judgement-vacate-no-fill",
+      "file": "test/fort/support/judgement.ft",
+      "old": "        } else if (direct && !is_filled(f, k + 1, f->pos)) {",
+      "new": "        } else if (direct) {",
+      "what": "a store into the place after the statement that vacates it ends no vacated state"
+    },
+    {
+      "decision": "judgement-vacate-fill-before",
+      "file": "test/fort/support/judgement.ft",
+      "old": "        } else if (direct && !is_filled(f, k + 1, f->pos)) {",
+      "new": "        } else if (direct && !is_filled(f, 0, f->pos)) {",
+      "what": "a store before the statement that vacates the place ends the vacated state"
+    },
+    {
+      "decision": "judgement-vacate-fill-turn",
+      "file": "test/fort/support/judgement.ft",
+      "old": "        } else if (!direct && is_turned(f, before ? k : f->pos)) {",
+      "new": "        } else if (!direct && !is_filled(f, 0, f->pos) && is_turned(f, before ? k : f->pos)) {",
+      "what": "a store before the error ends the vacated state of a later turn of a loop"
+    },
+    {
+      "decision": "judgement-fill-row",
+      "file": "test/fort/support/judgement.ft",
+      "old": "string[FILL_COUNT] FILLS = {\"alloc\", \"clear\", \"move in\", \"choose\", \"from global\", \"swap\"};",
+      "new": "string[FILL_COUNT] FILLS = {\"alloc\", \"clear\", \"move in\", \"choose\", \"from global\", \"alloc\"};",
+      "what": "`swap` is no row of FILLS"
+    },
+    {
+      "decision": "judgement-vacate-no-test",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    if (is_tested(f)) {",
+      "new": "    if (false && is_tested(f)) {",
+      "what": "the test of `choose load` against `null` ends no vacated state"
+    },
+    {
+      "decision": "judgement-vacate-tested-each-type",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    return is_op(f->at, \"choose load\") && generator.TYPES[f->ty].holds == \"%P != null\";",
+      "new": "    return is_op(f->at, \"choose load\");",
+      "what": "the test of `choose load` ends the vacated state in a type whose test compares no pointer with `null`"
+    },
+    {
+      "decision": "judgement-vacate-tested-each-statement",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    return is_op(f->at, \"choose load\") && generator.TYPES[f->ty].holds == \"%P != null\";",
+      "new": "    return generator.TYPES[f->ty].holds == \"%P != null\";",
+      "what": "each statement of a type with a pointer test ends the vacated state"
+    },
+    {
+      "decision": "judgement-class-span-pointer-each",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    return through && generator.STORAGES[f->st].name == \"spanned\" && holds(f, 0, \"container\");",
+      "new": "    return through && generator.STORAGES[f->st].name == \"spanned\";",
+      "what": "the class `span pointer` takes a use through the pointer in a function with no `del(s, d)` of the span"
+    },
+    {
+      "decision": "judgement-class-range-callback-each",
+      "file": "test/fort/support/judgement.ft",
+      "old": "               && generator.STORAGES[f->st].shared.len > 0) {",
+      "new": "               && generator.STORAGES[f->st].place.len > 0) {",
+      "what": "the class `range callback` takes a storage class that the callback does not reach"
+    },
+    {
+      "decision": "judgement-class-range-callback-before",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    } else if (at_range && holds(f, f->pos + 1, \"extern call\")",
+      "new": "    } else if (at_range && holds(f, 0, \"extern call\")",
+      "what": "the class `range callback` takes an `extern call` before the range loop"
+    },
+    {
+      "decision": "judgement-class-view-each",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    } else if (released && is_op(f->at, \"load\") && is_viewed(f)) {",
+      "new": "    } else if (released && is_op(f->at, \"load\")) {",
+      "what": "the class `view` takes a load in a function that gives the view no pointer"
+    },
+    {
+      "decision": "judgement-class-moved-value-each",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    } else if (moved && is_moved_value(f)) {",
+      "new": "    } else if (moved) {",
+      "what": "the class `moved value` takes each use after move"
+    },
+    {
+      "decision": "judgement-class-moved-value-vacated",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    return !is_vacated(f) && (holds(f, pos + 1, \"self\") || stored);",
+      "new": "    return holds(f, pos + 1, \"self\") || stored;",
+      "what": "the class `moved value` takes a use after a statement that vacates the whole place"
+    },
+    {
+      "decision": "judgement-class-moved-value-each-store",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    bool stored = holds_before(f, pos, \"move in\") || holds_before(f, pos, \"choose\")",
+      "new": "    bool stored = is_filled(f, 0, pos) || holds_before(f, pos, \"choose\")",
+      "what": "the class `moved value` takes a store of a value that is no `move(y)`"
+    },
+    {
+      "decision": "judgement-exit-each-class",
+      "file": "test/fort/support/judgement.ft",
+      "old": "    if (class_count(t, NO_CLASS) > 0) {",
+      "new": "    if (class_count(t, NO_CLASS) > t->failures.len) {",
+      "what": "a failure with no class gives the exit status 0"
+    }
+  ]
+}
