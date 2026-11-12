@@ -8,6 +8,12 @@ Status: implemented. Written 2026-09-28 as a design (T-209); T-213 to T-255 impl
 since T-255 (2026-09-30) the translator writes every function of a build. Section 16 gives the
 migration, which T-255 ended, and section 17 gives the open questions and their rulings.
 
+**The state since 2026-11-11.** The user ruled on 2026-11-11: "I don't want anything undefined."
+This document states the end state of that ruling at three points. The `check` terminator has the
+kind `null` (section 8). The build-mode pass removes no `check` of the kinds `bounds`, `span` and
+`null` (section 11, D10.6). A pointer that outlives its storage points at dead storage (D10.9). The
+compiler implements the three in later changes. No other part of FIR changes.
+
 ## 1. Why FIR exists
 
 FIR has two jobs.
@@ -25,7 +31,8 @@ this four times:
   `ANN_LVALUE`, and the emitter reads it.
 - **Whether a body can fall off its end.** `check_terminates` derives it (D8.4), and the emitter's
   `terminated` flag derives it again. The emitter writes `unreachable` because `check_terminates`
-  says that the body terminates, so a disagreement is undefined behavior at run time.
+  says that the body terminates, so a disagreement is a defect of the compiler that no pass
+  reports: the program runs an `unreachable` of LLVM IR.
 - **Which deferred statements run at an exit.** The emitter's scope stack derives it (D7.8), and
   the frames and joins of a linear ownership analysis on the tree would derive it again. Such an
   analysis can call a path clean that the emitted code leaks on.
@@ -382,7 +389,7 @@ Rules:
 - `unreachable` ends a body that the checker proved cannot fall off its end (D8.4, item 10).
 
 The kinds, the runtime entry each calls, the operands it reports, and the build mode that removes
-the check:
+the check. No option removes a check (D10.6):
 
 | kind | entry | operands reported | removed by |
 |---|---|---|---|
@@ -390,8 +397,9 @@ the check:
 | `shift` | `fail_shift` | the count as `i64`, the type name as `bytes` | release, which masks it |
 | `div_zero` | `fail_div_zero` | none | nothing |
 | `div_overflow` | `fail_div_overflow` | none | nothing |
-| `bounds` | `fail_bounds` | the index as `i64`, the length as `u64` | `--no-bounds-check` |
-| `span` | `fail_span` | `lo` and `hi` as `i64`, the length as `u64` | `--no-bounds-check` |
+| `bounds` | `fail_bounds` | the index as `i64`, the length as `u64` | nothing |
+| `span` | `fail_span` | `lo` and `hi` as `i64`, the length as `u64` | nothing |
+| `null` | `fail_null` | the operation as `bool`: true for a call | nothing |
 | `alloc_count` | `fail_alloc_count` | the count as `i64` | nothing |
 | `overwrite` | none | none | every mode, after the emptiness pass proves it |
 | `enum` | `fail_enum` | the value as `i64`, the enum name as `bytes` | nothing |
@@ -402,6 +410,17 @@ Every runtime entry of the table also takes a file, a line and a column, which t
 adds from the location of the terminator (D11.4). The lowering computes the condition of a
 `check` with ordinary rvalues: `ge` against the length for `bounds`, `add_overflows` for
 `overflow`, `eq` against zero for `div_zero`.
+
+A `check` of the kind `null` stands before each evaluation of a place that goes through a pointer,
+and before each call through a function value (D10.5, D10.6). An `addr` and a `slice` of such a
+place take it too, also when they read no storage. Its condition is `eq` of the pointer against
+`null`. The entry `fail_null` writes `null dereference` for a place and `null call` for a call
+(D11.4). An `index` on a span or a `string` takes no `check` of this kind: a header whose pointer is
+`null` is the zero value, whose length is 0, so its `bounds` check fails. A `del` of `null` takes
+none, because it has no effect (D17.9).
+
+Until 2026-11-11 the table had no kind `null`, and `--no-bounds-check` removed the kinds `bounds`
+and `span`. The compiler adds the kind and removes the option in later changes (D10.6, D14.1).
 
 A `switch` on an enum without a `default` clause names as `otherwise` a block that holds only
 `fail(enum, ...)` (D7.7). `fail(panic, ...)` is the lowering of the builtin `panic`. Every other
@@ -809,8 +828,9 @@ statement index.
 - **V13**: every read of a temporary is preceded, on every path from `bb0`, by an assignment of it.
   A named local needs no such rule: the checker requires an initializer (D7.1), and the entry block
   zeroes every `own` reference (9.2). The rule matters most for a temporary that the translator
-  keeps in an `alloca` (12.1): a read before any assignment would read undefined memory, and
-  LLVM's verifier does not report it. The verifier tests V13 with a forward dataflow over the
+  keeps in an `alloca` (12.1): a read before any assignment would read bytes that no store
+  wrote, and LLVM's verifier does not report it. The verifier tests V13 with a forward dataflow
+  over the
   blocks: the set of temporaries assigned on every path, joined by intersection. `bb0` starts with
   the empty set and every other block with the set of all temporaries, so a block that no edge
   reaches, such as the block after a terminator (D14.2), passes. V13 follows every edge, the edge
@@ -818,7 +838,7 @@ statement index.
 V9 closes the termination gap of section 1. The direct path wrote `unreachable` at the end of a
 body because `check_terminates` said that the body terminates, and the translator writes the
 `unreachable` that the lowering puts there for the same reason. With V9, a disagreement is an
-internal error at compile time, not undefined behavior at run time. The constant clause exists
+internal error at compile time, and no program runs that `unreachable`. The constant clause exists
 because `while (true)` lowers to `switch(const true)`, and D8.4 counts that loop as terminating.
 `check_terminates` accepts a literal `true` in a `while`, a `for` with no condition, and a
 `switch` that has a `default` clause or names every member of its enum, whose clauses all end
@@ -893,12 +913,13 @@ changes the function, and the verifier runs after it. The passes run in this ord
    - **Fresh.** A pointer local `_n` is fresh at a point when, on each path to that point, the
      last store into `_n` writes a fresh `new`, and after that store no `copy` or `move` operand
      whose place is `_n` itself reads it and no `addr` or `slice` names a place whose base is
-     `_n`, but the `addr` of a held address (**Held address**) and of the address of a whole
-     store (**Whole stores**). Each store through the address of a whole store ends the freshness
-     of the local of the place of its `addr`, after the test of the store and before its kill
-     rules (**Order**). The analysis computes freshness with the facts, by the same join. A place
-     through a fresh `_n` is `(*_n)` followed by `field` projections and `index` projections on
-     fixed arrays only. The rule assumes no access through a dangling pointer (D17.11).
+     `_n`, but the `addr` of a held address (**Held address**) and of the address of a whole store
+     (**Whole stores**). Each store through the address of a whole store ends the freshness of the
+     local of the place of its `addr`, after the test of the store and before its kill rules
+     (**Order**). The analysis computes freshness with the facts, by the same join. A place through
+     a fresh `_n` is `(*_n)` followed by `field` projections and `index` projections on fixed arrays
+     only. A pointer to dead storage reaches that dead storage only, and no later `new` takes it
+     (D10.9), so the rule needs no assumption on such a pointer (D17.11).
    - **Held address.** When the right side of `lv = e` has a writer, the lowering holds
      `_a = addr mut(p)` and writes `(*_a)` in place of `p` (9.3). The pass reads the place
      `(*_a)` of that `check(overwrite: (*_a))` and of that store as `p`, for the fact, the kill
@@ -917,11 +938,12 @@ changes the function, and the verifier runs after it. The passes run in this ord
      one whose place reads no header in memory. A `del` and a `move` operand make no held
      address stale. A `move` of a header writes the zero value, whose length is 0, so each later
      `index` through it is out of bounds until a store or a call writes the header again. A `del`
-     of a header also frees the storage that `_a` names, so the store through `(*_a)` writes
-     through a dangling pointer. A `move` of field 0 of a header leaves `null` with the length,
-     so a later `index` through it dereferences `null`. D17.11 assumes that each index stays in
-     bounds (D10.6) and that no operation accesses storage through a dangling pointer or through
-     `null` (D10.7), so these cases are outside its guarantee. A stale `_a` gives no tracked
+     of a header also frees the storage that `_a` names, so the store through `(*_a)` changes
+     only dead storage (D10.9). A `move` of field 0 of a header leaves `null` with the length.
+     Only FIR text holds such a `move`: no fort source moves the `.ptr` of a span or of a
+     `string` (D3.5, D17.6). An index out of bounds is a runtime error in each build (D10.6). So
+     each of these cases has a defined result in a fort program, and D17.11 needs no assumption
+     for them. A stale `_a` gives no tracked
      place, so the pass proves no check of `(*_a)`, and no item gives `(*_a)` a fact. The store
      through it kills as a store through a pointer and keeps no fact through a fresh pointer
      local, because the `addr` ended no freshness.
@@ -1232,7 +1254,8 @@ changes the function, and the verifier runs after it. The passes run in this ord
      - each `dead(_n)` of a named owner local, at the closing brace, at the last token of a `case`
        clause, or at the `return`, `break` or `continue` that leaves its scope (9.5). A `dead` in
        an abort block has none: a runtime error runs no deferred code (D7.8, D11.4), so a leak
-       there is outside the guarantee. A `dead` that no run reaches keeps its obligation (**Join**);
+       there is a defined leak (D10.7). A `dead` that no run reaches keeps its obligation
+       (**Join**);
      - each `return`, for each parameter and each temporary that is an owner local;
      - each `return`, for each named owner local whose scope can be open there. A fifth dataflow, an
        intersection, gives one bit for each named owner local: its scope has ended. `bb0` starts
@@ -1240,7 +1263,8 @@ changes the function, and the verifier runs after it. The passes run in this ord
        sets the bit of `_n`. A store into fixed storage of `_n` that writes no zero value by
        **Values**, whatever value it writes, and an `addr` or a `slice` of that storage, clear it. A
        later store through a pointer goes through such an address, or through an address from before
-       the `dead`, which dangles (D17.11). The lowering writes the `dead` of each named local of
+       the `dead`, which points at dead storage (D10.9). The lowering writes the `dead` of each
+       named local of
        each scope that a `return` leaves (9.5), so only FIR text has such an exit with its bit
        clear.
      The fact of an exit is the fact of the whole local, a tracked place; it joins the facts of
@@ -1293,7 +1317,10 @@ changes the function, and the verifier runs after it. The passes run in this ord
      no obligation tests the object through a pointer to a type with no inner owner, so a store
      through a view of the object after the `cast` can give it an owner that the `del` of the new
      pointer frees with it. The view can come from the old pointer before the `cast` or from the
-     new pointer after it. This case is outside the guarantee of part 2. The facts of the inner
+     new pointer after it. The pass accepts this case, and the run gives a `leak` event at that
+     `del`. That is an event of an error kind in a program that the compiler accepts, so it is a
+     defect against the gate of D17.11, and a later change closes it (`ownership-design.md` 17,
+     case 1). The facts of the inner
      owners join the facts of **Facts**, and no gen rule or kill rule changes for them. Each inner
      owner of each site takes a fact of its own, with no search for an earlier fact of its place:
      no rule reads the number of a fact, so two facts of one place hold the same value, and one
@@ -1392,8 +1419,9 @@ changes the function, and the verifier runs after it. The passes run in this ord
      and not its value, so `_1 = aggregate counted(const i32 0, const false, const zero box)` clears
      it. The frame of a call holds no allocation of the call, and a value that the local holds at
      its `dead` is the leak of that exit, which **Aggregates** reports (D17.20). A pointer to the
-     local from before the `dead` or from an earlier entry of its block dangles, so a store through
-     it is undefined (D10.7), and the rule assumes none. So the pass proves a declaration: the
+     local from before the `dead` or from an earlier entry of its block points at dead storage, so
+     a store through it changes only dead storage (D10.9), and the rule needs no assumption. So
+     the pass proves a declaration: the
      lowering writes `live(_x)` and then the store (9.3), and each exit of the scope writes
      `dead(_x)` (9.5). A later store into the local after a store of another value takes the facts.
      The fifth dataflow runs in each function with a named local of an owning aggregate type within
@@ -1476,8 +1504,9 @@ changes the function, and the verifier runs after it. The passes run in this ord
      a second mask of the same count ends the first. A count that is no whole temporary, such as
      a constant, a parameter, a named local or a field, keeps every read, and its mask goes as
      dead (T-247).
-   - Under `--no-bounds-check`, it replaces `check(_, bounds, ...)` and `check(_, span, ...)` by
-     `goto`.
+   - It keeps each `check` of the kinds `bounds`, `span` and `null` in every mode (D10.6). The
+     pass of 2026-11-11 still replaces `check(_, bounds, ...)` and `check(_, span, ...)` by
+     `goto` under `--no-bounds-check`. The compiler removes the option in a later change.
    - It then removes each assignment `_t = rvalue` where `_t` is a temporary of the lowering,
      the rvalue is an operand, an arithmetic, overflow, bitwise, shift, comparison or `cast`
      rvalue, or `addr`, the rvalue contains no `move` operand, and no statement or terminator
@@ -1528,8 +1557,10 @@ writes it (section 12), and it starts a program as `toolchain.md` 6 item 22 star
   `outside`. When the run keeps the output of the program, a `write` to a descriptor other than
   1 and 2 also ends the run as `outside`.
 - A run ends with the return of the function that it runs, an `exit`, an `abort`, a `trap`, an
-  `outside`, or a fault: an operation with no defined result, such as a load through null or
-  outside each live range.
+  `outside`, or a fault: an operation for which the interpreter has no storage, such as a load
+  through null or outside each live range. In the end state a load through null fails its `check`
+  of the kind `null` (section 8), and a load or a store in dead storage has a result of D10.9. A
+  later change of the interpreter implements both.
 - The shadow state `fir.shadow` (`src/fort/fir/shadow.ft`) observes each run and changes none of its
   outcome. It keeps the owner slots, the tags and the events of `spec/ownership-design.md` 3.3 and
   3.4. A run reports each event once, as the line `event <kind> in <function> at <line>:<col>`,
@@ -1910,7 +1941,8 @@ At a `call`, at every assignment or `del` whose place may overlap an escaped pla
 `move` operand whose place may overlap an escaped place (5.5), an analysis must treat every escaped
 place that may overlap it as changed to an unknown state; a `call` changes every escaped place. A
 `del` also frees the storage its value designates, so it changes every escaped place that contains a
-`deref` or an index on a span or a `string`, as a `call` does. D17.14 leaves use after free outside
+`deref` or an index on a span or a `string`, as a `call` does. A use after free reads or writes dead
+storage, with the results of D10.9. D17.14 leaves use after free outside
 the ownership rules; an analysis that tracks views (T-190) needs this rule. The escape of a place is
 permanent for the rest of the function: FIR has no rule that ends it. That is a deliberate loss of
 precision, not an oversight: an address can be stored anywhere, and nothing in FIR says when the
@@ -1920,8 +1952,9 @@ is not escaped changes only through the statements that name it, which is what m
 locals exact.
 
 An analysis must not derive a fact from the continuation edge of a `check` that a build mode
-removes (`overflow`, `shift`, `bounds`, `span`): the fact holds only in the modes that keep that
-check. The emptiness pass proves each overwrite check in every mode (D17.11). The continuation
+removes (`overflow`, `shift`): the fact holds only in the modes that keep that check. Until the
+compiler loses `--no-bounds-check` (D10.6), the rule also covers `bounds` and `span`.
+The emptiness pass proves each overwrite check in every mode (D17.11). The continuation
 edge of every other kind, and every edge of a `switch`, carries a fact that holds in every mode.
 
 The linear ownership analysis, the refinement of null states and the analysis of local views
