@@ -642,10 +642,10 @@ bullet at a time and without a rewrite.
   `cast(&tt.nodes, raw mut*)->len = n`, with `raw` a struct of two `u64`, reached
   `types.reserve` before D3.14 refused that cast, which hides the owner `tt.nodes`. An argument
   of an `extern fn` still reaches the header (`libc.memcpy` over `&tt.nodes`), and so does a
-  span that owns nothing. D6.9 and D10.7 make such a view undefined behavior. No test forges a
-  length or a pointer, so such a site stays listed. A site that needs more memory or time than a
-  test can use stays listed too. The comment lines above an entry or a group give the reason. The
-  list holds 17 of 215 sites, each a site that needs a forged length
+  span that owns nothing. D6.9 and D10.7 make such a view a case of the trusted premise. No test
+  forges a length or a pointer, so such a site stays listed. A site that needs more memory or time
+  than a test can use stays listed too. The comment lines above an entry or a group give the
+  reason. The list holds 17 of 215 sites, each a site that needs a forged length
   (`python3 tools/panic_coverage.py` prints the totals).
 - **`test/fir` holds the FIR tests**, one `.fir` file each, in the format that `test/fir/README.md`
   gives (`spec/fir.md` 16.3). The header is the leading run of `//!` and `//|` lines: one or more
@@ -788,9 +788,10 @@ bullet at a time and without a rewrite.
   parameter or a temporary of an owning aggregate type. A `leak` at its `return` marks no site of an
   owner local (`unsure`). No event tells that `leak` from the `leak` of an owner local. **No other
   condition of
-  a run keeps a `leak` from its site.** A leak after a store through a dangling pointer is outside
-  the guarantee of D17.11. A test that kept each `leak` of a run with a `use after scope` from its
-  site hid two false accepts of mutants (`dangle_mix`, `late_dangle`). The access and the leak need
+  a run keeps a `leak` from its site.** An owner that a store puts into dead storage is a defined
+  leak (D10.7, `spec/ownership-design.md` 3.4) and no event of an error kind. But a test that kept
+  each `leak` of a run with a `use after scope` from its site hid two false accepts of mutants
+  (`dangle_mix`, `late_dangle`). The access and the leak need
   not touch one owner. Such a case stands in `test/fort/owner/prover_test.ft` with a comment,
   and not in the oracle sets. The exit cases (`EXIT_CASES`) hold one case for each exit kind, and
   the seeded family inserts into them as into the hand cases.
@@ -816,9 +817,10 @@ bullet at a time and without a rewrite.
   none adds no line to the expected stdout. A store through a view after a proved `cast` gives the
   object an owner that the `del` of the new pointer leaks, and no site has that event, so the case
   would count a false accept: it stands in `test/fort/owner/prover_test.ft` (`cast_alias` with a
-  view of the old pointer) with a comment that it is outside the guarantee, and not in the oracle
-  sets. The form with a view of the new pointer does not compile since D3.14 refuses a cast that
-  hides an owner place, so `cast_view` is gone.
+  view of the old pointer) with a comment, and not in the oracle sets. Since 2026-11-11 the case
+  is a defect against the gate of D17.11 that a later change closes (`spec/fir.md` 11, Inner
+  owners). The form with a view of the new pointer does not compile since D3.14 refuses a cast
+  that hides an owner place, so `cast_view` is gone.
   **The test holds the tests against null of D17.11 gen rule 6 too.** The vocabulary of
   `generator.ft` holds an `if` on `==`, `!=`, a negation, `&&` and the `else` arm of `||`, over `x`,
   `y`, `q->a`, `*p`, `r->a`, `G` and `arr[j]`, and a loop on `!=` that a `del` ends; the items

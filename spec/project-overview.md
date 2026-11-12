@@ -33,8 +33,8 @@ Read them in this order. Two are normative and win over the rest.
 |                      | builtins.                                                             |
 | `type-system.md`     | Every type, mutability levels, conversions, untyped constants, layout.|
 | `memory-model.md`    | Stack and heap, `new`/`del`, ownership (`own`, `move`), spans and     |
-|                      | strings, runtime checks, the runtime-error contract, undefined        |
-|                      | behavior.                                                             |
+|                      | strings, runtime checks, the runtime-error contract, dead storage,    |
+|                      | the trusted premise.                                                  |
 | `module-system.md`   | Files and imports, name resolution, mangling, C FFI, calling          |
 |                      | convention, entry point.                                              |
 | `stdlib.md`          | The v1 standard library, module by module, with signatures.           |

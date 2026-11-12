@@ -136,32 +136,30 @@ push run. A nightly full matrix tests `main`. Queue no PR while its latest `ci-s
   four read, and those four are exactly where a later ticket has work to do (T-077).
 
 ### Agents
-- The coordinator is the main Codex session. Seven TOML roles live in `.codex/agents/` (T-139).
-  Each role inherits the coordinator model and sets effort. Pass its text, model, and effort.
-  Use named roles only after loading is proved. Restart Codex after a role changes.
-- Implementors use full tools: `impl-mech` (medium) for work the specification
-  pins completely, transcription and coverage; `impl-std` (high) for ordinary tickets that need
-  data-structure design; `impl-hard` (xhigh) for cross-cutting invariants, the calling
-  convention, memory layout, ownership and codegen; `impl-port` (medium) for transliterating a
-  tested C module into fort against an oracle.
+- The coordinator is the main Codex session. Seven TOML roles live in `.codex/agents/` (T-139). Each
+  role sets effort. Pass its text, model, and effort. Use named roles only after loading is proved.
+  Restart Codex after a role changes. Each implementor runs on Fable 5.2 (user, 2026-11-11: "The
+  implementors must use the fable 5.2 model"). The coordinator runs each reviewer on the same model.
+  The ticket Log names the model of each hand-off. Do not resume an agent that ran on another model.
+- Implementors use full tools: `impl-mech` (medium) for work the specification pins completely,
+  transcription and coverage; `impl-std` (high) for ordinary tickets that need data-structure
+  design; `impl-hard` (xhigh) for cross-cutting invariants, the calling convention, memory layout,
+  ownership and codegen; `impl-port` (medium) to port a tested C module to fort against an oracle.
 - Reviewers run in a separate read-only Codex session; parent live settings can override a role's
   sandbox (b33baf94). `rev-quick` (medium) screens a low-risk diff for conventions, tests and scope;
   `rev-std` (high) reviews an ordinary change; `rev-deep` (xhigh) re-derives the invariants
   independently for ABI, memory, ownership, exact arithmetic, unsafe casts and generated code.
-- Each ticket names its tiers in its `impl:` and `review:` fields. Review depth follows the risk
-  of the change, not the effort it took to write: a ticket can be `impl-std` and `rev-deep`.
-- A tier is a default, not a verdict. If a ticket run at `impl-mech` or `impl-port` fails the
-  gate twice or comes back with a must-fix finding, the coordinator re-runs it one tier up and
-  records the promotion in the ticket log; two promotions out of one tier means the mapping is
-  wrong, so change the tickets' `impl:` field rather than promoting case by case.
+- A ticket names its tiers in `impl:` and `review:`. Review depth follows the risk of the change,
+  not its effort: a ticket can be `impl-std` and `rev-deep`. If a ticket at `impl-mech` or
+  `impl-port` fails the gate twice or gets a must-fix finding, the coordinator runs it one tier up
+  and logs the promotion. After 2 promotions out of one tier, change the tickets' `impl:` field.
 
 ### Review Workflow
 - Coordinator: picks an unblocked ticket. Create `.worktrees/fort-<id>` and branch
   `feat/<id>-<slug>`. Record branch, worktree, and assignee. Move the ticket to `inprogress/`.
-  Give the worker its role text, effort, ticket path, and worktree.
-- Implementor: reads the ticket and its cited specification sections; codes and tests there.
-  Run relevant tests, format checks, and lint checks before committing. Keep commits self-contained.
-  Squash a single-unit ticket first. Hand off a clean SHA and development evidence in 40 lines.
+  Give the worker its role text, model, effort, ticket path, and worktree.
+- Implementor: reads the ticket and its cited specification sections; codes and tests there. Follow
+  the Change Implementation Loop above. Hand off a clean SHA and development evidence in 40 lines.
   Do not run a local final gate or start review.
 - Coordinator: pushes the branch and opens a PR. Start independent read-only review on its head SHA.
   Move the ticket to `inreview/`. PR CI and review can run concurrently. For `rev-std`, use:
@@ -170,14 +168,16 @@ push run. A nightly full matrix tests `main`. Queue no PR while its latest `ci-s
         -c 'model_reasoning_effort="high"' \
         -c 'developer_instructions="Read and follow .codex/agents/rev-std.toml."' --base origin/main
   Fetch `origin/main` before review. Add the ticket's absolute path to `developer_instructions`.
-  Set `<coordinator-model>` to the active model. Never pass `[PROMPT]` with `--base`.
+  Set `<coordinator-model>` to the implementor model (Agents). Never pass `[PROMPT]` with `--base`.
   Keep the ticket in `inreview/`. Relay findings. Run CI for source fixes; review behavior changes.
 - Reviewer: follows its TOML. Check tests, citations, commits, scope, xfail, and the ticket.
   Pending PR CI remains pending. Never edit or merge. Route learning below.
-- Coordinator: send a finding class that 2 review rounds find to the user as a rule question, not
-  to a third fix round (PR 103: rounds 2 to 5 found one class). Split a ticket that reaches review
-  round 3 into tickets that each merge in one PR. PR 103 ran 8 rounds; PR 98 merged in 2 h. Hold
-  that limit: 7 of 114 ownership-wave tickets passed round 3 (`notes/ownership-retrospective.md` 6).
+- Edge cases: `spec/ownership-design.md` 17 says who decides each case. The implementor decides
+  cases 1 to 5: when a text is silent or has two readings, take the reading that rejects more
+  programs and record it in Notes. The coordinator decides case 6. Of these, only case 7 reaches the
+  user: a change of the guarantee table, of a decision or of the language surface. Caps:
+  `src/fort/owner/` 9,000 lines, `src/fort/fir/release.ft` 500. Round limit: after review round 3,
+  one more fix round; then cut the failing rule into a new ticket.
 - Coordinator: require zero open must-fix findings and green PR `ci-status` for the current head.
   Record the PR URL, head and base SHA, job counts, the PR CI run (on the PR merge ref) and the
   merge-group CI run (on the merge-group commit). A new head invalidates the old CI result. If the

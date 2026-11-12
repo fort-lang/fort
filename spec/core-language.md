@@ -11,6 +11,14 @@ and its memory rules are in `memory-model.md`, as are the runtime checks; module
 `extern` are in `module-system.md`. In examples, a
 trailing `// error: ...` comment marks a compile error; runtime errors say so explicitly.
 
+**The state since 2026-11-11.** The user ruled on 2026-11-11: "I don't want anything undefined." A
+fort program has no undefined behavior (D10.7). This document states the end state of that ruling at
+five points: a dereference of `null` and a call of a null function pointer are runtime errors (5.5,
+5.8, D10.6), no option removes a check (5.7, D10.6), a pointer that outlives its storage points at
+dead storage (5.5, D10.9), `regrow` is a universe function (8.2, D12.2), and a store of an aggregate
+reads the whole source before it changes the destination (5.4, D6.3). The compiler and the runtime
+implement the five in later changes.
+
 ## 2. Lexical structure
 
 ### 2.1 Source text and comments (D2.1, D2.2)
@@ -35,7 +43,7 @@ is an ordinary identifier. Keywords and reserved words cannot be identifiers. Th
 `as bool break case cast char continue default defer do else enum extern f32 f64 false fn for
 i8 i16 i32 i64 if import mut new noreturn null own return sizeof string struct switch true u8
 u16 u32 u64 void while`. Reserved for future use, usable nowhere: `async await const match pub
-priv trait type union yield`. `del`, `move`, `assert`, `panic` and the print family are
+priv trait type union yield`. `del`, `move`, `regrow`, `assert`, `panic` and the print family are
 universe-scope functions (section 8), not keywords.
 
 ```fort
@@ -312,8 +320,10 @@ fn f(i32 n) void {
 ### 3.9 Ownership (D17.1-D17.8, D17.11, D17.14, D17.20)
 
 A pointer, `void*`, span or `string` type may be qualified `own`. An `own` reference designates the
-start of a live heap allocation, obtained from `new` (5.10) or answered by an `extern` whose
-signature says `own` (D17.13), that `del` (8.2) may free. `own` is part of the type, so `node* own`
+start of a live heap allocation, obtained from `new` (5.10) or `regrow` (8.2) or answered by an
+`extern` whose signature says `own` (D17.13). `del` (8.2) frees an allocation of `new` or of
+`regrow`, and a C function that takes the owner as `own` frees an allocation that C gave (D10.3).
+`own` is part of the type, so `node* own`
 and `node*` are different types (`type-system.md` section 8), and it is erased at run time. `own` on
 a non-reference type or on a function-pointer type is an error; a struct or fixed array that
 contains an `own` reference by value is an owning aggregate (below). Ownership is a typing
@@ -369,8 +379,9 @@ storage holding that reference is immutable. `node mut* own mut@ own` converts t
 `node mut* mut@ own`, whose nodes would belong to nobody once the span is freed, and not to
 `node mut* mut@`, through which a borrowed pointer could be stored into a slot the source still
 sees as owned. Adding
-`own` requires `cast`. Lending never empties the source, and a lent value must not outlive the
-allocation (D17.14).
+`own` requires `cast`. Lending never empties the source. The compiler does not track a lent value
+that outlives the allocation: such a value points at dead storage, and each access through it has a
+result of D10.9 (D17.14).
 
 **Transfer (D17.5, D17.6).** Copying an `own` lvalue into an `own` place, that is a declaration's
 initializer, an assignment target, an `own` parameter, an `own` field or element of a literal,
@@ -604,7 +615,11 @@ what they need. For an assignment the target's address, including any index and 
 check, is computed before the right-hand side; a compound assignment computes the target once.
 Temporaries live until the end of the enclosing statement. An aggregate literal reads every member
 before the destination changes, so `s = pair{s.b, s.a}` swaps the two fields (D6.3, amended
-2026-09-28).
+2026-09-28). A store of an aggregate reads the whole source before it changes the destination
+(D6.3, amended 2026-11-11). Two places can overlap in part, because two view casts of one pointer
+can name them (D3.14). The destination then gets the bytes that the source held before the store:
+for an `i32[4]` that holds `{1, 2, 3, 4}`, a copy of its elements 0 to 2 onto its elements 1 to 3
+gives `{1, 1, 2, 3}`.
 An index evaluates its base to determine its value or storage, then its index. A span or `string`
 index reads a stored base header after the index. A span expression evaluates its base, then
 evaluates its explicit lower and upper bounds in that order. It reads a stored span or
@@ -628,9 +643,11 @@ other than `void*` or a function pointer and yields the pointee. There is no poi
 calls yield `own` pointers (3.9). `null` is the zero pointer and function-pointer value (D10.5); it
 has no type of its own: it takes its type from context and is an error where no pointer, `void*` or
 function-pointer type is expected. `== null` and `!= null` are allowed on pointers, `void*` and
-function pointers only; spans and strings compare `.len` or `.ptr`. Dereferencing `null`, and
-returning the address of a local or a span of a local array, are undefined behavior and are not
-diagnosed.
+function pointers only; spans and strings compare `.len` or `.ptr`. Dereferencing `null` is the
+runtime error `null dereference` in both build modes (D10.5, D10.6). It covers each place that goes
+through a null pointer, `&p->f` included. A function can return the address of a local or a span of
+a local array, and the compiler does not diagnose it: the local is in frame storage, and the result
+points at dead storage after the return (D10.9, `memory-model.md` 8.2).
 
 ```fort
 i32* a = &(x + 1);        // error: '&' requires an lvalue
@@ -680,8 +697,8 @@ u8 mut* e = new(u8, 8).ptr;  // error: owning temporary would leak (D17.8)
 `e[i]`: `e` is a fixed array, span or string; `i` is any integer type or an untyped constant,
 and a negative constant is a compile error (D4.1). Signed indices are sign-extended and unsigned
 ones zero-extended, and one unsigned comparison against the length catches negatives. Every
-index is bounds-checked in every build mode; the `--no-bounds-check` option removes the checks
-for benchmarking and is documented as unsafe (D10.6). Out of range is a runtime error
+index is bounds-checked in every build mode, and the compiler has no option that removes the check
+(D10.6). Out of range is a runtime error
 (`index 5 out of range for length 3`, `memory-model.md` section 6); a constant index out of
 range for a fixed array is a compile error. Indexing a string yields `char`. Pointers cannot be
 indexed, not even pointers to arrays: write `(*p)[i]`.
@@ -694,8 +711,9 @@ a view: never `own` at its outermost reference, while `own` marks inside the ele
 (`kids[1..]` on a `node mut* own mut@ own kids` is `node mut* own mut@`) (D17.3). The runtime
 check is `0 <= lo <= hi <= len` relative to the operand, not the original allocation; the result
 may be empty. `p[lo..hi]` on a `T*` or `T mut*` yields a `T@` or `T mut@` with no check: this
-is the explicit unsafe escape for foreign memory, and a range beyond the object is undefined
-behavior (D10.7). Only the two-bound form exists for pointers: `p[lo..]`, `p[..hi]` and `p[..]`
+is the explicit unsafe escape for foreign memory. Only `str.from_cstr` and `rt.args_init` can write
+it (D6.9), and a range beyond the object is a case of the trusted premise (D10.7). Only the
+two-bound form exists for pointers: `p[lo..]`, `p[..hi]` and `p[..]`
 are errors because a pointer has no length (D10.4). No span can be taken of a `void*`.
 
 ```fort
@@ -724,7 +742,8 @@ ownership of its argument (D6.11, D17.5): an `own` lvalue argument is written `m
 an rvalue, which would leak (D17.8). Fort functions have no defaults, named arguments,
 overloading or variable tails. A C extern with `...` accepts arguments after its fixed prefix
 (D9.8). A function name, a function-pointer-typed expression and a
-qualified name `mod.f` are callable; calling a null function pointer is undefined behavior. A
+qualified name `mod.f` are callable; a call of a null function pointer is the runtime error
+`null call` in both build modes (D3.10, D10.6). A
 call statement to a `noreturn` function is a terminating statement (7.3). Arguments and results
 are passed by value (7.1).
 
@@ -839,7 +858,8 @@ yields `node mut* own mut@ own`, an owned span of owned pointers whose slots are
 (D10.2, D17.3); nothing precedes the base type
 there either (`grammar.md` section 6). `new(T{...})`, `new(T@)` and `new(void)` are errors. The
 result is an `own` rvalue and must land in an `own` place (3.9): `point* q = new(point);` is an
-error, not a conversion. Heap storage is freed only by `del` (8.2).
+error, not a conversion. Heap storage is freed only by `del` and by `regrow`, which releases the
+old storage of its span (8.2).
 
 ```fort
 u64 a = sizeof(x);                     // error: 'sizeof' takes a type
@@ -1114,8 +1134,8 @@ for (vec v : vecs) { }                         // error: elements are owning; it
   member finds every `switch` that needs updating. Listing every member is not covering every
   value: a zeroed enum holds 0 whether or not 0 is a member and an integer casts to an enum
   unchecked (D3.9), so the compiler gives such a `switch` a `default` of its own that reports a
-  runtime error, `enum value 0 is not a member of level`, and aborts (D7.7, D11.4). It is not a
-  bounds check, so `--no-bounds-check` keeps it (D10.6).
+  runtime error, `enum value 0 is not a member of level`, and aborts (D7.7, D11.4). No build mode
+  and no option of the compiler removes it (D10.6).
 
 `break;` exits the innermost enclosing loop or `switch`; `continue;` continues the innermost
 enclosing loop, running `step` in a `for`. Outside a loop or `switch` they are errors. There is
@@ -1304,7 +1324,8 @@ the parameter types (including pointee mutability), the return type and `noretur
 the identity (D17.1): `fn (node* own) void` and `fn (node*) void` are different types, and so are
 `fn () node mut* own` and `fn () node mut*`. `own` on a function-pointer type itself is an error.
 A function name, or a qualified name `m.f`, used as a value has its function type; `&f` and `*f`
-are errors. `null` is a valid value, and calling it is undefined behavior. `==` and `!=` compare
+are errors. `null` is a valid value, and a call of it is the runtime error `null call` (D3.10,
+D10.6). `==` and `!=` compare
 identity. An unparenthesized function type ends at its return type, so every marker and every
 suffix written after it belongs to that return type: `fn (i32) i32[4]` returns an `i32[4]` and
 `fn (i32) i32*` returns an `i32*`. To mark or to suffix the complete function type, put it in
@@ -1412,10 +1433,12 @@ are specified in 5.9 and 5.10.
 
 ### 8.2 Universe functions (D12.2, D10.3, D11.4, D17.6, D17.9, D17.20)
 
-`del(x)`, `move(lv)`, `assert(cond)`, `panic(msg)`, `print(...)`, `println(...)`, `eprint(...)`,
-`eprintln(...)`, `fprint(fd, ...)` and `fprintln(fd, ...)` live in the universe scope, use
+`del(x)`, `move(lv)`, `regrow(s, n)`, `assert(cond)`, `panic(msg)`, `print(...)`, `println(...)`,
+`eprint(...)`, `eprintln(...)`, `fprint(fd, ...)` and `fprintln(fd, ...)` live in the universe
+scope, use
 ordinary call syntax and have special typing. They may be shadowed by a module-level or local
-declaration (3.8) and cannot be used as values. `move` yields a value; the others produce none
+declaration (3.8) and cannot be used as values. `move` and `regrow` yield a value; the others
+produce none
 and appear only as call statements, `defer` operands and `for` init or step.
 
 `del(x)` frees the allocation designated by `x`, which must have an `own` type of any
@@ -1424,15 +1447,21 @@ rvalue (D17.9, D10.3). On an lvalue, `del` empties the operand as `move` does (3
 binding need not be `mut` but a level reached through `*p`, `p->f` or `s[i]` must be; on an
 rvalue it only frees. `del(null)` (the literal adopts `void* own`) and `del` of a zero span or
 string are no-ops, so `del(buf); del(buf);` frees once. A use of a local owner after its `del` is
-a compile error (D17.21), and another use after `del` dereferences `null`. `del` is shallow:
+a compile error (D17.21). A use of an owner that is no local owner after its `del` reads the zero
+value, so a dereference of it is the runtime error `null dereference` (D10.6). `del` is shallow:
 `del(kids)` on a `node mut* own mut@ own` frees the slots, not the nodes, and `del` of a struct
 or
 array is an error. So `del(p)` of a `T* own` whose `T` holds owners needs each owner of `*p`
 proved empty first (D17.20, `memory-model.md` 2.5). A view, a sub-span, a `.ptr`, a stack
 address, a literal and a `string` that is not `own` are compile errors, because none of them has
-an `own` type. Allocations have no
-header, so `new`/`del` and C `malloc`/`free` are interchangeable, and C memory is owned when its
-`extern` says `own` (D17.13).
+an `own` type. After the `del`, the storage of the allocation is dead: the runtime never gives it
+to another object, and a view that still points at it reads or writes only dead storage (D10.9).
+The runtime has its own allocator, so `new`/`del` and C `malloc`/`free` are not interchangeable
+(D10.3). C memory is owned when its `extern` says `own` (D17.13), and a C function that takes the
+owner as `own`, such as `free`, releases it. A `del` of a pointer that is not `null` and starts no
+live allocation of the runtime is the runtime error `invalid release` (D10.9): an owner that C
+gave, an interior pointer and a pointer to dead storage are such pointers. `regrow` makes the same
+test of the `.ptr` of its operand (D12.2).
 
 `del(s, d)` frees a span of owners: an `own` span whose element type `E` holds an `own` place in
 its fixed storage, such as `node mut* own mut@ own kids` or a span of structs with an `own` field
@@ -1465,20 +1494,56 @@ A `cast` that carries `own` from a span of owners to another element type is an 
 D3.14).
 
 `move(lv)` takes an lvalue of owning type, an `own` reference or an owning aggregate, yields its
-value and leaves the zero value behind (D17.6); the mutability rules are those of `del`. It is
-the one universe function with a value, and that value is an `own` rvalue which must land (3.9):
+value and leaves the zero value behind (D17.6); the mutability rules are those of `del`. `move`
+and `regrow` are the two universe functions with a value, and that value is an `own` rvalue which
+must land (3.9):
 `move(x);` as a statement is an error. Moving a zero value yields a zero value.
+
+`regrow(s, n)` takes an expression `s` of type `T mut@ own` and a count `n` of any integer type, and
+it yields a `T mut@ own` of `n` elements in new storage (D12.2). An lvalue takes `move`, as each
+owner does, so the usual form is `v = regrow(move(v), n);`. The first `s.len` elements of the result
+are the elements of `s`, moved: each keeps its value, and an element that holds an owner still holds
+it. Each other element holds the zero value. The result is in new storage also when `n` equals
+`s.len`. After it moves the elements, `regrow` stores the zero value into each owner slot in the
+fixed storage of each old element, and then it releases the old storage. Each other byte of the old
+storage keeps its value. The old storage is dead (D10.9), so a `move` through a view of an old
+element gives the zero value or a memory fault, and no second owner. The operand `s` is the zero
+span, or its `.ptr` is the start of a live allocation of the runtime. When `s` is the zero span, the
+result is that of `new(T, n)`: a new span of `n` zero elements. A `.ptr` that is not `null` and is
+no start of a live allocation of the runtime is the runtime error `invalid release` (D10.9). An
+operand of another type is a compile error: `T@ own` and `string own` are such types. A count below
+`s.len` is a runtime error in both build modes. A negative count, a size that overflows and `out of
+memory` are the errors of `new` (5.10). The runtime tests in this order: a negative count, a count
+below `s.len`, the size, the operand, the storage. The operands are evaluated left to right (D6.3),
+so in `regrow(move(v), v.len * 2)` the count reads the emptied `v`. That count is 0, so the call is
+the runtime error of a count below the length when the span has an element. A count that reads the
+span goes into a local before the call, so the form of doubling has two statements. The ownership
+analysis reads `regrow` as a `move` of `s` and a fresh allocation, with no call (D17.11).
+
+```fort
+// i32 mut@ own mut v of 3 elements; u64 cap
+v = regrow(move(v), cap);         // ok for cap >= 3: v[0], v[1], v[2] keep their values
+regrow(move(v), cap);             // error: owning temporary would leak
+v = regrow(move(v), 2);           // runtime error: regrow count 2 below length 3
+v = regrow(move(v), v.len * 2);   // runtime error: regrow count 0 below length 3
+u64 n = v.len * 2;                // the form of doubling: the count goes into a local first
+v = regrow(move(v), n);           // ok: 6 elements, and v[3], v[4], v[5] hold 0
+```
 
 `assert(cond)` takes a `bool`; on failure it reports `<file>:<line>:<col>: assertion failed:
 <expression text>` and aborts, and it is active in every build mode. `panic(msg)` takes a
 `string`, reports `<file>:<line>:<col>: panic: <message>` and aborts; it is `noreturn`, so a
 `panic(...)` statement is terminating (7.3). Runtime error contract (D11.4): the runtime flushes
 buffered output, writes one line to stderr (`<file>:<line>:<col>: runtime error: <message>` for
-the bounds, overflow, shift, division and allocation checks, with the fixed message texts of
+the bounds, `null`, overflow, shift, division, allocation and release checks, with the fixed
+message texts of
 `memory-model.md` section 6) and calls `abort()`, so the process dies with SIGABRT, status 134
 under a shell. `<file>` is the path the compiler opened; the column is that of the operator
-token, or of the builtin's name for `new`, `assert` and `panic`; the `assert` text is the
-source text of the expression, verbatim. Deferred code does not run.
+token, or of the builtin's name for `new`, `regrow`, `del`, `assert` and `panic`; the `assert` text
+is the
+source text of the expression, verbatim. Deferred code does not run. A memory fault (D10.9) is no
+runtime error of this contract: the system ends the process, and the runtime writes no line
+(D11.4).
 
 ```fort
 // u8 mut@ own buf; node mut* own n; node* v = n; node* own@ view; vec w; string s; i32 k
