@@ -373,19 +373,28 @@ fn range_storage_write(ast.node* target, ast.node* coll, u64 depth) bool {
 // Until ownership analysis proves loan preservation, fort calls and other ownership writes fail.
 // An owning element can own the object that contains the collection, so its release also fails.
 // A trusted extern call keeps its D17.13 contract. Scalar element writes remain legal.
+// `del(s, d)` vacates and frees `s` as `del(s)` does, and it calls the fort function `d` (D17.9).
+// The walk reports the span operand `s` first, as it reports each other operand.
+// It reports `d`, as a call with no proof, only when the walk of `s` gave no report.
 fn check_range_writes(check.checker mut* ck, ast.node* n, ast.node* coll) void {
     if (n == null) {
         return;
     }
     ast.node* mut target = null;
+    ast.node* mut drop = null;
     if (n->kind == ast.ast_kind.k_assign || n->kind == ast.ast_kind.k_incdec
         || (n->kind == ast.ast_kind.k_return && (n->ann & check.ANN_MOVE) != 0)) {
         target = n->a;
     } else if (n->kind == ast.ast_kind.k_call && n->a->sym != null
-               && n->a->sym->kind == ast.sym_kind.s_builtin && ast.ast_len(n) == 1
+               && n->a->sym->kind == ast.sym_kind.s_builtin && ast.ast_len(n) >= 1
                && (n->a->sym->name == "del" || n->a->sym->name == "move")) {
         target = ast.ast_child(n, 0);
+        if (ast.ast_len(n) == 2 && n->a->sym->name == "del") {
+            drop = ast.ast_child(n, 1);
+        }
     }
+    // `errors` counts each report, also a muted one, so it tells if the span operand gave one.
+    u64 before = ck->errors;
     if (target != null && (target->ann & check.ANN_LVALUE) != 0) {
         if (range_storage_write(target, coll, 0)) {
             check.check_error(ck, target->loc,
@@ -406,6 +415,11 @@ fn check_range_writes(check.checker mut* ck, ast.node* n, ast.node* coll) void {
     check_range_writes(ck, n->d, coll);
     u64 mut i = 0;
     while (i < ast.ast_len(n)) {
+        if (drop != null && i == 1 && ck->errors == before) {
+            // The span operand is an rvalue with no report, for example `new(...)`.
+            // The drop can free a collection that a global holds.
+            check.check_error(ck, drop->loc, "cannot prove call preserves collection storage");
+        }
         check_range_writes(ck, ast.ast_child(n, i), coll);
         i += 1;
     }
