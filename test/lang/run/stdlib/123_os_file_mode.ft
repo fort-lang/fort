@@ -22,14 +22,8 @@ u32 S_IFDIR = 0o040000;
 u32 S_IFCHR = 0o020000;
 u32 S_IFIFO = 0o010000;
 
-// mkfifo(3), whose mode_t is a u32 on Linux and a u16 on Mac (D9.8).
-$if ($cfg(target_os) == "linux") {
-    extern fn mkfifo(char* path, u32 mode) i32;
-} else {
-    extern fn mkfifo(char* path, u16 mode) i32;
-}
-
 // Whether the type of `path` reads, with its type bits in *kind.
+// C call libc.close: no pointer argument.
 fn type_of(string path, u32 mut* kind) bool {
     i32 fd = os.open_nonblocking(path);
     if (fd < 0) {
@@ -42,6 +36,8 @@ fn type_of(string path, u32 mut* kind) bool {
     return ok;
 }
 
+// C call libc.mkfifo: fifo.ptr names the buffer fifo that str.to_cstr gave, with its NUL (D9.8 rule
+// 4).
 fn main() i32 {
     println(io.write_file("t-mode.txt", cast("x", u8@)));
     u32 mut kind = 0;
@@ -50,7 +46,8 @@ fn main() i32 {
     println(type_of("/dev/null", &kind), " ", kind == S_IFCHR);
     char mut@ own fifo = str.to_cstr("t-mode.fifo");
     defer del(fifo);
-    println(mkfifo(fifo.ptr, 0o600) == 0 && type_of("t-mode.fifo", &kind), " ", kind == S_IFIFO);
+    bool made = libc.mkfifo(fifo.ptr, 0o600) == 0;
+    println(made && type_of("t-mode.fifo", &kind), " ", kind == S_IFIFO);
     println(os.open_nonblocking("t-mode-missing.txt"), " ", sys.errno() == libc.ENOENT);
     return 0;
 }

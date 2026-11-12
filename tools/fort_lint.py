@@ -6,8 +6,19 @@ file once and reports problems as `<file>:<line>:<col>: <message>`.
 
 The rows of D9.8: each `extern fn` of a trusted module has a declaration row, the call rows of
 each function of a trusted module count each call of an `extern fn`, of a boundary function and
-through a function value, and a name of a boundary function goes only to C (row_problems). A
-boundary function is found by the types of its parameters in the source, with the structs that
+through a function value, and a name of a boundary function goes only to C (row_problems).
+A call row that cites `the gives: of <callee>` or `the writes: of <callee>` names a callee that
+the body calls, whose row holds a line with that word (citation_problems). A function that is no
+boundary function gives no `mut` global whose type reaches a byte pointer to a call of C
+(mut_global_to_c).
+
+The lint does not read the sources of a row. It does not check a bound, a length or a NUL: a row
+that claims the bound of the whole array for `&g[0][1][0]` of a `char@[1][2] g` passes, and a
+reviewer reads it against rule 2. It sees a `mut` global only by its name in the arguments of
+the call: a value that a local copies from a `mut` global first, and a length or a NUL of a `mut`
+global of another type, go past it.
+
+A boundary function is found by the types of its parameters in the source, with the structs that
 the index records resolve, so the answer is the checker's own for each struct and each name
 (Rows.reaches).
 
@@ -20,6 +31,11 @@ modules are checked under the root of that target. Each set reads nested directo
 `std.<name>` of the standard root of its target, which symbolic links to the files of `std/`
 make, so a list of files may name one module of `std/` or the modules of both targets. A module
 that both targets share checks under the root of the target.
+
+The files of `test/lang/run` and `test/lang/programs` get the checks of D9.8 only: a test
+exercises the language, so the names, the width and the rules of notes/style.md 3.1 do not
+apply to it (ROWS_ONLY). Each such file is indexed with the `--cfg` options of the `//! flags:`
+directive of its test (lang_options).
 
 The naming checks of notes/style.md 3.1 apply to a file of `src/fort`, `src/lsp` and `std`
 by its path. The prefix check applies in each directory of those roots. The function and
@@ -54,7 +70,12 @@ SOURCE_SETS = (
     ("test/lsp/**/*.ft", ("src", "test/fort/support")),
     ("test/library/**/*.ft", ("src", "test/library/chain")),
     ("test/tty/**/*.ft", ()),
+    ("test/lang/run/**/*.ft", ()),
+    ("test/lang/programs/**/*.ft", ()),
 )
+# The trees whose files get the checks of D9.8 and the diagnostics of the compiler only. A
+# language test exercises the language rather than the conventions (notes/testing.md 8).
+ROWS_ONLY = ("test/lang/",)
 SOURCE_GLOBS = tuple(glob for glob, _ in SOURCE_SETS)
 TARGETS = ("linux", "darwin")
 
@@ -399,8 +420,11 @@ def group_records(document, root, cache):
     return buckets
 
 
-def file_problems(records, diagnostics, has_source_text=True, segments=None):
+def file_problems(records, diagnostics, has_source_text=True, segments=None, names=True):
     """The problems one run reports about one file, sorted by position.
+
+    `names` False leaves out the problems of the records, the names of D1.4, for a file of
+    ROWS_ONLY.
 
     A rejected file can still contain resolved index records. Check those records.
     Diagnostics disable the empty-index guard because an early error can produce no records.
@@ -409,7 +433,7 @@ def file_problems(records, diagnostics, has_source_text=True, segments=None):
     problems = list(diagnostics)
     seen = set()
     found = []
-    for record in records:
+    for record in records if names else ():
         for message in record_problems(record, segments):
             key = (record["line"], record["col"], message)
             if key in seen:
@@ -441,8 +465,9 @@ def document_problems(document, root, relative, has_source_text=True):
                          module_segments(relative))
 
 
-def index_document(fort, root, relative, includes=(), std_dir=None):
-    """Run `fort --index` over one file and return (document, error).
+def index_document(fort, root, relative, includes=(), std_dir=None, options=()):
+    """Run `fort --index` over one file and return (document, error). `options` are more
+    arguments of the compiler, the `--cfg` options of a language test (lang_options).
 
     The compiler exits 0 for a clean file and 1 for reported diagnostics.
     Another status or malformed output indicates a broken environment.
@@ -455,6 +480,7 @@ def index_document(fort, root, relative, includes=(), std_dir=None):
         # The compiler takes one search root per `-I`. They are spelled
         # relative to the working directory, which is the repository root.
         command.extend(["-I", str(include)])
+    command.extend(options)
     command.append(str(relative))
     proc = subprocess.run(
         command,
@@ -478,6 +504,49 @@ def index_document(fort, root, relative, includes=(), std_dir=None):
             "fort exited with status 1 but reported no diagnostic: %s" % proc.stderr.strip(),
         )
     return document, None
+
+
+def rows_only(relative):
+    """Whether the file `relative` gets the checks of D9.8 only (ROWS_ONLY)."""
+    name = Path(relative).as_posix()
+    return any(name.startswith(prefix) for prefix in ROWS_ONLY)
+
+
+# The marks of the lines of the header of a language test (test/lang/run_tests.py).
+HEADER_MARKERS = ("//!", "//<", "//|")
+# The directive of a language test that gives the compiler its options (spec/toolchain.md 7.2).
+FLAGS_DIRECTIVE = re.compile(r"\A//! flags:(.*)\Z")
+
+
+def lang_options(root, relative):
+    """The `--cfg` options of the `//! flags:` directive of the test of the file `relative` of
+    ROWS_ONLY, as a tuple of arguments, or (). A module of a directory test,
+    `run/modules/<name>/dep.ft` or a module in a directory below it, takes the directive of the
+    nearest `main.ft` above it. The header is the leading run of `//!`, `//<` and `//|` lines, as
+    the harness reads it (test/lang/run_tests.py). A key that the options do not set stops the
+    compile of its `$if` (D21.1), so the index needs them."""
+    if not rows_only(relative):
+        return ()
+    path = Path(root) / relative
+    top = Path(root) / "test" / "lang"
+    folder = path.parent
+    while folder != top and top in folder.parents:
+        if (folder / "main.ft").is_file():
+            path = folder / "main.ft"
+            break
+        folder = folder.parent
+    options = []
+    for line in path.read_text(encoding="utf-8").split("\n"):
+        if line[:3] not in HEADER_MARKERS:
+            break
+        found = FLAGS_DIRECTIVE.match(line)
+        if found is None:
+            continue
+        words = found.group(1).split()
+        for at, word in enumerate(words):
+            if word == "--cfg" and at + 1 < len(words):
+                options.extend((word, words[at + 1]))
+    return tuple(options)
 
 
 def text_problems(relative, text, root=None):
@@ -1224,6 +1293,109 @@ def function_row_problems(rows, path, source, record, calls, values=()):
     return problems
 
 
+# A citation in a call row of the word of the row of another trusted function (D9.8 rule 3):
+# `the gives: of rt.alloc` or `the writes: of rt.decimal_text`.
+CITATION = re.compile(r"\b(?i:the) (gives|writes): of "
+                      r"([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)")
+
+
+def citation_problems(rows, source, record, called):
+    """The problems of the citations in the call rows of one function of a trusted module: each
+    cited callee is called in the body (`called` maps the callee as the body spells it to the key
+    of its declaration), and the row of that function, its `//` lines directly above it, holds a
+    line that starts with the cited word (D9.8 rule 3)."""
+    at = source.offset(record["line"], record["col"])
+    start = keyword_before(source.code, at, "fn")
+    run = comment_run(source, source.line_of(start if start >= 0 else at))
+    problems = []
+    # A citation can wrap, so the lines join with a space, and each keeps its first offset.
+    joined = ""
+    starts = []
+    for line, text in run:
+        starts.append((len(joined), line))
+        joined += text[2:].strip() + " "
+    for found in CITATION.finditer(joined):
+        line = [number for offset, number in starts if offset <= found.start()][-1]
+        word, callee = found.group(1) + ":", found.group(2)
+        key = called.get(callee)
+        if key is None:
+            problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', which its "
+                             "body does not call (%s)" % (record["name"], word, callee, ROWS)))
+            continue
+        if not cited_word_stands(rows, key, word):
+            problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', and the row "
+                             "of '%s' has no line '// %s ...' (%s)"
+                             % (record["name"], word, callee, callee, word, ROWS)))
+    return problems
+
+
+def cited_word_stands(rows, key, word):
+    """Whether the row of the fort function declared at `key`, its `//` lines directly above it,
+    holds a line that starts with `word`."""
+    path, line, col = key
+    source = rows.source(path)
+    if source is None:
+        return False
+    at = source.offset(line, col)
+    start = keyword_before(source.code, at, "fn")
+    run = comment_run(source, source.line_of(start if start >= 0 else at))
+    return any(text.startswith("// " + word) for _, text in run)
+
+
+def enclosing_opens(code, start, stop):
+    """The offsets of the `(` of each call whose argument list holds the offset `start`, inner
+    first, up to the statement and not before `stop`."""
+    opens = []
+    depth = 0
+    i = start - 1
+    while i > stop:
+        c = code[i]
+        if c in ")]}":
+            depth += 1
+        elif c in "([{":
+            if depth > 0:
+                depth -= 1
+            elif c == "(":
+                opens.append(i)
+            else:
+                break
+        elif c == ";" and depth == 0:
+            break
+        i -= 1
+    return opens
+
+
+def mut_global_to_c(rows, path, source, use, stop):
+    """Whether the use record `use` of a global names a `mut` global whose type reaches a byte
+    pointer, inside the arguments of a call of an `extern fn` or of a boundary function."""
+    # The index names a `mut` global `global` and a module constant `constant`, so each record of
+    # kind `global` is a `mut` global.
+    key = rows.decl_key(use)
+    if key is None:
+        return False
+    decl_path, line, col = key
+    decl_source = rows.source(decl_path)
+    if decl_source is None:
+        return False
+    if not rows.reaches(decl_path, rows.type_at(decl_path, decl_source.offset(line, col), ";{}")):
+        return False
+    code = source.code
+    for open_at in enclosing_opens(code, source.offset(use["line"], use["col"]), stop):
+        callee, callee_at = prev_char(code, open_at)
+        word = re.search(r"[A-Za-z_][A-Za-z0-9_]*\Z", code[:callee_at + 1])
+        if word is None:
+            continue
+        at_line = source.line_of(word.start())
+        at_col = word.start() - source.starts[at_line - 1] + 1
+        for record in rows.records_at(path, at_line, at_col):
+            if record["kind"] == "extern fn":
+                return True
+            target = rows.decl_key(record) if record["kind"] == "fn" else None
+            if target is not None and rows.is_boundary(target):
+                return True
+    return False
+
+
 def row_problems(rows, path, records):
     """The problems of D9.8 that the records of the file `path` show, as (line, col, message).
 
@@ -1240,6 +1412,8 @@ def row_problems(rows, path, records):
     problems = []
     functions = []
     uses = []
+    globals_used = []
+    fn_calls = []
     for record in records:
         if record.get("is_decl"):
             if rows.decl_key(record) != (path, record["line"], record["col"]):
@@ -1254,10 +1428,15 @@ def row_problems(rows, path, records):
                 body_close = matching_close(source.code, body_open) if body_open >= 0 else -1
                 functions.append((body_open, body_close, record, {}))
             continue
+        if record["kind"] == "global":
+            globals_used.append(record)
         if record["kind"] == "extern fn":
             uses.append((record, False))
         elif record["kind"] == "fn":
             key = rows.decl_key(record)
+            start = source.offset(record["line"], record["col"])
+            if key is not None and next_char(source.code, start + len(record["name"]))[0] == "(":
+                fn_calls.append((start, spelled_callee(source.code, start)[1], key))
             if key is not None and rows.is_boundary(key):
                 uses.append((record, True))
     for record, boundary in uses:
@@ -1284,6 +1463,18 @@ def row_problems(rows, path, records):
                 calls[callee] = calls.get(callee, 0) + 1
                 values.add(callee)
         problems.extend(function_row_problems(rows, path, source, record, calls, values))
+        called = {callee: key for at, callee, key in fn_calls if body_open < at < body_close}
+        problems.extend(citation_problems(rows, source, record, called))
+        if not rows.is_boundary((path, record["line"], record["col"])):
+            for use in globals_used:
+                at = source.offset(use["line"], use["col"])
+                if body_open < at < body_close and mut_global_to_c(rows, path, source, use,
+                                                                    body_open):
+                    problems.append((use["line"], use["col"], "fn '%s' gives the `mut` global "
+                                     "'%s', whose type reaches a byte pointer, to a call of C: "
+                                     "a value from it is a parameter source (rule 1), which "
+                                     "stands only in a boundary function (%s)"
+                                     % (record["name"], use["name"], ROWS)))
     return problems
 
 
@@ -1411,7 +1602,9 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
     for path, includes in files:
         relative = os.path.relpath(str(path), str(root))
         text = Path(path).read_text(encoding="utf-8")
-        entries.append((relative, tuple(includes), real_path(root, relative, cache), text))
+        # A run judges a file only when its roots and its options agree, so the pair is its key.
+        given = (tuple(includes), lang_options(root, relative))
+        entries.append((relative, given, real_path(root, relative, cache), text))
     reports = [None] * len(entries)
     runs = 0
     for indexes, buckets, diagnostics, error in std_documents(fort, root, entries, cache, target):
@@ -1423,13 +1616,14 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
                 continue
             records = buckets.get(path, [])
             reports[index] = file_problems(records, diagnostics, has_source_text(text),
-                                           module_segments(relative))
+                                           module_segments(relative), not rows_only(relative))
             rows = Rows(root, buckets, cache, std_roots, memo)
             reports[index].extend(row_problems(rows, path, records))
-    for index, (relative, includes, _, _) in enumerate(entries):
+    for index, (relative, given, _, _) in enumerate(entries):
         if reports[index] is not None:
             continue
-        document, error = index_document(fort, root, relative, includes, std_dir)
+        includes, options = given
+        document, error = index_document(fort, root, relative, includes, std_dir, options)
         runs += 1
         if error is not None:
             reports[index] = [(1, 1, error)]
@@ -1441,24 +1635,27 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
             if reports[other] is not None:
                 continue
             records = buckets.get(entries[other][2])
-            if other != index and (not records or entries[other][1] != includes):
+            if other != index and (not records or entries[other][1] != given):
                 # The whole design rests on one fact: a file's records depend on
                 # that file's own import closure and on nothing wider. So the
                 # records of a file in this document are the records its own run
-                # would give. The search roots are the one thing that can change
-                # that closure. Thus, a run judges a file only when the roots
-                # agree. Std/ resolves through the copy beside the compiler, which is
-                # another file, and the test/fort and test/lsp tests carry the roots of
+                # would give. The search roots and the `--cfg` options of a language
+                # test are the things that can change that closure. Thus, a run judges a
+                # file only when the roots and the options agree. Std/ resolves through
+                # the copy beside the compiler, which is another file, and the test/fort
+                # and test/lsp tests carry the roots of
                 # test/fort/support. A module of src/fort carries `-I src`, so a run of a
                 # module of src/lsp, which carries the same root, can judge it.
                 continue
             source = has_source_text(entries[other][3])
             segments = module_segments(entries[other][0])
-            reports[other] = file_problems(records or [], diagnostics, source, segments)
+            reports[other] = file_problems(records or [], diagnostics, source, segments,
+                                           not rows_only(entries[other][0]))
             reports[other].extend(row_problems(rows, entries[other][2], records or []))
     lines = []
     for index, (relative, _, _, text) in enumerate(entries):
-        problems = text_problems(relative, text, root) + reports[index]
+        problems = [] if rows_only(relative) else text_problems(relative, text, root)
+        problems += reports[index]
         problems.sort(key=lambda problem: (problem[0], problem[1]))
         lines.append(
             ["%s:%d:%d: %s" % (relative, line, col, message) for line, col, message in problems]

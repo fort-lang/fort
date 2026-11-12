@@ -542,17 +542,25 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   function that a parameter gives, or from a `mut` global, but a span or a string with its `.ptr`
   and `.len`, and a typed pointer to another type, also through a cast; then the own bound of a
   value that no call of C gave, `.len` elements of a span or a string, the rest of the object for
-  the address of an element of a fixed array, a span or a string, one object for another address or
+  the address of an element of a fixed array, a span or a string (of a nested fixed array, or of a
+  span of fixed arrays, when each index after the first selects an element of a fixed array, the
+  rest of the whole storage, `type-system.md` 3.1; a span keeps its own `.len`), one object for
+  another address or
   a typed pointer to a type other than `char`, `u8` or `void`, kept through each cast; then storage
   that a call of C in the same function returned or wrote, with the size and the NUL that its
-  declaration row states; then the NUL of a string literal (also through a global that is no `mut`
-  global), of a buffer of `str.to_cstr`, or one that the function or a fort function of its module
-  stores by a checked index into the array or span of the pointer, a null item of an array of
-  pointers included (another `string` has none). A parameter source stands only in a boundary
-  function, whose callers are trusted. So a length fits each buffer that C uses it with, and a C
-  string ends in a NUL inside its storage, at each call that the rows cover. The list is a checklist
-  for review. The rows of `std` and of `test/fort/support/heap.ft` corrected it on 2026-11-06, where
-  a true row could not be written (D9.8).
+  declaration row states, or that a call of a fort function of a trusted module gave or wrote,
+  with what the row of that function states by `gives:` or `writes:` (a line of its row that
+  starts with the word, which the call row cites as `the gives: of <callee>`), or by a contract
+  of `stdlib.md` that it cites; then the NUL of a string literal (also through a global that is no
+  `mut` global), of a buffer of `str.to_cstr`, one that the function or a fort function of its
+  module stores by a checked index into the array or span of the pointer, a null item of an array
+  of pointers included, one that the initializer of a local fixed array stores, or one that such
+  a row of another trusted function states (another `string` has none). A parameter source
+  stands only in a boundary function, whose callers are trusted. So a length fits each buffer that
+  C uses it with, and a C string ends in a NUL inside its storage, at each call that the rows
+  cover. The list is a checklist for review. The rows of `std` and of `test/fort/support/heap.ft`
+  corrected it on 2026-11-06, where a true row could not be written (D9.8), and the rows of
+  `test/lang/run` on 2026-11-07.
   The user ruled the points on the pointers that C gives with "(A) Close R1-R7" (2026-10-31), and
   the coordinator ratified the out-parameter and the alignment on 2026-11-01. No cast gives a
   function pointer another type, as an argument of an `extern fn` too (D3.14), so fort gives C no

@@ -20,6 +20,7 @@ parameter type, and one over each function of the standard library of the build.
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -85,6 +86,15 @@ class Rules(unittest.TestCase):
                 self.assertEqual((f, line), (want_file, want_line), output)
                 self.assertIn(part, message, output)
             self.assertEqual(status, 1 if expected else 0, output)
+            return output
+
+    def check_raw(self, files):
+        """Write `files` (name to text), lint them, and return the output; the lint must fail."""
+        with tempfile.TemporaryDirectory() as out:
+            root = os.path.realpath(out)
+            names = [write(root, name, text) for name, text in files.items()]
+            status, output, _ = lint(root, names)
+            self.assertEqual(status, 1, output)
             return output
 
     def test_a_declaration_and_a_call_with_their_rows_pass(self):
@@ -383,6 +393,149 @@ class Rules(unittest.TestCase):
                  "one.ft": head + "// C call labs x1: no pointer argument.\n" + body}
         self.check(files, [("one.ft", 8, "count 1 call(s) of 'labs', and its body holds 3")])
 
+    def test_a_language_test_gets_the_rows_and_no_names(self):
+        # A file of test/lang/run or test/lang/programs gets the checks of D9.8 and no check of
+        # D1.4: its module name, its struct name and its long line pass, and its extern with no
+        # row is reported. The same text in another tree gets each check.
+        text = ("import extern;\n\n// " + "x" * 100 + "\nstruct Bad_Name {\n    i64 v;\n}\n\n"
+                "extern fn labs(i64 v) i64;\n")
+        files = {"test/lang/run/ffi/001_bad.ft": text,
+                 "test/lang/programs/Bad.ft": text,
+                 "other/001_bad.ft": text}
+        self.check(files, [
+            ("other/001_bad.ft", 1, "module '001_bad' is not lower_case"),
+            ("other/001_bad.ft", 3, "line is 103 columns"),
+            ("other/001_bad.ft", 4, "struct 'Bad_Name' is not lower_case"),
+            ("other/001_bad.ft", 8, "extern 'labs' has no declaration row"),
+            ("test/lang/programs/Bad.ft", 8, "extern 'labs' has no declaration row"),
+            ("test/lang/run/ffi/001_bad.ft", 8, "extern 'labs' has no declaration row")])
+
+    def test_a_language_test_keeps_the_errors_of_the_compiler(self):
+        # A language test gets no check of D1.4, but a closure that the compiler cannot check
+        # is still a problem: the rows of a file with no index cannot be read.
+        text = "fn main() i32 {\n    return missing;\n}\n"
+        output = self.check_raw({"test/lang/run/x/001_broken.ft": text})
+        self.assertIn("test/lang/run/x/001_broken.ft:1:1:", output)
+        self.assertIn("missing", output)
+
+    def test_a_language_test_takes_the_cfg_options_of_its_flags(self):
+        # The `--cfg` options of `//! flags:` reach the index, so a `$if` on a key of the test
+        # compiles. A module of a directory test takes the options of the main.ft beside it.
+        main = ("//! run\n//! flags: --release --cfg mode=good\n"
+                "import extern;\nimport dep;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                "// C call labs: no pointer argument.\n"
+                "fn main() i32 {\n    $if ($cfg(mode) == \"good\") {\n"
+                "        return cast(labs(cast(dep.KEY.len, i64)), i32);\n    }\n}\n")
+        dep = "string KEY = $cfg(mode);\n"
+        self.check({"test/lang/run/modules/keyed/main.ft": main,
+                    "test/lang/run/modules/keyed/dep.ft": dep}, [])
+        output = self.check_raw({"elsewhere/keyed/main.ft": main,
+                                 "elsewhere/keyed/dep.ft": dep})
+        self.assertIn("configuration key 'mode' is not set", output)
+
+    def test_a_citation_names_a_callee_whose_row_holds_the_word(self):
+        # A call row may cite the word of the row of another trusted function (D9.8 rule 3): the
+        # body calls that callee, and its row holds a line that starts with the word.
+        maker = ("import extern;\n\n/// Gives a value.\n// gives: 4 zero bytes, never null.\n"
+                 "fn make() u64 {\n    return 4;\n}\n")
+        user = ("import extern;\nimport maker;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                "// C call labs: the gives: of maker.make states 4 bytes.\n"
+                "fn use() i64 {\n    return labs(cast(maker.make(), i64));\n}\n")
+        self.check({"maker.ft": maker, "user.ft": user}, [])
+        no_row = maker.replace("// gives: 4 zero bytes, never null.\n", "")
+        cite = lines_of(user, "// C call labs")[0]
+        self.check({"maker.ft": no_row, "user.ft": user},
+                   [("user.ft", cite, "cites the gives: of 'maker.make', and the row of "
+                     "'maker.make' has no line '// gives: ...'")])
+        other_word = maker.replace("// gives:", "// writes:")
+        self.check({"maker.ft": other_word, "user.ft": user},
+                   [("user.ft", cite, "has no line '// gives: ...'")])
+        wrapped = user.replace("the gives: of maker.make states 4 bytes.",
+                               "the writes: of\n// maker.make states 4 bytes.")
+        self.check({"maker.ft": maker, "user.ft": wrapped},
+                   [("user.ft", cite, "cites the writes: of 'maker.make'")])
+        not_called = user.replace("maker.make states", "maker.other states")
+        self.check({"maker.ft": maker, "user.ft": not_called},
+                   [("user.ft", cite, "cites the gives: of 'maker.other', which its body does not "
+                     "call")])
+
+    def test_the_cited_rows_of_std_are_checked(self):
+        # Each row of std that a row of test/lang cites: deleting its line, or its word, gives a
+        # problem in the file that cites it, and in std.sys for the gives: of rt.args.
+        cases = (("rt.ft", "fn decimal_text(", "// writes:", "test/lang/run/stdlib/095_rt_round_"
+                  "trip_floats.ft", "rt.decimal_text"),
+                 ("rt.ft", "fn alloc(", "// gives:", "test/lang/run/stdlib/070_rt_alloc_free.ft",
+                  "rt.alloc"),
+                 ("rt.ft", "fn alloc(", "// gives:", "test/lang/run/modes/014_rt_release.ft",
+                  "rt.alloc"),
+                 ("sys.ft", "fn args(", "// gives:", "test/lang/run/stdlib/019_sys_args_env.ft",
+                  "sys.args"),
+                 ("rt.ft", "fn args(", "// gives:", "std/sys.ft", "rt.args"))
+        # A row of test/lang reads std from --std-dir, a copy of the std of the build; a row of
+        # std reads std from the root, a copy of the std of the source tree.
+        built = os.path.join(os.path.dirname(OPTIONS.fort), "std")
+        for module, fn, word, citing, callee in cases:
+            in_std = citing.startswith("std/")
+            std = os.path.join(OPTIONS.source, "std") if in_std else built
+            for spoil in ("line", "word"):
+                with self.subTest(callee=callee, citing=citing, spoil=spoil), \
+                        tempfile.TemporaryDirectory() as out:
+                    copy = os.path.join(os.path.realpath(out), "std")
+                    shutil.copytree(std, copy)
+                    target = os.path.join(copy, module)
+                    with open(target, encoding="utf-8") as handle:
+                        lines = handle.read().split("\n")
+                    at = [i for i, text in enumerate(lines) if text.startswith(fn)][0]
+                    row = [i for i in range(at - 1, -1, -1) if lines[i].startswith(word)][0]
+                    if spoil == "line":
+                        del lines[row]
+                    else:
+                        lines[row] = lines[row].replace(word, word[:-1], 1)
+                    with open(target, "w", encoding="utf-8") as handle:
+                        handle.write("\n".join(lines))
+                    root = os.path.dirname(copy) if in_std else OPTIONS.source
+                    argv = [sys.executable, os.path.join(OPTIONS.source, "tools", "fort_lint.py"),
+                            "--fort", OPTIONS.fort, "--root", root, os.path.join(root, citing)]
+                    if not in_std:
+                        argv[4:4] = ["--std-dir", copy]
+                    else:
+                        host = "darwin" if sys.platform == "darwin" else "linux"
+                        argv[4:4] = ["--target", host]
+                    proc = subprocess.run(argv, cwd=root, capture_output=True, text=True)
+                    output = proc.stdout + proc.stderr
+                    self.assertEqual(proc.returncode, 1, output)
+                    self.assertIn("the row of '%s' has no line '// %s ...'" % (callee, word[3:]),
+                                  output)
+
+    def test_a_mut_global_that_reaches_a_byte_pointer_goes_to_c_only_from_a_boundary_function(
+            self):
+        # A value from a `mut` global is a parameter source (D9.8 rule 1), which stands only in a
+        # boundary function. The lint sees the global by its name in the arguments of a call of
+        # an extern fn or of a boundary function.
+        head = ("import extern;\n\n// C: strlen, ISO C11 7.24.6.3, strlen(3).\n// gives: a count. "
+                "writes: nothing. keeps: no pointer.\n// calls: no fort function. frees: nothing."
+                "\nextern fn strlen(char* s) u64;\n\nchar* mut name = null;\nchar* FIXED = null;"
+                "\ni32 mut count = 0;\nchar[4] mut buf = {};\n\n")
+        plain = (head + "// C call strlen: name.\nfn plain() u64 {\n    return strlen(name);\n}\n"
+                 "\n// C call strlen: &buf[0].\nfn nested() u64 {\n"
+                 "    return strlen(cast(&buf[0], char*)) + cast(count, u64);\n}\n"
+                 "\n// C call strlen: FIXED.\nfn steady() u64 {\n    return strlen(FIXED);\n}\n"
+                 "\n// C call strlen: p is a parameter source.\nfn edge(char* p) u64 {\n"
+                 "    return strlen(p) + strlen(name);\n}\n")
+        plain = plain.replace("// C call strlen: p is a parameter source.",
+                              "// C call strlen x2: p and name are parameter sources.")
+        # `&buf[0]` is an address of the global, with the own bound of rule 2, and `char[4]` and
+        # `i32` reach no byte pointer; `FIXED` is no `mut` global; `edge` is a boundary function.
+        self.check({"globals.ft": plain}, [
+            ("globals.ft", lines_of(plain, "return strlen(name);")[0],
+             "fn 'plain' gives the `mut` global 'name'")])
+        called = plain.replace("return strlen(name);", "return strlen(pick(name));").replace(
+            "// C call strlen: name.", "// C call strlen: name.\n// C call pick: name.")
+        called += "\nfn pick(char* p) char* {\n    return p;\n}\n"
+        self.check({"globals.ft": called}, [
+            ("globals.ft", lines_of(called, "return strlen(pick(name));")[0],
+             "fn 'plain' gives the `mut` global 'name'")])
+
     def test_a_row_in_the_standard_library_is_checked(self):
         # A module of std/ is trusted by its root (D9.8). The test removes the declaration row
         # of `strlen` from a copy of the std.libc of the target and the call row of mem.copy.
@@ -614,6 +767,40 @@ class Parts(unittest.TestCase):
                            ("import externs;", False)):
             with self.subTest(text=text):
                 self.assertEqual(fort_lint.Source(text).is_trusted_form(), want)
+
+    def test_the_options_of_a_language_test_are_its_cfg_pairs(self):
+        fort_lint = lint_module()
+        with tempfile.TemporaryDirectory() as out:
+            root = os.path.realpath(out)
+            write(root, "test/lang/run/a/001_one.ft",
+                  "//! run\n//! flags: --release --cfg a=1,b= --no-bounds-check --cfg c=x=y\n"
+                  "//! stdout:\n//| 1\n// --cfg z=0 is no directive\nfn main() i32 {}\n")
+            write(root, "test/lang/run/modules/d/main.ft", "//! run\n//! flags: --cfg k=v\n")
+            write(root, "test/lang/run/modules/d/dep.ft", "//! flags: --cfg other=1\n")
+            write(root, "test/lang/programs/plain.ft", "//! run\nfn main() i32 {}\n")
+            write(root, "test/fort/x.ft", "//! flags: --cfg k=v\n")
+            for relative, want in (
+                    ("test/lang/run/a/001_one.ft", ("--cfg", "a=1,b=", "--cfg", "c=x=y")),
+                    ("test/lang/run/modules/d/main.ft", ("--cfg", "k=v")),
+                    ("test/lang/run/modules/d/dep.ft", ("--cfg", "k=v")),
+                    ("test/lang/programs/plain.ft", ()),
+                    ("test/fort/x.ft", ())):
+                with self.subTest(relative=relative):
+                    self.assertEqual(fort_lint.lang_options(root, relative), want)
+        with tempfile.TemporaryDirectory() as out:
+            root = os.path.realpath(out)
+            write(root, "test/lang/run/b/001_two.ft",
+                  "//! run\n//! stdout:\n//| x\n//< y\n//! flags: --cfg late=1\nfn main() i32 {}\n")
+            write(root, "test/lang/run/modules/e/main.ft", "//! run\n//! flags: --cfg deep=1\n")
+            write(root, "test/lang/run/modules/e/sub/leaf.ft", "fn f() void {}\n")
+            self.assertEqual(fort_lint.lang_options(root, "test/lang/run/b/001_two.ft"),
+                             ("--cfg", "late=1"))
+            self.assertEqual(fort_lint.lang_options(root, "test/lang/run/modules/e/sub/leaf.ft"),
+                             ("--cfg", "deep=1"))
+        self.assertTrue(fort_lint.rows_only("test/lang/programs/calc.ft"))
+        self.assertTrue(fort_lint.rows_only("test/lang/run/ffi/001_libc.ft"))
+        self.assertFalse(fort_lint.rows_only("test/fort/lang_test.ft"))
+        self.assertFalse(fort_lint.rows_only("std/rt.ft"))
 
     def test_the_standard_roots_include_each_place_of_std(self):
         fort_lint = lint_module()
