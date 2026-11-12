@@ -161,6 +161,15 @@ class MemcpyLinesTest(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertEqual(run_tests.memcpy_lines(line), [line])
 
+    def test_a_name_in_quotes_counts(self):
+        # LLVM reads `@"llvm.memcpy.p0.p0.i64"` as the name `@llvm.memcpy.p0.p0.i64`.
+        for line in ('  call void @"llvm.memcpy.p0.p0.i64"(ptr %a, ptr %b, i64 8, i1 false)',
+                     'declare void @"llvm.memcpy.p0.p0.i64"(ptr, ptr, i64, i1 immarg)'):
+            with self.subTest(line=line):
+                self.assertEqual(run_tests.memcpy_lines(line + "\n"), [line])
+        self.assertEqual(run_tests.memcpy_lines(
+            '  call void @"llvm.memmove.p0.p0.i64"(ptr %a, ptr %b, i64 8, i1 false)'), [])
+
     def test_a_memmove_does_not_count(self):
         self.assertEqual(run_tests.memcpy_lines(MEMMOVE_CALL), [])
         self.assertEqual(run_tests.memcpy_lines(MEMMOVE_DECLARATION), [])
