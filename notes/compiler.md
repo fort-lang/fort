@@ -1970,3 +1970,648 @@ library (T-160).
 
 **The fort compiler can implement language forms that the C compiler does not implement.**
 Product tests hold these forms directly. The project does not maintain C-to-fort parity (T-160).
+
+## 9. The census of the undefined states
+
+The goal: no program outside the trusted modules has an undefined state. This section lists each
+construct of the emitted IR that has a precondition in the LLVM language reference, each raw
+operation of `std/rt.ft`, and the back end line. It gives each one a row. The census changes no
+behavior of the compiler: it lists a gap and does not close it.
+
+The reference is the LLVM 18.1.8 language reference; each text in double quotes is from it. The tree
+is the one at af68c1ba, on 2026-11-11, and each line number is a line of that tree. A `.ft` path
+with no directory is under `src/fort/`. The probes ran in the VM: clang 18.1.3,
+`--target=x86_64-linux-gnu`, the program under `qemu-x86_64`. "Both modes" means the checked mode
+and the release mode (D11.1). Exit 134 is SIGABRT after a runtime error, exit 139 is SIGSEGV, and
+exit 124 is the limit of 20 s.
+
+### 9.1 The summary
+
+- **How to read a row.** A row gives the construct and its undefined state, the sites where the
+  compiler writes it, the precondition, the guard that holds the precondition or `none`, the
+  evidence, the state and the method. The id starts with `E` for the emitter (`gen.ft`,
+  `gen_data.ft`, `fir_llvm.ft`), `R` for `std/rt.ft` and `B` for the back end line.
+- **The states.** `guarded`: the construct has a precondition, and a compile error, a run-time check
+  or a fixed property of the emitter holds it. `closed by` a planned work item: no guard holds it
+  today, and the item will. `no plan`: no guard holds it and no planned item closes it. `no
+  undefined state`: the reference gives the emitted form no precondition, or the emitter has 0
+  sites.
+- **The planned work items** are eight. The null check: a null pointer traps before its use. Dead
+  storage: the storage of a `del` is never used again. Frame storage: a local whose address the
+  program takes gets storage that lives after the call. The removal of `--no-bounds-check`. The
+  one-thread rule: a program has one thread. The aggregate copy that reads its whole source first:
+  the emitter writes `llvm.memmove` for the copy of an aggregate. The zero bytes of a local when its
+  declaration runs: each byte of a local, a padding byte too, holds 0 before the first statement
+  that reads it. The trusted premise that names the options of the builder: a build with one of
+  these options is outside the guarantee, as a trusted module is.
+- **The methods.** `mutation-measured`: a mutant of the compiler removed the property and the test
+  `ir-flags` (`test/ir_flags_test.py`) went red. `probed`: a program was compiled and run, or the
+  test `ir-flags` counted the corpus, and the row quotes the result. `read`: the code was read and
+  nothing ran. Use a `read` row as an argument, not as a test.
+- **The rows: 73.** 47 for the emitter, 23 for `std/rt.ft`, 3 for the back end line.
+- **By state.** `guarded`: 42. Closed by a planned work item: 12. `no plan`: 0. `no undefined
+  state`: 19. The rows of each item: the null check 4; dead storage 2; frame storage 2; the removal
+  of `--no-bounds-check` 1; the one-thread rule 2; the aggregate copy that reads its whole source
+  first 1; the zero bytes of a local when its declaration runs 1; the trusted premise that names the
+  options of the builder 1. E19 names three items, so these eight counts add up to 14.
+- **By method.** `mutation-measured`: 3. `probed`: 46. `read`: 24.
+- **The rows with no plan: 0.** The census found 3 rows with no guard and no planned work item. Each
+  one has a planned work item now. E11: a `load` of a padding byte that no `store` wrote: the
+  positional literal. E41: `llvm.memcpy` of two places that overlap in part. B03: the options in the
+  hands of the builder: `-Xcc`, `--cc`, `--std-dir`, `-l`. 9.2 gives the program of each one. No
+  guard of this tree holds them.
+- **The guard of `inbounds`.** It is complete for an index or a span of a live object (E04). It is
+  not complete under `--no-bounds-check` (E05) and for a null base (E06). A dead base adds no
+  undefined state at the instruction (E07).
+- **What the null check must cover.** A check before each `load` and each `store` leaves three rows
+  open: the address of a field through a null pointer (E06), the `sret` destination of a call (E19)
+  and the call of a null function pointer (E16).
+- **The counts of the corpus.** The test `ir-flags` reads 604 modules (602 run entries of
+  `test/lang`, the compiler and the language server) for 2 targets and 2 modes: 2416 module texts.
+  In a function body it finds 0 of each of the 65 tokens of `ZERO` and 0 of each of the 15 tokens of
+  `HEADER_ONLY`. Among them are `nsw`, `nuw`, `exact`, `inrange`, the 8 fast-math flags, `noundef`,
+  `nonnull`, `dereferenceable`, `dereferenceable_or_null`, `readnone`, `undef`, `poison`, `fptosi`,
+  `fptoui`, `noalias`, `willreturn`, `nofree`, `readonly`, `memory` and `speculatable`. On the
+  header lines of the Linux target in the checked mode it finds `noalias` 1208 times, `willreturn`
+  1787, `nofree` 1787, `readonly` 604, `memory` 2391 and `speculatable` 579: each one on the
+  declaration of an intrinsic (E44). In the same configuration it finds `inbounds` 558447 times
+  (459748 in the field form, 47341 in the array form, 51358 in the element form) and `unreachable`
+  179294 times (167780 after a failure entry, 9958 after `llvm.trap`, 1556 alone in a block that no
+  path reaches). The release mode has 116782 `unreachable`, because it removes the overflow and the
+  shift checks. The test holds the forms and prints the counts; it does not pin a count, which
+  changes with each new test and each edit of `std`.
+
+### 9.2 The programs of E41, E11 and B03
+
+Each program has no `import extern;` and names no boundary function. The compile lines are `fort
+--cc clang --std-dir <std> -o p p.ft` and the same with `--release`.
+
+**E41, the copy of two places that overlap in part.** The right output is `0 1 2 ... 15`: element 0
+takes `head`, and element `i` takes the old element `i - 1`. The checked mode prints `0 1 2 3 4 5 6
+7 8 9 10 11 12 13 14 15`. The release mode prints `0 1 1 3 3 5 5 7 7 9 9 11 11 13 13 15`. The IR of
+both modes holds `call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t6, ptr align 8 %t5, i64 128, i1
+false)`, where `%t5` is the address of `x` and `%t6` is that address plus 8 bytes.
+
+```fort
+struct lo {
+    u64[16] a;
+    u64 tail;
+}
+
+struct hi {
+    u64 head;
+    u64[16] a;
+}
+
+fn main() i32 {
+    hi mut x = hi{};
+    u64 mut i = 0;
+    while (i < 16) {
+        x.a[i] = i + 1;
+        i += 1;
+    }
+    lo* p = cast(&x, lo*);
+    x.a = p->a;
+    i = 0;
+    while (i < 16) {
+        print(x.a[i]);
+        print(" ");
+        i += 1;
+    }
+    println("");
+    return 0;
+}
+```
+
+**E11, the padding byte of a positional literal.** The IR of `peek` holds one `store` for each of
+the two fields of `%x.1`, no fill, and then a `load i8` of the byte 1. The checked mode ends with
+SIGSEGV (exit 139). The release mode prints `the padding byte is 0`. With the designated literal
+`padded{.small = v, .big = 5}` the IR holds `llvm.memset` before the two stores, and both modes
+print `the padding byte is 0`.
+
+```fort
+struct padded {
+    u8 small;
+    u64 big;
+}
+
+fn peek(u8 v) u8 {
+    padded x = padded{v, 5};
+    u8[16]* b = cast(&x, u8[16]*);
+    return (*b)[1];
+}
+
+fn main() i32 {
+    u8 pad = peek(7);
+    if (pad == 0) {
+        println("the padding byte is 0");
+    } else {
+        println("the padding byte is ", pad);
+    }
+    return 0;
+}
+```
+
+**B03, the options of the builder.** The program prints `0` with no option. With `-Xcc -static -Xcc
+-Wl,--defsym=calloc=malloc` the linker gives the name `calloc` to `malloc`, the storage of `new` is
+not 0, and the program prints `132817`. `-Xcc -ffast-math` gave the same result as no option for the
+probe of E29 in this VM.
+
+```fort
+fn main() i32 {
+    u64 mut@ own a = new(u64, 4);
+    println(a[3]);
+    del(a);
+    return 0;
+}
+```
+
+### 9.3 The rows of the emitter
+
+- **E01. A `load` or a `store` through a null pointer.** Sites: `gen_load` `gen.ft:1011` and
+  `gen_store` `gen.ft:1023`, 1 site each. Precondition: "Any memory access must be done through a
+  pointer value associated with an address range of the memory access, otherwise the behavior is
+  undefined." No function carries `null_pointer_is_valid`, so the address 0 is in no range. Guard:
+  none (D10.5 and D10.7 list this state). Evidence: `i32* p = pick(false, &v); println(*p);`, where
+  `pick` returns `null`, exits 139 (SIGSEGV) in both modes. State: closed by the null check. Method:
+  probed.
+- **E02. A `load` or a `store` through a view after the `del` of its storage.** Sites: as E01.
+  Precondition: as E01; the reference gives a freed object no address range. Guard: none (D10.7).
+  Evidence: `i32* v = p; del(p); i32 mut* own q = new(i32); *q = 9; println(*v);` prints
+  `1431655795` in the checked mode and `1431655796` in the release mode. The first value of `*p` was
+  7. State: closed by dead storage. Method: probed.
+- **E03. A `load` or a `store` through a pointer to a local after its function returns.** Sites: as
+  E01, and each `alloca` (E39). Precondition: as E01; the storage of an `alloca` ends when its
+  function returns. Guard: none (D10.7). Evidence: `fn leak() i32* { i32 x = 7; return &x; }`, then
+  one other call, then `println(*p, " ", n)`: the checked mode prints `7 10` and the release mode
+  prints `0 10`. State: closed by frame storage. Method: probed.
+- **E04. `getelementptr inbounds`, array form and element form: an index or a span outside the
+  object.** Sites: `gen_gep_array` `gen.ft:1076` and `gen_gep_element` `gen.ft:1089`, which write
+  the one text `getelementptr inbounds` of `gep_begin`, `gen.ft:1067`. Precondition: with `inbounds`
+  the base and the result must be in bounds of one allocated object, or the result is poison, and an
+  access through poison is undefined. Guard: `chk_bounds` before each index (`fir_lower.ft:1677`)
+  and `chk_span` before each span expression (`fir_lower.ft:1729`). `term_removable` (`fir.ft:1666`)
+  removes them only for `--no-bounds-check` (E05). The length is true: an array has the length of
+  its type, a span carries the length of its source, and a module that is not trusted cannot make a
+  span of a pointer (`check.ft:3411`), index a pointer (`check.ft:3351`) or add to a pointer
+  (`check.ft:1914`). A null span has the length 0, so the check fails before the instruction. The
+  guard is complete for a live object. A dead object is E02 and E03, and a null pointer to an array
+  is E06. Evidence: the index 4 and the index -1 of an `i32[4]` give `runtime error: index 4 out of
+  range for length 4` and `index -1 out of range for length 4`, exit 134, in both modes. `a[3..1]`
+  gives `span bounds 3..1 out of range for length 4`, exit 134, in both modes. `p[0..8]` for an
+  `i32* p` is the error `cannot take a span of i32*: a pointer has no length`. State: guarded.
+  Method: probed.
+- **E05. The same instruction under `--no-bounds-check`.** Sites and precondition: as E04. Guard:
+  none: the option removes `chk_bounds` and `chk_span` (D10.6). Evidence: `i32[4] a = {1, 2, 3, 4};
+  i32 after = 99; println(a[pass(4)], " ", after);` prints `0 99` and exits 0 with the option.
+  State: closed by the removal of `--no-bounds-check`. Method: probed.
+- **E06. `getelementptr inbounds` on a null base: `&p->f`, and an index through a null pointer to an
+  array.** Sites: `gen_gep_field` `gen.ft:1100` and `gen_gep_array` (E04). Precondition: "the only
+  pointer in bounds of the null pointer in the default address space is the null pointer itself", so
+  the address of a field at an offset above 0 is poison. No load is necessary. Guard: none.
+  Evidence: for a `struct s { i32 a; i32 b; }` and a null `s* p`, `i32* q = &p->b; println(q ==
+  null, " ", cast(q, u64));` prints `false 4` in both modes: the program compares and prints a
+  poison value. The null check closes the row only when it stands at the address computation, and
+  not only at a `load` or a `store`. State: closed by the null check. Method: probed.
+- **E07. `getelementptr inbounds` on a base in a dead object.** Sites: as E04 and E06. The
+  reference: "the object does not have to be live anymore; being in-bounds of a deallocated object
+  is sufficient". So the instruction has no undefined state of its own. The access after it is E02
+  or E03. State: no undefined state. Method: read.
+- **E08. The alignment of a `load`, a `store`, an `alloca`, a global, a copy and a fill.** Sites: 12
+  texts of `align`: `gen.ft:1016`, `gen.ft:1029`, `gen.ft:1134`, `gen.ft:1138`, `gen.ft:1151`,
+  `gen.ft:1574`, `gen.ft:1790`, `fir_llvm.ft:306`, `gen_data.ft:103`, `gen_data.ft:147`,
+  `gen_data.ft:428` and `gen_data.ft:444`. Precondition: "Overestimating the alignment results in
+  undefined behavior." Guard: each number is `type_alignof` of the type of the place
+  (`types.ft:1307`). Each object has that alignment or more: an `alloca` and a global carry the same
+  number, and `calloc` gives storage that fits each object type (C11 7.22.3). A cast never gives a
+  pointer a pointee with more alignment (`report_pointee_growth`, `check.ft:4154`). Evidence:
+  `cast(&pair, i64*)` for an `i32[2] pair` is the error `a cast never makes the alignment larger (4
+  to 8 bytes)`. The test `ir-flags` holds an alignment on each `load` and each `store`; a mutant
+  that removes the text turns it red. State: guarded. Method: probed.
+- **E09. A `store` into a global `constant`.** Sites: the 4 texts of `constant` for a global:
+  `gen_data.ft:99`, `gen_data.ft:124`, `gen_data.ft:422` and `gen_data.ft:441`. Precondition: "the
+  contents of the variable will never be modified". Guard: a pointer to a constant has no `mut`, and
+  a cast never adds `mut` (`check.ft:4217`). The verifier refuses a FIR function that writes one
+  (V3, `fir_verify.ft:60`). Evidence: `cast(s, u8 mut@)` for a `string s` is the error `cannot cast
+  string to u8 mut@: a cast never adds 'mut'`. State: guarded. Method: probed.
+- **E10. A `load` from storage that no `store` wrote: a local, a temporary, the heap.** Sites: each
+  `alloca` (E39). Precondition: "The allocated memory is uninitialized, and loading from
+  uninitialized memory produces an undefined value." A branch on that value is undefined (E37).
+  Guard: `var_decl_head` of `spec/grammar.md` gives each local an initializer: `i32 mut x;` is the
+  error `expected '=', found ';'`. `{}` writes the whole place with `llvm.memset` (`place_zero`,
+  `fir_llvm.ft:502`), and a designated literal does the same before its fields (`aggregate_into`,
+  `fir_llvm.ft:1044`). The verifier refuses a read of a temporary before its assignment (V13,
+  `fir_verify.ft:113`). `new` is `calloc` (R10). Evidence: for a `struct padded { u8 small; u64 big;
+  }` the 7 padding bytes read 0 after `{}`, after a designated literal, in an array literal, in a
+  parameter and after a copy, in both modes. The guard does not hold the padding of a positional
+  literal: E11. State: guarded. Method: probed.
+- **E11. A `load` of a padding byte that no `store` wrote: the positional literal.** Sites:
+  `lower_literal` writes `aggregate T(...)` with no fill for a literal with no designator
+  (`fir_lower.ft:1963`), and `aggregate_into` then writes one `store` for each field
+  (`fir_llvm.ft:1033`). Precondition: as E10. Guard: none. D3.14 lets a program read each byte of a
+  struct through a cast to a pointee of the same size, and D10.7 says that this read is defined.
+  Evidence: the program of 9.2 ends with SIGSEGV in the checked mode and prints `the padding byte is
+  0` in the release mode. State: closed by the zero bytes of a local when its declaration runs.
+  Method: probed.
+- **E12. A `bool` place that holds a byte other than 0 or 1.** Sites: a `bool` in memory is an `i8`;
+  a read is `load i8` and `trunc` to `i1` (`gen.ft:1046`), and a write is `zext` (`gen.ft:1056`).
+  The emitter writes no `load i1` and no range metadata, so each byte is a defined value. Evidence:
+  through `cast(&two, bool*)` the byte 2 reads `false` and the byte 3 reads `true`, in both modes:
+  the low bit decides. State: no undefined state. Method: probed.
+- **E13. A `switch` on an enum value outside its set.** Sites: `switch`, `gen.ft:1191`.
+  Precondition: none in the reference: a value with no case goes to the default label. The risk is a
+  default label that holds `unreachable`. Guard: the default label of a `switch` with no `default`
+  is the block of `fail_enum` (`chk_enum`, `fir_lower.ft:1250`), which no build mode removes
+  (`fir.ft:1666`). Evidence: `cast(7, color)` and a `color*` cast of an `i32` that holds 7 both give
+  `runtime error: enum value 7 is not a member of color`, exit 134, in both modes. State: guarded.
+  Method: probed.
+- **E14. A `load` through a pointer to another type of the same size or smaller.** Sites: as E01.
+  Precondition: none for an integer or a float, because the emitter writes no metadata, so no
+  type-based rule exists (D10.7). A pointer that a `load` reads from bytes that an integer `store`
+  wrote has no object, and an access through it is undefined. Guard: a cast never adds a pointer
+  place and a `mut` cast never hides one (`report_pointer_place`, `check.ft:3957`; D3.14). Evidence:
+  `cast(&f, string*)` for a struct of two `u64` is the error `a cast adds the pointer string at byte
+  0`, and `cast(&h, u64 mut*)` for a struct that holds an `i32*` is the error `a 'mut' cast hides
+  the pointer i32* at byte 0`. The test `ir-flags` holds 0 metadata attachments. Two states stay
+  open behind a legal cast: E41 and E11. State: guarded. Method: probed.
+- **E15. A `load` that races with a `store` of another thread.** Sites: as E01. Precondition: the
+  memory model of the reference gives such a `load` an undefined value, and a branch on it is
+  undefined (D10.7 lists the data race). Guard: none in the compiler. `grep -rn 'pthread\|clone('
+  std` finds 0 lines, and a thread needs an `extern`, so a trusted module (E20). State: closed by
+  the one-thread rule. Method: read.
+- **E16. An indirect `call` through a null function pointer.** Sites: `gen_call_sig` with `pointer`
+  set, `gen.ft:1445`. Precondition: the callee must be a function. Guard: none (D10.7). Evidence:
+  `hook h = {}; println(h.f(1));` for a `struct hook { fn (i32) i32 f; }` exits 139 in both modes.
+  State: closed by the null check. Method: probed.
+- **E17. An indirect `call` with a function type that the callee does not have.** Sites: as E16.
+  Precondition: a call through a pointer needs the function type and the calling convention of the
+  callee, "or else the behavior is undefined". Guard: no cast changes a function pointer type or
+  makes one (`check.ft:3979`), and a function pointer in storage is a pointer place (E14). Evidence:
+  `cast(g, fn (i32) i32)` for a `fn (u64) u64 g` is the error `cannot cast fn (u64) u64 to fn (i32)
+  i32`, and `cast(&bits, hook*)` for a `u64 bits` is the error `a cast adds the pointer fn () void
+  at byte 0`. State: guarded. Method: probed.
+- **E18. A direct `call`: the signature of the call and of the definition.** Sites: 8 texts of
+  `call`. The 3 that call a fort function or an `extern` are `gen.ft:1445`, `gen.ft:1641` and
+  `gen.ft:1651`. Precondition: the type and the calling convention of a call match the callee.
+  Guard: one function, `signature_of` (`gen.ft:1356`), gives the text of the call
+  (`fir_llvm.ft:929`), of the definition (`fir_llvm.ft:1432`), of the two declarations
+  (`gen_data.ft:456`, `gen_data.ft:521`) and of `main` (`gen.ft:1603`). The emitter writes no
+  calling convention keyword, so each side has the default one. State: guarded. Method: read.
+- **E19. The `sret` pointer of a call that returns an aggregate.** Sites: 4 texts of `sret`:
+  `gen.ft:1396`, `gen.ft:1492`, `gen.ft:1591`, `gen_data.ft:479`. Precondition: "This pointer must
+  be guaranteed by the caller to be valid: loads and stores to the structure may be assumed by the
+  callee not to trap and to be properly aligned." Guard: none when the destination is a place behind
+  a pointer: the caller passes that address. Evidence: `*h.p = make(7);` with a null `two mut* p`
+  gives the line `call void @"sret_null.make"(ptr sret(%struct.sret_null.two) %t1, i64 7)`, where
+  `%t1` is the null pointer that a `load` gave, and the program exits 139 in both modes. The null
+  check closes the null case only when it stands before the call. A dead destination is E02 and E03.
+  State: closed by the null check, dead storage and frame storage. Method: probed.
+- **E20. The declaration and the call of an `extern` function.** Sites: `declare ... nobuiltin`,
+  `gen_data.ft:523` and `gen_data.ft:541`. Precondition: the declaration agrees with the C function,
+  and each call holds the preconditions of that function. Guard: only a trusted module declares or
+  calls one (`check.ft:2919`, `check.ft:2928`; D9.8). The census lists the calls of `std/rt.ft` in
+  9.4. Evidence: `extern fn abort() noreturn;` and a call of it, in a module with no `import
+  extern;`, give 2 errors: `extern 'abort' needs a trusted module` and `a call of extern 'abort'
+  needs a trusted module`. State: guarded. Method: probed.
+- **E21. A tail call.** Sites: 0. The emitter writes no `tail`, `musttail` or `notail`, and the test
+  `ir-flags` holds 0 of each. The back end can still make a tail call of its own; that changes no
+  meaning. State: no undefined state. Method: probed.
+- **E22. `nounwind` on each definition.** Sites: the groups 0, 1 and 8: `gen_data.ft:23`,
+  `gen_data.ft:25`, `gen_data.ft:42`. Precondition: "If the function does raise an exception, its
+  runtime behavior is undefined." Guard: fort has no construct that unwinds, and the test `ir-flags`
+  holds 0 `invoke`, `landingpad`, `resume` and `personality`. A C function does not unwind, and
+  `std` declares no `longjmp`. State: guarded. Method: read.
+- **E23. `sdiv`, `udiv`, `srem`, `urem` by 0.** Sites: `fir_llvm.ft:773`, `fir_llvm.ft:775`,
+  `fir_llvm.ft:778`, `fir_llvm.ft:780`. Precondition: "Division by zero is undefined behavior", and
+  the remainder is the same. Guard: `chk_div_zero` (`fir_lower.ft:2690`), which no build mode
+  removes. Evidence: an `i32` and a `u64` division by a 0 that the compiler does not know give
+  `runtime error: division by zero`, exit 134, in both modes. State: guarded. Method: probed.
+- **E24. `sdiv` and `srem` of the minimum by -1.** Sites: as E23. Precondition: "Overflow also leads
+  to undefined behavior". Guard: `chk_div_overflow` (`fir_lower.ft:2701`), which no build mode
+  removes. Evidence: `min % -1` for an `i32` and `-128 / -1` for an `i8` give `runtime error:
+  division overflow`, exit 134, in both modes. State: guarded. Method: probed.
+- **E25. `shl`, `lshr`, `ashr` by a count below 0 or not below the width.** Sites:
+  `fir_llvm.ft:788`, `fir_llvm.ft:791`, `fir_llvm.ft:793`. Precondition: for a count "equal to or
+  larger than the number of bits in op1, this instruction returns a poison value". Guard: the
+  checked mode keeps `chk_shift` (`fir_lower.ft:2723`). The release mode removes it and masks the
+  count with the width minus 1 (`write_mask`, `fir_passes.ft:123`; D11.1). Evidence: `one << 32` for
+  a `u32` gives `runtime error: shift count 32 out of range for u32`, exit 134, in the checked mode.
+  In the release mode `one << 32`, `one << 33` and `4096 >> 40` print `1 2 16`. A count of -1 gives
+  the error in the checked mode and `-2147483648` in the release mode. State: guarded. Method:
+  probed.
+- **E26. `add`, `sub`, `mul`: integer overflow.** Sites: `fir_llvm.ft:766`, `fir_llvm.ft:768`,
+  `fir_llvm.ft:770`, and the `sub` of a span length (`fir_llvm.ft:1065`, `fir_llvm.ft:1078`).
+  Precondition: none, because the emitter writes no `nsw` and no `nuw`: the result wraps. The
+  checked mode calls the overflow intrinsic and keeps `chk_overflow` (`fir_lower.ft:2673`), so an
+  overflow of `+`, `-`, `*`, unary `-`, `++` and `--` traps. The release mode removes the check and
+  the result wraps (D11.1). Evidence: a mutant of the tree at 9d188c4f that writes `add nsw` turns
+  the test `ir-flags` red, with 44851 `nsw` tokens in the 604 modules of Linux release and 2810 in
+  checked. `max + 1` and `-min` for an `i32` give `runtime error: integer overflow`, exit 134, in
+  the checked mode and `-2147483648` in the release mode. State: no undefined state. Method:
+  mutation-measured.
+- **E27. `exact`, `nneg`, `disjoint`, `inrange` and the fast-math flags.** Sites: 0. Each one makes
+  a result poison for some operand. The test `ir-flags` holds 0 of `exact`, `nneg`, `disjoint`,
+  `inrange`, `nnan`, `ninf`, `nsz`, `arcp`, `contract`, `afn`, `reassoc` and `fast`. State: no
+  undefined state. Method: probed.
+- **E28. A float to an integer.** Sites: `llvm.fptosi.sat` and `llvm.fptoui.sat`: the name
+  (`gen.ft:1743`), the call (`fir_llvm.ft:1653`) and the declaration (`gen_data.ft:564`). A plain
+  `fptosi` or `fptoui` is poison when "the value cannot fit"; the emitter writes 0 of them and the
+  test `ir-flags` holds 0. The saturating intrinsic has no precondition (D3.14). Evidence:
+  `cast(1e300, i32)`, `cast(nan, i32)`, `cast(inf, u8)` and `cast(-inf, i64)` print `2147483647 0
+  255 -9223372036854775808` in both modes. State: no undefined state. Method: probed.
+- **E29. The float instructions and the integer to float conversions.** Sites: `fadd`, `fsub`,
+  `fmul`, `fdiv` (`fir_llvm.ft:795`, `fir_llvm.ft:797`, `fir_llvm.ft:799`, `fir_llvm.ft:801`),
+  `fneg` (`fir_llvm.ft:986`), `fcmp` (`gen.ft:952`), `fptrunc`, `fpext` (`fir_llvm.ft:1632`,
+  `fir_llvm.ft:1634`), `sitofp`, `uitofp` (`fir_llvm.ft:1638`, `fir_llvm.ft:1640`). Precondition: no
+  operand is undefined: `fdiv` by 0 gives an infinity or a NaN, and `sitofp` rounds. Each
+  instruction assumes the default floating-point environment: "Running LLVM code in an environment
+  where these assumptions are not met can lead to undefined behavior." Guard: fort has no construct
+  that changes the rounding mode or enables a trap, and a C function that does needs a trusted
+  module (E20). The build line can change the environment (B03). Probes that ran: `1.0 / zero`
+  prints `inf`, `cast(18446744073709551615, f32)` prints `1.8446744e+19`, and the product of the
+  smallest normal `f64` and 0.5 is above 0. State: guarded. Method: read.
+- **E30. A pointer comparison, and a pointer to an integer.** Sites: `icmp`, `gen.ft:936`, and
+  `ptrtoint`, `fir_llvm.ft:1595`. Precondition: none: `icmp` compares the two addresses, and
+  `ptrtoint` gives the address. fort has `==` and `!=` on pointers only: `a < f` for two `i32*` is
+  the error `'<' takes ordered operands, not i32*` (`check.ft:2333`). The value of an address is
+  unspecified, not undefined: two literals of one text gave one address in both modes. State: no
+  undefined state. Method: probed.
+- **E31. An integer to a pointer.** Sites: `inttoptr` in `cast_value`, `fir_llvm.ft:1592`.
+  Precondition: none at the instruction; an access through the result needs an address inside a live
+  object. Guard: no fort source reaches the site, because the checker refuses each cast of an
+  integer to a pointer (`check.ft:4192`; D3.14). Evidence: `cast(bits, i32*)` for a `u64 bits` is
+  the error `a cast never makes a pointer from an integer`, and the test `ir-flags` holds 0
+  `inttoptr`. State: guarded. Method: probed.
+- **E32. A pointer cast.** Sites: no instruction: a pointer is `ptr`, and `cast_value` returns its
+  operand (`fir_llvm.ft:1580`). Precondition: none at the cast. The access after it has the
+  preconditions of E01, E04, E08, E09 and E14. Guard: D3.14: a cast never makes the pointee larger
+  or more aligned (`check.ft:4154`), never gives a type to a `void*` (`check.ft:4201`), never adds
+  `mut` (`check.ft:4217`) or `own` (`check.ft:4227`), and keeps each pointer place (E14). Evidence:
+  9 refused casts and pointer operations in one probe, 3 added pointer places in a second and 2
+  hidden pointer places in a third; each one is a compile error. A legal cast still gives two places
+  that overlap in part (E41) and a view of the padding (E11). State: guarded. Method: probed.
+- **E33. `unreachable` after the call of a failure entry.** Sites: `fail_block`, `gen.ft:1679`, and
+  `fail_call`, `fir_llvm.ft:1289`. Precondition: `unreachable` "has no defined semantics", so
+  control must not reach it. Why control does not: the line before it is a call of one of the 10
+  failure entries of `std.rt` (`fail_overflow`, `fail_shift`, `fail_div_zero`, `fail_div_overflow`,
+  `fail_bounds`, `fail_span`, `fail_alloc_count`, `fail_enum`, `assert_fail`, `panic`). Each one is
+  `noreturn` (E36) and ends in `abort()` (`std/rt.ft:822`). Evidence: the test `ir-flags` holds this
+  form for each such `unreachable`. State: guarded. Method: probed.
+- **E34. `unreachable` after `llvm.trap`.** Sites: `fir_llvm.ft:1404`. Why control does not reach
+  it: `llvm.trap` ends the program. The lowering writes the pair after each call of a `noreturn`
+  function (`fir_lower.ft:2077`) and at the end of a `noreturn` function (`fir_lower.ft:270`).
+  Evidence: a mutant that removes the call of `llvm.trap` turns the test `ir-flags` red. State:
+  guarded. Method: mutation-measured.
+- **E35. `unreachable` alone.** Sites: `fir_llvm.ft:1406`, from the end of a function that returns a
+  value (`lower_end`, `fir_lower.ft:274`). Why control does not reach it: the checker refuses a body
+  whose end a path reaches (`missing return`, `check_stmt.ft:908`), and the verifier refuses a
+  function in which a path from `bb0` reaches it (V9, `fir_verify.ft:109`). Evidence: `fn value(bool
+  c) i32 { if (c) { return 1; } }` is the error `missing return`. The test `ir-flags` walks the
+  blocks of each function and holds that no path from `entry` reaches such a block. State: guarded.
+  Method: probed.
+- **E36. `noreturn` on a definition and on a declaration.** Sites: the groups 1 and 8
+  (`gen_data.ft:25`, `gen_data.ft:42`) and the group 7 of `llvm.trap` (`gen_data.ft:40`).
+  Precondition: "This produces undefined behavior at runtime if the function ever does dynamically
+  return." Guard: the checker refuses a `noreturn` body that reaches its end (`check_stmt.ft:905`);
+  the lowering ends such a function with `llvm.trap` (E34); the verifier holds the trap after each
+  `noreturn` call (V8, `fir_verify.ft:108`). A `noreturn` `extern` is a trusted declaration (E20).
+  Evidence: `fn stop() noreturn { }` is the error `a noreturn function must end in a terminating
+  statement`. State: guarded. Method: probed.
+- **E37. `undef`, `poison`, `phi`, `select`, `freeze`; a branch on an undefined value.** Sites: 0 of
+  each. "Branching on an undefined value is undefined behavior." The emitter writes no `undef` and
+  no `poison`, and the test `ir-flags` holds 0 of the 5 tokens. A local lives in an `alloca`, so no
+  `phi` joins two values. The undefined values that an instruction can still make are in E06, E11,
+  E15 and E41. State: no undefined state. Method: probed.
+- **E38. A loop with no end and no effect.** Sites: each `br`. Precondition: none, because no
+  definition carries `mustprogress` (`gen_data.ft:16`). With that attribute a loop with no end and
+  no effect is undefined. Evidence: a mutant that adds `mustprogress` to the group 0 turns the test
+  `ir-flags` red. `while (true) { }` runs until the limit of 20 s in both modes. State: no undefined
+  state. Method: mutation-measured.
+- **E39. `alloca`: the size of the frame and the end of the stack.** Sites: 3: `gen.ft:1572`,
+  `gen.ft:1788`, `fir_llvm.ft:304`. Precondition: "The operation itself is undefined if there is
+  insufficient stack space for the allocation." Guard: each definition carries
+  `"probe-stack"="inline-asm"` (`gen_data.ft:23`; D10.8), so a frame above one page touches each
+  page, and the guard page ends the program. The ctest `stack_depth` holds the probes
+  (`CMakeLists.txt:828`). Evidence: a frame of 64 MB whose first write goes to the far end exits 139
+  (SIGSEGV) in both modes. Limit: the reference has no exception for a probed stack. The guard is a
+  property of the two targets, not of the IR. State: guarded. Method: probed.
+- **E40. An `alloca` of a variable size, `llvm.stacksave`, `llvm.lifetime`.** Sites: 0. The test
+  `ir-flags` holds each `alloca` at a fixed type and in the block `entry`, and it refuses the
+  declaration of an intrinsic outside the 5 of E43. So a local keeps its storage until its function
+  returns: inside the function, a pointer to a local of a block that ended is defined. State: no
+  undefined state. Method: probed.
+- **E41. `llvm.memcpy` of two places that overlap in part.** Sites: the text `gen.ft:1134`, from
+  `copy_to` (`fir_llvm.ft:514`) and its 3 callers (`fir_llvm.ft:497`, `fir_llvm.ft:636`,
+  `fir_llvm.ft:652`). Precondition: the source and the destination "must either be equal or
+  non-overlapping"; the declaration says `noalias` for both. Guard: none. Two places of one type are
+  equal or apart. A cast to a pointee of the same size or smaller (D3.14) gives a second struct type
+  over the same bytes, and then a field of one overlaps a field of the other in part. D10.7 does not
+  list this state. Evidence: the program of 9.2 prints a wrong array in the release mode. The same
+  copy through the `sret` result of a call (`x.w = get(cast(&x, lo*));`) gives the same wrong array.
+  With 24 bytes and with 4096 bytes the release mode gave the right bytes; with 128 bytes it did
+  not. State: closed by the aggregate copy that reads its whole source first. Method: probed.
+- **E42. `llvm.memcpy` and `llvm.memset`: the length, the alignment, the volatile flag.** Sites:
+  `gen.ft:1134`, `gen.ft:1151`. The emitter writes 0 `llvm.memmove`. Precondition: both pointers are
+  valid for the length, and the length is a defined value. Guard: the length is the literal
+  `type_sizeof` of the type of the place (`types.ft:1298`), the alignment is E08, and the last
+  argument is the literal `false`. The pointers are the places of E01, E02 and E03. Evidence: the
+  test `ir-flags` holds each call at one of two forms with a literal length. State: guarded. Method:
+  probed.
+- **E43. Each other intrinsic.** Sites: the 6 overflow intrinsics
+  `llvm.{s,u}{add,sub,mul}.with.overflow` (call `fir_llvm.ft:1531`, declaration `gen_data.ft:576`),
+  the 2 saturating conversions (E28) and `llvm.trap` (`gen_data.ft:559`). None has a precondition.
+  With `llvm.memcpy` and `llvm.memset` the emitter declares 5 forms, and the test `ir-flags` refuses
+  a `declare` line of another form. State: no undefined state. Method: probed.
+- **E44. The attributes on the declaration of an intrinsic.** Sites: the groups 4, 5, 6 and 7
+  (`gen_data.ft:34`, `gen_data.ft:36`, `gen_data.ft:38`, `gen_data.ft:40`), which hold `nocallback`,
+  `nofree`, `nosync`, `speculatable`, `willreturn` and `memory(...)`, and the parameter attributes
+  `noalias`, `nocapture`, `readonly`, `writeonly` and `immarg` (`gen_data.ft:549`,
+  `gen_data.ft:550`, `gen_data.ft:554`). Precondition: an attribute that is false for the callee
+  makes the call undefined. Guard: each one stands only on the `declare` line of an LLVM intrinsic.
+  The test `ir-flags` holds 0 of them in a function body and holds each header line at a known text.
+  Evidence: clang 18.1.3 prints the same groups and the same parameter attributes for the 5
+  declarations when the input gives none, so the emitter claims nothing new. The one attribute that
+  a program can make false is `noalias` of `llvm.memcpy`: E41. The `immarg` argument is the literal
+  `false`. State: guarded. Method: probed.
+- **E45. `cold`, `nobuiltin`, `"frame-pointer"`, `"probe-stack"`; the call attributes.** Sites:
+  `cold` (`gen_data.ft:40`, `gen_data.ft:42`; the group 2 of `gen_data.ft:30` is never emitted),
+  `nobuiltin` (group 3, `gen_data.ft:32`; on an `extern` declaration, `gen_data.ft:541`), and the
+  two string attributes (`gen_data.ft:23`). None has a precondition: `cold` is a hint, `nobuiltin`
+  removes the assumption that a function with a C name is the C function, and the string attributes
+  select code. A call carries the group 3 or no group; the test `ir-flags` holds that. State: no
+  undefined state. Method: read.
+- **E46. `zeroext` and `signext`.** Sites: `gen.ft:623`, `gen.ft:625`. Precondition: the caller
+  extends a parameter and the callee extends a result, as the target ABI says; the two sides must
+  agree. Guard: `signature_of` gives both sides one text (E18). For a C function the declaration is
+  trusted (E20). State: guarded. Method: read.
+- **E47. `dso_local`, `private`, `unnamed_addr`, `external`, `zeroinitializer`, `null`.** Sites: the
+  lines of a global and of a definition, for example `gen_data.ft:99`, `gen_data.ft:420` and
+  `gen.ft:1481`. None gives a program an undefined state. `unnamed_addr` makes the address of a
+  constant unspecified (E30). `dso_local` is a promise to the linker: a symbol that another shared
+  object defines breaks the link and not the run. State: no undefined state. Method: read.
+
+### 9.4 The rows of `std/rt.ft`
+
+The module has 1044 lines. `grep -n 'libc\.[a-z_]*(' std/rt.ft`, less the comment lines, gives 16
+call lines of 13 functions of the C library; each function has one row. Each call carries a `// C
+call` comment that states its pointer arguments (D9.8). A row says what C behavior the operation
+relies on.
+
+- **R01. `libc.write`.** Site: `std/rt.ft:106`. C behavior: POSIX `write` reads `rest.len` bytes at
+  `rest.ptr`; an `fd` that is not open gives -1 and `EBADF`. Guard: the pointer and the length come
+  from one span, and `rest.len > 0` because `done < bytes.len`. State: guarded. Method: read.
+- **R02. `libc.errno_slot` and the dereference of its result.** Sites: `std/rt.ft:76`,
+  `std/rt.ft:108`; the reads and the write of `*slot` at `std/rt.ft:77`, `std/rt.ft:79`. C behavior:
+  `__errno_location` of glibc and `__error` of the Darwin C library return a pointer to the `errno`
+  of the thread, which is never null and lives as long as the thread (C11 7.5). Guard: the trusted
+  declaration of `std.libc`. State: guarded. Method: read.
+- **R03. `libc.isatty`.** Site: `std/rt.ft:78`. C behavior: POSIX `isatty` takes each `int`; a bad
+  descriptor gives 0 and sets `errno`, which the function saves and restores. No pointer argument.
+  State: guarded. Method: read.
+- **R04. `libc.memmove`.** Site: `std/rt.ft:158`. C behavior: `memmove` copies `n` bytes and permits
+  an overlap (C11 7.24.2.2); both pointers must be valid, also for `n` 0. Guard: `n` is `bytes.len`,
+  the function returns before the call when `n` is 0, and the flush before it leaves `n` bytes in
+  `room`. Evidence: a module with no `import extern;` appends `b->data[1..5]` to the buffer `b` that
+  holds `abcdef`; the output is `abcdefbcde` in both modes. State: guarded. Method: probed.
+- **R05. `libc.strtod`.** Site: `std/rt.ft:612`. C behavior: `strtod` reads a string up to its NUL
+  (C11 7.22.1.3); a null `endptr` is legal. Guard: `text` is a local array, and `decimal_text`
+  stores the NUL through a checked index. State: guarded. Method: read.
+- **R06. `libc.strtof`.** Site: `std/rt.ft:620`. C behavior and guard: as R05. State: guarded.
+  Method: read.
+- **R07. `libc.snprintf_float`.** Sites: `std/rt.ft:633`, `std/rt.ft:658`. C behavior: `snprintf`
+  writes at most the given size with a NUL, and `%.*e` reads one `int` and one `double` from the
+  variable arguments (C11 7.21.6.1, 7.21.6.5). An argument of another type is undefined in C. Guard:
+  the size is the length of the local `scratch`; the format is one constant; the declaration of
+  `std.libc` fixes the two argument types, and the `f32` caller casts to `f64`. State: guarded.
+  Method: read.
+- **R08. `libc.memcpy`.** Sites: `std/rt.ft:684`, `std/rt.ft:692`. C behavior: `memcpy` needs two
+  objects of `n` bytes that do not overlap (C11 7.24.2.1). Guard: the two pointers are the addresses
+  of two locals of 8 bytes (4 for `f32`), and the length is that constant. State: guarded. Method:
+  read.
+- **R09. `libc.abort`.** Site: `std/rt.ft:822`. C behavior: `abort` raises SIGABRT and does not
+  return (C11 7.22.4.1). `std` installs no handler (R22), so the process ends. Evidence: each
+  runtime error of 9.3 exits 134. State: guarded. Method: probed.
+- **R10. `libc.calloc`.** Site: `std/rt.ft:972`, in `alloc`. C behavior: `calloc` gives null or new
+  storage of `size` bytes, all 0, with an alignment that fits each object type (C11 7.22.3,
+  7.22.3.2). E10 and E08 rely on this. Guard: `alloc` tests the product of the element size and the
+  count for overflow, makes the size 0 into 1, and reports `out of memory` for null. The compiler
+  tests a count below 0 before the call (`chk_alloc_count`, `fir_lower.ft:1845`). The link line can
+  give the name `calloc` to another function (B03). State: guarded. Method: read.
+- **R11. `libc.free`.** Site: `std/rt.ft:984`. C behavior: `free` takes null or a pointer that
+  `calloc` gave and that no call freed (C11 7.22.3.3). Guard: `free` is a boundary function. The
+  compiler calls it for `del` of an owner, and an owner comes from `new` or from a trusted module: a
+  cast never adds `own` (`check.ft:4227`), a copy of an owner needs `move` (`check.ft:1722`), and
+  `del` writes null into the owner (`gen_zero_owner`, `gen.ft:1687`). Evidence: `del(p); del(p);`
+  exits 0 in both modes; `box mut b = a;` for a struct with an owner is the error `copying an owning
+  value requires 'move'`; `rt.free(null)` in a module that is not trusted is the error
+  `'std.rt.free' is a boundary function`. The census does not audit the ownership rules. State:
+  guarded. Method: probed.
+- **R12. `libc.memcmp`.** Site: `std/rt.ft:1003`, in `str_eq`. C behavior: `memcmp` reads `n` bytes
+  of two objects; a null pointer is undefined, also for `n` 0 (C11 7.24.1, 7.24.4.1). Guard: the
+  call runs only when the two lengths are equal and above 0. `str_eq` is a boundary function, and
+  the compiler calls it with the `.ptr` and the `.len` of two strings. Evidence: `rt.str_eq(null, 1,
+  null, 1)` in a module that is not trusted is the error `'std.rt.str_eq' is a boundary function`.
+  State: guarded. Method: probed.
+- **R13. `libc.exit`.** Site: `std/rt.ft:1043`. C behavior: `exit` runs the `atexit` handlers and
+  does not return; a second call of `exit` from a handler is undefined (C11 7.22.4.4). Guard: `std`
+  registers no handler: `grep -rn 'extern fn atexit\|\.atexit(' std` finds 0 lines. State: guarded.
+  Method: read.
+- **R14. `str.from_cstr`, which calls `libc.strlen`.** Sites: 6 calls: `std/rt.ft:362`,
+  `std/rt.ft:806`, `std/rt.ft:878`, `std/rt.ft:927`, `std/rt.ft:950`, `std/rt.ft:1024`. C behavior:
+  `strlen` reads up to a NUL inside the object (C11 7.24.6.3). Guard: `from_cstr` is a boundary
+  function and tests for null. 5 calls take a pointer that the compiler emits: a file name, a type
+  name, the text of an `assert` or the name of an enum member, each a constant with its NUL. The
+  call at line 1024 takes an element of `argv` (R21). State: guarded. Method: read.
+- **R15. A span of a raw pointer: `argv[0..n]`.** Site: `std/rt.ft:1022`, in `args_init`. C
+  behavior: `argv` has `argc` elements (C11 5.1.2.2.1). Guard: `n` is `argc`, and the function
+  returns before the span when `argc <= 0`. Only a trusted module can write this form
+  (`raw_span_allowed`, `check.ft:2713`; D6.9, D10.7). Evidence: `p[0..8]` for an `i32* p` in a
+  module that is not trusted is the error `cannot take a span of i32*: a pointer has no length`.
+  State: guarded. Method: probed.
+- **R16. A pointer cast: 6 casts to `u8 mut*` and `u8*`.** Sites: `std/rt.ft:684`, `std/rt.ft:692`,
+  `std/rt.ft:1003`. C behavior: a pointer to a character type can read and write each byte of an
+  object (C11 6.5 paragraph 7). Guard: each cast goes to a pointee of 1 byte, which D3.14 permits in
+  each module. The other 41 casts of the module are 34 among integers, `char` and floats, 6 from a
+  `string` or a `char` span to `u8@`, and 1 pointer to `u64` (R17). State: guarded. Method: read.
+- **R17. A pointer to an integer: `cast(p, u64)`.** Site: `std/rt.ft:341`, in `print_ptr`. C
+  behavior: none: the function prints the address. The emitted instruction is `ptrtoint` (E30).
+  State: no undefined state. Method: read.
+- **R18. Pointer arithmetic.** Sites: 0. The language has none: `&x + 1` is the error `there is no
+  pointer arithmetic` (E04). The module reaches an element through a span index, which carries its
+  check, and takes `.ptr` of a span on 2 lines (`std/rt.ft:106`, `std/rt.ft:158`) for R01 and R04.
+  State: no undefined state. Method: probed.
+- **R19. A cast of an integer to a pointer.** Sites: 0 of the 47 casts of the module. D3.14 refuses
+  the cast in each module, a trusted one too (E31). State: no undefined state. Method: probed.
+- **R20. A direct system call.** Sites: 0. Each system call goes through a function of the C
+  library. The emitter writes no inline assembly, and the test `ir-flags` holds 0 `asm`. State: no
+  undefined state. Method: probed.
+- **R21. The start-up code.** Sites: the emitted `main` (`gen_main`, `gen.ft:1563`) and `args_init`
+  (`std/rt.ft:1015`). The start files of the C library call `main(argc, argv)`. The emitted `main`
+  calls `std.rt.args_init`, `std.rt.args`, the `main` of the program and `std.rt.flush_all`, and
+  returns the status with the mask 255 (`gen.ft:1617`). C behavior: `argv[0]` to `argv[argc - 1]`
+  point to strings with a NUL, and the return from `main` calls `exit` (C11 5.1.2.2.1, 5.1.2.2.3).
+  Guard: no module can call `args_init` (`check.ft:2681`). Evidence: `rt.args_init(1, null)` in a
+  program is the error `'std.rt.args_init' belongs to the start of the program`. State: guarded.
+  Method: probed.
+- **R22. The handling of a signal.** Sites: 0 handlers. `grep -rn 'sigaction\|[^_]signal(' std`
+  finds 0 lines, so no fort code runs at a signal. `abort` gives SIGABRT (exit 134), the guard page
+  gives SIGSEGV (exit 139), and `llvm.trap` gives the trap of the target. `sys.raise_signal` sends a
+  signal to the process, whose default action applies. State: no undefined state. Method: read.
+- **R23. The 6 mutable globals.** Sites: `std/rt.ft:58`, `std/rt.ft:59`, `std/rt.ft:63`,
+  `std/rt.ft:64`, `std/rt.ft:67`, `std/rt.ft:70`. C behavior: none. Each output call and each
+  failure reads and writes them with no lock, so a second thread gives the race of E15. State:
+  closed by the one-thread rule. Method: read.
+
+### 9.5 The rows of the back end line
+
+- **B01. The compile line and the link line.** Sites: `push_cc_line` (`driver.ft:1154`) and
+  `link_entry` (`driver.ft:2666`). The compile line is `<cc> --target=<triple> -O1 -fPIE
+  -Wno-override-module [-c] -o <out> <module.ll> [<-l options>] [<-Xcc arguments>]`, with `-O2` in
+  place of `-O1` under `--release`. The link line of a build with libraries is `<cc>
+  --target=<triple> -o <out> <object> <archives> <-l options> <-Xcc arguments>`. No fixed option
+  changes the meaning of the IR: `-O1` and `-O2` select the passes, `-fPIE` selects the relocation
+  model, `-Wno-override-module` removes a warning. The line holds no `-ffast-math`, no `-fwrapv`, no
+  `-ffp-contract`, no `-march` and no `-mcpu`, and the module holds no `target-cpu` and no
+  `target-features` attribute. For an IR input the `-O` level decides how far the back end uses an
+  undefined state: the program of E41 gives the right bytes in the checked mode (`-O1`) and wrong
+  bytes in the release mode (`-O2`). State: no undefined state. Method: read.
+- **B02. The data layout and the target.** Sites: the module holds `target triple`
+  (`gen_data.ft:654`) and no `target datalayout` line; clang gives the layout of `--target`.
+  Precondition: the size and the alignment that the emitter computes for a type must be the ones of
+  that layout: a copy takes its length from `type_sizeof`, and a field address takes its offset from
+  the layout of the back end. Guard: the tests `006_struct_layout.ft`, `011_multidim_layout.ft` and
+  `013_sockaddr_layout.ft` of `test/lang/run/ffi` hold sizes and offsets against C; the test
+  `ir-flags` holds 0 `target datalayout` lines. State: guarded. Method: read.
+- **B03. The options in the hands of the builder: `-Xcc`, `--cc`, `--std-dir`, `-l`.** Sites: `-Xcc`
+  arguments go to both lines, last and unchanged (`driver.ft:1182`); `--cc` names the program that
+  reads the module; `--std-dir` names the tree of the trusted modules; `-l` adds a library.
+  Precondition: each row above assumes clang with the fixed line and the `std` of the compiler.
+  Guard: none. The source of the program holds no trusted module, and the build line still changes
+  what a trusted call means. Evidence: the third program of 9.2 prints `0` with no option and
+  `132817` with `-Xcc -static -Xcc -Wl,--defsym=calloc=malloc`. State: closed by the trusted premise
+  that names the options of the builder. Method: probed.
+
+### 9.6 The index, the inventory and the limits
+
+- **The constructs by name.** `getelementptr inbounds`: E04, E05, E06, E07. `unreachable`: E33, E34,
+  E35. `load`, `store`: E01, E02, E03, E08, E09, E10, E11, E14, E15. An indirect `call`: E16, E17.
+  `sdiv`, `udiv`, `srem`, `urem`: E23, E24. `shl`, `lshr`, `ashr`: E25. A float to an integer, an
+  integer to a float: E28, E29. An `alloca` of a variable size: E40, E39. `memcpy`, `memmove`,
+  `memset`: E41, E42. Each other intrinsic: E43. Each function attribute: E22, E36, E38, E44, E45.
+  Each parameter attribute: E19, E46, E44. Each call attribute: E45. Each flag on an instruction:
+  E26, E27, E04. The data layout and the target: B02, E08, B01. `phi` or `select` over `undef` or
+  `poison`: E37. A `switch` on an enum value outside its set: E13. A `bool` that holds a value other
+  than 0 or 1: E12. A local that no statement wrote: E10, E11. A tail call: E21. Integer overflow:
+  E26. A pointer comparison: E30. A pointer cast: E32, E14. An integer to a pointer: E31.
+- **The inventory.** The string literals of `gen.ft`, `gen_data.ft`, `fir_llvm.ft` and `gen_fir.ft`
+  hold 77 LLVM keywords. 67 stand in a row above. The other 10 have no precondition in a form that
+  the emitter writes: `and`, `attributes`, `define`, `extractvalue`, `global`, `or`, `ret`, `sext`,
+  `type`, `xor`. A `ret` in a `noreturn` function is E36.
+- **Unspecified, not undefined.** The value of an address (E30). The bits of a NaN that an operation
+  gives. The end of a recursion with no end: SIGSEGV at the guard page in the checked mode, and a
+  loop with no end in the release mode, where the back end removes the frame.
+- **The limits.** The probes ran for the Linux target only; the test `ir-flags` reads the Darwin
+  modules and runs none. The census lists the calls of `std/rt.ft` and not the 154 call lines of the
+  C library in the 8 other modules of `std` that have one (`grep -rn 'libc\.[a-z_0-9]*(' std`, less
+  the comment lines). It does not audit the ownership rules, a library archive, or the passes of
+  clang. A row with the method `read` has no test.

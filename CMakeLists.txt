@@ -855,6 +855,19 @@ set_tests_properties(leak-sites PROPERTIES
     PROCESSORS ${FORT_LANG_JOBS}
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
+# Hold the emitted IR free of each flag and attribute that adds an undefined state (`nsw`,
+# `noundef`, `undef`, a plain `fptosi`), and each `inbounds` and each `unreachable` at a known
+# form, in the module of each run entry of test/lang, of the compiler and of the language server,
+# for the Linux and the Darwin target, in the checked and in the release mode. The census of
+# notes/compiler.md 9 gives each form a row.
+add_test(NAME ir-flags
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/ir_flags_test.py"
+            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}" -j "${FORT_LANG_JOBS}")
+set_tests_properties(ir-flags PROPERTIES
+    LABELS "fort;integration"
+    PROCESSORS ${FORT_LANG_JOBS}
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
+
 # Node's built-in runner tests the VS Code extension in editors/vscode.
 # It converts diagnostic documents into editor shapes.
 # It also converts 1-based byte columns to character offsets.

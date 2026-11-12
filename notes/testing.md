@@ -43,8 +43,9 @@ bullet at a time and without a rewrite.
   with a control tree);
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fir-run`,
   `library-interface`, `library-artifact`, `library-use`, `library-cache`, `fixpoint`,
-  `leak-sites`, `tty`, `stack_depth` and `lsp-binary`; bootstrap0 has none, since building
-  bootstrap-1 proves the C compiler. `leak-sites` (`test/leak_sites_test.py`) runs `--leak-report`
+  `leak-sites`, `ir-flags` (6 below), `tty`, `stack_depth` and `lsp-binary`; bootstrap0 has none,
+  since building bootstrap-1 proves the C compiler. `leak-sites` (`test/leak_sites_test.py`)
+  runs `--leak-report`
   on both targets over each suite of test/fort and test/lsp, a program that imports each module of
   test/fort/support, each program of test/library and each entry of test/lang. It holds each run at
   no error (a fail entry of test/lang excepted), each line of a report at a known form, the sites
@@ -1143,6 +1144,30 @@ bullet at a time and without a rewrite.
   violation, and exits 0.
   `.tickets/evidence/T253/v9_report.sh` runs it and `-S --fir-stats` over `test/lang`,
   `src/fort`, `src/lsp` and `std` in the three modes.
+- **`ir-flags` holds the text of each emitted module against the census of `notes/compiler.md` 9**
+  (`test/ir_flags_test.py`, 2026-11-11). It compiles with `-S` each run entry of test/lang (the
+  directories `run` and `programs`, 602 entries), `src/fort/main.ft` and `src/lsp/main.ft`, for the
+  Linux and the Darwin target, in the checked and in the release mode: 2416 module texts. Each
+  module holds the functions of `std` that its program reaches. The test does not compile test/fort,
+  because each suite holds the modules of the compiler again. It holds 0 of each token of its lists
+  `ZERO` (65 tokens: `nsw`, `noundef`, `undef`, `poison`, a plain `fptosi`, `phi`, `inttoptr` and
+  more) and `HEADER_ONLY` (15 tokens: `noalias`, `willreturn`, `memory` and more) outside the header
+  lines, and each `attributes` line and each `declare` line at a known text. It holds each
+  `inbounds` at one of 3 forms and each `unreachable` after a failure entry of `std.rt`, after
+  `llvm.trap`, or in a block that no path from `entry` reaches. It holds each `alloca` at a fixed
+  size in the block `entry`, an alignment on each `load` and each `store`, and a fixed length on
+  each `llvm.memcpy` and each `llvm.memset`. It pins the set of the forms that the corpus shows
+  (`EXPECTED_SHAPES`) and not a count of occurrences: an occurrence count changes with each new
+  entry and with each edit of `std`. The test prints the counts of each target and mode, and
+  `RUN_ENTRIES` is a floor. A control module holds each token as a name, in a string and in a
+  comment, so a scan that counts nothing or counts a name fails. Four mutants of the emitter each
+  turned the test red: `add nsw` in place of `add`, no `llvm.trap` before `unreachable`, no
+  alignment on a `load`, and `mustprogress` in the attribute group 0. Three runs took 145 s, 156 s
+  and 283 s of ctest time with `-j 6` and the debug compiler in the VM. The test has the labels
+  `fort` and `integration`, so the CI job `bootstrap (<os>)` of `.github/workflows/fort.yml` runs
+  it. A change that makes the emitter write a new token or a new form must change the test and the
+  census in one commit. The test cannot see a property that needs a run: the value of an index, a
+  null pointer, two places that overlap.
 
 ## 7. What a test cannot see
 
