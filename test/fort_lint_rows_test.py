@@ -1955,6 +1955,190 @@ class Reach(unittest.TestCase):
             self.assertIn("std.rt.print_enum", by_lint)
 
 
+# The C functions whose declaration no row makes legal (D9.8): the 5 of "One thread" and the 6 of
+# "Calls from C".
+THREAD_NAMES = ("pthread_create", "clone", "clone3", "thrd_create", "vfork")
+RETURN_NAMES = ("setjmp", "sigsetjmp", "longjmp", "siglongjmp", "setcontext", "swapcontext")
+ONE_THREAD = "a fort program has one thread"
+RETURNS_ONCE = "a call of C returns one time to its caller or ends the process"
+
+
+def declared(name):
+    """A trusted module that declares the C function `name` in line 6, below a row that gives
+    each point once."""
+    return "import extern;\n\n" + ROW.replace("labs", name) + "extern fn %s(i64 v) i64;\n" % name
+
+
+def decision_names(paragraph):
+    """The names of the sentence `The lint reports a declaration of ...` in the paragraph of D9.8
+    that starts with `**<paragraph>.**`, in the order of the text."""
+    with open(os.path.join(OPTIONS.source, "spec", "decisions.md"), encoding="utf-8") as handle:
+        text = handle.read()
+    start = text.index("  **%s.**" % paragraph)
+    body = text[start:text.index("\n\n", start)]
+    sentence = re.search(r"The lint reports a declaration of ((?:`[a-z0-9_]+`(?:,|\s+or)?\s+)+)",
+                         body)
+    return tuple(re.findall(r"`([a-z0-9_]+)`", sentence.group(1)))
+
+
+class Names(unittest.TestCase):
+    """The declarations that no row makes legal (D9.8, "One thread" and "Calls from C")."""
+
+    check = Rules.check
+    check_raw = Rules.check_raw
+
+    def refused(self, name, reason):
+        """A declaration of `name` with a row that gives each point is 1 problem, at the name."""
+        self.check({"named.ft": declared(name)},
+                   [("named.ft", 6, "extern '%s': %s, and no row makes this declaration legal "
+                     "(D9.8, " % (name, reason))])
+
+    def test_a_declaration_of_pthread_create_is_reported(self):
+        self.refused("pthread_create", ONE_THREAD)
+
+    def test_a_declaration_of_clone_is_reported(self):
+        self.refused("clone", ONE_THREAD)
+
+    def test_a_declaration_of_clone3_is_reported(self):
+        self.refused("clone3", ONE_THREAD)
+
+    def test_a_declaration_of_thrd_create_is_reported(self):
+        self.refused("thrd_create", ONE_THREAD)
+
+    def test_a_declaration_of_vfork_is_reported(self):
+        self.refused("vfork", ONE_THREAD)
+
+    def test_a_declaration_of_setjmp_is_reported(self):
+        self.refused("setjmp", RETURNS_ONCE)
+
+    def test_a_declaration_of_sigsetjmp_is_reported(self):
+        self.refused("sigsetjmp", RETURNS_ONCE)
+
+    def test_a_declaration_of_longjmp_is_reported(self):
+        self.refused("longjmp", RETURNS_ONCE)
+
+    def test_a_declaration_of_siglongjmp_is_reported(self):
+        self.refused("siglongjmp", RETURNS_ONCE)
+
+    def test_a_declaration_of_setcontext_is_reported(self):
+        self.refused("setcontext", RETURNS_ONCE)
+
+    def test_a_declaration_of_swapcontext_is_reported(self):
+        self.refused("swapcontext", RETURNS_ONCE)
+
+    def test_the_names_of_the_lint_are_the_ones_of_the_decision(self):
+        # The lint has one list for each of the two paragraphs of D9.8, and each list is the
+        # names of the sentence of its paragraph: 5 and 6, 11 names, each one time.
+        fort_lint = lint_module()
+        self.assertEqual(fort_lint.THREAD_NAMES, THREAD_NAMES)
+        self.assertEqual(fort_lint.RETURN_NAMES, RETURN_NAMES)
+        self.assertEqual(decision_names("One thread"), THREAD_NAMES)
+        self.assertEqual(decision_names("Calls from C"), RETURN_NAMES)
+        self.assertEqual((len(THREAD_NAMES), len(RETURN_NAMES)), (5, 6))
+        self.assertEqual(len(set(THREAD_NAMES + RETURN_NAMES)), 11)
+
+    def test_each_name_gives_the_reason_of_its_paragraph(self):
+        fort_lint = lint_module()
+        for names, reason, paragraph in ((THREAD_NAMES, ONE_THREAD, "One thread"),
+                                         (RETURN_NAMES, RETURNS_ONCE, "Calls from C")):
+            for name in names:
+                found = fort_lint.refused_declaration_problems("extern fn %s() void;\n" % name)
+                self.assertEqual(found, [(1, 11, "extern '%s': %s, and no row makes this "
+                                          "declaration legal (D9.8, \"%s\")"
+                                          % (name, reason, paragraph))])
+
+    def test_the_problem_stands_at_the_name(self):
+        output = self.check_raw({"named.ft": declared("setjmp")})
+        self.assertIn("named.ft:6:11: extern 'setjmp': ", output)
+
+    def test_a_declaration_with_no_row_gets_both_problems(self):
+        text = "import extern;\n\nextern fn longjmp(i64 v) i64;\n"
+        self.check({"bare.ft": text}, [("bare.ft", 3, "extern 'longjmp' has no declaration row"),
+                                       ("bare.ft", 3, "extern 'longjmp': " + RETURNS_ONCE)])
+
+    def test_each_declaration_of_a_file_is_reported(self):
+        text = declared("setjmp") + "\n" + ROW.replace("labs", "vfork") + \
+            "extern fn vfork() i32;\n\n" + ROW + "extern fn labs(i64 v) i64;\n"
+        self.check({"both.ft": text}, [("both.ft", 6, "extern 'setjmp': " + RETURNS_ONCE),
+                                       ("both.ft", 11, "extern 'vfork': " + ONE_THREAD)])
+
+    def test_a_declaration_in_a_branch_that_the_compile_does_not_take_is_reported(self):
+        # The index holds no record of a declaration in a branch of a `$if` that the compile does
+        # not take (D21.2), so the check of the names reads the text and not the index.
+        text = ("import extern;\n\n$if ($cfg(target_os) == \"plan9\") {\n"
+                "    extern fn swapcontext(i64 v) i64;\n}\n\n"
+                "fn two() i32 {\n    return 2;\n}\n")
+        self.check({"branch.ft": text}, [("branch.ft", 4, "extern 'swapcontext': " +
+                                          RETURNS_ONCE)])
+        other = text.replace("swapcontext", "labs")
+        self.check({"branch.ft": other}, [])
+
+    def test_a_declaration_in_a_module_that_is_not_trusted_is_reported(self):
+        # The compiler refuses the declaration (D9.8), and the lint names the function too.
+        text = "extern fn siglongjmp(i64 v) i64;\n"
+        output = self.check_raw({"plain.ft": text})
+        self.assertIn("plain.ft:1:11: extern 'siglongjmp': " + RETURNS_ONCE, output)
+        self.assertNotIn("extern 'labs': ", self.check_raw({"plain.ft": text.replace(
+            "siglongjmp", "labs")}))
+
+    def test_a_language_test_gets_the_check(self):
+        # A file of test/lang/run gets the checks of D9.8, and this is one of them.
+        text = "//! run\n" + declared("clone") + "\nfn main() i32 {\n    return 0;\n}\n"
+        name = "test/lang/run/ffi/001_thread.ft"
+        self.check({name: text}, [(name, 7, "extern 'clone': " + ONE_THREAD)])
+
+    def test_a_name_in_a_comment_or_a_literal_is_no_declaration(self):
+        text = ("import std.io;\n\n// extern fn setjmp(i64 v) i64;\n"
+                "fn main() i32 {\n    println(\"extern fn longjmp(i64 v) i64;\");\n"
+                "    return 0; // extern fn vfork() i32;\n}\n")
+        self.check({"quiet.ft": text}, [])
+
+    def test_a_fort_function_with_a_listed_name_is_no_declaration(self):
+        # A fort function is no C function: its symbol is a mangled name (D9.7).
+        text = ("fn setjmp(i64 v) i64 {\n    return v;\n}\n\n"
+                "fn main() i32 {\n    i64 vfork = setjmp(2);\n    return cast(vfork, i32);\n}\n")
+        self.check({"own.ft": text}, [])
+
+    def test_a_longer_name_is_no_listed_name(self):
+        # The lint reports the 11 names and no other: a reviewer reads the row of each other
+        # declaration.
+        for name in ("_setjmp", "setjmp2", "clone_range", "clone33", "my_vfork", "longjmper",
+                     "pthread_create_np", "getcontext"):
+            self.check({"near.ft": declared(name)}, [])
+        # `fork` has the type that the runtime declares (D9.8: one type for one symbol).
+        self.check({"near.ft": declared("fork").replace("(i64 v) i64", "() i32")}, [])
+
+    def test_white_space_and_comments_between_the_words_change_nothing(self):
+        fort_lint = lint_module()
+        message = "extern 'setjmp': %s, and no row makes this declaration legal (D9.8, " \
+            "\"Calls from C\")" % RETURNS_ONCE
+        cases = (("extern fn setjmp(i64 v) i64;", (1, 11)),
+                 ("extern  fn\tsetjmp (i64 v) i64;", (1, 12)),
+                 ("extern\nfn\n  setjmp(i64 v) i64;", (3, 3)),
+                 ("extern // C\n    fn // C\n    setjmp(i64 v) i64;", (3, 5)),
+                 ("$if (a) {\n    extern fn setjmp(i64 v) i64;\n}", (2, 15)),
+                 ("i32 x = 1;extern fn setjmp(i64 v) i64;", (1, 21)),
+                 # A column is a byte column (D20.3): the 2 letters of the literal are 4 bytes,
+                 # so the name at character 28 stands at byte 30.
+                 ("string s = \"éé\"; extern fn setjmp(i64 v) i64;", (1, 30)))
+        for text, where in cases:
+            self.assertEqual(fort_lint.refused_declaration_problems(text), [where + (message,)],
+                             text)
+        self.assertEqual(len(cases), 7)
+
+    def test_text_that_is_no_declaration_gives_no_problem(self):
+        fort_lint = lint_module()
+        cases = ("", "fn setjmp(i64 v) i64 {\n    return v;\n}\n", "extern fn labs(i64 v) i64;",
+                 "// extern fn setjmp(i64 v) i64;", "string s = \"extern fn setjmp(\";",
+                 "extern fn _setjmp(i64 v) i64;", "extern fn setjmp_(i64 v) i64;",
+                 "extern fn clone4() i32;", "my_extern fn setjmp(i64 v) i64;",
+                 "extern fnx setjmp(i64 v) i64;", "externfn setjmp(i64 v) i64;",
+                 "extern fn (setjmp)(i64 v) i64;", "setjmp(env);", "extern setjmp(i64 v) i64;")
+        for text in cases:
+            self.assertEqual(fort_lint.refused_declaration_problems(text), [], text)
+        self.assertEqual(len(cases), 14)
+
+
 def main():
     global OPTIONS
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])

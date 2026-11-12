@@ -253,7 +253,7 @@ follows from its base and its projections. The address of a place is the rvalue 
 | operand | spelling | meaning |
 |---|---|---|
 | copy | `copy p` | the value at `p`; `p` keeps it |
-| move | `move p` | the value at `p`; `p` then holds the zero value of its type (D17.6) |
+| move | `move p` | the value at `p`; it empties `p`, which then holds its zero value (D17.6) |
 | constant | `const c` | a constant (below) |
 
 `move` is legal on a place of an owning type. `copy` is legal on any place. An assignment into a

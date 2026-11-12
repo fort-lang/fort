@@ -180,14 +180,26 @@ Sections:
   A `bool` place is one byte. A store of `true` writes the byte 1, and a store of `false` writes
   the byte 0. A load of a `bool` place gives `true` when the low bit of its byte is 1, and `false`
   when that bit is 0 (D19.2). So each load gives one of the two values, also when the byte holds a
-  value other than 0 and 1. A byte holds such a value when a view gives one byte two types, `bool`
-  and another type (D3.14), and a store of the other type writes it, or when C writes the byte.
+  value other than 0 and 1. A byte holds such a value in three cases. A view gives one byte two
+  types, `bool` and another type (D3.14), and a store of the other type writes it. C writes the
+  byte. Or an operation copies a byte that holds such a value: a copy of an aggregate, or a
+  `regrow`. A copy of a struct or of a fixed array copies the bytes of its source (D19.3), and
+  `regrow` copies each byte of each element that it moves (D12.2). Such a copy makes no load of
+  a `bool` place and no store of `true` or `false`, so each byte of a `bool` field or element
+  stays as it is. So `pairb c = *p` for a `struct pairb { bool a; bool b; }` whose first byte
+  holds 2 gives a `c.a` whose byte holds 2, and a load of `c.a` gives `false`.
 - history: Amended 2026-11-11: the rule said "`bool` has exactly the values `true` and `false`", and
   it gave no result for a load of a `bool` place whose byte is neither 0 nor 1. The user ruled on
   2026-11-11: "I don't want anything undefined." A load now gives the low bit of the byte, which is
   the `load i8` and the `trunc` of D19.2. Probed for a `u8` that a `bool*` view reads: the byte 2
   gave `false` and the byte 3 gave `true`, in builds with `-Xcc -O0`, `-Xcc -O1` and `-Xcc -O2`
   and with `--fir-run`. The four runs agree with the rule.
+  Amended 2026-11-12: the rule named two causes of a `bool` byte that holds a value other than 0
+  and 1: a store through a view, and C. A copy of the byte is a third cause. Probed: for a
+  `u8[2] raw` that holds 2 and 4 and a `pairb mut* p` view of it, a `u8[2]*` view of
+  `pairb copy = *p` printed 2 for its first byte, and `copy.a == false` printed `true`, in builds
+  with `-Xcc -O0` and `-Xcc -O2`, in a build with `--release -Xcc -O2` and with `--fir-run`. The
+  rule now names the three cases. The result of a load does not change.
 
 ### D3.4 Fixed arrays
 - owner: `type-system.md`.
@@ -1723,7 +1735,7 @@ Sections:
   later call of `strerror` can change the text. The system or another process can do so at each
   time: another process can change the bytes of a shared mapping. No rule of D10.9 gives the
   result of an access to storage of C that one of the three released. So a trusted module keeps
-  two rules for storage of C, and a module outside the trusted set keeps none:
+  three rules for storage of C, and a module outside the trusted set keeps none:
   - A function of a trusted module gives its caller no pointer, no span and no string to storage
     of C that C, the system or another process can release or change while fort code holds the
     value, or the row of the function says why none of them does. The rule holds at any depth. It
@@ -1748,11 +1760,30 @@ Sections:
     call released no byte that the access reaches. The rule holds in the same way for storage
     that the system or another process can release with no call of the program: the row says why
     the access reaches no byte that one of them released.
+  - A function of a trusted module gives its caller no function pointer that C gave, and no value
+    through which fort code can load a function pointer that C gave. No row makes such a value
+    legal. A function pointer that C gave is a function pointer that C gives in one of the ways
+    of A7, `gives:`, as the result of a call of C or as a value that fort code loaded from
+    storage of C. It is one that C gave also when it names a fort function, because the value
+    does not say which function it names. The rule holds at any
+    depth. It holds for the value, and for each value that fort code can load from storage of C
+    through the value, or through a value that it loaded this way. The function gives the value
+    in each way that the first rule names: as its result, by a store into a place that is no
+    local of its run, as an argument of a call of a fort function or of a function value, and in
+    a field or an element of an aggregate. A copy of the bytes that holds such a function
+    pointer is the same case. The reason: a call through a function value in a module outside
+    the trusted set has no call row, so a call there through a function pointer that C gave
+    runs C code with arguments that no row covers. So the pointer `ops*` to a static record of C
+    is such a value for a `struct ops { fn (i64 mut*, i64) void fill; }`: a module outside the
+    trusted set can call `o->fill(p, 4)`. A value whose type reaches no function pointer type
+    gives fort code no such load, because no cast gives a `void*` a type and no cast adds a
+    pointer place (D3.14). So a `void*` to a record of C is no such value.
 
-  A function whose row cannot say so has a wrong row, and a function with no such row has an
-  absent row. Each is case 1 of the trusted premise (D10.7). The lint makes no check of these two
-  rules: a reviewer reads the row, as for each other row. A later change audits the rows of `std`
-  against them.
+  For the first two rules, a function whose row cannot say so has a wrong row, and a function
+  with no such row has an absent row. No row can stand for a function that breaks the third
+  rule. Each is case 1 of the trusted premise (D10.7). The lint makes no check of these three
+  rules: a reviewer reads the row and the function, as for each other row. A later change audits
+  the rows of `std` against the first two rules.
 
   **One thread.** A fort program has one thread (D10.7). No trusted module declares a C function
   that starts a thread. The lint reports a declaration of `pthread_create`, `clone`, `clone3`,
@@ -1772,8 +1803,26 @@ Sections:
   function as the handler: the system can call the handler between two operations of fort code.
   `atexit` is such a declaration too: C calls the kept function after the emitted `main` returns
   (D11.6), and no call of C that fort code made runs then. A row that says the opposite is wrong,
-  and the call is a case of the trusted premise (D10.7). The lint makes no check of this rule: a
-  reviewer reads the row, as for each other row.
+  and the call is a case of the trusted premise (D10.7). The lint reports no declaration of
+  `signal`, `sigaction` or `atexit`: a reviewer reads the row, as for each other row.
+  A call of C that fort code makes returns one time to its caller, or it ends the process. So the
+  call returns no second time, and the program continues at no other place when control leaves
+  the call. The compiler emits code for a call that returns one time: it can keep the value of a
+  local in a register through the call, and the deferred code of a block runs only on the paths
+  of D7.8. A declaration of a C function that returns a second time, or that continues at
+  another place and does not end the process, breaks this rule, and no row makes it legal.
+  `setjmp` and `sigsetjmp` return a second time. `longjmp`, `siglongjmp`, `setcontext` and
+  `swapcontext` continue at another place.
+  The lint reports a declaration of `setjmp`, `sigsetjmp`, `longjmp`, `siglongjmp`, `setcontext`
+  or `swapcontext` in each file that it reads. A C function with another name that does the
+  same, as `_setjmp` or `_longjmp`, breaks the rule too. The lint does not report it, and a
+  reviewer reads its row. Three calls keep the rule. `fork` returns one time in each of two
+  processes, and each process has its own storage. A call that replaces the program of the
+  process, as `execvp` when it gives no error, ends the run of the fort program, so it ends the
+  process for this rule. A call that waits has not returned: it returns later, or the process
+  ends first. C code keeps the rule too (A7, `calls:`). C code that returns a second time from a
+  call that fort code made, or that leaves a fort function that it called with no return of
+  that function, is a case of the trusted premise (D10.7).
 
   **The lint.** `tools/fort_lint.py` reads the `.ft` files of `std`, `src/fort`, `src/lsp`,
   `test/fort`, `test/lsp`, `test/library`, `test/tty`, `test/lang/run` and `test/lang/programs`. A
@@ -1807,6 +1856,9 @@ Sections:
   function pointer that C gave. The reason: it does not tell a function pointer that C gave from a
   function pointer of fort code. It does report the global when the callee of that call holds the
   name of a boundary function as a value, as `(first ? take : other)(name)` or `g(takep)(name)`. It
+  reads that callee back to a `}` and no further. So it reports no `mut` global for
+  `hh{.g = takep}.g(name)`, whose callee it reads as `.g`. The next check reports the value
+  `takep` of that line, so the lint still reports the file. It
   checks no bound, length or NUL. It reports a name of a boundary function, outside an import, that
   stands neither as the callee of a call nor as an argument of a call whose callee is an `extern fn`
   or a function pointer. A group around an argument changes nothing: `take_cb((takep))` is
@@ -1815,12 +1867,21 @@ Sections:
   because the lint does not tell a function pointer that C gave from a function pointer of fort
   code. So each call through a function value in a trusted module has a row: a trusted module that
   gives a boundary function to a function value of fort code, through a local or an element of a
-  table, gives a module that is not trusted a function that trusts its caller. A program of
+  table, gives a module that is not trusted a function that trusts its caller. The last check
+  reports each `extern fn` whose name is one of 11 names: the 5 of "One thread" and the 6 of "Calls
+  from C". It reads the text of each file of the run, with comments and literals left out, and it
+  reads no index. So it sees a declaration in a module that is not trusted, and in each branch of a
+  `$if`. It reports those 11 names and no other name. Each other check of this decision reads the
+  index of a compile. So it sees nothing in a branch of a `$if` that this compile does not take
+  (D21.2). The compiler that the lint runs takes a branch by its own target and by the `--cfg`
+  options of a language test. The `--target` option of the lint changes no key of `$cfg`. A
+  program of
   `test/lang/fail` does not run, and a program that a test suite holds as text is outside the files
-  of the lint, so they need no row. The interface file of a library writes `import extern;` first in
-  the section of each trusted module that is not of `std` (D9.11). The reason: no rule can check C,
-  so each compile rule on a declaration checked a part of A7, and each review found one more route
-  past it. A call outside the trusted set kept the same unchecked condition one step further out: a
+  of the lint, so they need no row. The interface file of a library writes `import extern;` first
+  in the section of each trusted module that is not of `std` (D9.11). The reason: no rule can check
+  C, so each compile rule on a declaration checked a part of A7, and each review found one more
+  route past it.
+  A call outside the trusted set kept the same unchecked condition one step further out: a
   length that fits its buffer, a NUL inside its storage. A small trusted set, with a row for each
   declaration and for each call, makes A7 a question that a reviewer answers for one row at a time.
   Linux x86-64 uses the System V C ABI. Mac arm64 uses the Apple arm64 C ABI.
@@ -2050,6 +2111,34 @@ Sections:
   build with `-Xcc -O2` did not end, and a build with `--release -Xcc -O2` ended with status 2. A
   declaration that lets C or the system call a fort function at another time than in a call of C
   now breaks `calls:`.
+  Amended 2026-11-12: the paragraph "Storage of C" had two rules, and no rule covered a function
+  pointer that C gave and that fort code loads from storage of C. Probed at 25ed2418: a function
+  of a trusted module with true rows gave an `ops*` to a static record of C, and a module
+  outside the trusted set called `o->fill(p, 4)`. The C function wrote 4 words through a pointer
+  to 1 word. A build with `-Xcc -O0` stopped with status 134 after a false `integer overflow`,
+  a build with `-Xcc -O2` ended with status 0, and the lint reported nothing. The third rule now
+  makes that function case 1 of the trusted premise (D10.7). A count at 361c6055 over the 792
+  structs of the `.ft` files of `std`, `src` and `test` found 46 fields of a function type. C
+  fills 1 of them, `enumerator` of `test/fort/support/heap.ft`, and one function loads it and
+  calls it and gives it to no caller. So 0 functions break the third rule.
+  The same amendment gives "Calls from C" the rule that a call of C returns one time to its
+  caller, or ends the process. Before, no sentence said so. Probed at 25ed2418: a trusted module
+  with true rows declared `setjmp` and `longjmp`. A function that set a local to 1 before the
+  `longjmp` printed 1 in a build with `-Xcc -O0` and 0 in builds with `-Xcc -O1` and `-Xcc -O2`.
+  A second program left a function through `longjmp`, and its 2 `defer` statements did not run.
+  The lint reported nothing for each program. A declaration of one of the 6 names now breaks the
+  rule, and no row makes it legal.
+  The same amendment makes the two sentences on the lint of the thread rule one rule. The rule
+  said "The lint reports a declaration of" the 5 names, and the note of 2026-11-11 said that the
+  lint "implements the thread rule in a later change"; `git grep -c pthread_create -- tools` gave
+  0 at 361c6055. The lint now reports a declaration of each of the 11 names, in each file that
+  it reads, and one test and one mutation of the lint hold each name. A count at 361c6055 (`git
+  grep -cE` for an `extern fn` with one of the 11 names over `std`, `src` and `test`) found 0
+  such declarations. The same amendment gives "The lint" its 2 limits, which a review probed:
+  the reader of a callee stops at a `}`, and a check that reads the index sees nothing in a
+  branch of a `$if` that the compile does not take. For 3 branches under the lint targets
+  `linux` and `darwin`, the lint reported the `mut` global only in the branch of the compiler's
+  own target.
 
 ### D9.9 The internal calling convention
 - owner: `module-system.md`.
@@ -2452,15 +2541,19 @@ Sections:
   does, and it cannot define what a standard library does that the compiler did not check. Four
   cases have the behavior that C gives them, and fort defines no more:
   1. A trusted declaration or call whose row is wrong or absent (D9.8), or a function of a trusted
-     module whose row for storage of C is wrong or absent (D9.8). Examples are `memchr` declared
+     module whose row for storage of C is wrong or absent (D9.8). A declaration that no row makes
+     legal, and a function of a trusted module that breaks the third rule for storage of C, are
+     this case too: no row can stand for them (D9.8). Examples are `memchr` declared
      with an `i64*` result for a search of one byte, a declaration whose parameter marks no `mut`
      at a level that C writes, a function that gives its caller a view of a block of `malloc`
-     that a later call of `free` releases, and a declaration of `signal` whose parameter gives C
-     a fort function as the handler (D9.8, "Calls from C").
+     that a later call of `free` releases, a function that gives its caller a pointer to a record
+     of C whose field holds a function pointer (D9.8, "Storage of C"), a declaration of `signal`
+     whose parameter gives C a fort function as the handler, and a declaration of `setjmp` or of
+     `longjmp` (D9.8, "Calls from C").
   2. C code that breaks A7 of `ownership-design.md` 5.1. Examples are C code that keeps an argument
      and gives it back in a later call, C code that starts a thread which reads or writes
-     storage of fort code, and C code that calls a fort function when no call of C that fort code
-     made runs.
+     storage of fort code, C code that calls a fort function when no call of C that fort code
+     made runs, and C code that returns a second time from a call that fort code made.
   3. A call in a trusted module whose arguments break the contract of its callee, which its call row
      states wrongly or does not state. Examples are a `char*` with no NUL inside its storage for
      `strlen`, a length past the end of a buffer for `memcpy`, and storage of `new` for `free`
@@ -2474,13 +2567,14 @@ Sections:
      pointer in each function.
 
   A module outside the trusted set declares no extern, calls no extern and names no boundary
-  function (D9.8), and the two rules for storage of C bind only a function of a trusted module
+  function (D9.8), and the three rules for storage of C bind only a function of a trusted module
   (D9.8). So cases 1 to 3 stand only in a trusted module. A module outside the trusted set
   has no undefined behavior, with no condition on its code: it can keep a pointer to storage of C
   that a function of a trusted module gave, copy it and load through it, because the row of that
   function covers each time that fort code holds the value. The row covers also each pointer, each
   span and each string to storage of C that fort code loads through the value, at any depth
-  (D9.8).
+  (D9.8). By the third rule, fort code loads no function pointer that C gave through a value
+  that a function of a trusted module gave, at any depth (D9.8).
   A pointer or a span to dead storage is no case of the trusted premise. A module outside the
   trusted set can give such a value to a function of a trusted module, and that function can give
   it to C. The value breaks no contract of case 3 while each access of C stays inside the bound
@@ -2533,7 +2627,10 @@ Sections:
   thread, and the lint of D9.8 reports a declaration of `pthread_create`, `clone`, `clone3`,
   `thrd_create` or `vfork`. C calls a fort function only while a call of C that fort code made
   runs (D9.8, "Calls from C"). So such a function runs inside that call, and no fort function
-  runs between two operations of a run. The compiler has no option that removes a check (D10.6).
+  runs between two operations of a run. A call of C that fort code makes returns one time to its
+  caller, or it ends the process (D9.8, "Calls from C"). So the code after a call runs at most
+  one time for each run of the call, and control leaves a block only on the paths of D7.8, or
+  the process ends. The compiler has no option that removes a check (D10.6).
   Only
   `str.from_cstr` and `rt.args_init` can write `p[lo..hi]` (D6.9), and only a trusted module calls
   them, with a call row (D9.8), so a span beyond the object is case 3 of the trusted premise. The
@@ -2555,7 +2652,7 @@ Sections:
   return of its run, and no later local takes that storage (D10.9). Each entry of the block that
   declares a named local starts a new local, so a pointer to the local of an earlier entry points at
   dead storage.
-  **Defined leaks.** Four cases keep an allocation until the process ends. Each is a defined result,
+  **Defined leaks.** Five cases keep an allocation until the process ends. Each is a defined result,
   and no rule makes it an error:
   - an allocation that only a cycle of owners holds, or that the program reaches only through such
     a cycle;
@@ -2564,7 +2661,9 @@ Sections:
   - an allocation that an owner holds on a path that calls `exit`, or that ends in a runtime error,
     a `panic`, a failed `assert` or a memory fault;
   - an allocation whose only owner is a place in dead storage, which a store through a pointer or
-    a span to dead storage wrote, or that the program reaches only through such an owner (D10.9).
+    a span to dead storage wrote, or that the program reaches only through such an owner (D10.9);
+  - an allocation whose only owner is a place in storage of C, which a store through a pointer or
+    a span to storage of C wrote, or that the program reaches only through such an owner (D9.8).
 
   **No forged pointer.** Fort code reaches storage only through a value that derives from an address
   of that storage, inside its object. A pointer to dead storage (D10.9) is such a value: it derives
@@ -2686,6 +2785,14 @@ Sections:
   build with `-Xcc -O2` and as 932 with `--fir-run`. The same amendment names the load of a `bool`
   place (D3.3), and it names the time at which C calls a fort function (D9.8): case 1 and case 2
   of the trusted premise each got an example for a call at another time.
+  Amended 2026-11-12: D9.8 has a third rule for storage of C, on a function pointer that C gave,
+  and the rule that a call of C returns one time or ends the process. The text said "the two
+  rules for storage of C"; it now says three. Case 1 names a declaration that no row makes legal
+  and a function that breaks the third rule, with one example each. Case 2 got the example of C
+  code that returns a second time. The trusted premise keeps its four cases. The list of the
+  defined leaks had four cases, and none was an allocation whose only owner is a place in
+  storage of C. It has five cases now. The note of 2026-11-11 said that the lint implements the
+  rule of one thread in a later change; the lint implements it now (D9.8).
 
 ### D10.8 Stack probes
 - owner: `memory-model.md`.
@@ -2733,12 +2840,13 @@ Sections:
      So the guarantee "No forged pointer" of D10.7 holds for a value that the program reads from
      dead storage: the read gives the value that the storage held last, as a read of live storage
      does. A `move` of an owner out of dead storage gives no second owner. Each operation that takes
-     an owner out of a place stores the zero value into that place: a `move`, the implicit `move` of
-     `return x` included (D17.5, D17.6), a `del` (D17.9), and a `regrow` for each owner slot of each
-     old element (D12.2). So a place in dead storage whose owner went to another place held the zero
-     value last. A store of an owner into dead storage stores a new allocation, or it takes the
-     owner out of its source by one of these operations. So the place in dead storage is then the
-     one place that holds the owner. The behavior is defined.
+     an owner out of a place leaves the zero value in that place. A `move` empties its operand, the
+     implicit `move` of `return x` included (D17.5, D17.6). A `del` empties its operand (D17.9). A
+     `regrow` stores the zero value into each owner slot of each old element (D12.2). So a place
+     in dead storage whose owner went to another place held the zero value last. A store of an
+     owner into dead storage stores a new allocation, or it takes the owner out of its source by
+     one of these operations. So the place in dead storage is then the one place that holds the
+     owner. The behavior is defined.
   3. A local that an `&` names is in frame storage (D10.1). An `&` names a local when the function
      holds an `&e`, or a span expression of `e` when `e` is a fixed array, for a place `e` that is
      the local or a part of it (D19.4). D10.7 gives the term "a part". The term "an `&` names"
@@ -2833,6 +2941,10 @@ Sections:
   local after its scope, and a `del` of a pointer that is no start of an allocation as undefined
   behavior, and D6.7 called the return of the address of a local "documented undefined behavior, as
   in C". The compiler and the runtime implement this rule in a later change.
+  Amended 2026-11-12: rule 2 said that a `move` and a `del` store the zero value into the place,
+  and `fir.md` 6 says that the emptying "is no store of D17.11". Rule 2 now says that each of the
+  two empties its operand, which is the word of D17.6 and of D17.9. A `regrow` keeps the word of
+  D12.2. No result changes.
 
 ## D11 Build modes and the runtime contract
 
@@ -3803,10 +3915,10 @@ says ownership is "by convention", this section supersedes it.
   `del`, transfer, lending, the overwrite check), `core-language.md` (the `move` builtin,
   statements).
 - rule: `move(lv)` is a universe function (D12.2). Its operand is an lvalue of owning type (an `own`
-  reference or an owning aggregate, D17.7); it yields the operand's value and sets the operand to
-  its zero value (`null`, `{null, 0}`). After the emptying each byte of the operand holds 0, and
-  the padding bytes of an owning aggregate are among them (D10.1). Emptying is not an assignment:
-  the binding need not be
+  reference or an owning aggregate, D17.7); it yields the operand's value and empties the
+  operand. The operand then holds its zero value (`null`, `{null, 0}`). After the emptying each
+  byte of the operand holds 0, and the padding bytes of an owning aggregate are among them
+  (D10.1). The emptying is no assignment, and it is no store of D17.11: the binding need not be
   `mut`, and after the move it still cannot be assigned to unless it is. When the operand is reached
   through an indirection (`*p`, `p->f`, `s[i]`), that level must be mutable, because the move
   changes storage that others can see: `move(v[0])` on a `node* own@ v` is an error, since nothing
@@ -3820,6 +3932,11 @@ says ownership is "by convention", this section supersedes it.
   struct `ob{u8 tag; i32 mut* own p}` whose 7 padding bytes held 255: its first word printed 0
   after its `move`, in builds with `-Xcc -O0` and `-Xcc -O2` and with `--fir-run`. A later change
   measures each lowering of the emptying against this rule.
+  Amended 2026-11-12: the rule said that `move` "sets the operand to its zero value", and rule 2
+  of D10.9 said that a `move` and a `del` store the zero value. `fir.md` 6 says that the emptying
+  "is no store of D17.11", so one operation had the words "stores" and "no store". The rule now
+  says that `move` empties the operand, which is the word of D17.9 and of `fir.md`, and that the
+  emptying is no store of D17.11. No result changes.
 
 ### D17.7 Owning aggregates
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

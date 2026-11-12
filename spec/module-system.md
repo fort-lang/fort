@@ -263,7 +263,12 @@ each C string. A function of a trusted module gives its caller no pointer, no sp
 storage of C that C, the system or another process can release or change while fort code holds the
 value, or the row of the function says why none of them does (D9.8). The rule holds at any depth:
 it holds for each pointer, each span and each string to storage of C that fort code can load
-through the value. A reviewer reads that row, and the lint does not.
+through the value. A reviewer reads that row, and the lint does not. A function of a trusted module
+gives its caller no function pointer that C gave, and no value through which fort code can load
+one, at any depth. No row makes such a value legal (D9.8). A call of C returns one time to its
+caller, or it ends the process (D9.8, "Calls from C"). A fort program has one thread (D9.8, "One
+thread"). The lint reports a declaration of each of 11 C functions that break one of these two
+rules, as `setjmp` or `pthread_create`, and no row makes such a declaration legal.
 `tools/fort_lint.py` reports a missing call row or declaration row, but in `test/lang/fail` and in
 a program that a suite holds as text. Other modules call the functions of `std` that take spans and
 strings. A trusted module outside `std` starts as this test module does:
