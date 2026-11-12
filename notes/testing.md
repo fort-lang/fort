@@ -757,7 +757,18 @@ bullet at a time and without a rewrite.
   family, and `hold_floor` stops the test below it. So a family that accepts no item stops the test.
   `FORCED` runs a case of `GATE_CASES` with a chosen set of report lines and no error. Each row
   names the event kind that then fails the item, and another verdict stops the test (`run_forced`).
-  The rows hold that a line of one rule does not excuse an event of another rule. **The row `leak at
+  The rows hold that a line of one rule does not excuse an event of another rule. **The judge shares
+  2 functions with a `bool` result with the pass.** The first is `fir.term_is_abort`, which gives
+  the flag of an abort block. A mutant of it changes the pass and the judge together, so a row of
+  `FORCED` holds each side. The case `before_check` holds the side of a block that ends in a
+  `check`. The case `abort_block` holds the side of a block that ends in a `panic`. The second is
+  `fir.stmt_reads`, which gives `take_named` each operand of a statement. The FIR case `value_call`
+  and row accept-value-caller of `tools/mutations/disposition.json` hold it. A new predicate that
+  the judge and the pass both read needs a case of the gate and a row of `FORCED` on each side.
+  **The case `whole_chain` is no item of the hand set** (`GATE_ITEMS`). Its store of a whole struct
+  goes over the owner of an allocation that owns a second one. The compiler gives the item only a
+  line of `--whole-store-report`, which does not excuse the `leak at exit` of the second
+  allocation. So the gate fails that item, and only `FORCED` runs the case. **The row `leak at
   exit` judges only a run of a program whose `main` returns.** `shadow.test_exit` gives that event,
   and the interpreter calls it only there (`interpreter.run_program`). So the gate judges that kind
   in the hand cases and in the seeded family only. A run of the exhaustive family, of the shapes or

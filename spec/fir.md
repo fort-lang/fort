@@ -1604,11 +1604,11 @@ writes it (section 12), and it starts a program as `toolchain.md` 6 item 22 star
   through the tags of an argument whose value starts the access: of such arguments, the one with the
   lowest index that has a tag. A holder of an allocation that leaks at exit is an owner slot
   of such an allocation that holds it. The line of a `leak at exit` has its plain form when its
-  allocation has no holder, or when each holder stands in an allocation with the plain form. Each
-  other line ends with ` of a cycle`: a cycle of owners holds the allocation, in the cycle or
-  below it. One holder in or below a cycle gives that end, also when a second holder stands in an
-  allocation with the plain form. A run gives each of the two lines once at most, the line of a
-  cycle last. A `leak` stands at the item where the owner count became 0, and an
+  allocation has no holder. It has the plain form too when each holder stands in an allocation with
+  the plain form. Each other line ends with ` of a cycle`: a cycle of owners holds the allocation,
+  in the cycle or below it. One holder in or below a cycle gives that end, also when a second holder
+  stands in an allocation with the plain form. A run gives each of the two lines once at most, the
+  line of a cycle last. A `leak` stands at the item where the owner count became 0, and an
   event inside the `std.rt.free` of a `del` stands at the `del`. A `use after release`, `use after
   scope` of a frame that returned, `double release` and `invalid release` stand before the fault
   that ends the run, and a `use after move` before the fault `null dereference`.
