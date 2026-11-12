@@ -1586,6 +1586,10 @@ bullet at a time and without a rewrite.
   with `touch` in the guest before `ninja`, and quote the md5 of its mutant. On 2026-10-24 the
   first two rounds of one run of that table read `stale` in VM slot 3, with the clocks equal:
   put two such rows before the rows that you measure.
+  On 2026-11-14 in VM slot 4, 6 of 47 rounds read `stale`: the first round of 5 tables, and the
+  second round of `tools/mutations/whole.json` after a first round that read `stale`. With
+  `--runner` set to a script that runs `sleep 5` and then `tools/vm run "$@"`, each of the 6
+  built its mutant and read `caught`. Use that runner when a row must not read `stale`.
   **A stage that exits other than 0 reads `caught`, whatever the cause.** On 2026-11-12 the disk
   was full during a run of `tools/mutations/generator.json`. The compiler could not write
   its output in 34 of 50 rows, the harness printed a line `ERROR` and each row read `caught`. So

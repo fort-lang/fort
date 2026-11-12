@@ -450,7 +450,7 @@ fn kill_store(context* c, place.path d, fir_flow.bits* fresh, fir_flow.bits* ali
         place.path q = c->facts[k];
         if (place.is_same_base(q, d) && !place.is_separate(&c->places, q, d)) {
             kill(pr, cast(k, u32));
-        } else if (to_local && place.has_key(&c->places, q, d.local)) {
+        } else if (to_local && place.key_rank(&c->places, q, d.local) > 0) {
             kill(pr, cast(k, u32));
         }
         k += 1;
@@ -953,16 +953,21 @@ fn is_entry_zeroing(fir.func* f, fir.statement* s) bool {
 // place whose address an `addr` or a `slice` of `s` takes. A statement that writes no place of a
 // local and takes no address of one writes no byte of it, so the local holds what it held.
 fn mark_written(fir.statement* s, fir_flow.bits mut* written) void {
-    if (s->kind != fir.stmt_kind.st_assign && s->kind != fir.stmt_kind.st_del) {
+    switch (s->kind) {
+    case fir.stmt_kind.st_live, fir.stmt_kind.st_dead:
+        // a marker writes no byte (spec/fir.md 7)
         return;
+    case fir.stmt_kind.st_assign:
+        fir.rvalue r = s->value;
+        bool names = r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice;
+        if (names && r.place.base == fir.base_kind.bk_local) {
+            fir_flow.bits_set(written, r.place.local);
+        }
+    case fir.stmt_kind.st_del:
+        // a `del` writes its place and takes no address
     }
     if (s->place.base == fir.base_kind.bk_local) {
         fir_flow.bits_set(written, s->place.local);
-    }
-    fir.rvalue r = s->value;
-    bool names = r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice;
-    if (s->kind == fir.stmt_kind.st_assign && names && r.place.base == fir.base_kind.bk_local) {
-        fir_flow.bits_set(written, r.place.local);
     }
 }
 
@@ -2322,17 +2327,20 @@ fn judge_wholes(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
 // through an address from before the `dead`, which dangles (D17.11). `live` changes no bit: a
 // local whose scope ended holds no allocation, whatever its bytes hold.
 fn apply_ended(context* c, fir.statement* s, fir_flow.bits mut* set) void {
-    if (s->kind == fir.stmt_kind.st_dead) {
-        fir_flow.bits_set(set, s->local);
-        return;
-    }
     u32 mut taken = 0;
-    if (place.find_taken(&c->places, s, &taken)) {
-        fir_flow.bits_clear(set, taken);
-    }
-    bool fixed = s->kind == fir.stmt_kind.st_assign && fir.place_fixed(c->places.f, s->place);
-    if (fixed && !place.is_zero_rvalue(&c->places, s->value)) {
-        fir_flow.bits_clear(set, s->place.local);
+    switch (s->kind) {
+    case fir.stmt_kind.st_dead:
+        fir_flow.bits_set(set, s->local);
+    case fir.stmt_kind.st_assign:
+        if (place.find_taken(&c->places, s, &taken)) {
+            fir_flow.bits_clear(set, taken);
+        }
+        bool fixed = fir.place_fixed(c->places.f, s->place);
+        if (fixed && !place.is_zero_rvalue(&c->places, s->value)) {
+            fir_flow.bits_clear(set, s->place.local);
+        }
+    case fir.stmt_kind.st_live, fir.stmt_kind.st_del:
+        // `live` changes no bit; a `del` stores no value and takes no address
     }
 }
 
@@ -2397,9 +2405,13 @@ fn mark_named_owners(fir.func* f, fir_flow.bits mut* entry) void {
 // keeps each owner, so it has no obligation. A span and a `string` hold no inner owner of part 2:
 // the `del` or the `cast` of a span whose elements hold owners waits for refinement R8 (D17.20).
 fn released_place(fir.func* f, fir.statement* s, fir.place mut* out, u64 mut* owners) bool {
-    if (s->kind == fir.stmt_kind.st_del) {
+    switch (s->kind) {
+    case fir.stmt_kind.st_del:
         *out = s->place;
-    } else if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_cast) {
+    case fir.stmt_kind.st_assign:
+        if (s->value.kind != fir.rvalue_kind.rv_cast) {
+            return false;
+        }
         types.node* to = s->value.ty;
         fir.operand o = fir.rvalue_operand(f, s->value, 0);
         bool pointer = to->kind == types.type_kind.k_ptr || to->kind == types.type_kind.k_voidptr;
@@ -2413,7 +2425,8 @@ fn released_place(fir.func* f, fir.statement* s, fir.place mut* out, u64 mut* ow
             return false;
         }
         *out = o.place;
-    } else {
+    case fir.stmt_kind.st_live, fir.stmt_kind.st_dead:
+        // a marker releases no pointer
         return false;
     }
     types.node* t = fir.place_type(f, *out);
@@ -3037,31 +3050,53 @@ fn statement_acts(context mut* c, usage mut* u, u32 i, fir.statement* s, fir_flo
     void {
     fir.func* f = c->places.f;
     u64 at = position(s->loc);
-    if (s->kind == fir.stmt_kind.st_del) {
+    switch (s->kind) {
+    case fir.stmt_kind.st_del:
         pointer_acts(c, u, i, s->place, stale);
         vacate_act(c, u, i, s->place, at, stale);
         return;
-    }
-    if (s->kind != fir.stmt_kind.st_assign) {
+    case fir.stmt_kind.st_live, fir.stmt_kind.st_dead:
+        // a marker reads no place and writes no byte (spec/fir.md 7)
         return;
+    case fir.stmt_kind.st_assign:
+        // the acts of an assignment follow
     }
     fir.rvalue r = s->value;
-    if (r.kind == fir.rvalue_kind.rv_addr) {
+    switch (r.kind) {
+    case fir.rvalue_kind.rv_addr:
         pointer_acts(c, u, i, r.place, stale);
-    } else if (r.kind == fir.rvalue_kind.rv_slice) {
+    case fir.rvalue_kind.rv_slice:
         types.type_kind k = fir.place_type(f, r.place)->kind;
         pointer_acts(c, u, i, r.place, stale);
         if (k == types.type_kind.k_span || k == types.type_kind.k_string) {
             use_act(c, u, i, r.place, stale);
         }
+    case fir.rvalue_kind.rv_call:
+        switch (r.callee) {
+        case fir.callee_kind.cl_value:
+            operand_acts(c, u, i, r.callee_op, false, at, stale);
+        case fir.callee_kind.cl_fn, fir.callee_kind.cl_extern:
+            // a named callee reads no operand
+        }
+    case fir.rvalue_kind.rv_use, fir.rvalue_kind.rv_add, fir.rvalue_kind.rv_sub,
+        fir.rvalue_kind.rv_mul, fir.rvalue_kind.rv_add_overflows, fir.rvalue_kind.rv_sub_overflows,
+        fir.rvalue_kind.rv_mul_overflows, fir.rvalue_kind.rv_div, fir.rvalue_kind.rv_rem,
+        fir.rvalue_kind.rv_and, fir.rvalue_kind.rv_or, fir.rvalue_kind.rv_xor,
+        fir.rvalue_kind.rv_not, fir.rvalue_kind.rv_shl, fir.rvalue_kind.rv_shr,
+        fir.rvalue_kind.rv_fadd, fir.rvalue_kind.rv_fsub, fir.rvalue_kind.rv_fmul,
+        fir.rvalue_kind.rv_fdiv, fir.rvalue_kind.rv_fneg, fir.rvalue_kind.rv_eq,
+        fir.rvalue_kind.rv_ne, fir.rvalue_kind.rv_lt, fir.rvalue_kind.rv_le, fir.rvalue_kind.rv_gt,
+        fir.rvalue_kind.rv_ge, fir.rvalue_kind.rv_cast, fir.rvalue_kind.rv_slice_ptr,
+        fir.rvalue_kind.rv_alloc, fir.rvalue_kind.rv_regrow, fir.rvalue_kind.rv_aggregate:
+        // these kinds read no place of their own: the loop below reads their operands
     }
-    if (r.kind == fir.rvalue_kind.rv_call && r.callee == fir.callee_kind.cl_value) {
-        operand_acts(c, u, i, r.callee_op, false, at, stale);
-    }
-    u32 mut k = 0;
-    while (k < r.ops_len) {
-        operand_acts(c, u, i, fir.rvalue_operand(f, r, k), is_null_test(f, r, k), at, stale);
-        k += 1;
+    // the read of the place of a comparison with null is no use (D17.21); its constant has no act
+    fir.place mut tested = fir.place{};
+    bool null_test = place.compared_place(f, r, &tested);
+    for (u32 mut k = 0; k < r.ops_len; k++) {
+        fir.operand o = fir.rvalue_operand(f, r, k);
+        bool tests = null_test && fir.is_same_place(f, o.place, tested);
+        operand_acts(c, u, i, o, tests, at, stale);
     }
     bool memory = u->memory.len > 0;
     if (place.is_call(s) && memory) {
@@ -3092,22 +3127,20 @@ fn terminator_acts(context mut* c, usage mut* u, u32 i, fir.terminator* t, fir_f
     void {
     fir.func* f = c->places.f;
     u64 at = position(t->loc);
-    if (t->kind == fir.term_kind.tk_switch || t->kind == fir.term_kind.tk_check) {
-        operand_acts(c, u, i, t->cond, false, at, stale);
+    fir.operand mut o = fir.operand{};
+    for (u32 mut k = 0; place.find_operand(f, t, k, &o); k++) {
+        operand_acts(c, u, i, o, false, at, stale);
     }
-    if (t->kind == fir.term_kind.tk_check || t->kind == fir.term_kind.tk_fail) {
-        u32 mut k = 0;
-        while (k < t->args_len) {
-            operand_acts(c, u, i, fir.operand_at(f, t->args_first + k), false, at, stale);
-            k += 1;
-        }
-    }
-    if (t->kind == fir.term_kind.tk_check_overwrite) {
+    switch (t->kind) {
+    case fir.term_kind.tk_check_overwrite:
         pointer_acts(c, u, i, t->place, stale);
-    }
-    bool value = fir.local_at(f, 0)->ty->kind != types.type_kind.k_void;
-    if (t->kind == fir.term_kind.tk_return && value) {
-        use_act(c, u, i, fir.place_local(0), stale);
+    case fir.term_kind.tk_return:
+        if (fir.local_at(f, 0)->ty->kind != types.type_kind.k_void) {
+            use_act(c, u, i, fir.place_local(0), stale);
+        }
+    case fir.term_kind.tk_goto, fir.term_kind.tk_switch, fir.term_kind.tk_check,
+        fir.term_kind.tk_fail, fir.term_kind.tk_trap, fir.term_kind.tk_unreachable:
+        // these kinds read no place of their own: the loop above reads their operands
     }
 }
 
@@ -3130,14 +3163,17 @@ fn can_name_owner(context* c, usage* u, fir.place p) bool {
 // span or a `string` in fixed storage. A `move` vacates its place after the read.
 fn operand_acts(context mut* c, usage mut* u, u32 i, fir.operand o, bool null_test, u64 at,
                 fir_flow.bits* stale) void {
-    if (o.kind == fir.operand_kind.ok_const) {
-        return;
-    }
-    pointer_acts(c, u, i, o.place, stale);
-    if (o.kind == fir.operand_kind.ok_move) {
+    switch (o.kind) {
+    case fir.operand_kind.ok_const:
+        // a constant reads no place
+    case fir.operand_kind.ok_move:
+        pointer_acts(c, u, i, o.place, stale);
         vacate_act(c, u, i, o.place, at, stale);
-    } else if (!null_test && !is_fixed_length(c->places.f, o.place)) {
-        use_act(c, u, i, o.place, stale);
+    case fir.operand_kind.ok_copy:
+        pointer_acts(c, u, i, o.place, stale);
+        if (!null_test && !is_fixed_length(c->places.f, o.place)) {
+            use_act(c, u, i, o.place, stale);
+        }
     }
 }
 
@@ -3146,26 +3182,24 @@ fn operand_acts(context mut* c, usage mut* u, u32 i, fir.operand o, bool null_te
 fn pointer_acts(context mut* c, usage mut* u, u32 i, fir.place p, fir_flow.bits* stale) void {
     fir.func* f = c->places.f;
     types.node* mut t = fir.base_type(f, p);
-    u32 mut k = 0;
-    while (k < p.proj_len) {
+    for (u32 mut k = 0; k < p.proj_len; k++) {
         fir.projection pj = fir.place_projection(f, p, k);
-        bool header = t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string;
-        if (pj.kind == fir.proj_kind.pj_deref || (pj.kind == fir.proj_kind.pj_index && header)) {
+        bool mut loads = false;
+        switch (pj.kind) {
+        case fir.proj_kind.pj_deref:
+            loads = true;
+        case fir.proj_kind.pj_index:
+            loads = t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string;
+        case fir.proj_kind.pj_field:
+            // a field step reads no pointer
+        }
+        if (loads) {
             fir.place mut prefix = p;
             prefix.proj_len = k;
             use_act(c, u, i, prefix, stale);
         }
         t = fir.apply_projection(f, t, pj);
-        k += 1;
     }
-}
-
-// Whether operand `k` of the rvalue `r` is the place of a comparison with null
-// (place.compared_place), and not its zero constant (D17.21). The read of its value is no use.
-fn is_null_test(fir.func* f, fir.rvalue r, u32 k) bool {
-    fir.place mut p = fir.place{};
-    return place.compared_place(f, r, &p)
-        && fir.rvalue_operand(f, r, k).kind == fir.operand_kind.ok_copy;
 }
 
 // Whether `p` is the `.len` of a span or a `string` in fixed storage, whose read is no use. Through
@@ -3305,13 +3339,7 @@ fn path_type(context* c, place.path p) types.node* {
     types.node* mut t = fir.local_at(c->places.f, p.local)->ty;
     u32 mut i = 0;
     while (i < p.len) {
-        place.step s = place.step_at(&c->places, p, i);
-        if (s.kind == place.step_kind.sk_index) {
-            t = t->elem;
-        } else {
-            t = fir.apply_projection(c->places.f, t,
-                                     fir.projection{fir.proj_kind.pj_field, s.field, 0});
-        }
+        t = place.step_type(c->places.f, t, place.step_at(&c->places, p, i));
         i += 1;
     }
     return t;
@@ -3549,7 +3577,8 @@ fn apply_act(context* c, usage* u, act* a, fir_flow.bits* aliased, u64 mut@ s) v
             }
             k += 1;
         }
-    default:
+    case act_kind.ak_use, act_kind.ak_expose, act_kind.ak_borrow:
+        // walk_block judges a use and gives an exposure and a borrow to owner.alias
     }
 }
 

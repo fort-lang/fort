@@ -432,13 +432,14 @@ fn mark_readers(survey mut* c) void {
             held += 1;
             fir.place p = store_of(c, k)->value.place;
             add_reader(c, p.local, k, &at);
-            u32 mut i = 0;
-            while (i < p.proj_len) {
+            for (u32 mut i = 0; i < p.proj_len; i++) {
                 fir.projection pj = fir.place_projection(f, p, i);
-                if (pj.kind == fir.proj_kind.pj_index) {
+                switch (pj.kind) {
+                case fir.proj_kind.pj_index:
                     add_reader(c, pj.index, k, &at);
+                case fir.proj_kind.pj_deref, fir.proj_kind.pj_field:
+                    // these steps read no index local
                 }
-                i += 1;
             }
         }
         k += 1;
@@ -479,14 +480,20 @@ fn mark_sources(survey mut* c) void {
                 || (r.kind == fir.rvalue_kind.rv_cast && is_u64(r.ty));
             if (shape) {
                 fir.operand o = fir.rvalue_operand(f, r, 0);
-                if (o.kind == fir.operand_kind.ok_const && o.value.kind == fir.const_kind.ck_int) {
-                    l->source = key{key_kind.kk_constant, 0, o.value.value};
-                } else if (o.kind == fir.operand_kind.ok_copy && is_local(o.place)
-                           && !c->locals[cast(o.place.local, u64)].memory) {
-                    l->source = key{.kind = key_kind.kk_local, .local = o.place.local};
-                    l->next_source = c->first_source[cast(o.place.local, u64)];
-                    c->first_source[cast(o.place.local, u64)] = t;
-                    c->locals[cast(o.place.local, u64)].sourced += 1;
+                switch (o.kind) {
+                case fir.operand_kind.ok_const:
+                    if (o.value.kind == fir.const_kind.ck_int) {
+                        l->source = key{key_kind.kk_constant, 0, o.value.value};
+                    }
+                case fir.operand_kind.ok_copy:
+                    if (is_local(o.place) && !c->locals[cast(o.place.local, u64)].memory) {
+                        l->source = key{.kind = key_kind.kk_local, .local = o.place.local};
+                        l->next_source = c->first_source[cast(o.place.local, u64)];
+                        c->first_source[cast(o.place.local, u64)] = t;
+                        c->locals[cast(o.place.local, u64)].sourced += 1;
+                    }
+                case fir.operand_kind.ok_move:
+                    // a `move` leaves its place with no value, so the place is no key
                 }
             }
         }
@@ -500,14 +507,23 @@ fn mark_sources(survey mut* c) void {
 // reported operands of a `check`, the reported operands of a `fail`. False past the count.
 fn find_operand(fir.func* f, fir.terminator* t, u32 i, fir.operand mut* out) bool {
     u32 mut at = i;
-    if (t->kind == fir.term_kind.tk_switch || t->kind == fir.term_kind.tk_check) {
-        if (at == 0) {
+    switch (t->kind) {
+    case fir.term_kind.tk_switch:
+        if (i == 0) {
+            *out = t->cond;
+        }
+        return i == 0;
+    case fir.term_kind.tk_check:
+        if (i == 0) {
             *out = t->cond;
             return true;
         }
-        at -= 1;
-    }
-    if (t->kind != fir.term_kind.tk_check && t->kind != fir.term_kind.tk_fail) {
+        at = i - 1;
+    case fir.term_kind.tk_fail:
+        // each operand of a `fail` is a reported operand
+    case fir.term_kind.tk_goto, fir.term_kind.tk_return, fir.term_kind.tk_check_overwrite,
+        fir.term_kind.tk_trap, fir.term_kind.tk_unreachable:
+        // no operand: a `return` and a `check(overwrite: p)` read a place (spec/fir.md 7)
         return false;
     }
     if (at >= t->args_len) {
@@ -631,16 +647,27 @@ fn value_of(survey mut* c, u32 t) temp_value {
         return temp_value.tv_other;
     }
     fir.rvalue r = store_of(c, t)->value;
-    if (r.kind != fir.rvalue_kind.rv_use && r.kind != fir.rvalue_kind.rv_aggregate) {
+    switch (r.kind) {
+    case fir.rvalue_kind.rv_use, fir.rvalue_kind.rv_aggregate:
+        // the operands give the mark below
+    case fir.rvalue_kind.rv_add, fir.rvalue_kind.rv_sub, fir.rvalue_kind.rv_mul,
+        fir.rvalue_kind.rv_add_overflows, fir.rvalue_kind.rv_sub_overflows,
+        fir.rvalue_kind.rv_mul_overflows, fir.rvalue_kind.rv_div, fir.rvalue_kind.rv_rem,
+        fir.rvalue_kind.rv_and, fir.rvalue_kind.rv_or, fir.rvalue_kind.rv_xor,
+        fir.rvalue_kind.rv_not, fir.rvalue_kind.rv_shl, fir.rvalue_kind.rv_shr,
+        fir.rvalue_kind.rv_fadd, fir.rvalue_kind.rv_fsub, fir.rvalue_kind.rv_fmul,
+        fir.rvalue_kind.rv_fdiv, fir.rvalue_kind.rv_fneg, fir.rvalue_kind.rv_eq,
+        fir.rvalue_kind.rv_ne, fir.rvalue_kind.rv_lt, fir.rvalue_kind.rv_le, fir.rvalue_kind.rv_gt,
+        fir.rvalue_kind.rv_ge, fir.rvalue_kind.rv_cast, fir.rvalue_kind.rv_addr,
+        fir.rvalue_kind.rv_slice, fir.rvalue_kind.rv_slice_ptr, fir.rvalue_kind.rv_alloc,
+        fir.rvalue_kind.rv_regrow, fir.rvalue_kind.rv_call:
         return temp_value.tv_other;
     }
-    u32 mut i = 0;
-    while (i < r.ops_len) {
+    for (u32 mut i = 0; i < r.ops_len; i++) {
         fir.operand o = fir.rvalue_operand(c->f, r, i);
         if (o.kind == fir.operand_kind.ok_move && is_local(o.place)) {
             value_of(c, o.place.local);
         }
-        i += 1;
     }
     if (is_zero_rvalue(c, r)) {
         c->locals[at].value = temp_value.tv_zero;
@@ -749,14 +776,17 @@ fn literal_of(survey* c, fir.rvalue r, u32 mut* out) bool {
 // The number of the member that the step `s` names in *out: the field of a field step, or the
 // element of an index step on a fixed array whose key is a constant. False for each other step.
 fn member_of(step s, u64 mut* out) bool {
-    if (s.kind == step_kind.sk_field) {
+    switch (s.kind) {
+    case step_kind.sk_field:
         *out = cast(s.field, u64);
         return true;
-    }
-    if (s.kind != step_kind.sk_index || s.header || s.key.kind != key_kind.kk_constant) {
+    case step_kind.sk_index:
+        return !s.header && s.key.kind == key_kind.kk_constant
+            && consts.cv_to_u64(s.key.value, out);
+    case step_kind.sk_deref:
+        // a deref names no member
         return false;
     }
-    return consts.cv_to_u64(s.key.value, out);
 }
 
 // ---- the fresh pointer locals ------------------------------------------------------------------
@@ -1049,7 +1079,7 @@ fn is_same_base(path a, path b) bool {
 // other is not separate from it. A path leaves its object at a deref or at an index on a span or
 // a `string`, after which it can name any storage: `p->next->g` can be `p->g`.
 fn is_separate(survey* c, path a, path b) bool {
-    if (is_leaving(c, a) || is_leaving(c, b)) {
+    if (is_leaving(c, a, 1) || is_leaving(c, b, 1)) {
         return false;
     }
     u32 mut i = 0;
@@ -1064,20 +1094,13 @@ fn is_separate(survey* c, path a, path b) bool {
     return false;
 }
 
-// Whether `q` has a deref or an index on a span or a `string` after its first step.
-fn is_leaving(survey* c, path q) bool {
-    return is_leaving_from(c, q, 1);
-}
-
 // Whether `q` has a deref or an index on a span or a `string` at step `from` or after it.
-fn is_leaving_from(survey* c, path q, u32 from) bool {
-    u32 mut i = from;
-    while (i < q.len) {
+fn is_leaving(survey* c, path q, u32 from) bool {
+    for (u32 mut i = from; i < q.len; i++) {
         step s = step_at(c, q, i);
         if (s.kind == step_kind.sk_deref || s.header) {
             return true;
         }
-        i += 1;
     }
     return false;
 }
@@ -1089,18 +1112,13 @@ fn is_below(survey* c, path q, path p) bool {
         return false;
     }
     u32 mut i = 0;
-    while (i < q.len) {
-        step s = step_at(c, q, i);
-        if (i < p.len) {
-            if (is_different(s, step_at(c, p, i))) {
-                return false;
-            }
-        } else if (s.kind == step_kind.sk_deref || s.header) {
+    while (i < p.len) {
+        if (is_different(step_at(c, q, i), step_at(c, p, i))) {
             return false;
         }
         i += 1;
     }
-    return true;
+    return !is_leaving(c, q, p.len);
 }
 
 // Whether a vacate of `p`, which writes the zero value into `p` and each place below it, can write
@@ -1118,12 +1136,10 @@ fn is_below(survey* c, path q, path p) bool {
 // second such step `p` can name any storage. Two indexes with two keys can name one element, so
 // they do not make the places differ.
 fn can_vacate(survey* c, path b, path p) bool {
-    u32 mut i = 0;
-    while (i < b.len && i < p.len) {
+    for (u32 mut i = 0; i < b.len && i < p.len; i++) {
         if (is_different(step_at(c, b, i), step_at(c, p, i))) {
             return !is_separate(c, b, p);
         }
-        i += 1;
     }
     if (b.len >= p.len) {
         return true;
@@ -1135,7 +1151,7 @@ fn can_vacate(survey* c, path b, path p) bool {
     if (!is_through_memory(c, b)) {
         return false;
     }
-    return is_leaving_from(c, p, b.len + 1);
+    return is_leaving(c, p, b.len + 1);
 }
 
 // Whether the path `q` can read a reference that a vacate of `p` empties: a deref or an index on
@@ -1179,13 +1195,13 @@ fn is_through(survey* c, path q, u32 n) bool {
         || step_at(c, q, 0).kind != step_kind.sk_deref) {
         return false;
     }
-    return !is_leaving(c, q);
+    return !is_leaving(c, q, 1);
 }
 
 // Whether `q` holds a deref or an index on a span or a `string`: a store into it is a store
 // through a pointer.
 fn is_indirect(survey* c, path q) bool {
-    return is_leaving_from(c, q, 0);
+    return is_leaving(c, q, 0);
 }
 
 /// Whether `q` lies in storage that holds no allocation at the entry: fixed storage of a temporary,
@@ -1231,11 +1247,6 @@ fn is_through_memory(survey* c, path q) bool {
         return true;
     }
     return is_indirect(c, q);
-}
-
-// Whether `q` holds an index whose key is the local `k`.
-fn has_key(survey* c, path q, u32 k) bool {
-    return key_rank(c, q, k) > 0;
 }
 
 // Whether `q` is a place through a fresh pointer local of `fresh`. A null `fresh` has no local.
@@ -1360,12 +1371,26 @@ fn find_test(survey* c, u32 b, test mut* out) bool {
             *out = test{i, p, target, other};
             return true;
         }
-        bool chained = r.kind == fir.rvalue_kind.rv_use || r.kind == fir.rvalue_kind.rv_not;
-        if (!chained || !is_flag(c, fir.rvalue_operand(f, r, 0))) {
+        switch (r.kind) {
+        case fir.rvalue_kind.rv_not:
+            flipped = !flipped;
+        case fir.rvalue_kind.rv_use:
+            // a copy of a flag keeps its value
+        case fir.rvalue_kind.rv_add, fir.rvalue_kind.rv_sub, fir.rvalue_kind.rv_mul,
+            fir.rvalue_kind.rv_add_overflows, fir.rvalue_kind.rv_sub_overflows,
+            fir.rvalue_kind.rv_mul_overflows, fir.rvalue_kind.rv_div, fir.rvalue_kind.rv_rem,
+            fir.rvalue_kind.rv_and, fir.rvalue_kind.rv_or, fir.rvalue_kind.rv_xor,
+            fir.rvalue_kind.rv_shl, fir.rvalue_kind.rv_shr, fir.rvalue_kind.rv_fadd,
+            fir.rvalue_kind.rv_fsub, fir.rvalue_kind.rv_fmul, fir.rvalue_kind.rv_fdiv,
+            fir.rvalue_kind.rv_fneg, fir.rvalue_kind.rv_eq, fir.rvalue_kind.rv_ne,
+            fir.rvalue_kind.rv_lt, fir.rvalue_kind.rv_le, fir.rvalue_kind.rv_gt,
+            fir.rvalue_kind.rv_ge, fir.rvalue_kind.rv_cast, fir.rvalue_kind.rv_addr,
+            fir.rvalue_kind.rv_slice, fir.rvalue_kind.rv_slice_ptr, fir.rvalue_kind.rv_alloc,
+            fir.rvalue_kind.rv_regrow, fir.rvalue_kind.rv_aggregate, fir.rvalue_kind.rv_call:
             return false;
         }
-        if (r.kind == fir.rvalue_kind.rv_not) {
-            flipped = !flipped;
+        if (!is_flag(c, fir.rvalue_operand(f, r, 0))) {
+            return false;
         }
         flag = fir.rvalue_operand(f, r, 0).place.local;
         end = i;
@@ -1624,13 +1649,14 @@ fn rank_in(survey* c, types.node* t, path q, u32 from) u64 {
     u32 mut i = from;
     while (i < q.len && !types.type_is_reference(at)) {
         step s = step_at(c, q, i);
-        if (s.kind == step_kind.sk_index) {
+        switch (s.kind) {
+        case step_kind.sk_index:
             u64 mut index = 0;
             if (s.key.kind == key_kind.kk_constant && consts.cv_to_u64(s.key.value, &index)) {
                 rank = types.capped_sum(rank, types.capped_product(index, count_owners(at->elem)));
             }
             at = at->elem;
-        } else {
+        case step_kind.sk_field:
             // the owners of the fields before field `s.field` come first
             u32 mut field = 0;
             while (field < s.field) {
@@ -1638,6 +1664,8 @@ fn rank_in(survey* c, types.node* t, path q, u32 from) u64 {
                 field += 1;
             }
             at = fir.struct_field_type(at, s.field);
+        case step_kind.sk_deref:
+            // no step is a deref: a deref applies to a reference, where the walk stops
         }
         i += 1;
     }
@@ -1668,15 +1696,22 @@ fn first_read_owner(survey* c, path r, u64 mut* rank, bool mut* below) bool {
             *below = false;
             return count_owners(t) > 0;
         }
-        if (s.kind == step_kind.sk_index) {
-            t = t->elem;
-        } else {
-            t = fir.apply_projection(c->f, t,
-                                     fir.projection{fir.proj_kind.pj_field, s.field, 0});
-        }
+        t = step_type(c->f, t, s);
         i += 1;
     }
     *rank = 0;
     *below = true;
     return count_owners(t) > 0;
+}
+
+/// The type that the step `s` reaches from the type `t` of a place of `f`.
+fn step_type(fir.func* f, types.node* t, step s) types.node* {
+    switch (s.kind) {
+    case step_kind.sk_deref:
+        return fir.apply_projection(f, t, fir.projection{fir.proj_kind.pj_deref, 0, 0});
+    case step_kind.sk_field:
+        return fir.apply_projection(f, t, fir.projection{fir.proj_kind.pj_field, s.field, 0});
+    case step_kind.sk_index:
+        return t->elem;
+    }
 }

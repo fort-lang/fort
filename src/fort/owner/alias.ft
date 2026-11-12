@@ -194,13 +194,14 @@ fn add_operand(map* m, fir_flow.bits* state, fir.operand o, fir_flow.bits mut* o
 
 // Adds to `out` the origins of the local of each index of the place `p`.
 fn add_indexes(map* m, fir_flow.bits* state, fir.place p, fir_flow.bits mut* out) void {
-    u32 mut i = 0;
-    while (i < p.proj_len) {
+    for (u32 mut i = 0; i < p.proj_len; i++) {
         fir.projection pj = fir.place_projection(m->f, p, i);
-        if (pj.kind == fir.proj_kind.pj_index) {
+        switch (pj.kind) {
+        case fir.proj_kind.pj_index:
             add_content(m, state, fir.place_local(pj.index), out);
+        case fir.proj_kind.pj_deref, fir.proj_kind.pj_field:
+            // these steps read no index local
         }
-        i += 1;
     }
 }
 
@@ -226,16 +227,22 @@ fn add_address(map* m, fir_flow.bits* state, fir.place p, fir_flow.bits mut* out
     types.node* mut t = fir.base_type(f, p);
     u32 mut last = 0;
     bool mut owning = false;
-    u32 mut i = 0;
-    while (i < p.proj_len) {
+    for (u32 mut i = 0; i < p.proj_len; i++) {
         fir.projection pj = fir.place_projection(f, p, i);
-        bool header = t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string;
-        if (pj.kind == fir.proj_kind.pj_deref || (pj.kind == fir.proj_kind.pj_index && header)) {
+        bool mut loads = false;
+        switch (pj.kind) {
+        case fir.proj_kind.pj_deref:
+            loads = true;
+        case fir.proj_kind.pj_index:
+            loads = t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string;
+        case fir.proj_kind.pj_field:
+            // a field step reads no pointer
+        }
+        if (loads) {
             last = i;
             owning = t->is_own;
         }
         t = fir.apply_projection(f, t, pj);
-        i += 1;
     }
     if (owning) {
         return;
@@ -267,12 +274,20 @@ fn add_rvalue(map* m, fir_flow.bits* state, fir.rvalue r, fir_flow.bits mut* out
             add_indexes(m, state, r.place, out);
             add_content(m, state, r.place, out);
         }
-    default:
+    case fir.rvalue_kind.rv_use, fir.rvalue_kind.rv_add, fir.rvalue_kind.rv_sub,
+        fir.rvalue_kind.rv_mul, fir.rvalue_kind.rv_add_overflows, fir.rvalue_kind.rv_sub_overflows,
+        fir.rvalue_kind.rv_mul_overflows, fir.rvalue_kind.rv_div, fir.rvalue_kind.rv_rem,
+        fir.rvalue_kind.rv_and, fir.rvalue_kind.rv_or, fir.rvalue_kind.rv_xor,
+        fir.rvalue_kind.rv_not, fir.rvalue_kind.rv_shl, fir.rvalue_kind.rv_shr,
+        fir.rvalue_kind.rv_fadd, fir.rvalue_kind.rv_fsub, fir.rvalue_kind.rv_fmul,
+        fir.rvalue_kind.rv_fdiv, fir.rvalue_kind.rv_fneg, fir.rvalue_kind.rv_eq,
+        fir.rvalue_kind.rv_ne, fir.rvalue_kind.rv_lt, fir.rvalue_kind.rv_le, fir.rvalue_kind.rv_gt,
+        fir.rvalue_kind.rv_ge, fir.rvalue_kind.rv_cast, fir.rvalue_kind.rv_slice_ptr,
+        fir.rvalue_kind.rv_regrow, fir.rvalue_kind.rv_aggregate:
+        // these kinds have no place of their own: each borrows only through its operands
     }
-    u32 mut i = 0;
-    while (i < r.ops_len) {
+    for (u32 mut i = 0; i < r.ops_len; i++) {
         add_operand(m, state, fir.rvalue_operand(f, r, i), out);
-        i += 1;
     }
 }
 
