@@ -910,6 +910,25 @@ bullet at a time and without a rewrite.
   run forever: a removed `del`, or an inserted store into the tested place when the places line
   names it, keeps the test true. The first `while_test` hung the test for 30 minutes; its loop now
   has a second exit, a `break`.
+- **The form corpus holds each form of the catalogue in each storage class**
+  (`test/fort/owner/forms_test.ft`, D17.11, `spec/ownership-design.md` 16). The tables `FORMS`,
+  `CLASSES` and `SHAPES` are data, and the test writes one program for each cell of their product.
+  `reason_of` gives the reason for which a cell has no program, and `REASONS` holds each reason.
+  Each program goes through the steps of `driver.overwrite_entry`: the checker, the lowering, the
+  verifier, the three errors of the owner rules and the three reports. Each program then runs
+  under `fir.interpreter`, and each event goes through `disposition.is_error`. `KNOWN` lists each
+  cell that an owner rule rejects, with its diagnostic and the letter of its class of defect
+  (`DEFECTS`). `KNOWN` only shrinks: the change that repairs a defect removes its rows and lowers
+  `KNOWN_COUNT`. The test stops when a cell outside `KNOWN` fails, when a cell of `KNOWN` passes
+  and when a cell of `KNOWN` fails with another text. The test also runs a program that an owner
+  rule rejects. A run with an event of an error kind, or with an exit status that is not 0, stops
+  the test, and no row of `KNOWN` excuses it. A new failing cell is a defect of the change that
+  makes it fail. Do not add a row for it. The expected stdout of the test holds each count: the
+  cells, the programs, each reason, each form and each class of defect. Read the counts there. The
+  test binary takes 2 arguments for a person. `list` prints each rejected cell as a row of `KNOWN`.
+  `dump <form> <class> <type>` prints the program of one cell, with each position from 0. Give the
+  dump to `fort --check --whole-store-report --leak-report --span-del-report` to see the
+  diagnostic of the driver.
 - **The suites of fir.interpreter derive each expected value apart from the interpreter**
   (`test/fort/fir/interpreter_test.ft`, `interpreter_source_test.ft`). Python's integers and IEEE
   doubles gave each value at each boundary of each type when the cases were written: the wrap at
