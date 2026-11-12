@@ -317,8 +317,9 @@ Notes:
 
 - A `qualified_name` in `primary_expr` position is parsed as `identifier` followed by the `.`
   postfix; the checker resolves module, type and enum qualification (D9.4, D3.9).
-- A universe function (D12.2) is a `call_expr` whose callee is an `identifier`. So `del(x)` and
-  `del(s, d)` (D17.9) need no rule of their own. The second argument of `del` is an `identifier`
+- A universe function (D12.2) is a `call_expr` whose callee is an `identifier`. So `del(x)`,
+  `del(s, d)` (D17.9) and `regrow(s, n)` (D12.2) need no rule of their own. The second argument of
+  `del` is an `identifier`
   or a `qualified_name` that names a fort function, the drop of the elements of `s`; the checker
   refuses each other expression there, a name in parentheses `(d)` included.
 - Comparison operators do not chain: `a < b < c` parses but is a type error (`bool < T`).

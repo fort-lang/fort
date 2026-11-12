@@ -1017,8 +1017,9 @@ came here.
   work and the inner work of a full proof, the sets of its dataflows, where it got 0 before. The
   inner work is the work that `driver.overwrite_entry` gives `summary.add`, which charges it to the
   component of the function against `summary.WORK_LIMIT`; V1 gives no line, so the summaries of the
-  libraries `std` and `fort` do not change (measured with `--emit-summaries`), but a refinement that
-  gives lines, such as R2, reads the larger charge.
+  libraries `std` and `fort` do not change (measured with `--emit-summaries`), but an analysis that
+  gives lines reads the larger charge. No refinement gives a line since 2026-11-11: R1 is dropped,
+  and R2, R3 and R4 are retired (`spec/ownership-design.md` 8).
 - **The emptiness pass proves the stores of a whole value of an owning aggregate, and only reports
   them** (D17.11, `spec/fir.md` 11, Whole stores). `owner.prover.find_wholes` lists in
   `proof.wholes` each assignment whose place has an owning aggregate type, but a store into fixed

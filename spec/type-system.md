@@ -6,6 +6,13 @@ implements the decisions in `decisions.md`, cited as `(Dn.m)`, and the type gram
 Expression and statement semantics live in `core-language.md`; allocation, in-memory layout of
 values and runtime checks live in `memory-model.md`.
 
+**The state since 2026-11-11.** The user ruled on 2026-11-11: "I don't want anything undefined." A
+fort program has no undefined behavior (D10.7). This document states the end state of that ruling at
+three points: a call of a null function pointer is a runtime error (section 5, D10.6), `regrow` is a
+producer of an `own` span (section 8.3, D12.2), and a `del` of an owner that C gave is a runtime
+error (sections 5 and 11.2, D10.3). The compiler and the runtime implement the three in later
+changes.
+
 ## 1. Overview
 
 All types are resolved at compile time. There is no run-time type information, no inference
@@ -38,7 +45,8 @@ The three kinds differ in what a copy means:
 
 A reference type other than a function pointer may be qualified `own` (section 8): `T* own`,
 `void* own`, `T@ own`, `string own`. The qualifier says that the reference designates the start
-of a live allocation that `del` may free; it changes neither size, layout nor zero value, but it
+of a live allocation that its holder must release; it changes neither size, layout nor zero value,
+but it
 is part of the type, and copying an `own` value out of a variable is written `move` (D17.1,
 D17.5). A struct or array that contains an `own` reference is an owning aggregate (section 8.5).
 
@@ -393,7 +401,8 @@ Nested parentheses preserve the type and its existing markers (D3.6).
 Identity is structural over the parameter types, including the mutability levels behind their
 indirections and their `own` marks (D17.1), the
 return type, and whether the function is `noreturn`; `mut` at level 0 of a parameter is ignored
-(D3.10, D5.6). `null` is a valid value; calling it is undefined behavior (D10.7). `==` and `!=`
+(D3.10, D5.6). `null` is a valid value; a call of it is the runtime error `null call` in both
+build modes (D10.6). `==` and `!=`
 compare identity. A function-pointer type itself is never `own` (D17.1).
 
 | Types compared                          | Same? | Reason                                  |
@@ -433,7 +442,10 @@ integer to a `void*` (D3.14, D3.11). A `void*` holds no type and no size, so a c
 give a larger type than the storage has, and fort code would reach storage whose address it does
 not hold. A `void*` goes to C, compares with `null` and with another `void*`, and gives its
 address as a `u64`. `void* own` is its owned form (D17.1): `del` accepts it, and it is the type
-C's `malloc` and `free` are declared with (section 11.2). A program that wants typed storage
+C's `malloc` and `free` are declared with (section 11.2). The type check of `del` accepts each
+`void* own`, and the runtime does not: a `del` of storage that C gave is the runtime error
+`invalid release`, and the C function that takes the owner releases it (D10.3). A program that
+wants typed storage
 uses `new` (D10.2).
 
 `void* mut p` and `void mut* p` are two types. The first is a rebindable binding whose target is
@@ -459,7 +471,7 @@ bool isnull = vp == null;
 void mut* own raw = libc.malloc(16); // in a trusted module (D9.8): an own rvalue lands
 void* peek = raw;                    // ok: lends, and drops the mut on the way (D5.4)
 u8 mut* own bytes = cast(move(raw), u8 mut* own);   // error: no type for a void*
-del(raw);                            // ok: del accepts void* own
+libc.free(move(raw));                // ok: C gave the storage, and C releases it (D10.3)
 ```
 
 ## 6. Type identity and equality
@@ -822,15 +834,19 @@ n.next->value = 1;                   // ok: level 1 of the field type is mutable
 
 A pointer, `void*`, span or `string` type may be qualified `own` (D17.1): `T* own`, `void* own`,
 `T@ own`, `string own`. The qualifier states that the reference designates the start of a live
-allocation obtained from `new`, or answered by an `extern` whose signature says `own` (D17.13), and
-that `del` on it is meaningful (`core-language.md` 8.2). It changes nothing at run time: an `own`
+allocation obtained from `new` or `regrow`, or answered by an `extern` whose signature says `own`
+(D17.13), and that its holder must release it. `del` releases an allocation of `new` or of `regrow`
+(`core-language.md` 8.2), and a C function that takes the owner as `own` releases an allocation
+that C gave (D10.3). It changes nothing at run time: an `own`
 type has the size, alignment, layout, zero value and calling convention of the unqualified type, and
 the mark is erased in generated code. It is part of type identity (section 6): `node* own` and
 `node*` are different types, and so are `fn (node* own) void` and `fn (node*) void`. `own` on a
 scalar, a struct, a fixed array or a function-pointer type is an error; a struct or array that
 contains an `own` reference is an owning aggregate instead (section 8.5). Ownership is a typing
 discipline, not a linear check: a use after `move` is diagnosed only by D17.21, for a local owner
-(D17.14, D15). A leak is diagnosed only by D17.20. It covers a named local of `own` reference type
+(D17.14, D15). A use of each other owner after its `move` or `del` reads the zero value, so a
+dereference of it is the runtime error `null dereference` (D10.6). A leak is diagnosed only by
+D17.20. It covers a named local of `own` reference type
 or of an owning aggregate type (section 8.5) at the end of its scope, or such a parameter or
 temporary at a `return`, that can hold an allocation in itself or in an owner of its fixed storage.
 It also covers a `del` or an `own` cast that frees an object whose owners can hold
@@ -900,7 +916,8 @@ i32 own w = 1;                       // error: own on a non-reference type
 ### 8.3 Producers and views
 
 `new(T)` yields `T mut* own`, `new(T, n)` yields `T mut@ own`, `new(T[K], n)` yields
-`T[K] mut@ own`, and standard-library functions that allocate return `own` (D17.3, D13.5). An
+`T[K] mut@ own`, and standard-library functions that allocate return `own` (D17.3, D13.5).
+`regrow(s, n)` yields a `T mut@ own` from a `T mut@ own` (D12.2). An
 `extern` whose result says `own` yields an `own` value (D17.13), and a `cast` carries the `own` of
 its operand and never adds one (section 9.2). Everything else yields a view: a span expression,
 `.ptr`, `&`, literals and the runtime's `args` never produce an `own` reference, although the `own`
@@ -1611,7 +1628,7 @@ extern fn malloc(u64 n) void mut* own;
 extern fn free(void* own p) void;
 void mut* own raw = malloc(16);      // ok: the owned result lands
 free(raw);                           // error: 'raw' is an own lvalue; write move(raw)
-free(move(raw));                     // ok; del(raw) would have done the same (D10.3)
+free(move(raw));                     // ok; del(raw) is invalid release at run time (D10.3)
 void* lost = malloc(16);             // error: owning temporary would leak
 ```
 

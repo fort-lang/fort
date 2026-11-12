@@ -359,8 +359,9 @@ Sections:
   An `extern fn` in value position is an error: the direct call takes its target ABI form from
   the extern declaration (D9.8), and a function-pointer type has no C variable tail (D8.3).
   Wrap a C call in a fort function when C needs a function pointer.
-  `null` is a valid function-pointer value; calling it is undefined
-  behavior. `==`/`!=` compare identity. Function pointers are in the C bootstrap's subset
+  `null` is a valid function-pointer value; a call of it is the runtime error `null call` in
+  both build modes (D10.6). `==`/`!=` compare identity. Function pointers are in the C bootstrap's
+  subset
   (`toolchain.md` 7.3): a function pointer is an ordinary `ptr` value and a call through one an
   ordinary `call` in LLVM IR (D19.2), so the bootstrap implements them.
 - history: Amended 2026-09-10: an `extern` name was a value like any other, which emitted a
@@ -375,6 +376,9 @@ Sections:
   Function-pointer types stay fixed, and C extern names stay outside value position.
   Amended 2026-10-05: parentheses now permit function types to take outer markers and suffixes.
   The former rule required a struct wrapper for these types.
+  Amended 2026-11-11: the rule said that a call of a null function pointer was undefined behavior.
+  The user ruled on 2026-11-11: "I don't want anything undefined." The call is now the runtime
+  error `null call` (D10.6). The compiler implements this rule in a later change.
 
 ### D3.11 The void pointer
 - owner: `type-system.md`.
@@ -465,7 +469,7 @@ Sections:
   `node* own[2] mut arr` is an error, although a fixed array adds no level (D5.2). This is the
   conservative reading, and a later amendment may relax the `mut` and the `own` walk together. A
   cast carries `own` or drops it, and it never adds it. Ownership enters a program only through
-  `new` and through an `extern` signature that says `own` (D17.3, D17.13).
+  `new`, through `regrow` and through an `extern` signature that says `own` (D12.2, D17.3, D17.13).
   **No cast makes a pointer from an integer.** No cast takes an integer, a `char`, a `bool`, an
   enum or a float to a pointer, a `void*` or a function pointer type. `null` is the one pointer
   constant (D10.5). A pointer and a `void*` cast to `u64`, and no cast takes the `u64` back. So
@@ -615,7 +619,7 @@ Sections:
   either side, the call still writes or jumps. A struct parameter or result goes through a hidden
   pointer (`type-system.md` 11.2). So `fn () pair` called as `fn (u64) void` writes its result at
   the address that the integer holds. Bits that no function name gave jump to any code.
-  No form stays outside the guarantee of the rules of the pointer places. An argument of an
+  The rules of the pointer places hold for each form. An argument of an
   `extern fn` follows them, and C gives back only storage that C gave or an argument, with no
   `mut` that the argument lacked (A7 of `ownership-design.md` 5.1, D9.8). The examples use these
   structs. `two` holds two `i32`. `holder` holds a
@@ -765,6 +769,12 @@ Sections:
   trusted module declares an extern now, and its audit row states the `mut` that C gives (D9.8,
   A7). The casts of this decision do not change, and an argument of an `extern fn` keeps no
   exemption from them.
+  Amended 2026-11-11: the rule said "No form stays outside the guarantee of the rules of the
+  pointer places." The user ruled on 2026-11-11: "I don't want anything undefined." D10.7 now
+  keeps the words "outside the guarantee" for the trusted premise only, so the sentence says that
+  the rules hold for each form. The meaning of that sentence did not change. The rule also named
+  `new` and an `extern` signature as the two sources of ownership. `regrow` is a third source
+  (D12.2), and the compiler implements it in a later change.
 
 ### D3.15 sizeof
 - owner: `type-system.md`.
@@ -1128,7 +1138,12 @@ Sections:
   operand of a span expression, never assignable). `.len` and `.ptr` are never lvalues. Field access
   and indexing on an rvalue struct or array are allowed and yield rvalues (copied through a
   temporary). `&e` requires an lvalue. Returning the address of a local or a span of a local array
-  is not diagnosed (documented undefined behavior, as in C).
+  is not diagnosed. The local is in frame storage, and the result points at dead storage after the
+  return (D10.9): the behavior is defined.
+- history: Amended 2026-11-11: the rule said that a return of the address of a local, or of a span
+  of a local array, was "documented undefined behavior, as in C". The user ruled on 2026-11-11:
+  "I don't want anything undefined." The result now points at dead storage (D10.9). The compiler
+  implements this rule in a later change.
 
 ### D6.8 Indexing
 - owner: `core-language.md` (Expressions).
@@ -1295,14 +1310,17 @@ Sections:
   is a member and leaves int-to-enum unchecked, so a value outside the member set is reachable in a
   program with no error in it. The compiler therefore gives such a switch a `default` of its own
   that reports a runtime error naming the enum and the value, and does not return. D10.7 leaves no
-  third option: the case is not in its list of undefined behaviour, so it is defined or diagnosed,
-  and it cannot be diagnosed at compile time. It is not a bounds check, so `--no-bounds-check` does
-  not remove it (D10.6).
+  third option: a fort program has no undefined behavior, so the case is defined or diagnosed,
+  and it cannot be diagnosed at compile time. No option of the compiler removes the check (D10.6).
 - rationale: adding a member then finds every switch that needs updating.
 - history: Amended 2026-09-11: the rule said which switches compile and not what the ones it admits
   do with a value no clause names; T-020's review found the emitter naming the continuation as the
   LLVM default, where the epilogue had written `unreachable`, so a legal program became UB that
   `-O1` then folded on.
+  Amended 2026-11-11: the rule said that the case was not in the list of undefined behavior of
+  D10.7, and that `--no-bounds-check` did not remove the check. The user ruled on 2026-11-11:
+  "I don't want anything undefined." D10.7 has no such list now, and the compiler has no option
+  that removes a check (D10.6).
 
 ### D7.8 The defer statement
 - owner: `core-language.md` (Statements).
@@ -1629,8 +1647,12 @@ Sections:
      the type of `x`, and a typed pointer to a type other than `char`, `u8` or `void` keeps one
      object of its pointee type. A pointer keeps the bound of the value that it comes from
      through each cast, as A8 follows a value through a cast (D3.14): `cast(&bits, u8 mut*)` for a
-     `u64 bits` keeps 8 bytes. A typed pointer can be `null` or dangling (D10.7), so the row says
-     why it names a live object where the contract of C needs one.
+     `u64 bits` keeps 8 bytes. A span, a string and a typed pointer can point at dead storage
+     (D10.9). The bound holds for dead storage too, because the runtime keeps the address range of
+     dead storage reserved, and an access that C makes inside the bound has the results of rule 6
+     of D10.9. So the row gives a bound, and it does not say that the storage is live. A typed
+     pointer can also be `null`, so the row says why it is not `null` where the contract of C needs
+     an object.
   3. Storage that C gave: a value that a call of C in the same function returned or wrote, and a
      pointer that the function makes from it by a cast, with the size and the NUL that the
      declaration row of that call states. By A7 that size is never less than the pointee of the
@@ -1670,6 +1692,13 @@ Sections:
   `d_reclen` against the size of a local `dirent`, copies `d_reclen` bytes into that local, and
   reads the name with `str.from_cbuf`, which reads only inside the local and panics when no NUL is
   there.
+
+  **One thread.** A fort program has one thread (D10.7). No trusted module declares a C function
+  that starts a thread. The lint reports a declaration of `pthread_create`, `clone`, `clone3`,
+  `thrd_create` or `vfork` in each file that it reads, and no row makes such a declaration legal.
+  Each other C function that starts a thread which reads or writes storage of fort code, or
+  calls a fort function, breaks the points `keeps:` and `calls:` of A7. A row that says the
+  opposite is wrong, and the call is a case of the trusted premise (D10.7).
 
   **The lint.** `tools/fort_lint.py` reads the `.ft` files of `std`, `src/fort`, `src/lsp`,
   `test/fort`, `test/lsp`, `test/library`, `test/tty`, `test/lang/run` and `test/lang/programs`. A
@@ -1903,6 +1932,15 @@ Sections:
   their own bound; those tests keep the table in a local now, and the lint reports a `mut` global
   whose type reaches a byte pointer in an argument of a call of an `extern fn` or a boundary
   function, in a function that is no boundary function.
+  Amended 2026-11-11: the rule had no paragraph on threads, and D10.7 listed a data race as
+  undefined behavior. Rule 2 of the sources said that a typed pointer can be "`null` or
+  dangling". The user ruled on 2026-11-11: "I don't want anything undefined." A fort program has
+  one thread, and no trusted module declares a C function that starts one. A count at c95edf41
+  (`grep -rnE 'extern fn (pthread_create|clone|clone3|thrd_create|vfork)\(' std src test`) found
+  0 such declarations. A pointer whose storage is released is a pointer to dead storage (D10.9).
+  Rule 2 now says that a bound holds for dead storage, that rule 6 of D10.9 gives the result of an
+  access that C makes inside the bound, and that the row says why a typed pointer is not `null`.
+  The lint implements the thread rule in a later change.
 
 ### D9.9 The internal calling convention
 - owner: `module-system.md`.
@@ -2001,7 +2039,10 @@ Sections:
   pair (D21.1), `--cc`, each `-Xcc` argument, `--ar`, the source hash, the interface hash of each
   used library, the key, the interface hash, the archive hash and the summaries version.
   `summaries/` holds the file `ownership`, the ownership summaries of the functions of the
-  library (`spec/ownership-design.md` 8), and its version is 2.
+  library (`spec/ownership-design.md` 8), and its version is 2. The file also holds the
+  release-only bit of each function of the library (D17.9), the one fact of another function that
+  the ownership analysis reads (D17.11). The change that adds the bit sets the next version, and
+  `toolchain.md` 2.2 names the version and the line of the bit.
 
   The interface file holds one section for each module of the library, in byte order of the
   module path. The section of a trusted module that is not of `std` starts with `import extern;`
@@ -2054,7 +2095,9 @@ Sections:
   <dir>`, `--cache-stats` (write one line about the cache to stdout, with the cause of each
   miss) and `--ar <path>` (default
   `ar`). The manifest of a used library must name `<name>`. Its compiler identity, target, build
-  mode, bounds mode and configuration map must equal the ones of the build. The command line must
+  mode, bounds mode and configuration map must equal the ones of the build. The compiler has no
+  option that removes a check (D10.6), so the bounds mode of each build is `on`; the manifest
+  keeps the field. The command line must
   name with `--use` each library that its manifest uses, with the interface hash that the manifest
   records. The used libraries must not form a cycle. A failure of one of these rules is an error
   with status 2. `toolchain.md` 1 gives the combinations of options and the messages. One
@@ -2114,13 +2157,24 @@ Sections:
   vaguest/weakest link and course correct" (user, 2026-11-02). `test/library` declares no
   extern. Only libraries that suites of `test/fort` build from text declare one, and the
   interface text that those suites expect changes.
+  Amended 2026-11-11: the rule named no release-only bit in `summaries/`, and the bounds mode of
+  a build was `off` under `--no-bounds-check`. The user ruled on 2026-11-11: "I don't want
+  anything undefined." The file `ownership` holds the release-only bit of each function, and the
+  compiler has no option that removes a check, so each build has the bounds mode `on`. The
+  compiler implements both rules in a later change.
 
 ## D10 Memory and runtime checks
 
 ### D10.1 Stack and heap
 - owner: `memory-model.md`.
-- rule: Stack: locals, parameters, fixed arrays and struct values; freed at scope exit. Heap: only
-  through `new`; freed only through `del`.
+- rule: Stack: locals, parameters, fixed arrays and struct values; freed at scope exit. A local of
+  which a run takes an address is in frame storage and not on the stack, and its storage is dead at
+  scope exit (D10.9). Heap: only through `new` and `regrow` (D12.2); freed only through `del` and
+  `regrow`.
+- history: Amended 2026-11-11: the rule said that each local was on the stack, and that the heap was
+  reached "only through `new`; freed only through `del`". The user ruled on 2026-11-11: "I don't
+  want anything undefined." A local of which a run takes an address is now in frame storage (D10.9),
+  and `regrow` allocates and releases (D12.2). The compiler implements this rule in a later change.
 
 ### D10.2 The new builtin
 - owner: `memory-model.md`.
@@ -2128,7 +2182,9 @@ Sections:
   (`new(u8[4])` is a `u8[4] mut* own`); `new(T, n)` returns `T mut@ own` of `n` zero-initialized
   elements (D17.3), where `n` is any integer type; a negative `n`, a size that overflows, or
   allocation failure is a runtime error; `n == 0` is allowed and yields a non-null pointer (the
-  runtime allocates at least one byte). `new(T{...})`, `new(T@)` and `new(void)` are errors. Inside
+  runtime allocates at least one byte). The storage comes from the allocator of the runtime, and
+  allocation failure is the error `out of memory` of D10.9.
+  `new(T{...})`, `new(T@)` and `new(void)` are errors. Inside
   `new(...)` an `own` parses only after a `*` (D17.3), so `new(string own)` does not parse. This
   holds at every group depth (D3.6): an `own` after a `)` does not parse inside `new(...)`, so
   `new((i32*) own)` and `new(((i32*) own))` do not parse and `new((i32* own))` does. A
@@ -2139,7 +2195,7 @@ Sections:
   follows takes no `mut` here either and D5.3 is the rule that refuses `new(i32 mut[4], n)`.
   `new(T*)` allocates one pointer slot and is legal.
 - rationale: Rationale for zero-initialization: keeps "no undefined values" true at the cost of one
-  `calloc`; the earlier "uninitialized" text is withdrawn. Rationale for the outermost position:
+  zero fill; the earlier "uninitialized" text is withdrawn. Rationale for the outermost position:
   `new` marks the storage it allocates (D5.8), and that storage is the outermost position of `T`
   and nothing below it. A position below it describes storage `new` did not allocate -- what a
   pointer in the fresh memory would reach, and that pointer is null -- so the program says what it
@@ -2153,16 +2209,31 @@ Sections:
   array object, and a span was called a slice (D3.5).
   Amended 2026-10-06: the rule did not say whether an `own` after a group parses inside `new`.
   Both compilers refused `new((i32*) own)` and accepted `new(((i32*) own))`. Both now refuse each.
+  Amended 2026-11-11: the rule named no allocator, and the rationale gave the cost of the zero fill
+  as "one `calloc`". The user ruled on 2026-11-11: "I don't want anything undefined." The runtime
+  now has its own allocator, which never gives the storage of a released allocation to another
+  object (D10.9). The runtime implements this rule in a later change.
 
 ### D10.3 The del builtin
 - owner: `memory-model.md`.
 - rule: `del(x)` frees the allocation designated by its operand, which must have an `own` type; the
   full rules, including that `del` empties an lvalue operand and that `del` of a view, sub-span,
-  `.ptr`, stack address or literal is a compile error, are D17.9. Allocation has no header, so
-  `new`/`del` and C `malloc`/`free` are interchangeable; memory from C is owned when its `extern`
-  declaration says `own` (D17.13).
+  `.ptr`, stack address or literal is a compile error, are D17.9. The allocation is one of `new`
+  (D10.2) or of `regrow` (D12.2), and its storage is dead after the `del` (D10.9). The runtime has
+  its own allocator (D10.9), so `new`/`del` and C `malloc`/`free` are not interchangeable. Memory
+  from C is owned when its `extern` declaration says `own` (D17.13). A C function whose declaration
+  takes the owner as `own`, for example `free`, releases it, and only a trusted module calls that
+  function (D9.8). A `del` of an owner that C gave is the runtime error `invalid release`, because
+  its address is no start of a live allocation of the runtime (D10.9). Storage of `new` or of
+  `regrow` that a call gives to the C `free` breaks the contract of `free`: the call is a case of
+  the trusted premise (D10.7).
 - history: Amended 2026-09-29 (T-257): the rule read "memory from C is adopted with `cast`
   (D17.3)". A cast no longer adds `own` (D3.14).
+  Amended 2026-11-11: the rule said "Allocation has no header, so `new`/`del` and C `malloc`/`free`
+  are interchangeable". The user ruled on 2026-11-11: "I don't want anything undefined." The runtime
+  now has its own allocator (D10.9), so a `del` of an owner that C gave is the runtime error
+  `invalid release`, and a C function that takes the owner as `own` releases it. The compiler and
+  the runtime implement this rule in a later change.
 
 ### D10.4 No pointer arithmetic
 - owner: `memory-model.md`.
@@ -2184,32 +2255,150 @@ Sections:
 - rule: `null` is the zero pointer and function-pointer value. `== null` and `!= null` are allowed
   only on pointers, `void*` and function pointers; spans and strings compare `.len` or `.ptr`.
   `null` has no type of its own: it is usable only where a pointer, `void*` or function-pointer type
-  is expected, so `print(null)` and `null == null` are errors. Dereferencing `null` is undefined
-  behavior (a segfault in practice). Between two operands neither of which is `null`, the same-type
+  is expected, so `print(null)` and `null == null` are errors. Dereferencing `null` is the runtime
+  error `null dereference`, and a call of a null function pointer is the runtime error `null call`,
+  each in both build modes (D10.6). Between two operands neither of which is `null`, the same-type
   rule is D6.2's.
 - history: Amended 2026-09-11: the last sentence is a signpost added after T-027 consulted this
   decision for a pointer comparison that did not involve `null`.
+  Amended 2026-11-11: the rule said "Dereferencing `null` is undefined behavior (a segfault in
+  practice)". The user ruled on 2026-11-11: "I don't want anything undefined." A dereference of
+  `null` is now the runtime error `null dereference` (D10.6). The compiler implements this rule in a
+  later change.
 
-### D10.6 Bounds checks
+### D10.6 Runtime checks
 - owner: `memory-model.md`.
-- rule: Bounds checks are performed on every index and span operation, in every build mode;
-  `--no-bounds-check` disables them for benchmarking and is documented as unsafe.
+- rule: The runtime errors of this decision guard memory. Each is a runtime error in both build
+  modes (D11.1), with the contract of D11.4:
+  - an index out of range (D6.8) and a span expression out of range (D6.9): bounds checks are
+    performed on every index and span operation;
+  - `null dereference`: each evaluation of a place that goes through a null pointer, as `*p` and
+    `p->f`. A load, a store, an `&`, a span expression, a `move` and a `del` of such a place are
+    this error, also when the operation reads no storage, as `&p->f`: its result would derive from
+    no address (D10.7);
+  - `null call`: a call of a null function pointer (D3.10);
+  - `invalid release`: a `del` or a `regrow` whose pointer is not `null` and is no start of a live
+    allocation of the runtime; the pointer of a span or a `string` is its `.ptr` (D10.9, D12.2);
+  - `out of memory`: a `new`, a `regrow` or the frame storage of a run for which the runtime has no
+    storage (D10.2, D10.9);
+  - a `regrow` to a count below the length of its span (D12.2).
+
+  The compiler has no option that removes one of these checks. Bootstrap-0 is frozen, and it keeps
+  its option `--no-bounds-check`. A use of an owner that is no local owner after its `move` or `del`
+  reads the zero value (D17.6, D17.21). So a dereference of such a pointer is `null dereference`, an
+  index of such a span or string is the index error, because its length is 0, and a `del` of it has
+  no effect (D17.9). A `del` of `null` has no effect and is no error.
+- history: Amended 2026-11-11: the title was "Bounds checks", and the rule said: "Bounds checks are
+  performed on every index and span operation, in every build mode; `--no-bounds-check` disables
+  them for benchmarking and is documented as unsafe." The user ruled on 2026-11-11: "I don't want
+  anything undefined." The option was the one switch that removed a defined result, so the compiler
+  loses it, and the rule now lists each runtime error that guards memory. The compiler implements
+  this rule in a later change.
 
 ### D10.7 Undefined behavior in v1
 - owner: `memory-model.md`.
-- rule: Undefined behavior in v1 is limited to: using a view, or a copy made before a `move` or
-  `del`, after the allocation was freed; `del` of an `extern` result that is not the start of an
-  allocation; dereferencing `null` or a dangling pointer; `p[lo..hi]` beyond the object, which only
-  `str.from_cstr` and `rt.args_init` can write (D6.9), and which only trusted code calls (D9.8);
-  calling a null function pointer; and data races. Everything else is defined or a diagnosed
-  error. In particular there is no strict-aliasing rule: reading an object through a pointer to
-  another type of the same size or a smaller one (`*cast(&x, u64*)` for an `f64 x`) is defined
-  and yields the bit pattern.
-  A pointer to a local dangles after the end of the scope of the local and after the return of its
-  run, also when a later local takes the same storage. Each entry of the block that declares a
-  named local starts a new local, so a pointer to the local of an earlier entry dangles.
-  **No forged pointer.** Fort code reaches storage only through a value that derives from an
-  address of that storage, inside its object, or through a dangling pointer. The terms are exact:
+- rule: A fort program has no undefined behavior. The compiler refuses a program with a diagnostic,
+  or each operation that the program runs has a result that this log defines: a value, a runtime
+  error (D11.4), the trap of a `noreturn` function (D8.5, D11.4), one of the results of D10.9 for an
+  access to dead storage, or the memory fault of D10.8 when the stack cannot hold a frame.
+  **The trusted premise.** One premise stays outside the guarantee. Fort cannot define what C code
+  does, and it cannot define what a standard library does that the compiler did not check. Four
+  cases have the behavior that C gives them, and fort defines no more:
+  1. A trusted declaration or call whose row is wrong or absent (D9.8). Examples are `memchr`
+     declared with an `i64*` result for a search of one byte, and a declaration whose parameter
+     marks no `mut` at a level that C writes.
+  2. C code that breaks A7 of `ownership-design.md` 5.1. Examples are C code that keeps an argument
+     and gives it back in a later call, and C code that starts a thread which reads or writes
+     storage of fort code.
+  3. A call in a trusted module whose arguments break the contract of its callee, which its call row
+     states wrongly or does not state. Examples are a `char*` with no NUL inside its storage for
+     `strlen`, a length past the end of a buffer for `memcpy`, and storage of `new` for `free`
+     (D10.3).
+  4. A build with a standard library other than the one of the compiler: a build with `--std-dir`
+     (D14.1), or with `--use std=<path>` of an artifact that `fort --lib std` built from another
+     root (D9.11). It runs code that these rules did not check as `std`, such as a span of a raw
+     pointer in each function.
+
+  A module outside the trusted set declares no extern, calls no extern and names no boundary
+  function (D9.8), so cases 1 to 3 stand only in a trusted module. A module outside the trusted set
+  has no undefined behavior, with no condition on its code.
+  A pointer or a span to dead storage is no case of the trusted premise. A module outside the
+  trusted set can give such a value to a function of a trusted module, and that function can give
+  it to C. The value breaks no contract of case 3 while each access of C stays inside the bound
+  that the call row gives (D9.8): rule 6 of D10.9 gives the result of each such access. An access
+  of C outside that bound is case 3, as for live storage.
+  **The defined results.** An earlier text of this decision listed cases of undefined behavior. Each
+  case has a defined result:
+
+  | case                                                            | defined result      | rule   |
+  |-----------------------------------------------------------------|---------------------|--------|
+  | a view or a copy, used after the `del` of its allocation        | dead storage        | D10.9  |
+  | a pointer to a local, used after its scope or after its run     | dead storage        | D10.9  |
+  | a dereference of `null`                                         | `null dereference`  | D10.6  |
+  | a call of a null function pointer                               | `null call`         | D10.6  |
+  | an owner that is no local owner, used after its `move` or `del` | the zero value      | D17.6  |
+  | a `del` or a `regrow` of no start of a live allocation          | `invalid release`   | D10.9  |
+  | a data race                                                     | cannot occur        | D9.8   |
+  | an index or a span expression out of range                      | a runtime error     | D10.6  |
+  | `p[lo..hi]` beyond the object                                   | the trusted premise | D6.9   |
+  | a store over an owner that is not empty, a whole store          | a compile error     | D17.11 |
+  | a leak of a local owner, a shallow `del`                        | a compile error     | D17.20 |
+  | a `del` of a span of owners with one operand                    | a compile error     | D17.9  |
+  | a local owner, used after its `move` or `del`                   | a compile error     | D17.21 |
+
+  The rows are exact as follows. The first row is a use of a view, or of a copy made before a `move`
+  or `del`, after the `del` of the allocation or after the `regrow` that released it (D12.2). The
+  runtime never gives the storage of a released allocation to another object, and a local of which
+  a run takes an address is in frame storage, which is storage of the same kind. A read of dead
+  storage gives the value that the storage held last, a write changes only dead storage, and each
+  can stop the program with a memory fault. Neither reads or changes a live object (D10.9).
+  The checks of `null` stand in both build modes, and FIR holds each one as a `check` of the kind
+  `null` (`fir.md` 8). An owner that is no local owner is an owner in a global, a place through a
+  pointer such as `p->next`, or an element of a span such as `kids[i]` (D17.21). After its `move` or
+  its `del` the place holds the zero value (D17.6), and each use reads that value. Each use has one
+  result:
+  - a dereference of it is the runtime error `null dereference` (D10.6);
+  - an index of it is the index error, and a span expression of it with a bound above 0 is the
+    span error, because its `.len` is 0 (D10.6);
+  - its `.len` is 0, and its `.ptr` is `null`;
+  - a `del` of it has no effect (D17.9);
+  - a `move` of it gives the zero value (D17.6);
+  - a comparison of it with `null` is true (D10.5);
+  - a copy of it, as a view or as an argument that lends it, has the zero value.
+
+  No owner is a function pointer (D17.1), so no call goes through an owner. A `move` of an owning
+  aggregate leaves the zero value in each field (D17.6), so a call through a function-pointer field
+  of that aggregate is the runtime error `null call` (D10.6).
+  The runtime knows the start of each live allocation, so the test of `invalid release` is exact
+  (D10.9). A fort program has one thread: no trusted module declares a C function that starts a
+  thread, and the lint of D9.8 reports a declaration of `pthread_create`, `clone`, `clone3`,
+  `thrd_create` or `vfork`. The compiler has no option that removes a check (D10.6). Only
+  `str.from_cstr` and `rt.args_init` can write `p[lo..hi]` (D6.9), and only a trusted module calls
+  them, with a call row (D9.8), so a span beyond the object is case 3 of the trusted premise. The
+  compile errors are the four obligations of D17.11, which the type of a place selects: what the
+  compiler cannot prove is an error.
+  There is no strict-aliasing rule:
+  reading an object through a pointer to another type of the same size or a smaller one (`*cast(&x,
+  u64*)` for an `f64 x`) is defined and yields the bit pattern.
+  A pointer to a local points at dead storage after the end of the scope of the local and after the
+  return of its run, and no later local takes that storage (D10.9). Each entry of the block that
+  declares a named local starts a new local, so a pointer to the local of an earlier entry points at
+  dead storage.
+  **Defined leaks.** Four cases keep an allocation until the process ends. Each is a defined result,
+  and no rule makes it an error:
+  - an allocation that only a cycle of owners holds, or that the program reaches only through such
+    a cycle;
+  - an allocation that an owner in a global holds, or that the program reaches only through such an
+    owner;
+  - an allocation that an owner holds on a path that calls `exit`, or that ends in a runtime error,
+    a `panic`, a failed `assert` or a memory fault;
+  - an allocation whose only owner is a place in dead storage, which a store through a pointer to
+    dead storage wrote, or that the program reaches only through such an owner (D10.9).
+
+  **No forged pointer.** Fort code reaches storage only through a value that derives from an address
+  of that storage, inside its object. A pointer to dead storage (D10.9) is such a value: it derives
+  from an address of the storage that is now dead, and it reaches that dead storage only. The terms
+  are exact:
   A run is one call of a fort function. Each call starts a new run with its own locals.
   A local of a run is a parameter, a named local or a temporary (D6.3) of the run. The storage of
   a local is each byte of it, its fields, its elements and its padding included. A byte of the
@@ -2220,7 +2409,8 @@ Sections:
   of `e` when `e` is a fixed array (D6.9). A part is a field or an element of a fixed array, at any
   depth, that the place reaches through no pointer and no span. An address of a global is `&e` or
   a span expression of a place of the global, and an address of an allocation is the result of a
-  `new` (D10.2) or of an `extern` that says `own` (D17.13). An address of the storage of a string
+  `new` (D10.2), of a `regrow` (D12.2) or of an `extern` that says `own` (D17.13). An address of
+  the storage of a string
   literal is the `.ptr` of the literal, or a span expression of it (D3.7). An address of storage
   of C is a pointer that C gives to fort code: a result of an `extern fn`, an argument of a fort
   function that C calls, or a pointer that fort code reads from storage of C (A7).
@@ -2246,36 +2436,28 @@ Sections:
   as an argument of an `extern fn` in a trusted module, so no fort code loads or stores through
   it. D6.9: only `str.from_cstr` and `rt.args_init` take a span of a raw pointer,
   and no source calls `rt.args_init`. D10.4: no pointer arithmetic. D10.6: each index and each
-  span expression of a fixed array, a span or a string is in bounds. D9.8: only a trusted module
+  span expression of a fixed array, a span or a string is in bounds, and each place that goes
+  through a pointer goes through a pointer that is not `null`. No option removes these checks.
+  D9.8: only a trusted module
   declares or calls an `extern fn`, or names a boundary function, and the rows of each
   declaration and each call say why A7 holds. For C, A7 of
   `ownership-design.md` 5.1 holds: C gives fort code only storage that C gave, or storage that
   fort code gave to C, with the whole pointee inside that storage, at an address aligned for the
   pointee, and with no `mut` that fort code did not give; C writes only a level that the type of a
   parameter marks `mut`; and C keeps no pointer to fort storage after the call returns. So a
-  pointer that fort code holds is `null`, a value that derives from
-  an address and keeps its whole pointee inside the object of that address, or a dangling pointer.
-  A read or a write of the storage of a local of a run goes through a value that derives from an
-  address of that local that the run took, or through a dangling pointer. Fort code reaches a
-  frame of a C function, or a byte of the allocator outside each live allocation, only through a
+  pointer that fort code holds is `null`, or a value that derives from
+  an address and keeps its whole pointee inside the object of that address. That object is live,
+  or its storage is dead (D10.9).
+  A read or a write of the storage of a live local of a run goes through a value that derives from
+  an address of that local that the run took. A pointer to dead storage reaches no live local, no
+  live allocation and no global (D10.9). Fort code reaches a
+  frame of a C function, or a byte of an allocator that is outside each allocation and outside
+  dead storage, only through a
   pointer that C gave to that storage. An access by the name of a local in its own run goes through
   no value, and the guarantee covers each read and each write, of each type. It adds no
   strict-aliasing
   rule: the derivation of the value decides, and the type of the access does not.
-  Four cases are outside the guarantee. A build with `--no-bounds-check` removes the checks of
-  D10.6. A build with a standard library other than the one of the compiler runs code that these
-  rules did not check as `std`, such as a span of a raw pointer in each function: a build with
-  `--std-dir` (D14.1), or with `--use std=<path>` of an artifact that `fort --lib std` built from
-  another root (D9.11). A trusted declaration or call whose row is wrong or absent, or C code that
-  breaks A7, has the behavior that C gives it, and fort defines no more. Examples are `memchr`
-  declared with an `i64*` result for a search of one byte, a declaration whose parameter marks no
-  `mut` at a level that C writes, and C code that keeps an argument and gives it back in a later
-  call. A module outside the trusted set declares no extern, so this case stands only in a trusted
-  module (D9.8). And a call in a trusted module whose arguments break the contract of its callee,
-  which its call row states wrongly or does not state, such as a `char*` with no NUL inside its
-  storage for `strlen` or a length past the end of a buffer for `memcpy`, has the behavior that C
-  gives it (A7). A module outside the trusted set makes no such call, so the guarantee holds for its
-  code with no condition on that code.
+  The guarantee holds under the trusted premise above, and it has no other condition.
 - history: Amended 2026-09-29 (T-257): the list held "`del` of adopted memory (D17.3) that is not
   the start of an allocation" and "writing through a cast that added mutability into read-only
   memory". A cast adds neither `own` nor `mut` (D3.14); the second item was stale since T-085.
@@ -2307,6 +2489,20 @@ Sections:
   the trusted set then holds no declaration and no call that can break A7 or the contract of a C
   function, and the guarantee holds for its code with no condition on that code. The case of a
   standard library other than the one of the compiler names `--use std=` too (D9.11).
+  Amended 2026-11-11: the rule said: "Undefined behavior in v1 is limited to: using a view, or a
+  copy made before a `move` or `del`, after the allocation was freed; `del` of an `extern` result
+  that is not the start of an allocation; dereferencing `null` or a dangling pointer; `p[lo..hi]`
+  beyond the object, which only `str.from_cstr` and `rt.args_init` can write (D6.9), and which only
+  trusted code calls (D9.8); calling a null function pointer; and data races." The rule also said
+  that a pointer to a local "dangles" after the end of its scope, "also when a later local takes the
+  same storage", and that four cases were outside the guarantee, of which the first was a build with
+  `--no-bounds-check`. The user ruled on 2026-11-11: "I don't want anything undefined." The earlier
+  ruling "no annotation" stands, so no compile-time rule covers a view. Each case of the list now
+  has a defined result: dead storage (D10.9), a runtime error (D10.6), the zero value that a `move`
+  or a `del` leaves (D17.6), a compile error (D17.11) or
+  the trusted premise, which is the one premise that stays. The compiler loses `--no-bounds-check`
+  (D10.6). The compiler and the runtime implement the results of D10.6 and D10.9 in a later change,
+  and the lint implements the rule of one thread in a later change (D9.8).
 
 ### D10.8 Stack probes
 - owner: `memory-model.md`.
@@ -2323,6 +2519,111 @@ Sections:
   Amended 2026-09-30 (T-268): every host now uses LLVM 18. Homebrew clang 18.1.8 on arm64 Mac
   accepts `inline-asm` and emits the same probe loop as clang 19.1.7 for a 100000-byte frame: a
   4096-byte `sub sp` and a `str xzr, [sp]` per page before the remainder.
+
+### D10.9 Dead storage
+- owner: `memory-model.md`.
+- rule: Dead storage. The storage of an allocation is dead after its `del` (D10.3) and after its
+  `regrow` (D12.2). A local of which a run takes an address is in frame storage (rule 3). The
+  storage of such a local is dead after the end of the scope of the local, and each frame storage of
+  a run is dead after the run returns. Each entry of the block that declares a named local starts a
+  new local (D10.7), with new storage. The storage of a global and the storage of a string literal
+  are never dead. Storage that C gave is storage of C: the contract of the C function that releases
+  it says what a later access does (D10.7, the trusted premise).
+  1. The runtime never gives dead storage to another object. No later allocation, frame storage,
+     global or allocation of C takes an address of it: the runtime keeps the address range reserved.
+     The runtime keeps no state of its own in dead storage.
+  2. A read through a pointer or a span to dead storage gives the value that the storage held last,
+     or it stops the program with a memory fault. The value that the storage held last is the value
+     that it held when it died, with the change of each later write through a pointer or a span to
+     that dead storage. A write through such a value changes only dead storage, or it stops the
+     program with a memory fault. Neither reads or changes a live allocation, the storage of a live
+     local, a global, the frame of a run or the state of the runtime. Each access has one of its two
+     results, and the rule does not say which: the runtime can keep the storage, or it can give the
+     storage back to the system and keep the address range (rule 1). A read gives no third result.
+     So the guarantee "No forged pointer" of D10.7 holds for a value that the program reads from
+     dead storage: the read gives the value that the storage held last, as a read of live storage
+     does. A `move` of an owner out of dead storage gives no second owner. Each operation that takes
+     an owner out of a place stores the zero value into that place: a `move`, the implicit `move` of
+     `return x` included (D17.5, D17.6), a `del` (D17.9), and a `regrow` for each owner slot of each
+     old element (D12.2). So a place in dead storage whose owner went to another place held the zero
+     value last. A store of an owner into dead storage stores a new allocation, or it takes the
+     owner out of its source by one of these operations. So the place in dead storage is then the
+     one place that holds the owner. The behavior is defined.
+  3. A local of which a run takes an address is in frame storage. The term is that of D10.7: an
+     `&e`, or a span expression of `e` when `e` is a fixed array, for a place `e` that is the local
+     or a part of it. Frame storage is storage of the same kind as an allocation: rule 1 and rule 2
+     hold for it. A local of which no run takes an address has no address, so no pointer reaches it.
+  4. `del(p)` of a pointer that is not `null` and is no start of a live allocation of the runtime is
+     the runtime error `invalid release` (D10.6). Such a pointer is an interior pointer, a pointer
+     to dead storage, or an address that C gave. For a span and a `string`, the pointer is the
+     `.ptr`. The test is exact: the runtime knows each start. So a second `del` of one allocation,
+     through a copy of its owner, is this error. `regrow(s, n)` makes the same test of the `.ptr`
+     of `s` before it takes storage, so a `regrow` through such a copy is this error too (D12.2).
+  5. When the runtime has no storage, or no address range, for a `new`, for a `regrow` or for the
+     frame storage of a run, the operation is the runtime error `out of memory` (D10.2, D10.6).
+  6. C code that a trusted module calls can get a pointer or a span to dead storage: a function of
+     a trusted module gives C an argument of its caller, and the caller can be a module outside the
+     trusted set. Inside the bound that the call row gives (D9.8), an access that C code or a
+     system call makes to dead storage has the results of rule 2: a read gives the value that the
+     storage held last, and a write changes only dead storage, or the process stops with a memory
+     fault. A system call has one more result, because the system tests an address before it
+     accesses the storage. For an address that the system cannot access, the call can give the
+     error return of its contract (`EFAULT`), or the count of the bytes that it moved before that
+     address when its contract has such a count. So a call of C with such an argument is no case of
+     the trusted premise (D10.7). An access that C makes outside the bound of the row is case 3 of
+     the trusted premise, as for live storage.
+
+  A memory fault is the signal of the system for an access to an address that has no storage
+  (`SIGSEGV` or `SIGBUS`). The system ends the process. A memory fault is no runtime error of D11.4:
+  the runtime writes no line for it and does not flush buffered output (D11.5).
+  A view of an allocation, used after the `del`:
+
+  ```fort
+  node mut* own n = new(node);
+  node* v = n;            // a view
+  del(n);
+  i32 x = v->value;       // reads dead storage, or stops with a memory fault.
+                          // It never reads or changes a live object.
+  ```
+
+  A pointer to a local, used after the run returns:
+
+  ```fort
+  fn bad() i32* {
+      i32 x = 5;
+      return &x;          // `x` is in frame storage; the result points at dead storage
+  }
+  ```
+
+  A dereference of `null` is no access to dead storage. It is a runtime error (D10.6):
+
+  ```fort
+  node* p = find(k);      // gives null
+  i32 x = p->value;       // `null dereference` at this line.
+  ```
+
+- rationale: The user's rulings "no annotation" and "I don't want anything undefined." (user,
+  2026-11-11) leave no proof at compile time for a view. Rule (e) of `ownership-design.md` 6.5
+  measured 1,400 sites in 128 functions of `src/fort` and 17,193 sites in 1,981 functions of
+  `test/fort`, and two cases stayed outside its scope (X4 and X5 of that document as it stood on
+  2026-11-10). So the storage rules give the result at run time, with no annotation and no proof.
+  The cost has targets. The checks of `null` cost at most 5 % of the run time. Dead storage with
+  frame storage costs at most 15 % of the run time and at most 2 times the peak memory. A result
+  above a target does not reopen the guarantee: it starts the next optimization of this fixed list,
+  in this order.
+  1. Keep a local on the stack when no callee keeps its address. A "keep" bit for each parameter, in
+     the `summaries/` section of a library artifact (D9.11), holds that fact.
+  2. Remove a check of `null` that the lowering proves.
+  3. Give a compile error for a use after a release that one function proves on each path.
+  4. Reuse dead storage after a sweep finds no pointer to it.
+
+  An optimization keeps each result of this decision: no program can tell that it ran. The address
+  space of a process is 128 TiB. At 1 GiB of allocation each second, it lasts 36 hours.
+- history: Added 2026-11-11. The user ruled on 2026-11-11: "I don't want anything undefined." Before
+  this date, D10.7 listed a use of a view after the `del` of its allocation, a use of a pointer to a
+  local after its scope, and a `del` of a pointer that is no start of an allocation as undefined
+  behavior, and D6.7 called the return of the address of a local "documented undefined behavior, as
+  in C". The compiler and the runtime implement this rule in a later change.
 
 ## D11 Build modes and the runtime contract
 
@@ -2352,9 +2653,10 @@ Sections:
 - owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime).
 - rule: Runtime error contract: the runtime flushes buffered output, writes one line to stderr, and
   calls `abort()`, so the process dies with SIGABRT (status 134 under a shell). Formats:
-  `<file>:<line>:<col>: runtime error: <message>` for checks (bounds, overflow, shift, division,
-  allocation, enum `switch`), `<file>:<line>:<col>: panic: <message>` for `panic`, and
-  `<file>:<line>:<col>: assertion failed: <expression text>` for `assert`. Deferred code does not
+  `<file>:<line>:<col>: runtime error: <message>` for checks (bounds, `null`, overflow, shift,
+  division, allocation, release, enum `switch`), `<file>:<line>:<col>: panic: <message>` for
+  `panic`, and `<file>:<line>:<col>: assertion failed: <expression text>` for `assert`. Deferred
+  code does not
   run. The check messages are fixed, with the offending values in decimal:
 
   | Check                              | Message                                            |
@@ -2365,22 +2667,37 @@ Sections:
   | shift count                        | `shift count 64 out of range for i64`              |
   | division or remainder by zero      | `division by zero`                                 |
   | `MIN / -1`, `MIN % -1`             | `division overflow`                                |
-  | negative `new` count               | `negative allocation count -1`                     |
-  | `new` size overflow                | `allocation size overflow`                         |
-  | allocation failure                 | `out of memory`                                    |
+  | negative `new` or `regrow` count   | `negative allocation count -1`                     |
+  | `new` or `regrow` size overflow    | `allocation size overflow`                         |
+  | allocation failure (D10.9)         | `out of memory`                                    |
+  | `regrow` count below the length    | `regrow count 2 below length 3`                    |
+  | dereference of `null` (D10.6)      | `null dereference`                                 |
+  | call of a null function pointer    | `null call`                                        |
+  | `del` or `regrow` of no start (D10.9) | `invalid release`                               |
   | an enum value no clause names (D7.7) | `enum value 0 is not a member of level`          |
 
   The end of a `noreturn` function has a trap (D19.7). Linux x86-64 raises SIGILL.
   Mac arm64 raises SIGTRAP. Neither target writes a message for this trap.
   A conforming body never reaches it. `<file>` is the path the compiler opened (search root as given
   plus the relative module path); the column of a check is that of its operator token, or of the
-  builtin's name for `new`, `assert` and `panic`, or of the `switch` keyword for the default of
-  D7.7; the `assert` text is the source text of the expression, verbatim.
+  builtin's name for `new`, `regrow`, `del`, `assert` and `panic`, or of the `switch` keyword for
+  the default of D7.7; the `assert` text is the source text of the expression, verbatim. The
+  operator token of `null dereference` is the `*` or the `->` whose operand is `null`. The operator
+  token of `null call` is the `(` of the call. An `out of memory` for the frame storage of a run
+  (D10.9) stands at the name of the function in its definition. A memory fault (D10.9) is no runtime
+  error of this contract. The system ends the process with `SIGSEGV` or `SIGBUS`. The runtime writes
+  no line and does not flush buffered output, as for the trap of a `noreturn` function.
 - history: Amended 2026-09-10: the bounds message read `slice bounds ...` while spans were called
   slices (D3.5). Amended 2026-09-11 (T-020): the enum `switch` default of D7.7 was added.
   Amended 2026-09-15 (T-140): the `noreturn` trap now names both target signals.
   Amended 2026-10-22: the user made the overwrite check static, so the ownership check and its
   message `overwriting owned value` left this contract (D17.11).
+  Amended 2026-11-11: the rule had no message for a dereference of `null`, for a call of a null
+  function pointer, for a `del` of a pointer that is no start of an allocation and for `regrow`, and
+  it named no memory fault. The user ruled on 2026-11-11: "I don't want anything undefined." Each of
+  the four is now a runtime error with a fixed message (D10.6, D10.9, D12.2), and the contract says
+  that a memory fault writes no line. The compiler and the runtime implement this rule in a later
+  change.
 
 ### D11.5 Output buffering
 - owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime).
@@ -2462,9 +2779,11 @@ Sections:
   - `del(x)`: frees an `own` operand and empties it (D17.9); `del(s, d)` frees a span of owners
     after it moves each element into the drop `d`, which names a release-only fort function
     (D17.9);
-  - `move(lv)`: yields an owning lvalue's value and empties it (D17.6); the one universe
-    function that yields a value, and that value must be used (`move(x);` as a statement is an
-    error, D17.8);
+  - `move(lv)`: yields an owning lvalue's value and empties it (D17.6). `move` and `regrow` are the
+    two universe functions that yield a value, and that value must be used (`move(x);` as a
+    statement is an error, D17.8);
+  - `regrow(s, n)`: moves the elements of the span `s` into a new allocation of `n` elements and
+    releases the old storage; the paragraph on `regrow` below gives the rule;
   - `assert(cond)`: `bool` argument; failure is a runtime error with the expression text;
   - `panic(msg)`: `string` argument; `noreturn`;
   - `print(...)`, `println(...)`: zero or more arguments of integer, float, `bool`, `char`, enum,
@@ -2473,18 +2792,79 @@ Sections:
   - `fprint(fd, ...)`, `fprintln(fd, ...)`: the same to the descriptor `fd` (`i32`).
 
   Each argument compiles to one per-type runtime call. An untyped constant argument takes its
-  default type (D4.5). Universe functions other than `move` yield no value: they are usable only as
-  call statements (including as `defer` operands and in `for` init and step positions). `assert` is
+  default type (D4.5). Universe functions other than `move` and `regrow` yield no value: they are
+  usable only as call statements (including as `defer` operands and in `for` init and step
+  positions). `assert` is
   active in both build modes. Every runtime call a builtin makes is a call to a named function of
   `std.rt` (D13.1), an ordinary fort function reached by its mangled name (D9.7): the compiler holds
   the list of names, since fort has no attribute with which a module could mark a declaration as the
   target of a builtin, and `toolchain.md` 5.1 is that list. Not every builtin makes one. `move` is
   compiled where it stands, a read of the operand and a zeroing of it (D17.6), and `assert` calls
-  only on the failing branch; `del` calls, and so do `panic` and every member of the print family.
+  only on the failing branch; `del` and `regrow` call, and so do `panic` and every member of the
+  print family.
+  **`regrow`.** In `regrow(s, n)`, `s` is an expression of type `T mut@ own`. An lvalue takes
+  `move`, as each owner does (D17.6), so the usual form is `regrow(move(s), n)`. `n` is any integer
+  type, as the count of `new` (D10.2). An operand of another type is a compile error: `T@ own` and
+  `string own` are such types. The result is a `T mut@ own` of `n` elements in new storage. The
+  first `s.len` elements are the elements of `s`, moved: each keeps its value, and an element that
+  holds an owner still holds it. Each other element holds the zero value. The result is in new
+  storage also when `n` equals `s.len`.
+  After it moves the elements, `regrow` stores the zero value into each owner slot of each old
+  element, and then it releases the old storage. The owner slots are the slots of `slots(T)`
+  (D17.11) that are in the fixed storage of the element (D17.9): an `own` reference, and each `own`
+  reference in a field or in an element of a fixed array, at any level. An element of an `own` span
+  that an old element held is in another allocation, which the new element owns, and `regrow` does
+  not change it. Each other byte of the old storage keeps its value, so a `T` with no owner slot
+  takes no store. The old storage is dead (D10.9). So a `move` through a view of an old element
+  gives the zero value or a memory fault, and no second owner.
+  The operand `s` is the zero span (`{null, 0}`), or its `.ptr` is the start of a live allocation
+  of the runtime. When `s` is the zero span, `regrow` releases nothing, and the result is that of
+  `new(T, n)`: a new span of `n` zero elements. A `.ptr` that is not `null` and is no start of a
+  live allocation of the runtime is the runtime error `invalid release` (D10.6, rule 4 of D10.9).
+  A span of length 0 whose `.ptr` is not `null`, as `new(T, 0)` gives it, is no zero span: `regrow`
+  tests its `.ptr` and releases its storage.
+  A count `n` below `s.len` is a runtime error in both build modes (D10.6, D11.4). A negative `n`, a
+  size that overflows and `out of memory` are the errors of `new` (D10.2). The runtime tests in this
+  order: a negative `n`, an `n` below `s.len`, the size, the operand, the storage. The operands are
+  evaluated left to right (D6.3), so `n` is evaluated after a `move` in `s`: in
+  `regrow(move(v), v.len * 2)` the count reads the emptied `v`. That count is 0, so the call is the
+  runtime error of a count below the length when the span has an element. A count that reads the
+  span goes into a local before the call. The form of doubling has two statements:
+
+  ```fort
+  u64 n = v.len * 2;
+  v = regrow(move(v), n);
+  ```
+
+  The value is an `own` rvalue, so it must land (D17.8).
+  The ownership analysis reads `regrow` as a `move` of `s` and a fresh allocation, with no call:
+  kill rule 5 of D17.11 does not apply to it. The result is no fresh `new` of D17.11, and no gen
+  rule gives a fact of an element of the result, because the first `s.len` elements can hold owners.
+  The release-only bit of D17.9 reads `regrow` the same way: it is no call of an `extern fn` and no
+  call of a function value. In a range loop, D17.10 refuses the `move` of the collection that such
+  a `regrow` needs. `regrow` replaces the loop that moves each element into a larger span, whose
+  stores the compiler cannot prove (D17.11). For a parameter `v` whose field `items` is a
+  `func mut@ own`:
+
+  ```fort
+  // before
+  func mut@ own bigger = new(func, cap);
+  while (i < v->len) { bigger[i] = move(v->items[i]); i += 1; }
+  del(v->items);
+  v->items = move(bigger);
+  // after
+  v->items = regrow(move(v->items), cap);
+  ```
 - history: Amended 2026-09-11 (T-088): the calls named the C runtime's `fort_rt_*` entry points, the
   runtime being C (D13.1 as amended).
   Amended 2026-11-07: `del` takes a second operand, the drop of the elements of a span of owners
   (D17.9, the user ruling "del(s, drop)"). Before, `del` took one operand.
+  Amended 2026-11-11: the rule had no `regrow`, and it said that `move` was "the one universe
+  function that yields a value". The user ruled on 2026-11-11: "I don't want anything undefined."
+  The user approved `regrow` on the same date, as a part of the design that follows from that
+  ruling: the 13 stores of the trees that grow a span of owners in a loop have no proof under
+  D17.11, and no gen rule for the elements of a fresh `new(T, n)` enters (D17.11, the history of
+  2026-11-07). The compiler implements this rule in a later change.
 
 ## D13 Standard library scope
 
@@ -2612,8 +2992,8 @@ Sections:
 - owner: `toolchain.md`.
 - rule: `fort [options] entry.ft`. Options: `-o <file>` (default `a.out`), `-S` (stop after emitting
   `<entry>.ll`, D19.1), `-c` (stop after the object file), `-I <dir>` (repeatable), `--std-dir
-  <dir>` (default `$FORT_STD_DIR`, else `std` beside the binary), `--release` (D11.1),
-  `--no-bounds-check` (D10.6), `-l<lib>` (passed to the linker), `--cc <path>` (default `clang`
+  <dir>` (default `$FORT_STD_DIR`, else `std` beside the binary), `--release` (D11.1), `-l<lib>`
+  (passed to the linker), `--cc <path>` (default `clang`
   on both targets; it must be a clang that compiles LLVM IR),
   `--target <triple>` (default built target,
   passed to `--cc` as `--target=<triple>`), `-Xcc <arg>` (repeatable, passed to `--cc` verbatim
@@ -2629,7 +3009,7 @@ Sections:
   it with `--tokens`, `--ast`, `--check`, `--json` or `--index` is a usage error),
   `--fir-after=<pass>` (implies `--fir` and writes the FIR at the named point of `spec/fir.md`
   11; the names are `lower`, the output of the lowering, and `build-mode`, the output of the
-  build-mode pass for the mode that `--release` and `--no-bounds-check` select, and any other
+  build-mode pass for the mode that `--release` selects, and any other
   name is a usage error), `--fir-test` (read the entry file as a FIR test of `spec/fir.md`
   16.3: check its prelude as the module `main`, parse its FIR text against that module, run the
   passes that its `//! pass:` directives name, in their order, and write the module to stdout in
@@ -2649,9 +3029,10 @@ Sections:
   `main` that a build emits starts it; it writes no file, takes the target rule of `--check`,
   and ends as the checked build of the program ends: with its exit status, or by SIGABRT after
   an abort and by the trap signal of the target after a trap; a call that the interpreter does
-  not run and an operation with no defined result are errors with status 2; combining it with
-  `--tokens`, `--ast`, `--check`, `--json`, `--index`, `--use`, `--lib`, `--release`,
-  `--no-bounds-check`, `--fir`, `--fir-after`, `--fir-verify-report`, `--fir-test` or
+  not run and an operation at which the interpreter stops are errors with status 2; combining it
+  with
+  `--tokens`, `--ast`, `--check`, `--json`, `--index`, `--use`, `--lib`, `--release`, `--fir`,
+  `--fir-after`, `--fir-verify-report`, `--fir-test` or
   `--fir-stats` is a usage error; the run keeps each check of the checked mode), `--fir-events`
   (with `--fir-run`, write each ownership event of the run to stderr after the run, one line
   each, as `spec/fir.md` 11 spells it; it changes no status, and it is a usage error without
@@ -2727,6 +3108,13 @@ Sections:
   of `spec/ownership-design.md` 3.5, and the pass `run` of `--fir-test` runs a FIR test with it.
   Amended 2026-10-24: `--fir-events` did not exist, and the report of the pass `run` held no
   event. Both report the events of the shadow state of `spec/ownership-design.md` 3.3 and 3.4.
+  Amended 2026-11-11: the rule listed the option `--no-bounds-check` (D10.6), the build-mode pass
+  took "the mode that `--release` and `--no-bounds-check` select", and `--fir-run` refused the
+  option. The user ruled on 2026-11-11: "I don't want anything undefined." The compiler has no
+  option that removes a check (D10.6), so the option goes from the list. The rule also named "an
+  operation with no defined result" for a stop of the interpreter of `--fir-run`. No operation of a
+  fort program is such an operation (D10.7), so the words "an operation at which the interpreter
+  stops" replaced those words. The compiler implements this rule in a later change.
 
 ### D14.2 Diagnostics and recovery
 - owner: `toolchain.md`.
@@ -3105,7 +3493,8 @@ says ownership is "by convention", this section supersedes it.
   slots whose nodes this span cannot write. `new(void*)` is legal
   and yields `void* mut* own`, one pointer slot, since a pointer to `void` has a size (D3.11); it is
   `new(void)` that is not
-  legal, and D10.2 rejects that one. Standard-library functions that allocate
+  legal, and D10.2 rejects that one. `regrow(s, n)` yields a `T mut@ own` from a
+  `T mut@ own` (D12.2). Standard-library functions that allocate
   return `own` (D13.5). An `extern` whose result says `own` produces an owning value (D17.13). A
   `cast` carries `own` or drops it, and the target type of a cast decides (D3.14). A cast never
   adds `own`. Its result owns only what its operand owned. Span
@@ -3129,6 +3518,9 @@ says ownership is "by convention", this section supersedes it.
   `own`)", and called adoption "the one unsafe mark a cast adds". D3.14 now refuses that cast.
   Amended 2026-10-05: parentheses permit multiple spellings of one allocated element type.
   The marker and element restrictions stay unchanged across groups.
+  Amended 2026-11-11: the rule named no `regrow` among the producers. The user ruled on 2026-11-11:
+  "I don't want anything undefined." `regrow` is a producer (D12.2). The compiler implements this
+  rule in a later change.
 
 ### D17.4 Lending
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -3230,7 +3622,9 @@ says ownership is "by convention", this section supersedes it.
   span or `string own`, as an lvalue or an rvalue. On an lvalue, `del` empties the operand under the
   rules of D17.6, with the same mutability requirement through indirections; on an rvalue it only
   frees. `del(null)` (the literal adopts `void* own`) and `del` of a zero span or string are no-ops,
-  so `del(buf); del(buf);` frees once, and a use after `del` or `move` dereferences `null`. `del` of
+  so `del(buf); del(buf);` frees once, and a use after `del` or `move` dereferences `null`: it is a
+  compile error for a local owner (D17.21) and the runtime error `null dereference` for each other
+  owner (D10.6). `del` of
   a view, a sub-span, a `.ptr`, a stack address or a literal is a compile error, because none of
   them has an `own` type. This supersedes the earlier "del does not null its argument".
   A span of owners is an `own` span, of each mutability, whose element type `E` holds an `own`
@@ -3269,11 +3663,12 @@ says ownership is "by convention", this section supersedes it.
   is a compile error. The rules of D3.14 refuse each such cast: a span casts only to a span whose
   element type has the same shape, and a pointer place that carries a mark keeps its exact type.
   A cast to a span of the same element type keeps the elements, and `del(s, d)` frees them.
-  `del(s)` with one operand of a span of owners leaks each allocation that an element holds. The
-  compiler first lists each such `del` under the option `--span-del-report`, at the name `del`,
-  with the text `cannot del a span of owners with one operand: name the drop of its elements,
-  del(s, <drop>)`, and accepts the program. A later change makes each such `del` a compile error
-  with that text and amends this entry, after the code that CI compiles uses `del(s, d)`.
+  `del(s)` with one operand of a span of owners leaks each allocation that an element holds. So it
+  is a compile error at the name `del`, by obligation O-del of D17.11: `cannot del a span of owners
+  with one operand: name the drop of its elements, del(s, <drop>)`. While the code that CI compiles
+  holds such a `del`, the compiler lists each one under the option `--span-del-report` with that
+  text and accepts the program. The change that makes the error needs no amendment of this entry
+  (D17.11).
 - rationale: a span of owners is the one owner whose elements no fact of D17.11 tracks, so no
   rule of one function can prove them empty before the storage goes (D17.20). The compiler writes
   the loop of the drain, and part 1 of D17.20 proves the parameter of `d` empty at each exit of
@@ -3284,6 +3679,12 @@ says ownership is "by convention", this section supersedes it.
   of owners, from refinement R8 of `spec/ownership-design.md` 7 (the user ruling "del(s, drop)",
   2026-11-07, over a ban of spans of owners and over a rule that proves a drain loop). Before,
   `del` took one operand, and a `del` or a `cast` of a span of owners had no rule (D17.20).
+  Amended 2026-11-11: the rule said that a later change "makes each such `del` a compile error with
+  that text and amends this entry", and it did not say what a use after `del` or `move` gives for an
+  owner that is no local owner. The user ruled on 2026-11-11: "I don't want anything undefined." The
+  rule now states the error, as obligation O-del of D17.11, and the report is the state of the
+  compiler before the error. A load through an emptied owner that is no local owner is the runtime
+  error `null dereference` (D10.6). The compiler implements both rules in a later change.
 
 ### D17.10 Ownership in a range loop
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -3314,7 +3715,113 @@ says ownership is "by convention", this section supersedes it.
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
   `del`, transfer, lending, the overwrite check), `core-language.md` (the `move` builtin,
   statements).
-- rule: Overwrite check. A store into an `own` reference-typed lvalue is legal only when the
+- rule: The owner rules. D17.11, D17.20 and D17.21 are the owner rules. This entry holds the frame
+  of the three: the normative split, the obligations, the form catalogue and the one fact of another
+  function. It then holds the overwrite check.
+  **The normative split.** A decision of the owner rules holds three normative things: the
+  guarantee, the obligations, and the forms that must compile. The guarantee is the compile-error
+  rows of the table of D10.7. In a program that the compiler accepts with no report line of an owner
+  rule, no run stores over an owner that holds an allocation, lets a local owner hold an allocation
+  at the end of its scope, frees an object while an owner in it holds an allocation, or uses a local
+  owner after its `move` or its `del`. The obligations and the form catalogue follow below. The gen
+  rules and the kill rules of this entry, and each other rule of D17.11, D17.20 and D17.21 that says
+  how the analysis proves an obligation, describe the implementation. A change of them needs no
+  amendment of a decision when the gate holds. The gate tests the guarantee: no program that the
+  compiler accepts, with no report line of an owner rule, gives an event of an error kind in the
+  reference semantics (`spec/ownership-design.md` 3). An event of an error kind is an event whose
+  disposition is a compile error (`spec/ownership-design.md` 3.4). The text of those rules stays in
+  this log as the description of the implementation at the date of its last amendment.
+  **The obligations come from the type.** `slots(T)` names the owner slots of a type `T`. An `own`
+  reference (D17.1) is 1 slot: an `own` pointer, a `void* own`, an `own` span and a `string own`. A
+  struct has the slots of each field. A fixed array has the slots of each element. An `own` span of
+  an owning element type has the slots of its elements too; an empty span has no element, so it has
+  no slot but its own. Each other type has no slot. The owner rules have four obligations. Each is a
+  compile error when the compiler does not prove it: "Unknown is an error" (user, 2026-10-22) holds
+  for each of the four.
+  - O-store: each slot of the destination of a store is empty at the store. The overwrite check of
+    this entry is this obligation. It covers a whole store of an aggregate.
+  - O-end: each slot of a local is empty at its `dead` (part 1 of D17.20).
+  - O-del: each slot of the pointee of a `del` is empty at the `del`, and a `cast` of part 2 of
+    D17.20 has the same obligation. A span of owners takes `del(s, d)` (part 2 of D17.20, D17.9).
+  - O-use: no use of a local owner reads it after its `move` or its `del` (D17.21).
+
+  No syntactic condition selects what the compiler checks: the type of the place selects it. An
+  operation on a place whose type has a slot has the obligation, in each form that the language can
+  write it. Three rules start as reports. While the report of a rule has a line for the code that CI
+  compiles, the compiler gives each site of that rule as a report line and accepts the program: the
+  whole stores of O-store under `--whole-store-report`, part 2 of D17.20 under `--leak-report`, and
+  the `del` of a span of owners with one operand under `--span-del-report`. A later change makes
+  each of the three a compile error. That change needs no amendment of a decision, because the
+  obligation is the rule and the report is the state of the compiler before the error.
+  **The form catalogue.** Each form of this list must compile with no error of an owner rule and
+  with no report line of one, in each storage class and for each type that the form can name. A form
+  that does not compile is a defect of the compiler. A site that the compiler rejects takes one of
+  these forms: no new gen rule, no kill exception and no exclusion answers such a site
+  (`spec/ownership-design.md`, "Edge cases: who decides"). In the forms, `T` is an owning type: an
+  `own` reference or an owning aggregate (D17.7). `P` is a place of type `T`. `T_drop` is the value
+  drop of `T` (D13.5), a fort function that takes a `T` and releases each owner in it; for an `own`
+  reference, `T_drop(move(x))` stands for `del(x)`. The storage classes are the places that can hold
+  an owner: a local that is not memory, a memory local, a global, a field of each, an element of a
+  fixed array, an element of a span, and a place through a pointer. In the examples, `box` is
+  `struct box { u8 mut@ own data; }`, `box_drop` is its value drop, `make` returns a `box`, `holder`
+  is `struct holder { box b; i32 n; }`, and `v->items` is a `box mut@ own`.
+  1. Swap: `T nv = <value>; T old = move(P); P = move(nv); T_drop(move(old));`, in this order. When
+     the lvalue is no tracked place, the form takes its address first, `T mut* q = &<lvalue>;`, and
+     `P` is `*q`. An element of a fixed array takes a key local as its index.
+
+     ```fort
+     // in place of `v->items[i] = make();`
+     box nv = make();
+     box mut* q = &v->items[i];
+     box old = move(*q);
+     *q = move(nv);
+     box_drop(move(old));
+     ```
+  2. Return the value, in place of `*out = f(...)`.
+
+     ```fort
+     // in place of `fn fill(box mut* out) void { *out = make(); }`
+     fn fill() box { return make(); }
+     ```
+  3. Hoist the call: put the result of a call in a local, then write `move(b)` in the literal.
+
+     ```fort
+     // in place of `*p = holder{make(), 0};`
+     box b = make();
+     holder mut* own p = new(holder);
+     *p = holder{move(b), 0};
+     ```
+  4. `drop_made`: `if (p == null) { return; } T v = move(*p); del(p); T_drop(move(v));`, with `p` in
+     a pointer local.
+
+     ```fort
+     fn box_drop_made(box mut* own p) void {
+         if (p == null) { return; }
+         box v = move(*p);
+         del(p);
+         box_drop(move(v));
+     }
+     ```
+  5. `del(s, T_drop)`. Move the span into a local first when it is a field, a global or an element.
+
+     ```fort
+     box mut@ own s = move(v->items);
+     del(s, box_drop);
+     ```
+  6. `T_drop(move(x))` as the last use of `x`.
+
+     ```fort
+     box b = make();
+     u64 n = b.data.len;
+     box_drop(move(b));
+     ```
+  7. `regrow(move(s), n)` (D12.2).
+
+     ```fort
+     v->items = regrow(move(v->items), cap);
+     ```
+
+  Overwrite check. A store into an `own` reference-typed lvalue is legal only when the
   compiler proves, inside the function, that the destination holds the zero value at the store.
   Otherwise the store is a compile error, because the previous allocation could leak. The message
   is `overwriting owned value: cannot prove '<place>' is empty here`. `<place>` is the source text
@@ -3353,9 +3860,9 @@ says ownership is "by convention", this section supersedes it.
   holds no allocation of its scope: the frame of a call holds no allocation of the call, a store of
   a zero form gives it none, and D17.20 reports a value that the local still holds at the end of its
   scope. A declaration is such a store, and so is `b = T{};` after `b.f = null;` that follows the
-  declaration of `b`. This rule assumes that no operation writes the storage of the local through a
-  pointer to the local of an earlier entry of its block, or of an earlier scope: such a pointer
-  dangles, and a store through it is undefined (D10.7). A destination of any other whole store that
+  declaration of `b`. No operation writes the storage of the local through a pointer to the local of
+  an earlier entry of its block, or of an earlier scope: such a pointer points at dead storage, and
+  a store through it changes only dead storage (D10.9). A destination of any other whole store that
   is no tracked place has no fact, so the compiler never proves its store: an element whose index is
   no key, and a place through a pointer that is not tracked.
   For a local `b` of type `box`, whose field `data` is an `own` reference, `box mut* own p =
@@ -3371,7 +3878,8 @@ says ownership is "by convention", this section supersedes it.
   no build and no `--check` changes its verdict. The proof of the whole stores of one function has
   a work limit of its own (`fir.md` 11, Whole stores), and past it the compiler proves no whole
   store of the function and keeps each other verdict. A later change makes each whole store that
-  the compiler cannot prove a compile error, and amends this entry.
+  the compiler cannot prove a compile error, and that change needs no amendment of this entry (the
+  obligations above).
   The proof is a forward must-empty analysis over the FIR of one function (`fir.md` 11). A fact
   says that a tracked place holds the zero value. The analysis joins facts by intersection: a fact
   holds at the start of a block only when it holds at the end of each predecessor, on the edge from
@@ -3379,7 +3887,8 @@ says ownership is "by convention", this section supersedes it.
   rule 6 (`fir.md` 11, Join). The entry block
   starts with the fact of each place in the storage of a temporary of the lowering and of a result
   that is no aggregate, which hold no allocation before their first store, and with no other fact.
-  The analysis reads no other function.
+  The analysis reads no other function, with one exception: the release-only bit of a callee
+  (D17.9), which the paragraph after the kill rules gives.
   The tracked places are these, and no fact names another place:
   - a local or a global, then field projections and keyed index projections;
   - a place through a pointer local: a local of pointer type that is not memory, parameters
@@ -3413,14 +3922,13 @@ says ownership is "by convention", this section supersedes it.
   A pointer local `n` is fresh at a point when, on each path to that point, the last store into
   `n` writes a fresh `new`, and after that store no operand copies or moves the value of `n` and
   no `&` or slice names a place through `n`. A place through a fresh `n` contains no index into a
-  span or a `string`. No other pointer can name the object of a fresh `n`, but an address of a
-  place through `n` that the lowering holds for one store (`fir.md` 11, Held address, Whole
-  stores): a temporary that is not memory, that only the check and the stores of that store read,
-  and that no call gets. This rule assumes that
-  no operation accesses storage through a dangling pointer, such as a pointer to an allocation
-  that a `del` freed. Such an access is outside the guarantee of this rule.
-  It also assumes that each index stays in bounds and that no operation accesses storage through
-  `null`, as D10.6 and D10.7 give, so a build with `--no-bounds-check` is outside the guarantee.
+  span or a `string`. No other pointer can name the object of a fresh `n`, but an address of a place
+  through `n` that the lowering holds for one store (`fir.md` 11, Held address, Whole stores): a
+  temporary that is not memory, that only the check and the stores of that store read, and that no
+  call gets. A pointer to dead storage, such as a pointer to an allocation that a `del` freed,
+  reaches that dead storage only, and no later `new` takes it (D10.9).
+  Each index stays in bounds and no operation accesses storage through `null`, because each such
+  operation is a runtime error in each build (D10.6). So this rule needs no assumption on either.
   Borrows (refinement R6 of `spec/ownership-design.md` 7). The terms run and derive are those of
   D10.7: a run is one call of the function. A borrow local is a local that is not memory. An origin
   is the frame of a memory local, or `exposed`. The storage of an aggregate result is the
@@ -3548,6 +4056,19 @@ says ownership is "by convention", this section supersedes it.
      can reach no byte of the object (D10.7).
   A store applies the kill rules first and its gen rule after them. A call in the right-hand side
   kills before the store. `del` and `move` are no stores, and they apply only their gen rule.
+  **The one fact of another function.** The release-only bit of a callee (D17.9) is the one fact of
+  another function that the analysis reads. The release-only functions are the greatest set that
+  keeps the three conditions of D17.9 over the whole unit, and a library artifact holds the bit of
+  each of its functions in its `summaries/` section (D9.11). At a call that names a release-only
+  fort function as its callee, kill rule 5 keeps each fact that it keeps at another call: the facts
+  about a local that is not memory and about its places that are not reached through memory, and the
+  facts about a place through a fresh pointer local. It also keeps each fact whose place holds only
+  `field` projections and `index` projections on a fixed array or on an `own` span (`fir.md` 5.5).
+  The base of such a place can be a local that is not memory, a memory local or a global. It kills
+  each other fact: a place with any other projection, a dereference among them, loses its fact,
+  unless the place goes through a fresh pointer local. A call through a function value reads no bit.
+  Operation 2 of D17.21 keeps its rule: a call vacates each memory owner, also when its callee is
+  release-only. `regrow` is no call under kill rule 5 and under operation 2 of D17.21 (D12.2).
   Each store into an `own` reference-typed place needs the fact of that place after the
   right-hand side and before its own kill rules. The entry zeroing of gen rule 1 needs none unless
   a check stands right before it. A store into an aggregate result, or into a part of it that the
@@ -3712,6 +4233,17 @@ says ownership is "by convention", this section supersedes it.
   of a fresh `new(T, n)` that keys each element loses its fact at `i += 1`, so the coordinator ruled
   on 2026-11-07 that no such rule enters, and the migration of the whole stores rewrites the 13 such
   stores of the trees.
+  Amended 2026-11-11: the rule started at "Overwrite check" and held no frame of the owner rules. It
+  said that "The analysis reads no other function", that a later change of the whole stores "amends
+  this entry", that a store through a pointer to the local of an earlier entry "is undefined
+  (D10.7)", that an access through a dangling pointer "is outside the guarantee of this rule", and
+  that "a build with `--no-bounds-check` is outside the guarantee". The user ruled on 2026-11-11: "I
+  don't want anything undefined." The user approved on the same date the design that follows from
+  that ruling. The entry now holds the normative split, `slots(T)` with the four obligations, the
+  form catalogue and the release-only bit as the one fact of another function, and each of the three
+  cases has a defined result: dead storage (D10.9) or a runtime error (D10.6). The gen rules and the
+  kill rules keep their text. The compiler implements the obligations over `slots(T)`, the
+  release-only exception of kill rule 5 and the errors of the three reports in later changes.
 
 ### D17.12 Owned strings
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -3790,18 +4322,20 @@ says ownership is "by convention", this section supersedes it.
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
   `del`, transfer, lending, the overwrite check), `core-language.md` (the `move` builtin,
   statements).
-- rule: Not tracked, exactly as in C: a view, or a copy made before a `move` or `del`, used after
-  the allocation was freed; an `own` value that is never freed, except where D17.20 applies.
+- rule: Not tracked at compile time: a view, or a copy made before a `move` or `del`, used after
+  the allocation was freed, which reads or writes dead storage (D10.9); an `own` value that is
+  never freed, except where D17.20 applies, which is a defined leak (D10.7).
   D17.20 makes two kinds of leak compile errors. The first is a named local of `own` reference
   type or of an owning aggregate type (D17.7) at the end of its scope, or such a parameter or
   temporary at a `return`, that can hold an allocation. The second is a `del` or an `own` cast that
   frees an object whose owners can hold allocations. Each site of the first kind is a compile
-  error. The compiler first reports each
-  site of the second kind and accepts the program; a later change makes each such site a compile
-  error (D17.20). D17.21 makes each use of a local owner that a `move`, a `del` or a call can have
-  vacated a compile error. The linear check that would make the other leaks and the other uses
-  after `move` compile errors is deferred (D15); this design is its intended base and adds no
-  syntax it would not need.
+  error. A site of the second kind is a compile error too (obligation O-del of D17.11); the
+  compiler first reports each such site and accepts the program, and D17.11 says when the report
+  becomes the error. D17.21 makes each use of a local owner that a `move`, a `del` or a call can
+  have vacated a compile error. A use of each other owner after its `move` or `del` reads the zero
+  value, so a load through it is a runtime error (D10.6). The linear check that would make the
+  other leaks and the other uses after `move` compile errors is deferred (D15); this design is its
+  intended base and adds no syntax it would not need.
 - history: Amended 2026-09-29 (T-257): the list held "two `own` copies made through `cast`". A cast
   no longer adds `own` (D3.14), and `cast(move(x), ...)` ends the source binding (D17.5).
   Amended 2026-10-24: D17.20 takes the part that it covers out of this list
@@ -3813,6 +4347,11 @@ says ownership is "by convention", this section supersedes it.
   deferred linear check. Before, the deferred check covered each use after `move`.
   Amended 2026-11-06: the first kind covers a local of an owning aggregate type too (D17.20).
   Before, it covered a local of `own` reference type only.
+  Amended 2026-11-11: the rule said "Not tracked, exactly as in C", and D10.7 made a use of a view
+  after the free undefined. The user ruled on 2026-11-11: "I don't want anything undefined." Such a
+  use now reads or writes dead storage (D10.9), a leak that no rule refuses is a defined leak
+  (D10.7), and a use of an owner that is no local owner after its `move` or `del` is a runtime error
+  (D10.6). The compiler and the runtime implement these rules in a later change.
 
 ### D17.20 Leak
 - owner: `memory-model.md` (`move`, `del`, transfer, lending, the overwrite check, the leak rule),
@@ -3821,9 +4360,14 @@ says ownership is "by convention", this section supersedes it.
 - rule: Leak. The terms are those of `spec/ownership-design.md` 2. An owner is a tracked place of
   D17.11 whose type is an `own` reference (D17.1). A local owner is an owner in the fixed storage of
   a local (`fir.md` 5.5). A memory owner is a local owner of a memory local of D17.11. The analysis
-  reads the FIR of one function and no other function. An owner holds the zero value, or is empty,
-  at a point when the analysis proves the emptiness fact of D17.11 for that owner at that point
+  reads the FIR of one function and no other function, but for the release-only bit of a callee,
+  the one exception of D17.11. An owner holds the zero value, or is empty, at a point when the
+  analysis proves the emptiness fact of D17.11 for that owner at that point
   (`spec/ownership-design.md` 4.4 and 4.7).
+  This entry holds two of the four obligations of D17.11, which the type of a place selects: O-end
+  is part 1, and O-del is part 2. D17.11 holds the normative split and the form catalogue. The forms
+  of that catalogue must compile under this rule, and the text below that says how the analysis
+  proves an obligation describes the implementation.
   Part 1. Take a named local at the end of its scope, or a parameter or a temporary at a `return`.
   The analysis must prove that each local owner in it holds the zero value. Otherwise the exit is a
   compile error, because the allocation can leak: `leak: cannot prove '<place>' is empty at this
@@ -3893,10 +4437,11 @@ says ownership is "by convention", this section supersedes it.
   `d` is release-only, so it stores no owner through memory and no element holds an allocation
   when the storage goes. The analysis adds no fact for it (refinement R8 of
   `spec/ownership-design.md` 7). A `cast` of a span of owners to another element type is an error
-  (D17.9). Until a `del(s)` of a span of owners with one operand is an error (D17.9), such a `del`
-  has no obligation of part 2, and its leak is outside the guarantee of this rule.
-  A leak through a cycle of owners, and a leak on a path that calls `exit` or ends in a runtime
-  error, are outside the guarantee of this rule too (`spec/ownership-design.md` 5.2, X3).
+  (D17.9). A `del(s)` of a span of owners with one operand is a compile error (D17.9, obligation
+  O-del of D17.11), so part 2 has no obligation of its own for it.
+  A leak through a cycle of owners, a leak of an owner that a global holds, and a leak on a path
+  that calls `exit` or ends in a runtime error are no errors of this rule. Each is a defined leak:
+  the allocation stays until the process ends (D10.7; `spec/ownership-design.md` 5.2, X3).
   `<place>` is source text. For a named local or a parameter, it is the declared name. An owner
   of `*p` is written in source form, from the source text of `p` and its field names (`p->items`,
   `p->a.b`). A temporary is written as the source text of the expression whose value it holds. No
@@ -3921,9 +4466,10 @@ says ownership is "by convention", this section supersedes it.
   loop ends only at its condition: the edge out of the loop makes `l->head` empty, so the `del`
   frees nothing.
   Part 2 starts as a report. A first change lists each site of part 2 that the analysis cannot
-  prove and accepts the program. A later change makes each such site a compile error and amends
-  this entry. Part 1 took this path, from a report (e0bb6c0a) to an error, as the overwrite check
-  of D17.11 went from a report (5152c9fd) to an error (d8a9e096).
+  prove and accepts the program. A later change makes each such site a compile error, and that
+  change needs no amendment of this entry (D17.11, the obligations). Part 1 took this path, from a
+  report (e0bb6c0a) to an error, as the overwrite check of D17.11 went from a report (5152c9fd) to
+  an error (d8a9e096).
 - rationale: an obligation that the analysis cannot prove is an error, as in D17.11 ("Unknown is
   an error", the user, 2026-10-22), so the rule keeps no list of known gaps. `del` is shallow
   (D17.7), so a `del` of an object whose owners hold allocations leaks them. The order of the
@@ -3968,19 +4514,34 @@ says ownership is "by convention", this section supersedes it.
   Amended 2026-11-07: a span of owners ends through `del(s, d)` of D17.9 (the user ruling
   "del(s, drop)", 2026-11-07). Before, a `del` or a `cast` of such a span waited for refinement R8
   with no obligation of part 2, by the ruling on Q7.
+  Amended 2026-11-11: the rule said that the analysis "reads the FIR of one function and no other
+  function", that the leak of a `del(s)` of a span of owners with one operand "is outside the
+  guarantee of this rule", that a leak through a cycle of owners and a leak on a path that calls
+  `exit` or ends in a runtime error "are outside the guarantee of this rule too", and that the
+  change that makes part 2 an error "amends this entry". The user ruled on 2026-11-11: "I don't want
+  anything undefined." The entry now names its two obligations of D17.11, the release-only bit is
+  the one fact of another function, a `del(s)` of a span of owners with one operand is a compile
+  error, and each other leak of the list is a defined leak (D10.7). The compiler implements the
+  release-only exception and the two errors in later changes.
 
 ### D17.21 Use after move or del
 - owner: `memory-model.md` (`move`, `del`, transfer, lending, the overwrite check, the leak rule,
   the use rule), `core-language.md` (`move`, `del`, statements), `fir.md` 11 (the pass).
-- rule: Use after `move` or `del`. The terms owner, local owner and memory owner are those of
-  D17.20, and the analysis reads the FIR of one function and no other function. Places,
+- rule: Use after `move` or `del`. This entry holds obligation O-use of the four obligations of
+  D17.11, which the type of a place selects; D17.11 holds the normative split and the form
+  catalogue. The terms owner, local owner and memory owner are those of D17.20, and the analysis
+  reads the FIR of one function and no other function. It does not read the release-only bit of
+  D17.11 either, so operation 2 below holds at each call. Places,
   tracked places, keys, separate places, fixed storage and the Borrows are those of D17.11. A
   place contains `p` when `p` is a tracked place below it (D17.11). A fixed array of owners has an
   owner at each constant index in its bounds. A `move` or a `del` of a place vacates it: it
   leaves the zero value there (D17.6, D17.9).
   An owner that is no local owner has no obligation of this rule: a global, a place through a
   pointer such as `p->next`, and an element of a span such as `kids[i]`. A use of it after a
-  `move` or a `del` is outside the guarantee of this rule.
+  `move` or a `del` reads the zero value that the operation left (D17.6, D17.9), in both build
+  modes. So a load or a store through it is the runtime error `null dereference`, an index of it
+  is the index error, because the length of the zero span and of the zero string is 0, and a `del`
+  of it has no effect (D10.6).
   A place can overlap a local owner `p` when one of these is true:
   - It is a place in the fixed storage of the local of `p`, and it is not separate from `p`
     (D17.11). So `p` itself, a place that contains `p` and a part of `p`, such as `p.ptr`, can
@@ -3995,7 +4556,10 @@ says ownership is "by convention", this section supersedes it.
   1. a `move` or a `del` of a place that can overlap `p`, also the implicit `move` of `return x`
      (D17.5, D17.7);
   2. a call, when `p` is a memory owner. Kill rule 5 of D17.11 kills each fact of a memory owner
-     at a call, and this rule takes `p` as vacated after the call. `new` and `del` are no calls.
+     at a call whose callee is not release-only. At a call that names a release-only callee, it
+     keeps the facts that D17.11 lists ("The one fact of another function"). This rule reads no
+     bit: it takes `p` as vacated after each call, also when the callee is release-only. `new` and
+     `del` are no calls, and `regrow` is no call (D12.2).
   Two events end the state:
   - a store whose destination is `p` or contains `p`, when no store into the local that is the
     key of an index of that destination follows the store on the path;
@@ -4088,12 +4652,14 @@ says ownership is "by convention", this section supersedes it.
   `move`, no `del` and no call that can vacate an owner takes no fixpoint and no charge.
   The rule takes the assumptions of D17.11, those of its Borrows included (D10.7, D17.1). A use
   of `p` that cannot be vacated is no error of this rule, also when `p` holds a `null` that a
-  store wrote or the entry value of a parameter: a load through `null` stays undefined (D10.5,
-  D10.7). A view or a copy of the value of `p` that a lend made before the `move` or the `del`
-  designates the allocation and not the storage of `p`, so a read through it is no use of `p`. A
-  use of it after the free stays undefined (D10.7, D17.14). A read of a vacated owner of this
-  function that a callee makes through a pointer is outside the guarantee of this rule
-  (`spec/ownership-design.md` 5.2, X2).
+  store wrote or the entry value of a parameter: a load through `null` is the runtime error
+  `null dereference` (D10.5, D10.6). A view or a copy of the value of `p` that a lend made before
+  the `move` or the `del` designates the allocation and not the storage of `p`, so a read through
+  it is no use of `p`. A
+  use of it after the free reads or writes dead storage (D10.9, D17.14). A read of a vacated owner
+  of this function that a callee makes through a pointer is no error of this rule. In the callee
+  the owner is no local owner, so the read sees the zero value, as the paragraph on such an owner
+  above gives (`spec/ownership-design.md` 5.2, X2).
   What the analysis cannot prove: a use after a `move` or a `del` on some paths only, a use of a
   memory owner after a call, and a use after a `move` or a `del` of a place that can overlap the
   owner and does not contain it, such as another element of one fixed array or a place through a
@@ -4139,8 +4705,9 @@ says ownership is "by convention", this section supersedes it.
   is an error", the user, 2026-10-22), so the rule keeps no list of known gaps. The exempt reads
   see the zero value that D17.6 and D17.9 define, so they need no proof (the ruling on Q5). A
   vacated owner holds the zero value, so a test that finds another value proves that no `move` and
-  no `del` emptied it since its last store. The analysis reads no other function, so kill rule 5
-  stays at each call (premise 1 of `spec/ownership-design.md`). By the ruling on Q1, the rule
+  no `del` emptied it since its last store. The analysis of this rule reads no other function, so
+  operation 2 stays at each call, also where kill rule 5 of D17.11 keeps a fact at a call of a
+  release-only callee (premise 1 of `spec/ownership-design.md`). By the ruling on Q1, the rule
   follows a sound refinement R6, which D17.11 (Borrows) holds.
 - history: Added 2026-10-27 from rule (b) of `spec/ownership-design.md` 6.2, with the reads of the
   ruling on Q5 (section 12), the borrows of refinement R6 (D17.11, Borrows) and assumption A8
@@ -4165,6 +4732,18 @@ says ownership is "by convention", this section supersedes it.
   that the operation vacates. Before, the compiler listed each use under `--move-report` and
   accepted the program, and each note named `<place>`, so `del(t.e[1]); *t.e[0]` gave the note
   `'t.e[0]' is deleted here`. The change amends D15 and D17.14 too.
+  Amended 2026-11-11: the rule said that a use of an owner that is no local owner after a `move` or
+  a `del` "is outside the guarantee of this rule", that "a load through `null` stays undefined",
+  that a use of a view after the free "stays undefined", and that a read of a vacated owner that a
+  callee makes through a pointer "is outside the guarantee of this rule". The rationale said that
+  "The analysis reads no other function, so kill rule 5 stays at each call". The user ruled on
+  2026-11-11: "I don't want anything undefined." Each of the four cases now has a defined result:
+  the zero value and a runtime error (D10.6), or dead storage (D10.9). Kill rule 5 of D17.11 takes
+  the release-only exception. Operation 2 of this rule said: "Kill rule 5 of D17.11 kills each fact
+  of a memory owner at a call, and this rule takes `p` as vacated after the call. `new` and `del`
+  are no calls." Operation 2 keeps its rule: a call vacates each memory owner. Its text now names
+  the exception of kill rule 5, and it names `regrow` as no call (D12.2). The compiler implements
+  the checks of `null` in a later change.
 
 ## D18 Float printing in the runtime
 
@@ -4338,9 +4917,9 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   Two `-S` runs use identical arguments except the `-o` output path.
   That path does not enter the emitted IR text.
   A self-hosted compiler reaches a fixpoint when stage2 and stage3 emit byte-identical modules
-  for the same sources and selected target in four modes: checked and `--release` (D11.1), each
-  with and without `--no-bounds-check` (D10.6).
-  The toolchain must make two comparisons in each of the four modes. It must compare with `cmp` the
+  for the same sources and selected target in both build modes: checked and `--release` (D11.1).
+  No option removes a check (D10.6), so each stage binary holds the checks.
+  The toolchain must make two comparisons in each of the two modes. It must compare with `cmp` the
   `-S` output that two distinct stages emit for one input, with `diff` as the debugging output, and
   it must compare two stage binaries byte for byte.
   On Mac, both links use one output pathname.
@@ -4432,6 +5011,10 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   Amended 2026-09-30 (T-255): blocks were `%L<N>` "in creation order", the order in which the
   direct path created them. T-255 deleted the direct path, and the translator names each block by
   its FIR block number.
+  Amended 2026-11-11: the rule gave "four modes: checked and `--release` (D11.1), each with and
+  without `--no-bounds-check` (D10.6)". The user ruled on 2026-11-11: "I don't want anything
+  undefined." The compiler loses the option (D10.6), so the fixpoint has the two build modes, and
+  each stage binary holds the checks. The fixpoint script implements this rule in a later change.
 
 ### D19.6 Checks and failure blocks
 - owner: `toolchain.md` (6, the IR contract).
@@ -4445,7 +5028,10 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   carry `cold noreturn nounwind` on their definitions, in the group `#8` of `toolchain.md` 6 item
   14: `noreturn` is truthful, since every one of them is `fn noreturn` in `std.rt` (D8.5, D13.1) and
   aborts, and `cold` lays the block out of line, which is what the out-of-line failure stubs used to
-  do. `--no-bounds-check` removes exactly the index and span branches (D10.6).
+  do. No option removes a check (D10.6).
+  A test that the runtime makes inside one of its entries is no check of this rule and has no
+  failure block. `alloc` makes the tests of the size and of `out of memory`. The entry that releases
+  makes the test of `invalid release` (D10.9). The entry of `regrow` makes its five tests (D12.2).
 - history: Amended 2026-09-11 (T-020): the `switch` default was added, with `std.rt.fail_enum` in
   `toolchain.md` 5.1, which was then the C `fort_rt_fail_enum`. Amended 2026-09-11 (T-088): the
   attributes stood on a `declare` of a C entry point and `noreturn` was truthful because the C
@@ -4453,6 +5039,12 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   they stand on the definition the compiler emits from its `noreturn` fort signature.
   Amended 2026-10-22: the user made the overwrite check of D17.11 static, so it is no runtime
   check and has no failure block.
+  Amended 2026-11-11: the rule said "`--no-bounds-check` removes exactly the index and span branches
+  (D10.6)". The user ruled on 2026-11-11: "I don't want anything undefined." The compiler loses the
+  option (D10.6). The check of `null` (D10.6) is a runtime check of this rule, with a failure block.
+  The rule did not say where the runtime makes its own tests. It now says that `alloc`, the entry
+  that releases and the entry of `regrow` make their tests inside the runtime (D10.9, D12.2). The
+  compiler and the runtime implement this rule in a later change.
 
 ### D19.7 The trap after a noreturn body
 - owner: `toolchain.md` (6, the IR contract).
