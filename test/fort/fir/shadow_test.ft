@@ -3251,6 +3251,73 @@ string[10] CHAIN = {
     "}",
 };
 
+// A link that owns itself is a cycle of one allocation.
+string[9] SELF = {
+    "struct link {",
+    "    link mut* own next;",
+    "}",
+    "fn main() i32 {",
+    "    link mut* own a = new(link);",
+    "    link mut* pa = a;",
+    "    pa->next = move(a);",
+    "    return 0;",
+    "}",
+};
+
+// A cycle of two nodes holds a leaf. No chain of owners from an allocation with no owner reaches
+// the leaf, so it leaks through the cycle, and the run gives the one event of the cycle.
+string[13] BELOW = {
+    "struct node {",
+    "    node mut* own next;",
+    "    node mut* own leaf;",
+    "}",
+    "fn main() i32 {",
+    "    node mut* own a = new(node);",
+    "    node mut* own b = new(node);",
+    "    b->leaf = new(node);",
+    "    node mut* pa = a;",
+    "    b->next = move(a);",
+    "    pa->next = move(b);",
+    "    return 0;",
+    "}",
+};
+
+// A shallow `del` leaks the next link at the `del`, and the two links after it at exit. Each of
+// the two hangs below an allocation with no owner, so neither is of a cycle.
+string[11] LONG = {
+    "struct link {",
+    "    link mut* own next;",
+    "}",
+    "fn main() i32 {",
+    "    link mut* own a = new(link);",
+    "    a->next = new(link);",
+    "    a->next->next = new(link);",
+    "    a->next->next->next = new(link);",
+    "    del(a);",
+    "    return 0;",
+    "}",
+};
+
+// A cycle of two links and a chain that a shallow `del` leaks: the run gives the event of the
+// chain, and then the event of the cycle.
+string[15] BOTH = {
+    "struct link {",
+    "    link mut* own next;",
+    "}",
+    "fn main() i32 {",
+    "    link mut* own a = new(link);",
+    "    link mut* own b = new(link);",
+    "    link mut* pa = a;",
+    "    b->next = move(a);",
+    "    pa->next = move(b);",
+    "    link mut* own c = new(link);",
+    "    c->next = new(link);",
+    "    c->next->next = new(link);",
+    "    del(c);",
+    "    return 0;",
+    "}",
+};
+
 // A call of `exit` ends the run with no test at exit.
 string[12] EXITS = {
     "import extern; import std.libc;",
@@ -4292,11 +4359,13 @@ fn source(run_env.env mut* e) void {
 }
 
 // A whole program: the test of `leak at exit` when `main` returns, and none after a
-// call of `exit`. The one argument of the run is the path `p`.
+// call of `exit`. The event of an allocation that a cycle of owners holds ends with ` of a cycle`,
+// and the event of an allocation below one with no owner does not. The one argument of the run is
+// the path `p`.
 fn programs(run_env.env mut* e) void {
     string[1] argv = {"p"};
     string[2] w115 = {
-        "event leak at exit in main.main at 10:5",
+        "event leak at exit in main.main at 10:5 of a cycle",
         "exit 0",
     };
     run_env.expect(run_env.run_program(e, CYCLE[..], argv[..]), w115[..]);
@@ -4307,6 +4376,29 @@ fn programs(run_env.env mut* e) void {
         "exit 0",
     };
     run_env.expect(run_env.run_program(e, CHAIN[..], argv[..]), w117[..]);
+    string[2] own_link = {
+        "event leak at exit in main.main at 8:5 of a cycle",
+        "exit 0",
+    };
+    run_env.expect(run_env.run_program(e, SELF[..], argv[..]), own_link[..]);
+    string[2] below = {
+        "event leak at exit in main.main at 12:5 of a cycle",
+        "exit 0",
+    };
+    run_env.expect(run_env.run_program(e, BELOW[..], argv[..]), below[..]);
+    string[3] tail = {
+        "event leak in main.main at 9:5",
+        "event leak at exit in main.main at 10:5",
+        "exit 0",
+    };
+    run_env.expect(run_env.run_program(e, LONG[..], argv[..]), tail[..]);
+    string[4] both = {
+        "event leak in main.main at 13:5",
+        "event leak at exit in main.main at 14:5",
+        "event leak at exit in main.main at 14:5 of a cycle",
+        "exit 0",
+    };
+    run_env.expect(run_env.run_program(e, BOTH[..], argv[..]), both[..]);
     run_env.expect_line(run_env.run_program(e, EXITS[..], argv[..]), "exit 3");
     run_env.expect_line(run_env.run_program(e, QUIET[..], argv[..]), "exit 4");
     run_env.expect_line(run_env.run_program(e, SPAN[..], argv[..]), "exit 0");

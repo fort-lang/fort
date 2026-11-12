@@ -1,0 +1,66 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| overwrite: error, D17.11
+//| leak: error, D17.20
+//| leak at exit: cycle leak, D17.20
+//| double release: trusted, A1
+//| invalid release: trusted, A2
+//| use after release: trusted, A1
+//| use after move: error, D17.21
+//| use after scope: trusted, A1
+//| duplicate owner: trusted, A2
+//| forged: trusted, A8
+//| kinds 10 of 10, complete true
+//| an event: overwrite, leak, leak at exit, use after move
+//| an event of a cycle: overwrite, leak, use after move
+//| an event at an exit into an abort block: overwrite, leak at exit, use after move
+//| an event of a cycle at an exit into an abort block: overwrite, use after move
+/// Checks the disposition table of the oracle gate (test/fort/support/disposition.ft): the row of
+/// each event kind of fir.shadow, that the table has as many rows as the shadow has kinds, and
+/// the kinds that are an error, for an event of a cycle and for an event at an exit into an abort
+/// block. A person derived each expected line from the rules: D17.11, D17.20 and D17.21 give the
+/// error kinds, D17.20 takes a cycle of owners and an exit into an abort block out of the leak
+/// rule, and each other kind breaks an assumption of spec/ownership-design.md 5.1.
+import disposition;
+import fort.fir.shadow;
+
+// Prints the kinds whose event is an error. With `cycle`, the event says that a cycle of owners
+// holds its allocation. With `abort_exit`, it stands at an exit into an abort block.
+fn print_errors(bool cycle, bool abort_exit) void {
+    bool mut first = true;
+    for (u64 mut i = 0; i < disposition.TABLE.len; i++) {
+        shadow.event mut ev = shadow.event{};
+        ev.kind = disposition.TABLE[i].event;
+        ev.cycle = cycle;
+        if (!disposition.is_error(&ev, abort_exit)) {
+            continue;
+        }
+        if (!first) {
+            print(", ");
+        }
+        print(shadow.EVENT_TEXT[i]);
+        first = false;
+    }
+    println("");
+}
+
+fn main() i32 {
+    for (u64 mut i = 0; i < disposition.TABLE.len; i++) {
+        disposition.row r = disposition.TABLE[i];
+        u64 d = cast(cast(r.disposition, i32), u64);
+        println(shadow.EVENT_TEXT[disposition.index_of(r.event)], ": ",
+                disposition.DISPOSITION_TEXT[d], ", ", r.basis);
+    }
+    println("kinds ", disposition.TABLE.len, " of ", shadow.EVENT_KINDS, ", complete ",
+            disposition.is_complete());
+    print("an event: ");
+    print_errors(false, false);
+    print("an event of a cycle: ");
+    print_errors(true, false);
+    print("an event at an exit into an abort block: ");
+    print_errors(false, true);
+    print("an event of a cycle at an exit into an abort block: ");
+    print_errors(true, true);
+    return 0;
+}

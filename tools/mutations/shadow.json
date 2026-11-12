@@ -5,10 +5,14 @@
     "that the event `forged` reads, with the interpreter lines that feed them",
     "(src/fort/fir/interpreter.ft). A row names the line that decides the rule and a text that",
     "breaks it. The first stage runs the suite of the shadow (test/fort/fir/shadow_test.ft), the",
-    "second the driver suite of --fir-events and the pass `run`, and the third the FIR tests. The",
-    "table runs in the Linux VM with the debug preset and the default runner. The md5 guard reads",
-    "the product compiler, whose interpreter calls fir.shadow. The first round of a run can read",
-    "stale (notes/testing.md 7), so the first row is one that a full run caught."
+    "second the driver suite of --fir-events and the pass `run`, the third the FIR tests, and the",
+    "fourth the test of the disposition table of the oracle gate",
+    "(test/fort/owner/disposition_test.ft). The row event-kinds stops there with a compile error:",
+    "the `switch` of the disposition table over the event kinds has no `default` (D7.7). The",
+    "rows leak-at-exit hold the cycle mark of that event. The table runs",
+    "in the Linux VM with the debug preset and the default runner. The md5 guard reads the product",
+    "compiler, whose interpreter calls fir.shadow. The first round of a run can read stale",
+    "(notes/testing.md 7), so the first row is one that a full run caught."
   ],
   "sources": [
     "src/fort/fir/shadow.ft",
@@ -28,6 +32,10 @@
     {
       "name": "the FIR tests",
       "command": "python3 test/fir/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std"
+    },
+    {
+      "name": "the test of the disposition table",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 owner/disposition_test"
     }
   ],
   "mutations": [
@@ -76,9 +84,51 @@
     {
       "decision": "leak-at-exit",
       "file": "src/fort/fir/shadow.ft",
-      "old": "        if (r->live && !r->reached && !r->reported) {",
-      "new": "        if (r->live && !r->reached && !r->reported && false) {",
+      "old": "        if (r->live && !r->reached && r->holders > 0 && !r->reported) {",
+      "new": "        if (r->live && !r->reached && r->holders > 0 && !r->reported && false) {",
       "what": "a cycle of owners makes no `leak at exit`"
+    },
+    {
+      "decision": "leak-at-exit-no-holder",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        if (r->live && !r->reached && r->holders == 0) {",
+      "new": "        if (r->live && !r->reached && r->holders == 0 && false) {",
+      "what": "a leaked allocation that no owner slot holds starts no `leak at exit`"
+    },
+    {
+      "decision": "leak-at-exit-cycle-tag",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "            record(sh, event_kind.ev_leak_at_exit, tag{}, true);",
+      "new": "            record(sh, event_kind.ev_leak_at_exit, tag{}, false);",
+      "what": "the `leak at exit` of a cycle of owners has no cycle tag"
+    },
+    {
+      "decision": "leak-at-exit-plain-tag",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "            record(sh, event_kind.ev_leak_at_exit, tag{}, false);",
+      "new": "            record(sh, event_kind.ev_leak_at_exit, tag{}, true);",
+      "what": "the `leak at exit` of no cycle has the cycle tag"
+    },
+    {
+      "decision": "leak-at-exit-below",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        r->holders -= 1;\n",
+      "new": "",
+      "what": "an allocation below a leaked one keeps its holder, so its `leak at exit` has the cycle tag"
+    },
+    {
+      "decision": "leak-at-exit-key",
+      "file": "src/fort/fir/shadow.ft",
+      "old": " && o->cycle == cycle)) {",
+      "new": ")) {",
+      "what": "the two `leak at exit` events of one item are one event, with and without a cycle"
+    },
+    {
+      "decision": "leak-at-exit-line",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        if (e->cycle) {",
+      "new": "        if (false) {",
+      "what": "the line of a `leak at exit` of a cycle does not say so"
     },
     {
       "decision": "leak-at-exit-roots",
@@ -583,6 +633,13 @@
       "old": "    if (find_region(it, addr, types.type_sizeof(t)) != NONE) {\n        shadow.access(&it->sh, addr, types.type_sizeof(t), true, false);\n    }\n",
       "new": "    reach(it, addr, types.type_sizeof(t), true);\n",
       "what": "the test of the whole place of a `del` faults where no region holds it, so the shadow changes the outcome"
+    },
+    {
+      "decision": "event-kinds",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    ev_forged,\n}\n\n/// The count of the kinds of event_kind.\nu64 EVENT_KINDS = 10;\n\n/// The text of each kind of event_kind in a line of write_events, in its order.\nstring[EVENT_KINDS] EVENT_TEXT = {\n    \"overwrite\", \"leak\", \"leak at exit\", \"double release\", \"invalid release\",\n    \"use after release\", \"use after move\", \"use after scope\", \"duplicate owner\", \"forged\",\n};",
+      "new": "    ev_forged,\n    ev_new,\n}\n\n/// The count of the kinds of event_kind.\nu64 EVENT_KINDS = 11;\n\n/// The text of each kind of event_kind in a line of write_events, in its order.\nstring[EVENT_KINDS] EVENT_TEXT = {\n    \"overwrite\", \"leak\", \"leak at exit\", \"double release\", \"invalid release\",\n    \"use after release\", \"use after move\", \"use after scope\", \"duplicate owner\", \"forged\", \"new\",\n};",
+      "what": "the shadow has a new event kind that the disposition table of the oracle gate does not name"
     }
   ]
 }

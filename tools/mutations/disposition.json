@@ -1,0 +1,296 @@
+{
+  "comment": [
+    "The table of the gate of the oracle test (test/fort/owner/oracle_test.ft) and of its",
+    "disposition table (test/fort/support/disposition.ft). The gate fails an item when a run",
+    "gives an error event that no rule of the compiler for that item excuses (D17.11, D17.20,",
+    "D17.21). A row mutes one error kind, changes when a `leak` or a `leak at exit` is an",
+    "error, breaks the order of the table, changes a count, a family or a kind of KNOWN, raises",
+    "a row of FLOORS, gives each item of one family an error, takes a rule from an item, or",
+    "lets a report line excuse an event of another rule. The sources are test sources and no",
+    "part of the compiler binary, so the build writes both into one file and the md5 guard",
+    "reads that file. The stage runs the oracle test, which compiles the two sources itself.",
+    "A row counts as caught only when the test stops with a panic of the gate: the pinned",
+    "stdout of the test alone holds no row. The table runs in the Linux VM with the debug",
+    "preset and the default runner after `tools/vm build`."
+  ],
+  "sources": [
+    "test/fort/support/disposition.ft",
+    "test/fort/owner/oracle_test.ft"
+  ],
+  "binary": "build/Linux/debug/disposition_gate.txt",
+  "build": "cat test/fort/support/disposition.ft test/fort/owner/oracle_test.ft > build/Linux/debug/disposition_gate.txt",
+  "stages": [
+    {
+      "name": "the oracle test",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 owner/oracle_test"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D17.21-error",
+      "file": "test/fort/support/disposition.ft",
+      "old": "    row{shadow.event_kind.ev_use_after_move, disposition_kind.dk_error, \"D17.21\"},",
+      "new": "    row{shadow.event_kind.ev_use_after_move, disposition_kind.dk_trusted, \"D17.21\"},",
+      "what": "the gate does not judge a `use after move`"
+    },
+    {
+      "decision": "D17.11-error",
+      "file": "test/fort/support/disposition.ft",
+      "old": "    row{shadow.event_kind.ev_overwrite, disposition_kind.dk_error, \"D17.11\"},",
+      "new": "    row{shadow.event_kind.ev_overwrite, disposition_kind.dk_trusted, \"D17.11\"},",
+      "what": "the gate does not judge an `overwrite`"
+    },
+    {
+      "decision": "D17.20-error",
+      "file": "test/fort/support/disposition.ft",
+      "old": "    row{shadow.event_kind.ev_leak, disposition_kind.dk_error, \"D17.20\"},",
+      "new": "    row{shadow.event_kind.ev_leak, disposition_kind.dk_trusted, \"D17.20\"},",
+      "what": "the gate does not judge a `leak`"
+    },
+    {
+      "decision": "D17.20-exit",
+      "file": "test/fort/support/disposition.ft",
+      "old": "        return !ev->cycle;",
+      "new": "        return false;",
+      "what": "each `leak at exit` is no error, as that of a cycle of owners"
+    },
+    {
+      "decision": "D17.20-cycle",
+      "file": "test/fort/support/disposition.ft",
+      "old": "        return !ev->cycle;",
+      "new": "        return true;",
+      "what": "a `leak at exit` of a cycle of owners is an error"
+    },
+    {
+      "decision": "D17.20-no-abort-exit",
+      "file": "test/fort/support/disposition.ft",
+      "old": "    return ev->kind != shadow.event_kind.ev_leak || !abort_exit;",
+      "new": "    return true;",
+      "what": "a `leak` at an exit into an abort block is an error"
+    },
+    {
+      "decision": "D17.20-each-dead",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "    return ev->kind == shadow.event_kind.ev_leak && ev->at.line >= DEAD_LINE\n        && bt->deads.items[cast(ev->at.line - DEAD_LINE, u64)].abort;",
+      "new": "    return ev->kind == shadow.event_kind.ev_leak && ev->at.line >= DEAD_LINE;",
+      "what": "a `leak` at each `dead` marker is no error, also at a scope end before a `panic`"
+    },
+    {
+      "decision": "table-order",
+      "file": "test/fort/support/disposition.ft",
+      "old": "    row{shadow.event_kind.ev_double_release, disposition_kind.dk_trusted, \"A1\"},\n    row{shadow.event_kind.ev_invalid_release, disposition_kind.dk_trusted, \"A2\"},",
+      "new": "    row{shadow.event_kind.ev_invalid_release, disposition_kind.dk_trusted, \"A2\"},\n    row{shadow.event_kind.ev_double_release, disposition_kind.dk_trusted, \"A1\"},",
+      "what": "two rows of the table stand out of the order of the kinds"
+    },
+    {
+      "decision": "gate-excused",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "    } else if (is_excused(bt, of, ev)) {",
+      "new": "    } else if (true) {",
+      "what": "each error event counts as one that a rule of its item excuses"
+    },
+    {
+      "decision": "gate-failing",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "        if (it->errors == 0) {\n            continue;\n        }\n        u64 kind = disposition.index_of(it->failure.kind);",
+      "new": "        if (it->errors < 9) {\n            continue;\n        }\n        u64 kind = disposition.index_of(it->failure.kind);",
+      "what": "an item with fewer than 9 error events that no rule excuses passes the gate"
+    },
+    {
+      "decision": "known-low",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "    known{family.fm_exhaustive, shadow.event_kind.ev_use_after_move, 1,",
+      "new": "    known{family.fm_exhaustive, shadow.event_kind.ev_use_after_move, 0,",
+      "what": "KNOWN does not count the item that fails, so an unlisted item fails"
+    },
+    {
+      "decision": "known-high",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "    known{family.fm_exhaustive, shadow.event_kind.ev_use_after_move, 1,",
+      "new": "    known{family.fm_exhaustive, shadow.event_kind.ev_use_after_move, 2,",
+      "what": "KNOWN counts one item more than fail, as after an item starts to pass"
+    },
+    {
+      "decision": "known-family",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "    known{family.fm_exhaustive, shadow.event_kind.ev_use_after_move, 1,",
+      "new": "    known{family.fm_seeded, shadow.event_kind.ev_use_after_move, 1,",
+      "what": "KNOWN lists the failing item of the exhaustive family in another family"
+    },
+    {
+      "decision": "known-kind",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "    known{family.fm_exhaustive, shadow.event_kind.ev_use_after_move, 1,",
+      "new": "    known{family.fm_exhaustive, shadow.event_kind.ev_overwrite, 1,",
+      "what": "KNOWN lists the failing item under another event kind"
+    },
+    {
+      "decision": "known-seeded-low",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "    known{family.fm_seeded, shadow.event_kind.ev_use_after_move, 1,",
+      "new": "    known{family.fm_seeded, shadow.event_kind.ev_use_after_move, 0,",
+      "what": "KNOWN does not count the seeded item that fails, so an unlisted item fails"
+    },
+    {
+      "decision": "known-seeded-high",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "    known{family.fm_seeded, shadow.event_kind.ev_use_after_move, 1,",
+      "new": "    known{family.fm_seeded, shadow.event_kind.ev_use_after_move, 2,",
+      "what": "KNOWN counts one seeded item more than fail, as after an item starts to pass"
+    },
+    {
+      "decision": "floor-hand",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "    floor{family.fm_hand, 43},",
+      "new": "    floor{family.fm_hand, 44},",
+      "what": "the floor of the hand family is one above its count of accepted items"
+    },
+    {
+      "decision": "floor-exhaustive",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "    floor{family.fm_exhaustive, 5836},",
+      "new": "    floor{family.fm_exhaustive, 5837},",
+      "what": "the floor of the exhaustive family is one above its count of accepted items"
+    },
+    {
+      "decision": "floor-seeded",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "    floor{family.fm_seeded, 462},",
+      "new": "    floor{family.fm_seeded, 463},",
+      "what": "the floor of the seeded family is one above its count of accepted items"
+    },
+    {
+      "decision": "floor-shapes",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "    floor{family.fm_shapes, 140},",
+      "new": "    floor{family.fm_shapes, 141},",
+      "what": "the floor of the shapes family is one above its count of accepted items"
+    },
+    {
+      "decision": "refuse-each-hand",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "            take_rules(&bt->items[owner], &lines);\n",
+      "new": "            lines.error = lines.error || bt->kind == family.fm_hand;\n            take_rules(&bt->items[owner], &lines);\n",
+      "what": "each item of the hand family has an error, so the family accepts no item and no event fails one"
+    },
+    {
+      "decision": "refuse-each-exhaustive",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "            take_rules(&bt->items[owner], &lines);\n",
+      "new": "            lines.error = lines.error || bt->kind == family.fm_exhaustive;\n            take_rules(&bt->items[owner], &lines);\n",
+      "what": "each item of the exhaustive family has an error, so the family accepts no item and no event fails one"
+    },
+    {
+      "decision": "refuse-each-seeded",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "            take_rules(&bt->items[owner], &lines);\n",
+      "new": "            lines.error = lines.error || bt->kind == family.fm_seeded;\n            take_rules(&bt->items[owner], &lines);\n",
+      "what": "each item of the seeded family has an error, so the family accepts no item and no event fails one"
+    },
+    {
+      "decision": "refuse-each-shapes",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "            take_rules(&bt->items[owner], &lines);\n",
+      "new": "            lines.error = lines.error || bt->kind == family.fm_shapes;\n            take_rules(&bt->items[owner], &lines);\n",
+      "what": "each item of the shapes family has an error, so the family accepts no item and no event fails one"
+    },
+    {
+      "decision": "accept-error",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "    it->error = it->error || prover.has_error(p);",
+      "new": "    it->error = it->error;",
+      "what": "an item with a compile error of an owner rule counts as accepted"
+    },
+    {
+      "decision": "accept-leak-report",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "        it->leak_line = it->leak_line || !p->inners[k].proved;",
+      "new": "        it->leak_line = it->leak_line || p->inners[k].proved != p->inners[k].proved;",
+      "what": "an item with a line of --leak-report has no such line"
+    },
+    {
+      "decision": "accept-whole-store-report",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "        it->whole_line = it->whole_line || !p->wholes[k].proved;",
+      "new": "        it->whole_line = it->whole_line || p->wholes[k].proved != p->wholes[k].proved;",
+      "what": "an item with a line of --whole-store-report has no such line"
+    },
+    {
+      "decision": "accept-span-del-report",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "                it->span_line = true;\n                found = true;",
+      "new": "                found = true;",
+      "what": "an item with a line of --span-del-report has no such line"
+    },
+    {
+      "decision": "accept-caller",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "    refuse_span_dels(c, bt);\n    refuse_callers(bt);\n    counts mut n = counts{};",
+      "new": "    refuse_span_dels(c, bt);\n    counts mut n = counts{};",
+      "what": "an item takes no rule of an item whose function it names"
+    },
+    {
+      "decision": "excuse-leak-line-overwrite",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "        return of->whole_line;",
+      "new": "        return of->whole_line || of->leak_line;",
+      "what": "a line of --leak-report excuses an `overwrite`"
+    },
+    {
+      "decision": "excuse-span-line-overwrite",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "        return of->whole_line;",
+      "new": "        return of->whole_line || of->span_line;",
+      "what": "a line of --span-del-report excuses an `overwrite`"
+    },
+    {
+      "decision": "excuse-whole-line-leak",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "        return of->leak_line || (of->span_line && is_at_span_del(bt, ev));",
+      "new": "        return of->leak_line || of->whole_line || (of->span_line && is_at_span_del(bt, ev));",
+      "what": "a line of --whole-store-report excuses a `leak`"
+    },
+    {
+      "decision": "excuse-span-line-each-leak",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "        return of->leak_line || (of->span_line && is_at_span_del(bt, ev));",
+      "new": "        return of->leak_line || of->span_line;",
+      "what": "a line of --span-del-report excuses each `leak`, also one that stands at no `del` of a span"
+    },
+    {
+      "decision": "excuse-span-line-exit",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "    if (ev->kind == shadow.event_kind.ev_leak_at_exit) {\n        return of->leak_line;",
+      "new": "    if (ev->kind == shadow.event_kind.ev_leak_at_exit) {\n        return of->leak_line || of->span_line;",
+      "what": "a line of --span-del-report excuses a `leak at exit`"
+    },
+    {
+      "decision": "excuse-whole-line-exit",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "    if (ev->kind == shadow.event_kind.ev_leak_at_exit) {\n        return of->leak_line;",
+      "new": "    if (ev->kind == shadow.event_kind.ev_leak_at_exit) {\n        return of->leak_line || of->whole_line;",
+      "what": "a line of --whole-store-report excuses a `leak at exit`"
+    },
+    {
+      "decision": "excuse-line-use",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "        return of->leak_line;\n    }\n    return false;\n}",
+      "new": "        return of->leak_line;\n    }\n    return is_refused(of);\n}",
+      "what": "each report line excuses a `use after move`, which no report option names"
+    },
+    {
+      "decision": "excuse-no-leak-line",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "        return of->leak_line || (of->span_line && is_at_span_del(bt, ev));",
+      "new": "        return of->span_line && is_at_span_del(bt, ev);",
+      "what": "a line of --leak-report excuses no `leak`"
+    },
+    {
+      "decision": "excuse-no-whole-line",
+      "file": "test/fort/owner/oracle_test.ft",
+      "old": "        return of->whole_line;",
+      "new": "        return false;",
+      "what": "a line of --whole-store-report excuses no `overwrite`"
+    }
+  ]
+}
