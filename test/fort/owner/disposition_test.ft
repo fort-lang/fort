@@ -1,0 +1,84 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| overwrite: error, D17.11
+//| leak: error, D17.20
+//| leak at exit: cycle leak, D17.20
+//| double release: trusted, A1
+//| invalid release: trusted, A2
+//| use after release: trusted, A1
+//| use after move: error, D17.21
+//| use after scope: trusted, A1
+//| duplicate owner: trusted, A2
+//| forged: trusted, A8
+//| kinds 10 of 10, complete true
+//| return: overwrite, leak, leak at exit, use after move
+//| return, of a cycle: overwrite, leak, use after move
+//| exit: overwrite, leak, leak at exit, use after move
+//| exit, of a cycle: overwrite, leak, use after move
+//| abort: overwrite, leak at exit, use after move
+//| abort, of a cycle: overwrite, use after move
+//| trap: overwrite, leak at exit, use after move
+//| trap, of a cycle: overwrite, use after move
+//| outside: overwrite, leak, leak at exit, use after move
+//| outside, of a cycle: overwrite, leak, use after move
+//| fault: overwrite, leak, leak at exit, use after move
+//| fault, of a cycle: overwrite, leak, use after move
+/// Checks the disposition table of the oracle gate (test/fort/support/disposition.ft): the row of
+/// each event kind of fir.shadow, that the table has as many rows as the shadow has kinds, and
+/// the kinds that are an error for each way that a run ends. A person derived each expected line
+/// from the rules: D17.11, D17.20 and D17.21 give the error kinds, D17.20 takes a cycle of owners
+/// and a path that ends in a runtime error out of the leak rule, and each other kind breaks an
+/// assumption of spec/ownership-design.md 5.1.
+import disposition;
+import fort.fir.interpreter;
+import fort.fir.shadow;
+
+// The ways that a run ends, and the name of each.
+u64 ENDS = 6;
+
+interpreter.outcome_kind[ENDS] END_KINDS = {
+    interpreter.outcome_kind.oc_return, interpreter.outcome_kind.oc_exit,
+    interpreter.outcome_kind.oc_abort, interpreter.outcome_kind.oc_trap,
+    interpreter.outcome_kind.oc_outside, interpreter.outcome_kind.oc_fault,
+};
+
+string[ENDS] END_TEXT = {"return", "exit", "abort", "trap", "outside", "fault"};
+
+// Prints the kinds whose event is an error in a run that ended in `end`. With `cycle`, the event
+// says that a cycle of owners holds its allocation.
+fn print_errors(interpreter.outcome_kind end, bool cycle) void {
+    bool mut first = true;
+    for (u64 mut i = 0; i < disposition.TABLE.len; i++) {
+        shadow.event mut ev = shadow.event{};
+        ev.kind = disposition.TABLE[i].event;
+        ev.cycle = cycle;
+        if (!disposition.is_error(&ev, end)) {
+            continue;
+        }
+        if (!first) {
+            print(", ");
+        }
+        print(shadow.EVENT_TEXT[i]);
+        first = false;
+    }
+    println("");
+}
+
+fn main() i32 {
+    for (u64 mut i = 0; i < disposition.TABLE.len; i++) {
+        disposition.row r = disposition.TABLE[i];
+        u64 d = cast(cast(r.disposition, i32), u64);
+        println(shadow.EVENT_TEXT[disposition.index_of(r.event)], ": ",
+                disposition.DISPOSITION_TEXT[d], ", ", r.basis);
+    }
+    println("kinds ", disposition.TABLE.len, " of ", shadow.EVENT_KINDS, ", complete ",
+            disposition.is_complete());
+    for (u64 mut k = 0; k < ENDS; k++) {
+        print(END_TEXT[k], ": ");
+        print_errors(END_KINDS[k], false);
+        print(END_TEXT[k], ", of a cycle: ");
+        print_errors(END_KINDS[k], true);
+    }
+    return 0;
+}

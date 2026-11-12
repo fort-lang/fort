@@ -708,7 +708,10 @@ bullet at a time and without a rewrite.
   in the order of their numbers, so `&y + 8` reaches `x` in most of its cases. A store of a byte
   beside an owner word goes through an address of the same local, because a byte of the next local
   or of padding through `&p` is `forged`. A person derived each expected report from the design; no
-  case was blessed from a run. `run_env.events` turns the report of the events on.
+  case was blessed from a run. `run_env.events` turns the report of the events on. Four cases
+  hold the cycle mark of a `leak at exit`: an allocation that owns itself, one below a cycle, two
+  links below a link that a shallow `del` leaked, and a run with both kinds, which gives two
+  events at one location. The rows `leak-at-exit` of `tools/mutations/shadow.json` hold the mark.
 - **The oracle test holds a rule against the runs of the oracle** (`test/fort/owner/oracle_test.ft`,
   `spec/ownership-design.md` 3.6). It checks a batch of fort source in a sandbox, lowers each
   function, runs the pass of the rule on it and runs it in `fir.interpreter`. A site is a function
@@ -727,9 +730,37 @@ bullet at a time and without a rewrite.
   rule; the counts of the families are measured. `tools/mutations/oracle.json` holds the mutants of
   `owner.place` and `owner.prover` that prove too much, with the oracle test as its one stage. The
   log of a round says whether the test printed a false accept or only a changed count.
+  **The gate judges each item in a closed world.** The compiler refuses an item when the pass
+  gives one of its functions an error, a line of `--leak-report` or a line of
+  `--whole-store-report`, when the item holds a one-operand `del` of a span of owners
+  (`--span-del-report`), or when it names a function of a refused item. Each event of each run goes
+  through `disposition.is_error` (`test/fort/support/disposition.ft`), which reads the kind of the
+  event, its cycle mark and the end of the run (`it->end.kind`). It reads nothing of the statement
+  that gave the event, and the test holds no list of event kinds or statement forms that it does
+  not judge. The table `TABLE` has one row for each event kind: `overwrite`, `leak` and `use after
+  move` are errors, a `leak at exit` is an error unless a cycle of owners holds its allocation, and
+  the six other kinds are trusted (A1, A2, A8) until the run gate defines them. A `leak` is no
+  error in a run that ends in `abort` or `trap`. `disposition.is_complete` compares the count of
+  the rows with `shadow.EVENT_KINDS`, and the oracle test stops first when it fails, so a new
+  event kind needs a row. `test/fort/owner/disposition_test.ft` holds the table and the error
+  kinds for each end of a run. An accepted item with an error event fails the gate. `KNOWN` in the
+  oracle test counts the failing items by family and event kind, and `hold_known` stops the test
+  when a set has more or fewer: measured on 2026-11-11, 1 item of the exhaustive family, in which
+  a callee reads the vacated slot of a local owner through a pointer. A count only goes down, in
+  the change that makes its item pass. The site counts below stay as the report of each rule in
+  the refused items too, and the 105 rows of `tools/mutations/oracle.json` read them.
+  `tools/mutations/disposition.json` holds the gate: 20 rows that mute an error kind, change a
+  count of `KNOWN` or accept a refused item, with the oracle test as the one stage. The row
+  accept-whole-store-report survived until the hand case `whole` of `GATE_CASES`: no other item
+  had the line of `--whole-store-report` as the one reason that the compiler refuses it. The row
+  event-kinds of `tools/mutations/shadow.json` adds an event kind, and the disposition test
+  catches it. The helper
+  `drive` of `generator.PRELUDE` builds each field of its struct through a local owner: with a
+  store of `new` straight into the field, the compiler refused each exhaustive and shapes batch,
+  and the gate accepted no item of them.
   **The test holds part 1 of the leak rule of D17.20 too.** An exit site is a function and the
   location of a `dead` of an owner local outside an abort block, or of a `return`, and a `leak`
-  event at it is in the scope of the rule. The sites come from the FIR, and the exits of the proof
+  event at it marks the site. The sites come from the FIR, and the exits of the proof
   only mark them rejected: with sites from the proof alone, row D17.20-dead of
   `tools/mutations/oracle.json`, which drops each obligation of a `dead`, changed only counts and
   printed no false accept. The run reports a `leak` with no tag, at the item where the count of the
@@ -737,19 +768,19 @@ bullet at a time and without a rewrite.
   `dead` to a line of its own from `DEAD_LINE` before it proves and runs the batch (`relocate`); a
   `dead` changes no fact and no run. Without the move, a `leak` of a struct local at a closing brace
   would mark the site of an `own` local at that brace. The move gives each `leak` of two locals at
-  one brace its own event, so a change of the move changes the count `outside rule (a): leak` with
+  one brace its own event, so a change of the move changes the count of the line `gate leak` with
   no change of a run. **The owners at one `return` share one site, and their `leak` has no tag.** So
   one owner that the pass does not prove at a `return` hides a wrong proof of another owner at that
   `return`: the site is a reject with an event either way. The parameters and the temporaries end at
   the `return` together, and only a tag on the event would part them. A `leak` at the `return` of a
-  function with a parameter or a temporary of an owning aggregate type counts apart (`unsure
-  return`), because no event tells it from that of an owner local. **No other condition of a run
-  counts a `leak` apart.** A leak after a store through a dangling pointer is outside the guarantee
-  of D17.11, but a test that counted each `leak` of a run with a `use after scope` apart hid two
-  false accepts of mutants (`dangle_mix`, `late_dangle`): the access and the leak need not touch one
-  owner. Such a case stands in `test/fort/owner/prover_test.ft` with a comment, and not in the
-  oracle sets. The exit cases (`EXIT_CASES`) hold one case for each exit kind, and the seeded family
-  inserts into them as into the hand cases.
+  function with a parameter or a temporary of an owning aggregate type marks no site of an owner
+  local (`unsure`), because no event tells it from that of an owner local. **No other condition of
+  a run keeps a `leak` from its site.** A leak after a store through a dangling pointer is outside
+  the guarantee of D17.11, but a test that kept each `leak` of a run with a `use after scope` from
+  its site hid two false accepts of mutants (`dangle_mix`, `late_dangle`): the access and the leak
+  need not touch one owner. Such a case stands in `test/fort/owner/prover_test.ft` with a comment,
+  and not in the oracle sets. The exit cases (`EXIT_CASES`) hold one case for each exit kind, and
+  the seeded family inserts into them as into the hand cases.
   **The test holds part 2 of the leak rule too.** A site of part 2 is a function and the location of
   a `del` of a `T* own`, or of a `cast` whose operand moves a `T* own`, where `T` holds an owner by
   the checker's mark of its type (`holds_owners`), and not by `owner.place`, so that the sites come
@@ -762,19 +793,18 @@ bullet at a time and without a rewrite.
   `del` of a pointer to an object with no owner by its type comes after a `cast` that hid the
   owners, and it marks the `cast` sites of its function, or of the batch when its function has
   none; with no `cast` site the test counts a false accept. So a hand case with two `cast` sites
-  of one function cannot tell them apart. A `leak` at a `del` of a span counts apart (`span
-  leaks`): a one-operand `del` of a span whose elements hold owners is no error until the code
-  that CI compiles uses `del(s, d)` (D17.9, `--span-del-report`). So the `other` count of
-  part 1 holds no `leak` at a `del`. The cases of part 2 (`DEL_CASES`) give each kind of site, and
-  the seeded family inserts into them. The exhaustive family reaches part 2 through the local `r`
-  of `generator.LOCAL_DECL`, an owning pointer to a `pair` with a deferred `del`, and four
-  statements over `r->a`. A set prints its line of part 2 only when it holds a site of part 2 or a
-  leak of a span, so a case with neither adds no line to the expected stdout. A store through a view
-  after a proved `cast` gives the object an owner that the `del` of the new pointer leaks, and no
-  site has that event, so the case would count a false accept: it stands in
-  `test/fort/owner/prover_test.ft` (`cast_alias` with a view of the old pointer) with a comment that
-  it is outside the guarantee, and not in the oracle sets. The form with a view of the new pointer
-  does not compile since D3.14 refuses a cast that hides an owner place, so `cast_view` is gone.
+  of one function cannot tell them apart. A `leak` at a `del` of a span marks no site of part 2: a
+  one-operand `del` of a span whose elements hold owners gets a line of `--span-del-report` (D17.9),
+  so the gate refuses its item. The cases of part 2 (`DEL_CASES`) give each kind of site, and the
+  seeded family inserts into them. The exhaustive family reaches part 2 through the local `r` of
+  `generator.LOCAL_DECL`, an owning pointer to a `pair` with a deferred `del`, and four statements
+  over `r->a`. A set prints its line of part 2 only when it holds a site of part 2, so a case with
+  none adds no line to the expected stdout. A store through a view after a proved `cast` gives the
+  object an owner that the `del` of the new pointer leaks, and no site has that event, so the case
+  would count a false accept: it stands in `test/fort/owner/prover_test.ft` (`cast_alias` with a
+  view of the old pointer) with a comment that it is outside the guarantee, and not in the oracle
+  sets. The form with a view of the new pointer does not compile since D3.14 refuses a cast that
+  hides an owner place, so `cast_view` is gone.
   **The test holds the tests against null of D17.11 gen rule 6 too.** The vocabulary of
   `generator.ft` holds an `if` on `==`, `!=`, a negation, `&&` and the `else` arm of `||`, over `x`,
   `y`, `q->a`, `*p`, `r->a`, `G` and `arr[j]`, and a loop on `!=` that a `del` ends; the items
@@ -807,21 +837,20 @@ bullet at a time and without a rewrite.
   D3.5, D3.14, D6.9 and D17.13, so a program that compiles makes no such access unless C breaks
   A7; a FIR test still can. A FIR run that writes `x` through the address of `y` plus 8 reports
   `forged` at the access and no event after it, so the test counts no false accept there, though R6
-  may keep the fact of `x`. Each set prints its count of `forged` events on a line of its own
-  (`outside each rule (A8)`), with its rejected sites that have no event at
-  or after a `forged` event of their function: such a site is no false reject, because the run
-  reports no event after `forged`. The generator forges no pointer to a local, and no hand case
-  does: no cast makes a pointer from an integer (D3.14), so the vocabulary lends through `id(x)`
-  where it read back an integer, a shape lends through `cast(x, i32*)` where it kept a `u64`, and
-  `g4` reads no pointer back after its cast to `u64`. So each set prints `forged 0`, and the other
-  counts did not change when the event came (measured).
+  may keep the fact of `x`. Each set prints its count of `forged` events on its line `gate forged`,
+  and on a line of their own its rejected sites that have no event at or after a `forged` event of
+  their function: such a site is no false reject, because the run reports no event after `forged`.
+  The generator forges no pointer to a local, and no hand case does: no cast makes a pointer from an
+  integer (D3.14), so the vocabulary lends through `id(x)` where it read back an integer, a shape
+  lends through `cast(x, i32*)` where it kept a `u64`, and `g4` reads no pointer back after its cast
+  to `u64`. So each set prints 0 `forged` events, and the other counts did not change when the event
+  came (measured).
   **The test holds part 1 of the leak rule on the owning aggregate locals too** (D17.20). A site
   is a function and the location of a `dead` of a local of an owning aggregate type outside an
   abort block, or of a `return` of a function with a parameter or a temporary of such a type, from
   the FIR, or of an exit of `proof.aggregates` (`add_aggregates`). The site is rejected only with
   the error of the function (`prover.has_error`), so a mutant that drops the error prints false
-  accepts. Each `leak` event marks the site
-  at its location and keeps its count outside part 1, so the counts of part 1 do not change. The
+  accepts. Each `leak` event marks the site at its location. The
   event at a `return` does not say which owner leaked, so an exit of an owner local that the pass
   does not prove at that `return` rejects the site too. Such a masked site hides a wrong proof of
   the aggregate, so each set prints its masked sites and those with an event, and the case `masked`
@@ -837,33 +866,33 @@ bullet at a time and without a rewrite.
   item and a local whose owner the item reads, from `proof.uses`, rejected when the pass does not
   prove the use and `prover.has_error` holds, so the test holds the verdict of the error and the
   row D17.21-error of `tools/mutations/oracle.json` prints false accepts. A `use after move` event
-  is in the scope of rule (b) when its moved tag names a local of the function whose frame read the
-  slot (no ` by a callee`, X2); an event of a slot of no local, a global or an allocation, counts
-  apart. The event stands at the load through the null, and
-  it does not name the read of the vacated slot that gave the null, which can be an earlier copy
-  (`v = x;` and then `*v`), so it marks each site of its function and local: a false accept is such
-  an event with no rejected site of that function and local. So a wrong proof of one read hides
-  behind a rejected read of the same local in the same function, and a site with no event can count
-  as one with an event (`h4`). A slot that held no allocation gives no moved tag, so the locals of
-  the exhaustive family, null at the entry, gave no event in two statements: the local `z` of
-  `generator.LOCAL_DECL` holds an allocation from its declaration, and five statements over `z` and
-  its pointer `pz` (a `del` and a load, directly and through `pz`, and a `move`) give the family its
-  events. The programs of `USE_CASES` hold rule (b) as hand cases, and the seeded family inserts
-  into them. A rejected use with no event at or after a `forged` event of its function counts apart,
-  as the sites of the other rules do. Each set has 0 false accepts, and its false rejects come from
-  three gaps of the rule: a `del` of one element can vacate another element of a fixed array, a call
-  can vacate a memory owner, and a store through a pointer ends no state. The expected stdout of the
-  test holds the counts. A load of an element of a span after its `move` gives no event: the bounds
-  check of the empty span aborts the run first (`use span`). The rows D17.21 of
-  `tools/mutations/oracle.json` make the pass prove too much, and each one makes the test print a
-  false accept of rule (b); D17.21-test-both needed the hand case `null_edge`, whose load stands on
-  the edge where its test finds null. The case `global_ptr` loads through a global that holds the
-  address of the owner: no program before it stored a local address into a global, so the oracle did
-  not see that the pass named no owner through a global. A seeded variant inserts or removes one
-  statement, so a hand case whose loop ends through one statement of its body only can run forever:
-  a removed `del`, or an inserted store into the tested place when the places line names it, keeps
-  the test true. The first `while_test` hung the test for 30 minutes; its loop now has a second
-  exit, a `break`.
+  marks the sites of rule (b) when its moved tag names a local of the function whose frame read the
+  slot (no ` by a callee`); an event of a slot of no local, a global or an allocation, or one that
+  a callee read, marks no site, and the gate judges it as each event. The event stands at the load
+  through the null, and it does not name the read of the vacated slot that gave the null, which can
+  be an earlier copy (`v = x;` and then `*v`), so it marks each site of its function and local: a
+  false accept is such an event with no rejected site of that function and local. So a wrong proof
+  of one read hides behind a rejected read of the same local in the same function, and a site with
+  no event can count as one with an event (`h4`). A slot that held no allocation gives no moved tag,
+  so the locals of the exhaustive family, null at the entry, gave no event in two statements: the
+  local `z` of `generator.LOCAL_DECL` holds an allocation from its declaration, and five statements
+  over `z` and its pointer `pz` (a `del` and a load, directly and through `pz`, and a `move`) give
+  the family its events. The programs of `USE_CASES` hold rule (b) as hand cases, and the seeded
+  family inserts into them. A rejected use with no event at or after a `forged` event of its
+  function counts apart, as the sites of the other rules do. Each set has 0 false accepts, and its
+  false rejects come from three gaps of the rule: a `del` of one element can vacate another element
+  of a fixed array, a call can vacate a memory owner, and a store through a pointer ends no state.
+  The expected stdout of the test holds the counts. A load of an element of a span after its `move`
+  gives no event: the bounds check of the empty span aborts the run first (`use span`). The rows
+  D17.21 of `tools/mutations/oracle.json` make the pass prove too much, and each one makes the test
+  print a false accept of rule (b); D17.21-test-both needed the hand case `null_edge`, whose load
+  stands on the edge where its test finds null. The case `global_ptr` loads through a global that
+  holds the address of the owner: no program before it stored a local address into a global, so the
+  oracle did not see that the pass named no owner through a global. A seeded variant inserts or
+  removes one statement, so a hand case whose loop ends through one statement of its body only can
+  run forever: a removed `del`, or an inserted store into the tested place when the places line
+  names it, keeps the test true. The first `while_test` hung the test for 30 minutes; its loop now
+  has a second exit, a `break`.
 - **The suites of fir.interpreter derive each expected value apart from the interpreter**
   (`test/fort/fir/interpreter_test.ft`, `interpreter_source_test.ft`). Python's integers and IEEE
   doubles gave each value at each boundary of each type when the cases were written: the wrap at

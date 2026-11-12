@@ -1,0 +1,91 @@
+/// The disposition of each event kind of fir.shadow: what the gate of the oracle tests does with
+/// an event of an item that the compiler accepts with no error and no report line.
+//
+// The gate judges in a closed world. It holds no list of event kinds that it does not read and no
+// list of statement forms: each event of each run goes through is_error, and TABLE has one row
+// for each kind. A kind that TABLE does not name fails is_complete, so a new kind of the shadow
+// fails each test that reads the table until it has a row.
+import fort.fir.interpreter;
+import fort.fir.shadow;
+
+/// What the gate does with the events of one kind.
+enum disposition_kind {
+    dk_error, // the compiler refuses each program that gives the event
+    dk_cycle_leak, // an error, unless a cycle of owners holds the allocation (shadow.event.cycle)
+    dk_trusted, // the event needs a program that breaks an assumption of the rules
+}
+
+/// The names of disposition_kind, in its order.
+string[3] DISPOSITION_TEXT = {"error", "cycle leak", "trusted"};
+
+/// One row of TABLE: the event kind, its disposition, and its basis. The basis of an error is the
+/// decision that refuses the program. The basis of a trusted kind is the assumption of
+/// spec/ownership-design.md 5.1 that the program breaks.
+struct row {
+    shadow.event_kind event;
+    disposition_kind disposition;
+    string basis;
+}
+
+/// The count of the rows of TABLE.
+u64 KINDS = 10;
+
+/// The disposition of each kind of shadow.event_kind, in its order.
+//
+// An accepted item that gives an `overwrite`, a `leak` or a `use after move` fails the gate. A
+// `leak` is no error in a run that ends in a runtime error (is_error). A `leak at exit` of a
+// cycle of owners is defined behavior, and each other `leak at exit` is an error. The six other
+// kinds come from an access or a release through a pointer that the rules do not follow. The rules
+// assume that no program does that (A1, A2, A8), so the gate does not judge them.
+row[KINDS] TABLE = {
+    row{shadow.event_kind.ev_overwrite, disposition_kind.dk_error, "D17.11"},
+    row{shadow.event_kind.ev_leak, disposition_kind.dk_error, "D17.20"},
+    row{shadow.event_kind.ev_leak_at_exit, disposition_kind.dk_cycle_leak, "D17.20"},
+    row{shadow.event_kind.ev_double_release, disposition_kind.dk_trusted, "A1"},
+    row{shadow.event_kind.ev_invalid_release, disposition_kind.dk_trusted, "A2"},
+    row{shadow.event_kind.ev_use_after_release, disposition_kind.dk_trusted, "A1"},
+    row{shadow.event_kind.ev_use_after_move, disposition_kind.dk_error, "D17.21"},
+    row{shadow.event_kind.ev_use_after_scope, disposition_kind.dk_trusted, "A1"},
+    row{shadow.event_kind.ev_duplicate_owner, disposition_kind.dk_trusted, "A2"},
+    row{shadow.event_kind.ev_forged, disposition_kind.dk_trusted, "A8"},
+};
+
+/// The position of `kind` in shadow.event_kind, which is its row of TABLE.
+fn index_of(shadow.event_kind kind) u64 {
+    return cast(cast(kind, i32), u64);
+}
+
+/// Whether TABLE names each event kind of fir.shadow one time: it has as many rows as the shadow
+/// has kinds (shadow.EVENT_KINDS), and row `i` names kind `i`.
+fn is_complete() bool {
+    if (TABLE.len != shadow.EVENT_KINDS) {
+        return false;
+    }
+    for (u64 mut i = 0; i < TABLE.len; i++) {
+        if (index_of(TABLE[i].event) != i) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Whether a run that ended in `end` ended in a runtime error: an `abort`, as a failed check
+/// gives, or a `trap`. The leak rule holds no path that ends there (D17.20).
+fn is_error_end(interpreter.outcome_kind end) bool {
+    return end == interpreter.outcome_kind.oc_abort || end == interpreter.outcome_kind.oc_trap;
+}
+
+/// Whether the event `ev` of a run that ended in `end` is an error: an accepted item that gives
+/// it fails the gate. An event of a trusted kind is none. A `leak at exit` is none when a cycle
+/// of owners holds its allocation. A `leak` is none when its run ended in a runtime error. Each
+/// other event of an error kind is one, whatever the statement that gave it.
+fn is_error(shadow.event* ev, interpreter.outcome_kind end) bool {
+    row r = TABLE[index_of(ev->kind)];
+    if (r.disposition == disposition_kind.dk_trusted) {
+        return false;
+    }
+    if (r.disposition == disposition_kind.dk_cycle_leak) {
+        return !ev->cycle;
+    }
+    return ev->kind != shadow.event_kind.ev_leak || !is_error_end(end);
+}

@@ -38,10 +38,17 @@ enum event_kind {
     ev_forged,
 }
 
-string[10] EVENT_TEXT = {
+/// The count of the kinds of event_kind.
+u64 EVENT_KINDS = 10;
+
+/// The text of each kind of event_kind in a line of write_events, in its order.
+string[EVENT_KINDS] EVENT_TEXT = {
     "overwrite", "leak", "leak at exit", "double release", "invalid release",
     "use after release", "use after move", "use after scope", "duplicate owner", "forged",
 };
+
+/// The end of the line of a `leak at exit` whose allocation a cycle of owners holds.
+string CYCLE_TEXT = " of a cycle";
 
 /// The most entries that a derivation names. A value that derives from more derives from each.
 u64 DERIVATION_IDS = 4;
@@ -92,7 +99,9 @@ struct tag {
 
 // An allocation, a dead local, a global or a frame that ended after it made a frame tag. `owners`
 // counts the owner slots of an allocation and its owners in transit, `transit` the second.
-// `reported` says that an event of a leak or an overwrite named the allocation.
+// `reported` says that an event of a leak or an overwrite named the allocation. `holders` counts,
+// in the test of `leak at exit`, the owner slots of the allocation that stand in a live allocation
+// which no global reaches and which the test did not yet find below an allocation with no holder.
 struct range {
     u64 base;
     u64 size;
@@ -101,6 +110,7 @@ struct range {
     bool reached;
     u32 owners;
     u32 transit;
+    u32 holders;
 }
 
 struct range_vec {
@@ -140,12 +150,15 @@ struct frame_vec {
 /// An event, the item where it happened and the tag of the value that it went through. `exit` is
 /// the exit location of the statement of an `overwrite`, which tells the expansions of one deferred
 /// store at two exits apart, and the empty range for each other event and each other statement.
+/// `cycle` says that a `leak at exit` names an allocation that a cycle of owners holds (test_exit),
+/// and it is false for each other event.
 struct event {
     event_kind kind;
     ast.sym* sym;
     diag.loc at;
     diag.loc exit;
     tag t;
+    bool cycle;
 }
 
 struct event_vec {
@@ -349,7 +362,7 @@ fn leave(state mut* sh) void {
     frame fr = sh->frames.items[sh->frames.len - 1];
     cut(sh, fr.base, fr.base + (fr.size + WORD - 1) / WORD * WORD, false);
     if (fr.tagged) {
-        push_range(&sh->ended, range{fr.base, fr.size, false, false, false, 0, 0});
+        push_range(&sh->ended, range{fr.base, fr.size, false, false, false, 0, 0, 0});
     }
     sh->entries.len = slot_position(&sh->entries, fr.base);
     sh->deads.len = fr.dead;
@@ -360,7 +373,7 @@ fn leave(state mut* sh) void {
 /// scope` until its `live`.
 fn kill(state mut* sh, u64 addr, u64 size) void {
     cut(sh, addr, addr + size, false);
-    push_range(&sh->deads, range{addr, size, false, false, false, 0, 0});
+    push_range(&sh->deads, range{addr, size, false, false, false, 0, 0, 0});
 }
 
 /// `live` of the local at `addr` in the frame at the top. It starts a new entry of the local, so
@@ -382,13 +395,13 @@ fn revive(state mut* sh, u64 addr) void {
 /// A new allocation of `size` bytes at `base`, above each allocation before it; 0 is none.
 fn allocate(state mut* sh, u64 base, u64 size) void {
     if (base != 0) {
-        push_range(&sh->allocations, range{base, size, true, false, false, 0, 0});
+        push_range(&sh->allocations, range{base, size, true, false, false, 0, 0, 0});
     }
 }
 
 /// A new global of `size` bytes at `base`: a root of the test of `leak at exit`.
 fn add_root(state mut* sh, u64 base, u64 size) void {
-    push_range(&sh->roots, range{base, size, true, false, false, 0, 0});
+    push_range(&sh->roots, range{base, size, true, false, false, 0, 0, 0});
 }
 
 /// The release of the allocation at `p`: the slots inside it die, each whole word of it.
@@ -543,8 +556,34 @@ fn reach(state mut* sh, u64 lo, u64 hi) void {
     }
 }
 
+// Counts each owner slot in [lo, hi) as a holder of its allocation, when that allocation is live
+// and no global reaches it. With `ended` the slots stop to count: each such allocation loses one
+// holder, and one whose count becomes 0 goes on `touched`.
+fn count_holders(state mut* sh, u64 lo, u64 hi, bool ended) void {
+    for (u64 mut i = slot_position(&sh->slots, lo);
+         i < sh->slots.len && sh->slots.items[i].addr < hi; i++) {
+        u64 a = sh->slots.items[i].owner;
+        if (a == NONE || !sh->allocations.items[a].live || sh->allocations.items[a].reached) {
+            continue;
+        }
+        range mut* r = &sh->allocations.items[a];
+        if (!ended) {
+            r->holders += 1;
+            continue;
+        }
+        r->holders -= 1;
+        if (r->holders == 0) {
+            vec.int_push(&sh->touched, cast(a, i64));
+        }
+    }
+}
+
 /// The test of `leak at exit` when `main` returns: a live allocation that no chain of owner slots
-/// from a global reaches leaks, unless an event named it before.
+/// from a global reaches leaks, unless an event named it before. Such an allocation is of a cycle
+/// when no chain of owner slots from such an allocation with no holder reaches it: a cycle of
+/// owners holds it, in the cycle or below it. The test finds the others first, from each
+/// allocation with no holder down, so the events of the allocations of no cycle come before those
+/// of a cycle.
 fn test_exit(state mut* sh) void {
     sh->touched.len = 0;
     for (u64 mut g = 0; g < sh->roots.len; g++) {
@@ -555,10 +594,30 @@ fn test_exit(state mut* sh) void {
         reach(sh, r.base, r.base + r.size);
     }
     for (u64 mut a = 0; a < sh->allocations.len; a++) {
-        range mut* r = &sh->allocations.items[a];
-        if (r->live && !r->reached && !r->reported) {
+        range* r = &sh->allocations.items[a];
+        if (r->live && !r->reached) {
+            count_holders(sh, r->base, r->base + r->size, false);
+        }
+    }
+    for (u64 mut a = 0; a < sh->allocations.len; a++) {
+        range* r = &sh->allocations.items[a];
+        if (r->live && !r->reached && r->holders == 0) {
+            vec.int_push(&sh->touched, cast(a, i64));
+        }
+    }
+    while (sh->touched.len > 0) {
+        range mut* r = &sh->allocations.items[cast(vec.int_pop(&sh->touched), u64)];
+        if (!r->reported) {
             r->reported = true;
-            report(sh, event_kind.ev_leak_at_exit, tag{});
+            record(sh, event_kind.ev_leak_at_exit, tag{}, false);
+        }
+        count_holders(sh, r->base, r->base + r->size, true);
+    }
+    for (u64 mut a = 0; a < sh->allocations.len; a++) {
+        range mut* r = &sh->allocations.items[a];
+        if (r->live && !r->reached && r->holders > 0 && !r->reported) {
+            r->reported = true;
+            record(sh, event_kind.ev_leak_at_exit, tag{}, true);
         }
     }
 }
@@ -847,6 +906,12 @@ fn apply(state mut* sh, u64 dest, u64 from, u64 n, u64 callee, bool back) void {
 // `overwrite` keeps the exit location of its statement too, so the two expansions of one deferred
 // store give two events.
 fn report(state mut* sh, event_kind kind, tag t) void {
+    record(sh, kind, t, false);
+}
+
+// The event of report, with `cycle` for a `leak at exit` of a cycle of owners, which is an event
+// of its own beside the one of no cycle at the same item.
+fn record(state mut* sh, event_kind kind, tag t, bool cycle) void {
     diag.loc mut exit = diag.loc{};
     if (kind == event_kind.ev_overwrite) {
         exit = sh->exit_at;
@@ -857,7 +922,7 @@ fn report(state mut* sh, event_kind kind, tag t) void {
         if (o->kind == event_kind.ev_forged
             || (o->kind == kind && o->sym == sh->sym && o->at.line == sh->at.line
                 && o->at.col == sh->at.col && same_exit && is_same(o->t.o, t.o)
-                && is_same(o->t.f, t.f))) {
+                && is_same(o->t.f, t.f) && o->cycle == cycle)) {
             return;
         }
     }
@@ -870,7 +935,7 @@ fn report(state mut* sh, event_kind kind, tag t) void {
         del(v->items);
         v->items = move(bigger);
     }
-    v->items[v->len] = event{kind, sh->sym, sh->at, exit, t};
+    v->items[v->len] = event{kind, sh->sym, sh->at, exit, t, cycle};
     v->len += 1;
 }
 
@@ -898,7 +963,8 @@ fn write_origin(origin* g, strbuf.str_buf mut* out) void {
 
 /// With `reporting`, writes each event of `sh` as a line after `prefix`: `event <kind> in
 /// <function> at <line>:<col>`, then ` exit <line>:<col>` for an event with an exit location,
-/// then the owner tag and the frame or moved tag of its value.
+/// then the owner tag and the frame or moved tag of its value, then CYCLE_TEXT for a `leak at
+/// exit` of a cycle of owners.
 fn write_events(state* sh, string prefix, strbuf.str_buf mut* out) void {
     for (u64 mut i = 0; sh->reporting && i < sh->events.len; i++) {
         event* e = &sh->events.items[i];
@@ -919,6 +985,9 @@ fn write_events(state* sh, string prefix, strbuf.str_buf mut* out) void {
         }
         write_origin(&e->t.o, out);
         write_origin(&e->t.f, out);
+        if (e->cycle) {
+            strbuf.append(out, CYCLE_TEXT);
+        }
         strbuf.push(out, '\n');
     }
 }

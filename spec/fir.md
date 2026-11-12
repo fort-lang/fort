@@ -1507,7 +1507,10 @@ writes it (section 12), and it starts a program as `toolchain.md` 6 item 22 star
   through frame <function> _<n>` or ` through moved <function> _<n>`. A frame tag that a callee kept
   adds ` kept`, and a vacated slot that a callee read adds ` by a callee`. An extern reaches memory
   through the tags of an argument whose value starts the access: of such arguments, the one with the
-  lowest index that has a tag. A `leak` stands at the item where the owner count became 0, and an
+  lowest index that has a tag. The line of a `leak at exit` ends with ` of a cycle` when a cycle of
+  owners holds its allocation, in the cycle or below it. It does not when the allocation is below
+  a leaked allocation that no owner slot holds. A run gives each of the two lines once at most,
+  the line of a cycle last. A `leak` stands at the item where the owner count became 0, and an
   event inside the `std.rt.free` of a `del` stands at the `del`. A `use after release`, `use after
   scope` of a frame that returned, `double release` and `invalid release` stand before the fault
   that ends the run, and a `use after move` before the fault `null dereference`.
