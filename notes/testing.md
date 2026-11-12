@@ -757,7 +757,72 @@ bullet at a time and without a rewrite.
   family, and `hold_floor` stops the test below it. So a family that accepts no item stops the test.
   `FORCED` runs a case of `GATE_CASES` with a chosen set of report lines and no error. Each row
   names the event kind that then fails the item, and another verdict stops the test (`run_forced`).
-  The rows hold that a line of one rule does not excuse an event of another rule. **The row `leak at
+  The rows hold that a line of one rule does not excuse an event of another rule. **The judge and
+  the pass call the same functions of `fir` and `types`.** This command lists them:
+
+      comm -12 \
+        <(grep -v '^ *//' test/fort/owner/oracle_test.ft \
+          | grep -oE '\b(fir|types)\.[a-z_0-9]+\(' | sort -u) \
+        <(cat src/fort/owner/*.ft | grep -v '^ *//' \
+          | grep -oE '\b(fir|types)\.[a-z_0-9]+\(' | sort -u)
+
+  The command reads only `test/fort/owner/oracle_test.ft` and only the modules `fir` and `types`.
+  It prints 13 names. The support files of the test add 3 names, and none of the 3 has a `bool`
+  result: `ast.ast_len`, `fir_print.print_symbol` and `session.diags`. So the test and the pass
+  share 16 functions, and 4 of them have a `bool` result.
+  A mutant of a function of that list with a `bool` result changes the pass and the judge together.
+  Those functions are `fir.term_is_abort`, `fir.stmt_reads`, `types.type_is_owning_aggregate` and
+  `types.type_is_reference`. So each needs a case for each branch. `tools/mutations/oracle.json` has
+  19 rows for the 4 functions: 6 rows D17.20-abort, 3 rows D17.11-reads, 5 rows D17.20-owning and 5
+  rows D17.1-reference. `fir.stmt_reads` has 6 `if` conditions, and
+  `types.type_is_owning_aggregate` has 4. Each of the other 2 functions is 1 `return` expression
+  with no `if`. **`oracle_test` does not hold 3 of those 10 conditions.** A mutant of each of the 3
+  passes the test. Each reason below has the mark `read`: code was read, and no compiler build
+  measured the reason. The first condition is `t->layout->state == layout_state.l_error` in
+  `types.type_is_owning_aggregate` (`src/fort/types.ft:766`). A mutant that returns true there
+  passes. The reason (`read`): a struct in error does not reach the pass. The second condition is
+  `i != 0` in the `del` branch of `fir.stmt_reads` (`src/fort/fir.ft:1142`). A mutant that lets a
+  `del` read its place 2 times passes. The reason (`read`): 3 of the 4 loops of the pass over
+  `fir.stmt_reads` return before the loop for a `del`. They are in `prover.gen_reads`,
+  `prover.apply_scratch_reads` and `alias.apply_reads`. The loop of `place.apply_fresh_reads` clears
+  1 bit of the fresh set, and a second clear changes nothing. The third condition is
+  `s->kind != stmt_kind.st_assign` in `fir.stmt_reads` (`src/fort/fir.ft:1148`). A mutant with no
+  such guard passes. The reason (`read`): only a `live` and a `dead` then go on. `fir.stmt_live` and
+  `fir.stmt_dead` set no `value`, and a zero `value` has 0 operands. No row and no measured mutant
+  changes the condition of the panic in `types.type_is_owning_aggregate` (`l_resolved`). There,
+  the mutant that drops `e->is_own` and the mutant `layout->owning || true` go red only by pinned
+  lines, with exit 0 and no panic.
+  **In the table flow, 8 of the 19 rows stop when the compiler with the mutant builds `std`.** The 8
+  rows are D17.20-owning-none, D17.20-owning-struct, D17.1-reference-none, D17.1-reference-void,
+  D17.1-reference-pointer, D17.1-reference-span, D17.1-reference-string and D17.11-reads-none.
+  `tools/mutate.py` builds a compiler with the mutant, and that compiler builds the test. For these
+  8 rows the table flow holds "the compiler with the mutant does not build `std`". It does not hold
+  the case of the row. A second flow puts the mutant only into the modules that the test imports.
+  There, a compiler with no mutant builds the test from a tree with the mutant in `src/`. In that
+  flow, 1 of the 8 rows has a new case that goes red by itself: `string_owner` for
+  D17.1-reference-string. No checked-in tool runs that flow.
+  `fir.term_is_abort` gives the flag of an abort block. The case `before_check` of the gate holds a
+  block that ends in a `check`, and `abort_block` one that ends in a `panic`. The FIR case
+  `leak_abort` holds a block that ends in a `trap`, and the case `unreachable` of the gate one that
+  ends in `unreachable`. `fir.stmt_reads` gives `take_named` each operand of a statement. The FIR
+  case `value_call` and row accept-value-caller of `tools/mutations/disposition.json` hold a
+  constant that an assignment reads. The FIR case `const_call` holds the callee operand of a call
+  through a value. **The test holds the `del` branch of `fir.stmt_reads` only through the pass.**
+  Row D17.11-reads-del takes two false rejects of the FIR case `del_join` from the pinned stdout,
+  and no panic stops the test. The judge does not show that mutant: `take_named` reads a constant of
+  a function, and a `del` reads a `move`. With the mutant in `take_named` alone, the stdout of the
+  test does not change. For `types.type_is_owning_aggregate`, the hand case `fa1` holds a fixed
+  array of `own` pointers. The case `nested_array` of the gate holds a fixed array of a struct that
+  owns. For `types.type_is_reference`, the case `string_owner` of the gate holds a `string own`. The
+  sandbox runtime (`test/fort/support/run_env.ft`) holds `void* own` and an owning span. With a
+  mutant of either, it does not check, and the test stops at the first batch. A new function that
+  the judge and the pass both call needs a case and a row for each branch. **The case `whole_chain`
+  is no item of the hand set** (`GATE_ITEMS`). Its store of a whole struct goes over the owner of an
+  allocation that owns a second one. A line of `--whole-store-report` does not excuse the `leak at
+  exit` of the second allocation, and the rows of `FORCED` for the case hold that. Only `FORCED`
+  runs the case, and the test stops when no row of `FORCED` names it. **No test holds that the
+  compiler gives `whole_chain` only the whole line at this revision.** The rows of `FORCED` set the
+  lines by hand. **The row `leak at
   exit` judges only a run of a program whose `main` returns.** `shadow.test_exit` gives that event,
   and the interpreter calls it only there (`interpreter.run_program`). So the gate judges that kind
   in the hand cases and in the seeded family only. A run of the exhaustive family, of the shapes or
