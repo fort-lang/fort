@@ -1491,7 +1491,10 @@ bullet at a time and without a rewrite.
   to the identifier conventions of D1.4, to the naming rules of `notes/style.md` 3.1, to 100
   columns, and to the audit rows of D9.8: a declaration row above each `extern fn` of a trusted
   module, call rows that count each call of an extern, of a boundary function and through a
-  function value, and a boundary function as a value only on its way to C. The lint finds a
+  function value, and a boundary function as a value only on its way to C. It reads each citation
+  of rule 3 in a call row, and it reports text that starts a citation and that it cannot read. It
+  reports a `mut` global whose type reaches a byte pointer between the brackets of a call of C,
+  in a function that is no boundary function. The lint finds a
   boundary function by the parameter types that the index records spell, and `fort_lint_rows`
   holds that answer equal to the one of the compiler. A call row names the callee as the body
   spells it, with no white space (`libc.write`, `table[i+1]`). The rows count the calls in the
