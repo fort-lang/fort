@@ -10,13 +10,17 @@
 //| tests ok
 //| whole addresses ok
 //| values ok
+//| steps ok
+//| operands ok
+//| leaving ok
 /// Checks the helpers of owner.place that rule (b) of D17.21 reads: the owners in fixed storage of
 /// a local and below a place, the local keys of a path and the rank of a key, the number of an
 /// owner in a type, the owners that a read in fixed storage reads, the parts of a place, the count
 /// of the stores of a light survey, and the edge of the other value of a test against null. It also
 /// checks the addresses of the whole stores of D17.11 and their stale bits, and the index of a path
 /// with no key. Each expected value comes from the types of PRELUDE and the order of
-/// next_owner_step.
+/// next_owner_step. The last three cases hold the type and the member of each step kind, the
+/// operands of each terminator kind, and the step at which a path leaves its object.
 import fort.consts;
 import fort.fir;
 import fir_env;
@@ -874,6 +878,178 @@ fn is_zero_member_of(place.survey mut* c, fir.func mut* f, fir.rvalue r, u32 n, 
     return zero;
 }
 
+// The type behind each step kind (step_type), and the member that a step names (member_of).
+// `(*q).a` holds a deref and a field. `b.e[_9]` holds an index on a fixed array whose key is the
+// constant 1, `b.e[k]` one whose key is a local, and `b.data[_9]` an index on a span.
+fn a_step_gives_its_type_and_its_member() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    fir.func mut* f = open_locals(e, m);
+    defer fir.module_drop_made(move(m));
+    place.survey mut* own c = survey_of(f);
+    defer place.drop_made(move(c));
+    fir_flow.bits mut* own stale = fir_flow.bits_make();
+    *stale = fir_flow.bits_new(fir.local_count(f));
+    defer fir_flow.bits_drop_made(move(stale));
+    place.path through = place.trace(c, place_of(f, 5, "*.0"), stale);
+    place.step deref = place.step_at(c, through, 0);
+    place.step field = place.step_at(c, through, 1);
+    types.node* pair = place.step_type(f, fir.local_at(f, 5)->ty, deref);
+    assert(pair->kind == types.type_kind.k_struct);
+    types.node* owner = place.step_type(f, pair, field);
+    assert(owner->kind == types.type_kind.k_ptr && owner == fir.struct_field_type(pair, 0));
+    place.path element = place.trace(c, place_of(f, 1, ".2[9]"), stale);
+    place.step index = place.step_at(c, element, 1);
+    types.node* array = place.step_type(f, fir.local_at(f, 1)->ty, place.step_at(c, element, 0));
+    assert(array->kind == types.type_kind.k_array && array->elem->kind == types.type_kind.k_ptr);
+    assert(place.step_type(f, array, index) == array->elem);
+    u64 mut member = 99;
+    assert(place.member_of(field, &member) && member == 0);
+    assert(place.member_of(place.step_at(c, element, 0), &member) && member == 2);
+    assert(place.member_of(index, &member) && member == 1);
+    // a deref, an index whose key is a local and an index on a span name no member
+    member = 99;
+    assert(!place.member_of(deref, &member) && member == 99);
+    place.path keyed = place.trace(c, place_of(f, 1, ".2[4]"), stale);
+    assert(keyed.tracked && !place.member_of(place.step_at(c, keyed, 1), &member));
+    place.path byte = place.trace(c, place_of(f, 1, ".3[9]"), stale);
+    assert(place.step_at(c, byte, 1).header);
+    assert(!place.member_of(place.step_at(c, byte, 1), &member) && member == 99);
+    println("steps ok");
+}
+
+// One block for each terminator kind, in the order of fir.term_kind but for the second `switch`:
+// a `goto`, a `switch`, a `return`, a `check` with two reported operands, a `check(overwrite: p)`,
+// a `fail` with one reported operand, a `trap` and an `unreachable`.
+string[32] TERMS = {
+    "fn main.o1(_1 (a): bool, _2 (n): u64, _3 (x): i32 mut* own) -> void {",
+    "    bb0: {",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "    bb3: {",
+    "        check(copy _1, bounds, copy _2, const u64 4) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: _3) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        switch(copy _1) -> [true: bb6, otherwise: bb7];",
+    "    }",
+    "    bb6: {",
+    "        fail(panic, copy _2);",
+    "    }",
+    "    bb7: {",
+    "        switch(copy _1) -> [true: bb8, otherwise: bb9];",
+    "    }",
+    "    bb8: {",
+    "        trap;",
+    "    }",
+    "    bb9: {",
+    "        unreachable;",
+    "    }",
+    "}",
+};
+
+// Holds that the terminator of block `b` of `f` has the kind `kind` and one operand for each
+// character of `want`, in order: the digit of the local that a `copy` reads, or `k` for a
+// constant. No operand stands at the count or past it.
+fn expect_operands(fir.func* f, u32 b, fir.term_kind kind, string want) void {
+    fir.terminator* t = &fir.block_at(f, b)->term;
+    assert(t->kind == kind);
+    fir.operand mut o = fir.operand{};
+    u32 mut i = 0;
+    while (place.find_operand(f, t, i, &o)) {
+        assert(cast(i, u64) < want.len);
+        char ch = want[cast(i, u64)];
+        if (o.kind == fir.operand_kind.ok_const) {
+            assert(ch == 'k');
+        } else {
+            assert(o.kind == fir.operand_kind.ok_copy && o.place.proj_len == 0);
+            assert(o.place.local == cast(ch, u32) - cast('0', u32));
+        }
+        i += 1;
+    }
+    assert(cast(i, u64) == want.len);
+    assert(!place.find_operand(f, t, i + 1, &o) && !place.find_operand(f, t, i + 9, &o));
+}
+
+// find_operand gives the operand of a `switch`, the condition and then the reported operands of
+// a `check`, and the reported operands of a `fail`. Each other kind has no operand: a `return`
+// and a `check(overwrite: p)` read a place (spec/fir.md 7).
+fn a_terminator_gives_its_operands_in_order() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    *m = pass_env.parse(e, PRELUDE[..], TERMS[..]);
+    defer fir.module_drop_made(move(m));
+    fir.func* f = &m->funcs.items[0];
+    expect_operands(f, 0, fir.term_kind.tk_goto, "");
+    expect_operands(f, 1, fir.term_kind.tk_switch, "1");
+    expect_operands(f, 2, fir.term_kind.tk_return, "");
+    expect_operands(f, 3, fir.term_kind.tk_check, "12k");
+    expect_operands(f, 4, fir.term_kind.tk_check_overwrite, "");
+    expect_operands(f, 5, fir.term_kind.tk_switch, "1");
+    expect_operands(f, 6, fir.term_kind.tk_fail, "2");
+    expect_operands(f, 8, fir.term_kind.tk_trap, "");
+    expect_operands(f, 9, fir.term_kind.tk_unreachable, "");
+    println("operands ok");
+}
+
+// A path leaves its object at a deref or at an index on a span or a `string`. is_leaving reads the
+// steps from a given step: is_through and is_separate read from step 1, is_indirect from step 0,
+// and is_below from the length of the place above.
+fn a_path_leaves_its_object_at_a_deref_or_a_header() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = fir.module_make();
+    fir.func mut* f = open_locals(e, m);
+    defer fir.module_drop_made(move(m));
+    place.survey mut* own c = survey_of(f);
+    defer place.drop_made(move(c));
+    fir_flow.bits mut* own stale = fir_flow.bits_make();
+    *stale = fir_flow.bits_new(fir.local_count(f));
+    defer fir_flow.bits_drop_made(move(stale));
+    // `(*q).a`: the one deref stands at step 0
+    place.path through = place.trace(c, place_of(f, 5, "*.0"), stale);
+    assert(place.is_leaving(c, through, 0) && !place.is_leaving(c, through, 1));
+    assert(!place.is_leaving(c, through, through.len));
+    assert(place.is_indirect(c, through) && place.is_through(c, through, 5));
+    assert(!place.is_through(c, through, 4));
+    // `*(*q).a`: a second deref stands at the last step
+    place.path twice = place.trace(c, place_of(f, 5, "*.0*"), stale);
+    assert(place.is_leaving(c, twice, 1) && place.is_leaving(c, twice, 2));
+    assert(!place.is_leaving(c, twice, 3) && !place.is_through(c, twice, 5));
+    // below `(*q)` a place continues with fields; `*(*q).a` leaves the object of `(*q)`
+    place.path object = place.trace(c, place_of(f, 5, "*"), stale);
+    assert(place.is_below(c, through, object) && place.is_below(c, object, object));
+    assert(!place.is_below(c, object, through) && !place.is_below(c, twice, object));
+    assert(!place.is_below(c, twice, through) && place.is_below(c, twice, twice));
+    // `b.data[_9]`: an index on a span stands at the last step
+    place.path data = place.trace(c, place_of(f, 1, ".3"), stale);
+    place.path byte = place.trace(c, place_of(f, 1, ".3[9]"), stale);
+    assert(place.is_leaving(c, byte, 0) && place.is_leaving(c, byte, 1));
+    assert(!place.is_leaving(c, byte, 2) && place.is_indirect(c, byte));
+    assert(!place.is_below(c, byte, data) && place.is_below(c, byte, byte));
+    assert(!place.is_through(c, byte, 1));
+    // `b.e[_9]`: an index on a fixed array leaves no object
+    place.path row = place.trace(c, place_of(f, 1, ".2"), stale);
+    place.path element = place.trace(c, place_of(f, 1, ".2[9]"), stale);
+    assert(!place.is_leaving(c, element, 0) && !place.is_indirect(c, element));
+    assert(place.is_below(c, element, row) && !place.is_below(c, row, element));
+    // a step that differs from a step of the place above is not below it
+    assert(!place.is_below(c, element, data) && !place.is_below(c, byte, row));
+    // two places that leave their object after the first step are not separate
+    assert(place.is_separate(c, row, data) && !place.is_separate(c, byte, row));
+    println("leaving ok");
+}
+
 fn main() i32 {
     the_owners_follow_the_order_of_the_type();
     the_keys_of_a_path_count_and_rank_their_locals();
@@ -884,5 +1060,8 @@ fn main() i32 {
     a_test_gives_the_edge_of_each_value();
     the_address_of_a_whole_store_is_marked_and_turns_stale();
     the_values_of_the_temporaries_are_marked();
+    a_step_gives_its_type_and_its_member();
+    a_terminator_gives_its_operands_in_order();
+    a_path_leaves_its_object_at_a_deref_or_a_header();
     return 0;
 }

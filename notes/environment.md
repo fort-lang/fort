@@ -371,7 +371,10 @@ without a rewrite.
   round built: run a `stale` row again by hand, with the mutant written through a new inode
   (`cp` then `mv` on the host), and compare the `md5sum` again. That check is also how
   a build that silently skipped a source is caught, which is worth one `md5sum` before any
-  measurement that will be quoted as evidence. Undo the mutation from a saved copy of the file,
+  measurement that will be quoted as evidence. The md5 also changes with the worktree: on
+  2026-11-14 the debug build of ff4441b8 gave `149fa684` in one worktree and `fa68189f` in a new
+  second worktree, and each rebuild in the first worktree gave `149fa684` again. Compare the md5
+  of 2 builds only when one worktree made both. Undo the mutation from a saved copy of the file,
   never with `git checkout <file>`: the file usually also holds the
   ticket's own uncommitted work, which that command throws away silently, and the suite stays
   green afterwards because the deleted work was the part with no test of its own yet.

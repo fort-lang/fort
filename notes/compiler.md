@@ -1164,6 +1164,26 @@ came here.
   interleaved runs). A change that moves a value of an address must keep lemma (vi) of
   `spec/fir.md` 11: a forged pointer is outside it only by D10.7, and an `own` pointer only by
   D17.1.
+- **Each dispatch over a FIR kind in `owner` is a `switch` with no `default:`, and each predicate
+  has one definition** (D7.7, D17.11, D17.20, D17.21). The 17 dispatches of `owner.place`,
+  `owner.prover`, `owner.alias` and `owner.report` over a statement kind, an rvalue kind, a
+  terminator kind, an operand kind or a place step kind list each member, so a new kind is a
+  compile error at each of them. An arm that does nothing names its kinds and gives the reason in
+  one comment line. A loop that acts on each projection of a place and a test of the callee of a
+  call are dispatches too: `alias.add_indexes`, `alias.add_address`, `place.mark_readers`,
+  `prover.pointer_acts`, `prover.statement_acts` and `summary.add` each take a `switch` over the
+  projection kind or the callee kind. One other test of one set of kinds with no `else` is a guard
+  and stays an `if`.
+  `place.is_call` is the one trigger of the call effect, which has two results: the kill of facts
+  (`prover.apply_call`, kill rule 5 of D17.11) and the vacate (`prover.vacate_memory`, rule (b) of
+  D17.21). `place.is_zero_store` is the zero value, with a null survey for the entry zeroing.
+  `place.compared_place` is the null test, `place.is_aggregate_result` the `_0` predicate and
+  `place.is_moved_once` the moved temporary. `place.is_leaving` is the scan for the step at which
+  a path leaves its object, from a first step that the caller gives. `place.find_operand` gives
+  the operands of a terminator to the fresh reads and to the acts of rule (b), and
+  `place.step_type` gives the type behind a step. A new dispatch takes a `switch`. A new user of
+  one of these predicates calls it and writes no copy: before this rule the zero value had 6
+  definitions and the trigger of the call effect 4 tests.
 - **Free an object with owners in a form that part 2 of the leak rule proves** (D17.20,
   `test/fort/owner/release_test.ft`). A test against `null` proves a place empty on its edge (the
   entry above), so a `del` of a local, a parameter or a field that a loop or an `if` finds null
@@ -1571,13 +1591,13 @@ came here.
   `test/library/programs` reach in `std`.
 - **`regrow` is one rvalue and three runtime calls** (D12.2, `spec/fir.md` 6, 9.4 and 12.2). The
   lowering writes `_s = move p`, `_p = regrow<T>(move _s, copy _c)` and `dst = aggregate T mut@
-  own(move _p, copy _u)`. The form is an rvalue and no call, so `src/fort/owner/` has no line that
-  names `rv_regrow`: the prover reads the `move` of the operand, with the kill rule of a vacate (the
-  next entry), and a store of a value that is not zero. `test/fort/owner/prover_regrow_test.ft`
-  holds 14 functions of FIR text against the events of the interpreter. `fir.rvalue_owns` names
-  `rv_regrow`, which rule V6 reads. A change that makes a `switch` over `fir.rvalue_kind` exhaustive
-  in `owner/` gives `rv_regrow` the arm of each other rvalue: `alias.add_rvalue` borrows the origins
-  of its operands, and `place.is_fresh_new` is false for it. `fir_llvm.regrow_value` calls
+  own(move _p, copy _u)`. The form is an rvalue and no call, so `src/fort/owner/` names
+  `rv_regrow` only in the arm of the other rvalues of each `switch` over `fir.rvalue_kind`: the
+  prover reads the `move` of the operand, with the kill rule of a vacate (the next entry), and a
+  store of a value that is not zero. `test/fort/owner/prover_regrow_test.ft` holds 14 functions of
+  FIR text against the events of the interpreter. `fir.rvalue_owns` names `rv_regrow`, which rule
+  V6 reads. `alias.add_rvalue` borrows the origins of its operands, and `place.is_fresh_new` is
+  false for it. `fir_llvm.regrow_value` calls
   `std.rt.regrow`, `std.rt.regrow_move` and `std.rt.free`, and gives `regrow_move` the private
   constant `@.words.N`, which holds the offsets of `fir.owner_word_at`. `gen.gen_words_ref` gives
   one name for each `regrow` site and joins no two by content (D19.5), and `gen_data.emit_data`
