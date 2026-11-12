@@ -152,8 +152,8 @@ Lookup of an unqualified name proceeds (D7.9):
 1. block scopes, innermost outward: locals and parameters, a local being visible only after its
    own declaration;
 2. the module namespace of the current file;
-3. the universe: `del`, `move`, `assert`, `panic`, `print`, `println`, `eprint`, `eprintln`,
-   `fprint`, `fprintln` (D12.2).
+3. the universe: `del`, `move`, `regrow`, `assert`, `panic`, `print`, `println`, `eprint`,
+   `eprintln`, `fprint`, `fprintln` (D12.2).
 
 - A local or parameter may not reuse the name of an enclosing local or parameter.
 - A local or parameter may shadow a module-level name, import bindings included, or a universe
@@ -162,7 +162,8 @@ Lookup of an unqualified name proceeds (D7.9):
 - A module-level declaration or import binding may shadow a universe name: a module declaring
   `fn print(string s) void` loses the builtin `print` throughout its body.
 - Enum members are not in the namespace (D3.9): `red` is not a name, `color.red` is.
-- Universe functions other than `move` yield no value (D12.2); none can be used as a value,
+- Universe functions other than `move` and `regrow` yield no value (D12.2); none can be used as a
+  value,
   imported or qualified.
 
 ## 6. Import graph and export rules
@@ -258,9 +259,12 @@ the five points of A7 of `ownership-design.md` 5.1. Each call of an extern, of a
 or of a function pointer that C gave has a call row in the `//` lines of its function. The row names
 a source for each pointer and each length that C reads or writes, at any depth, in the order of
 D9.8, why each length fits the bound of each pointer that C uses it with, in bytes, and the NUL of
-each C string. `tools/fort_lint.py` reports a missing row, but in `test/lang/fail` and in a program
-that a suite holds as text. Other modules call the functions of `std` that take spans and strings. A
-trusted module outside `std` starts as this test module does:
+each C string. A function of a trusted module gives its caller no pointer, no span and no string to
+storage of C that C can release or change while fort code holds the value, or the row of the
+function says why C never does (D9.8). A reviewer reads that row, and the lint does not.
+`tools/fort_lint.py` reports a missing call row or declaration row, but in `test/lang/fail` and in
+a program that a suite holds as text. Other modules call the functions of `std` that take spans and
+strings. A trusted module outside `std` starts as this test module does:
 
 ```fort
 import extern;
@@ -353,7 +357,7 @@ extern fn strdup(char* s) char mut* own;        // C documents: the caller frees
 
 char mut* own copy = strdup("abc".ptr);         // owned through the declared own result
 char mut* alias = copy;                         // lends (D17.4)
-free(cast(move(copy), void* own));              // copy == null afterwards; alias dangles
+free(cast(move(copy), void* own));              // copy == null; C released what alias points at
 char mut* leak = strdup("abc".ptr);             // error: owning temporary would leak (D17.8)
 free(cast(alias, void*));                       // error: a view cannot pass to an own parameter
 ```
@@ -465,8 +469,12 @@ a terminator gets a copy: allocate `char mut@ own tmp = new(char, s.len + 1);` u
 code becomes a `string` through `str.from_cbuf`, and a trusted module copies other bytes into a
 buffer of fort code through `memcpy`. When C hands the
 memory over for good, its `extern` declares the result `own` (D17.13). The pointer is then the
-owner, and `del(p)` frees it (D17.3); memory from `new` may likewise be freed by C `free` and memory
-from `malloc` by `del` (D10.3). A span expression is always a view and a cast never adds `own`
+owner, and a C function whose declaration takes it as `own`, such as `free`, releases it (D10.3).
+The runtime has its own allocator, so `new`/`del` and C `malloc`/`free` are not interchangeable:
+a `del` of memory from `malloc` is the runtime error `invalid release` (D10.9), and memory from
+`new` that a call gives to the C `free` is a case of the trusted premise (D10.7). The compiler and
+the runtime implement this rule in a later change (D10.3, the user ruling of 2026-11-11: "I don't
+want anything undefined."). A span expression is always a view and a cast never adds `own`
 (D3.14), so no cast turns C's block into an `own` span. There is no strict-aliasing rule
 (D10.7): memory may be read through any pointer type reached by `cast`. A fort wrapper around a
 C function that fills a buffer and reports its length takes the out-parameter shape
@@ -479,25 +487,28 @@ value of `*out` is unknown to it (D17.11); the caller initializes the slot to `{
 ```fort
 import extern;  // a trusted module (D9.8); rows omitted
 extern fn c_read_all(u64 mut* n) u8 mut* own;   // C documents: the caller frees
+extern fn memcpy(u8 mut* dst, u8* src, u64 n) void;
+extern fn free(void* own p) void;
 
 fn read_all(u8 mut@ own mut* out) bool {
     u64 mut n = 0;
     u8 mut* own p = c_read_all(&n);
     if (p == null) { return false; }
     u8 mut@ own bytes = new(u8, n);
-    mem.copy(bytes, p[0..n]);                   // p[0..n] is a view of C's block
-    del(p);                                     // new/del and malloc/free interchange (D10.3)
+    memcpy(bytes.ptr, p, n);                    // no span of p exists (D6.9): C copies n bytes
+    free(cast(move(p), void* own));             // C gave the block, so C releases it (D10.3)
     del(*out);                                  // the entry value of *out is unknown here
     *out = move(bytes);                         // the caller dels *out later
     return true;
 }
 
-fn wrong(u8 mut@ own mut* out) void {
+fn wrong(u8 mut@ own mut* out, u8 mut@ view) void {
     u64 mut n = 0;
     u8 mut* own p = c_read_all(&n);
-    *out = p[0..n];                             // error: a view cannot be stored in an own slot
-    *out = cast(p[0..n], u8 mut@ own);          // error: a cast never adds own (D3.14)
-    del(p);
+    *out = p[0..n];                             // error: cannot take a span of a pointer (D6.9)
+    *out = view;                                // error: a view cannot be stored in an own slot
+    *out = cast(view, u8 mut@ own);             // error: a cast never adds own (D3.14)
+    free(cast(move(p), void* own));
 }
 ```
 

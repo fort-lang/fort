@@ -5,6 +5,18 @@ diagnostics, runtime, code generation contract and test conventions for v1. It i
 together with D9.10, D9.11, D10, D11, D12, D18 and the run-time side of D17. Where it disagrees with
 `decisions.md` or `grammar.md`, those files win (D1.2).
 
+**The state since 2026-11-11.** The user ruled on 2026-11-11: "I don't want anything undefined." A
+fort program has no undefined behavior (D10.7). Sections 1 to 3 state the end state of that ruling:
+the compiler has no option that removes a check (D10.6, D14.1). The compiler of that date still
+takes the option `--no-bounds-check`, which removes the index and span checks. The compiler removes
+the option in a later change. Bootstrap-0 is frozen, and it keeps its option (D10.6). Sections 5 and
+6 describe the runtime and the IR of that date. Later changes of the compiler and the runtime bring
+seven points to them: the allocator of the runtime (D10.3, D10.9), the check of `null` (D10.6), the
+entry of `regrow` (D12.2), frame storage (D10.9, D19.4), the release-only bit in `summaries/`
+(D9.11), the zero bytes of a local (D10.1) and `llvm.memmove` for a copy of an aggregate (D6.3,
+D19.3). Sections 2.2, 5.1 and 5.2, and items 3, 8 and 10 of section 6, name each point where it
+applies.
+
 Sections: 1 Command line; 2 Build pipeline; 3 Build modes; 4 Diagnostics; 5 The runtime;
 6 Code generation contract; 7 Testing; 8 Compiler architecture sketch; 9 Not in v1.
 
@@ -26,7 +38,6 @@ file: `fort [options] --lib <name> <root>`.
 | `-I <dir>`          | add a search root after the entry directory; repeatable    | none       |
 | `--std-dir <dir>`   | standard library directory                                 | see below  |
 | `--release`         | release mode (section 3, D11.1)                            | checked    |
-| `--no-bounds-check` | remove index and span checks (D10.6); unsafe               | checks on  |
 | `-l<lib>`           | passed to the linker as given; repeatable, in order        | none       |
 | `--cc <path>`       | the clang that compiles and links the IR (D14.3)           | see below  |
 | `--target <triple>` | select the IR target; pass it to `--cc` (D14.1)              | see below  |
@@ -98,7 +109,6 @@ file: `fort [options] --lib <name> <root>`.
   The caller must select sources that match that target. The compiler checks option presence.
   It does not inspect the sources for C ABI agreement.
 - `-c` and linking accept only the built target. A different target exits 2 before output.
-- `--release` and `--no-bounds-check` are independent and may be combined.
 - `--check` runs steps 1 to 3 of section 2 and stops there: no IR, no `--cc`, no temporary, and
   the entry module need not define `main`, since it is a module under inspection and not a
   program (D20.1, D8.6). With it, `-o`, `-S`, `-c`, `-l`, `--cc` and `-Xcc` are unused.
@@ -192,8 +202,8 @@ file: `fort [options] --lib <name> <root>`.
   the FIR at a named point of `spec/fir.md` 11: `lower`, the output of the lowering, or
   `build-mode`, the output of the build-mode pass. Any other name, the empty name and `verify`
   included, is a usage error. The last `--fir-after` wins. `build-mode` runs the pass for the
-  mode that `--release` and `--no-bounds-check` select, and the verifier after it. `--fir` and
-  `--fir-after=lower` read neither flag. The module holds each function with a body of the
+  mode that `--release` selects, and the verifier after it. `--fir` and
+  `--fir-after=lower` do not read that flag. The module holds each function with a body of the
   closure: the modules in the order of D9.10, and the functions of each in source order. A blank
   line stands between two functions. The verifier tests each function before the print, and a
   violation ends the compiler with a panic (`spec/fir.md` 3). The lowering does not lower every
@@ -213,8 +223,8 @@ file: `fort [options] --lib <name> <root>`.
   `spec/fir.md` 10 on each function, and the first violation ends the compiler with a panic.
   The pass `build-mode` runs the emptiness pass of `spec/fir.md` 11 on each function, which
   reports nothing here. It then runs the build-mode pass with that proof, so an overwrite check
-  that the emptiness pass does not prove stays. It does not run the verifier. Its arguments
-  `--release` and `--no-bounds-check` select the mode, and with no argument it runs the default
+  that the emptiness pass does not prove stays. It does not run the verifier. Its argument
+  `--release` selects the release mode, and with no argument it runs the default
   mode. The pass `run` runs the module with the interpreter of `spec/fir.md` 11 and captures what
   it writes to the descriptors 1 and 2. With no argument it runs the program `main.main` as
   `--fir-run` does, with the path of the test as its one argument. Its arguments can also name a
@@ -238,13 +248,14 @@ file: `fort [options] --lib <name> <root>`.
   exit status of the program, or by SIGABRT after an abort and by the trap signal of the target
   after a trap, SIGILL for `x86_64-linux-gnu` and SIGTRAP for `arm64-apple-macosxM.m.p`. A call
   of a function that the interpreter does not run is the error `the run calls '<name>', which the
-  interpreter does not run`, and an operation with no defined result, such as a null dereference,
+  interpreter does not run`, and an operation at which the interpreter stops, such as a null
+  dereference in FIR that holds no `check` of the kind `null` (`spec/fir.md` 8),
   is the error `the run stops at <file>:<line>:<col>: <what>`; each exits with 2. A compile error
   of the closure exits with 1 before the run. `--fir-run` writes no file and runs no `--cc`, so
   `-o`, `-S`, `-c`, `-l`, `--cc` and `-Xcc` are unused. It takes the target rule of `--check`. It
   is a usage error together with `--tokens`, `--ast`, `--check`, `--json`, `--index`, `--use`,
   `--fir`, `--fir-after`, `--fir-verify-report`, `--fir-test` or `--fir-stats`, and with `--lib`
-  as `--lib` says. It is also a usage error together with `--release` or `--no-bounds-check`,
+  as `--lib` says. It is also a usage error together with `--release`,
   because the run keeps each check of the checked mode. `--` ends the options: each argument
   after it, an option too, goes to the program, and `--` is a usage error without `--fir-run`.
 - `--fir-events` takes `--fir-run`, before or after it. After the run, the compiler writes each
@@ -255,7 +266,7 @@ file: `fort [options] --lib <name> <root>`.
 - `--fir-verify-report` implies `--fir` and takes its target rule. It lowers each function of
   the closure as `--fir` does and runs the verifier of `spec/fir.md` 10 in report mode, first on
   the output of the lowering and then, when the function keeps every rule, on the output of the
-  build-mode pass for the mode that `--release` and `--no-bounds-check` select. That pass removes
+  build-mode pass for the mode that `--release` selects. That pass removes
   the overwrite checks that the emptiness pass proves, and the run reports no overwrite error of
   D17.11 (`spec/fir.md` 11). The verifier stops at the first violation of a function, so for
   each function that breaks a rule it writes one line to stdout, the first violation,
@@ -282,7 +293,7 @@ file: `fort [options] --lib <name> <root>`.
   functions that the translator wrote of M definitions of fort functions in the closure, the
   compiler-emitted `main` not counted. A refusal is a compile error, so in a line that a build
   writes N equals M. A compile error writes
-  no line. It combines with `-S`, `-c`, `--release` and `--no-bounds-check`, and it is a usage
+  no line. It combines with `-S`, `-c` and `--release`, and it is a usage
   error together with `--tokens`, `--ast`, `--check`, `--index`, `--fir`, `--fir-after`,
   `--fir-verify-report` or `--fir-test`, which emit no module.
 - In the fort compiler's `--ast` form, a C extern with `...` prints a bare `...` last in its
@@ -372,6 +383,8 @@ Twenty-four report a command line the compiler cannot use and then print the usa
 `cannot link target '<triple>' with a '<built target>' compiler`.
 The last four target errors stop before output. `<triple>` shows the selected target.
 `<built target>` shows the binary's built target.
+The text of `--fir-run` names `--no-bounds-check`, because the compiler of 2026-11-11 takes that
+option. The compiler removes the option in a later change.
 Four report an operation of section 2 that
 failed, with the system's error text as `<reason>`: `cannot read '<file>': <reason>` (the entry
 file), `cannot write '<file>': <reason>` (the LLVM IR module), `cannot create a temporary directory
@@ -421,7 +434,6 @@ fort -S main.ft                               # write main.ll and stop
 fort -c main.ft                               # write main.o and stop
 clang --target=x86_64-linux-gnu -o main main.o          # link the -c object by hand
 fort --release -o main main.ft                # release mode
-fort --release --no-bounds-check -o bench main.ft
 fort -I lib -I vendor -lm main.ft             # extra roots, link libm
 fort --cc clang-18 --target x86_64-linux-gnu -Xcc -fuse-ld=lld main.ft
 fort -S --target arm64-apple-macosx26.6.2 --std-dir mac-std main.ft
@@ -645,7 +657,7 @@ between them. A hash is 64 lowercase hex digits. The lines come in this order:
 | `compiler <hash>`   | both    | the SHA-256 of the running compiler executable          |
 | `target <triple>`   | both    | the selected target (D14.1)                             |
 | `mode <mode>`       | both    | `checked`, or `release` under `--release` (D11.1)       |
-| `bounds <on\|off>`  | both    | `off` under `--no-bounds-check`, else `on` (D10.6)      |
+| `bounds <on\|off>`  | both    | `on` in each build (D9.11, D10.6); see below            |
 | `cfg <key> <value>` | both    | one line for each pair of the configuration map (D21.1) |
 | `cc <path>`         | both    | the `--cc` value as written                             |
 | `xcc <arg>`         | both    | one line for each `-Xcc` argument                       |
@@ -658,6 +670,9 @@ between them. A hash is 64 lowercase hex digits. The lines come in this order:
 | `summaries 2`       | `--lib` | the version of `summaries/`                             |
 | `object <hash>`     | entry   | the SHA-256 of `object.o` (section 2.3)                 |
 
+- The `bounds` line is `bounds on` in each build, because the compiler has no option that removes a
+  check (D10.6). The manifest keeps the field and its two values (D9.11): the compiler of 2026-11-11
+  writes `bounds off` under `--no-bounds-check`. The compiler removes the option in a later change.
 - The `cfg` lines hold the whole configuration map, the three target keys included, in byte
   order of the key. The `xcc` lines keep the command-line order. The `use` lines are in byte
   order of the name.
@@ -704,6 +719,11 @@ of line, the file holds its two header lines and the lines of the functions of a
 the limit of `spec/ownership-design.md` 8.1, which have the safe value: `result _k` and `keep _k`
 for each parameter `k`. The reader holds the form of each line and not its meaning (8.2 there): a
 refinement that reads a line checks it against the declaration of its function.
+
+The file also holds the release-only bit of each function of the library (D17.9), the one fact of
+another function that the ownership analysis reads (D9.11, D17.11). The compiler implements the bit
+in a later change. That change adds the line of the bit to the grammar above and sets the next
+version of `summaries/`; until then the version is 2 and the grammar has no such line.
 
 **Write protocol.** The compiler writes an artifact or a cache entry `D` in this order. It makes
 `D` when it does not exist. It removes `D/manifest`. For a library, it makes `D/summaries` when it
@@ -779,33 +799,42 @@ in dependency order and then for the program, and the cache decides what each ru
 
 ## 3. Build modes
 
-Two modes (D11.1); `--no-bounds-check` is an orthogonal switch (D10.6). The compiler itself
+Two modes (D11.1). No option removes a check of the table below (D10.6). The compiler itself
 optimizes nothing in v1 and emits the same shape of IR in both modes; the only difference besides
 the checks below is that `--cc` compiles the module with `-O2` instead of `-O1` (D14.3).
 
-| Check                                              | checked | `--release` | `--no-bounds-check` |
-|----------------------------------------------------|---------|-------------|---------------------|
-| signed overflow: `+ - *`, unary `-`, `++ --`, `+= -= *=` | trap | wrap    | unchanged           |
-| unsigned overflow, same operators                  | trap    | wrap        | unchanged           |
-| `+% -% *%`, `+%= -%= *%=` (D11.2)                  | wrap    | wrap        | unchanged           |
-| shift count negative or `>=` width (D11.1)         | trap    | masked      | unchanged           |
-| `/ %` by zero, `MIN / -1`, `MIN % -1` (D6.13)      | trap    | trap        | unchanged           |
-| index out of range (D6.8)                          | trap    | trap        | removed             |
-| span bounds `0 <= lo <= hi <= len` (D6.9)          | trap    | trap        | removed             |
-| `new`: negative count, size overflow, no memory    | trap    | trap        | unchanged           |
-| `own` store not proved empty (D17.11)              | compile error in every mode                 |
-| `assert(cond)` (D12.2)                             | trap    | trap        | unchanged           |
-| `panic(msg)`                                       | trap    | trap        | unchanged           |
-| constant index or fold out of range (D4.4, D6.8)   | compile error in every mode                 |
-| `cast` (D3.14)                                     | never traps in any mode                     |
+| Check                                                           | checked       | `--release`   |
+|-----------------------------------------------------------------|---------------|---------------|
+| signed overflow: `+ - *`, unary `-`, `++ --`, `+= -= *=`        | trap          | wrap          |
+| unsigned overflow, same operators                               | trap          | wrap          |
+| `+% -% *%`, `+%= -%= *%=` (D11.2)                               | wrap          | wrap          |
+| shift count negative or `>=` width (D11.1)                      | trap          | masked        |
+| `/ %` by zero, `MIN / -1`, `MIN % -1` (D6.13)                   | trap          | trap          |
+| index out of range (D6.8)                                       | trap          | trap          |
+| span bounds `0 <= lo <= hi <= len` (D6.9)                       | trap          | trap          |
+| a place through a null pointer: `*p`, `p->f` (D10.5, D10.6)     | trap          | trap          |
+| a call of a null function pointer (D3.10, D10.6)                | trap          | trap          |
+| `new`: negative count, size overflow, no memory (D10.2)         | trap          | trap          |
+| `regrow`: the errors of `new`, a count below the length (D12.2) | trap          | trap          |
+| `del` and `regrow`: `invalid release` (D10.9, D12.2)            | trap          | trap          |
+| no memory for the frame storage of a run (D10.9)                | trap          | trap          |
+| `own` store not proved empty (D17.11)                           | compile error | compile error |
+| `assert(cond)` (D12.2)                                          | trap          | trap          |
+| `panic(msg)`                                                    | trap          | trap          |
+| constant index or fold out of range (D4.4, D6.8)                | compile error | compile error |
+| `cast` (D3.14)                                                  | no trap       | no trap       |
 
 "Trap" is the runtime error contract of D11.4: flush, one line on stderr, `abort()`. "Wrap" is
 two's complement; "masked" means `count & (width - 1)`. No build mode emits a runtime check for a
 store into an `own` place: the emptiness pass proves each one at compile time (D17.11).
 Programs must not rely on wrapping or
 trapping for correctness (D11.1); the wrapping operators exist for code that needs wrap-around in
-both modes. `p[lo..hi]` on a raw pointer is never checked (D6.9), and the undefined behaviors of
-D10.7 are undefined in every mode.
+both modes. `p[lo..hi]` on a raw pointer is never checked (D6.9): a range beyond the object is a
+case of the trusted premise (D10.7). An access to dead storage has the results of D10.9 in both
+modes, and a memory fault is no trap of this table: it writes no line (D11.4). The compiler and the
+runtime implement five rows in later changes: the two rows of `null` and the rows of `regrow`, of
+`del` and of frame storage. The row of `invalid release` covers a `del` and a `regrow` whose operand
+is not zero and starts no live allocation of the runtime (D10.9, D12.2).
 
 ## 4. Diagnostics
 
@@ -1047,6 +1076,20 @@ each entry point that it calls with the `declare` lines of `module-system.md` 10
 
 ### 5.1 Entry points
 
+**The state since 2026-11-11.** D10.3, D10.6, D10.9 and D12.2 change four points of this section,
+and the compiler and the runtime implement them in later changes. Until then, the text below
+describes the `std.rt` of that date. First, the runtime has its own allocator: `alloc` and `free` do
+not call `calloc` and `free` of C, and the runtime never gives dead storage to another object
+(D10.9). Second, `free` takes the position of its `del` and reports `invalid release` for a pointer
+that is not `null` and starts no live allocation of the runtime (D10.9, D11.4). Third, `std.rt` gets
+the entry of the check kind `null`, `fn fail_null(bool call, char* file, u32 line, u32 col)
+noreturn` (`spec/fir.md` 8). Fourth, `std.rt` gets an entry for `regrow`, which makes its five tests
+inside the runtime (D12.2, D19.6), and the runtime gives and releases the frame storage of a run
+(D10.9). `regrow` stores the zero value into each owner slot of each old element before it releases
+the old storage (D12.2). D12.2 does not say whether the entry or the compiled code makes these
+stores: the change that adds the entry says so here. The change that adds an entry adds its
+signature to the list below.
+
 The signatures are fort, and `std.rt` defines each one; fort has no prototype, so the bodies are
 simply left out here. Their IR follows from the type table of section 6
 item 2 and the convention of item 7 and is nothing special: a `bool` result is `zeroext i1` and a
@@ -1208,6 +1251,22 @@ the allocation count are printed as signed values. Falling off the end of a `nor
 executes the trap of section 6 item 20 (D8.5, D19.7). Linux x86-64 raises SIGILL with no message.
 Mac arm64 raises SIGTRAP with no message.
 
+The changes that implement D10.6, D10.9 and D12.2 add four lines (5.1, the state since 2026-11-11):
+
+| Source                | Line after `<file>:<line>:<col>: ` (D11.4)     |
+|-----------------------|------------------------------------------------|
+| `fail_null`, a place  | `runtime error: null dereference`              |
+| `fail_null`, a call   | `runtime error: null call`                     |
+| `free` (no start)     | `runtime error: invalid release`               |
+| the entry of `regrow` | `runtime error: regrow count 2 below length 3` |
+
+The entry of `regrow` also writes the line `runtime error: invalid release`, for an operand that is
+no zero span and starts no live allocation of the runtime, and the lines of `fail_alloc_count` and
+of `alloc`. The line `runtime error: out of memory` also reports that the runtime has no storage for
+the frame storage of a run, at the name of the function in its definition (D10.9, D11.4). A memory
+fault writes no line and flushes no buffer: the system ends the process with `SIGSEGV` or `SIGBUS`
+(D11.4).
+
 ### 5.3 Buffering
 
 | fd    | Used by                              | Policy (D11.5)                                   |
@@ -1308,15 +1367,20 @@ emitter's text is a change here.
 3. **Aggregates live in memory** (D19.3). Only scalars are SSA values: a struct, fixed array,
    span or `string` always occupies a place, is copied with `llvm.memcpy.p0.p0.i64`, zeroed
    (`{}`, `del`, `move`) with `llvm.memset.p0.i64`, and reached field by field or element by
-   element with `getelementptr`. The emitter never loads or stores an aggregate as one value and
+   element with `getelementptr`. In the end state a copy is `llvm.memmove.p0.p0.i64`, which reads
+   the whole source before it changes the destination (D6.3). It is `llvm.memcpy.p0.p0.i64` only
+   where the compiler proves that the source and the destination are equal or do not overlap, as
+   for the copies of items 7 and 18 into a slot that the compiler made (D19.3). The compiler
+   implements this in a later change.
+   The emitter never loads or stores an aggregate as one value and
    never writes `insertvalue` or `extractvalue` on one; its only `extractvalue` takes apart the
    `{iN, i1}` of an overflow intrinsic (item 15). Exactly three `getelementptr` shapes exist,
    and all three always carry `inbounds`: `inbounds <arrty>, ptr %a, i64 0, i64 %i` for an
    element of a fixed array, `inbounds <elemty>, ptr %p, i64 %i` for an element reached through
    a pointer or a span's `.ptr`, and `inbounds %struct.x, ptr %s, i32 0, i32 <k>` for a field.
    `inbounds` is always true: an element access is preceded by its bounds check (item 16) and a
-   field or header access is in bounds by construction, and `--no-bounds-check` removes the
-   check's branch, never the `inbounds` (D10.6). This is D9.9's model spelled in IR.
+   field or header access is in bounds by construction, and no option removes the
+   check's branch (D10.6). This is D9.9's model spelled in IR.
 
 4. **Symbols, linkage, visibility** (D9.7). The dotted names of D9.7 are quoted:
    `@"main.add"`, `@"std.io.read_file"`, `@"main.LIMIT"`; quoting is uniform and does not change
@@ -1464,6 +1528,9 @@ emitter's text is a change here.
    `i8 i16 i32 i64` (item 15), then `llvm.fptosi.sat.i<N>.f32`, `llvm.fptosi.sat.i<N>.f64`,
    `llvm.fptoui.sat.i<N>.f32` and `llvm.fptoui.sat.i<N>.f64` by ascending target width (item
    12), then `llvm.trap` (item 20). The parameter attributes shown are part of the spelling.
+   In the end state of item 3 the module also declares `llvm.memmove.p0.p0.i64`. The change that
+   implements D19.3 gives the line of that declaration, its attribute group and its position in
+   this order.
 
    Only referenced declarations are emitted, in a fixed order (D19.5): `extern` C functions in
    first-use order, which is the order of the first call of each in the text of the function
@@ -1490,7 +1557,10 @@ emitter's text is a change here.
     aggregate result pointer, and `%tmp<K>` from a third counter for a place the compiler
     invents (an aggregate argument copy, a short-circuit slot). A name that embeds a fort
     identifier always contains a dot and an invented one never does, so a local named `tmp` is
-    `%tmp.0` and cannot collide with `%tmp0` (D19.5).
+    `%tmp.0` and cannot collide with `%tmp0` (D19.5). In the end state a local that an `&` names
+    is in frame storage, and it is no `alloca` (D19.4, D10.9). Each byte of the storage of a local
+    holds 0 when its declaration runs, on the stack and in frame storage (D10.1). The compiler
+    implements both in later changes.
 
     A scalar parameter arrives as `%<name>.in` and is stored into its slot immediately. An
     aggregate parameter is not copied again: its place is the caller-made copy the incoming
@@ -1606,8 +1676,7 @@ emitter's text is a change here.
 
     A span expression checks both bounds with one branch (`icmp ugt i64 %hi, %len`,
     `icmp ugt i64 %lo, %hi`, `or i1`) into `std.rt.fail_span(i64 %lo, i64 %hi, i64 %len, ...)`. A
-    fixed array's length is an `i64` literal. `--no-bounds-check` removes exactly these branches and
-    keeps the `inbounds`, which is what makes it unsafe (D10.6).
+    fixed array's length is an `i64` literal. No option removes these branches (D10.6).
 
 17. **`new` and `del`** (D10.2, D10.3, D17.9).
 

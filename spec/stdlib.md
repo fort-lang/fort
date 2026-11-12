@@ -87,8 +87,9 @@ library follows:
 - **Accessors return views** (D17.3). Functions named `view` or `bytes`, `sys.args`,
   `str.from_cstr` and every sub-span yield values without `own`; `del` on them does not
   compile (D17.9). A view into a container is valid until the next mutating call on that
-  container; a view of an owned value is valid until the value is `del`ed or moved away, which
-  nothing checks (D10.7, D17.14).
+  container; a view of an owned value is valid until the value is `del`ed or moved away. No
+  compile-time rule checks it (D17.14): after the `del`, the view points at dead storage, and
+  each access through it has a result of D10.9.
 - **The `defer` idiom.** Declare the owning variable empty, defer its release on the next
   line, then fill it. Put the declaration before the first call of the function, so that no
   call comes before it on any path. The function takes the address of the slot, and a call
@@ -444,10 +445,13 @@ caller may not write: `libc.read(fd, view.ptr, view.len)` on a `u8@` is
 "the argument expects u8 mut*, not u8*".
 `malloc` and `calloc` return `void mut* own`, storage of no type that the caller may write, and
 `free` takes `void* own`, which every result reaches by dropping marks (D3.11, D5.4, D17.13):
-the `own` is erased at the boundary and states C's convention, so the pair is interchangeable
-with `new` and `del` (D10.3) and exists for storage that fort code gives to C.
-`calloc` returns zeroed storage for `n` items of `size` bytes, or null, and is what `std.rt`
-allocates with, since `new` promises zeroed memory (D10.2, `toolchain.md` 5.1); `isatty` answers
+the `own` is erased at the boundary and states C's convention. The pair is not interchangeable
+with `new` and `del` (D10.3): `free` releases what `malloc` and `calloc` gave, and a `del` of that
+storage is the runtime error `invalid release` (D10.9). The pair exists for storage that fort code
+gives to C.
+`calloc` returns zeroed storage for `n` items of `size` bytes, or null. The `std.rt` of 2026-11-11
+allocates with it, since `new` promises zeroed memory (D10.2), and the runtime gets its own
+allocator in a later change (D10.9, `toolchain.md` 5.1); `isatty` answers
 D11.5's question about a descriptor and is asked once per buffer, and once more at the first
 output after `io.close` or `io.dup2` resets the buffer (`toolchain.md` 5.3).
 `__errno_location` returns `i32 mut*` because C returns `int*`, whose target is mutable: `std.rt`
@@ -733,7 +737,8 @@ fn is_hex(char ch) bool
   function takes a span of a raw pointer but `rt.args_init`, which no source calls (D6.9). Only a
   trusted module names `from_cstr`, because it takes a `char*` (D9.8).
   It trusts that a NUL ends `p` inside its storage, as `strlen` does; a `p` with no such NUL is
-  outside the guarantee of D10.7 (A7 of `ownership-design.md` 5.1). It takes no `.ptr` (D3.5): the
+  a case of the trusted premise of D10.7 (A7 of `ownership-design.md` 5.1). It takes no `.ptr`
+  (D3.5): the
   `.ptr` of an empty span names the byte after its object, and strlen would read from there. Pass
   `&buf[0]`, whose index is checked, or give the buffer to `from_cbuf`. Ownership: a view (D17.3)
   of whatever owns `p`; `del` on it does not compile.
@@ -1184,7 +1189,8 @@ fn cmp_u64(u64* a, u64* b) i32
   less for every adjacent pair. The sort is written in fort and makes no C call. The order is
   **not stable**: two elements that the comparator calls equal come out in an unspecified order.
   Each panics with `"sort.sort_i64: null comparator"` or `"sort.sort_u64: null comparator"` when
-  `cmp` is `null`, since calling a null function pointer is undefined (D3.10), and the test
+  `cmp` is `null`. A call of a null function pointer is the runtime error `null call` (D3.10), and
+  the panic comes before each call: the test
   comes before the count, so a span of 0 or 1 elements with a `null` comparator panics too. A
   span carries its length (D3.5), so the caller cannot pass a count that disagrees with the
   storage, and the parameter `T mut@` says that the elements must be mutable. Ownership: none;
@@ -1603,8 +1609,9 @@ fn exit(i32 status) noreturn;
   call to it.
 
 Three properties of the runtime the library also depends on: `del` frees by the pointer alone,
-with no header and no length check (D10.3, D17.9, used by 1.3); `own` changes no bits, so a
-value produced by `new` and one from `malloc` are released the same way (D17.1, D17.3);
+and its caller gives no length (D10.3, D17.9, used by 1.3); `own` changes no bits (D17.1, D17.3),
+and the runtime knows the start of each live allocation, so `del` releases a value of `new` and
+`libc.free` releases a value of `malloc` (D10.3, D10.9);
 and `new(T, n)` returns zeroed storage (D10.2), which is why fresh `str_buf`, `vec` and `strmap`
 slots read as zero and why a fresh `own` slot passes the overwrite check (D17.11).
 

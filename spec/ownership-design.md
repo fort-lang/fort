@@ -4,6 +4,26 @@ Status: a design. The user ruled on its questions on 2026-10-23, and on assumpti
 (section 12). It adds no rule to fort. `decisions.md` and `grammar.md` win over it (D1.2). A rule of
 section 6 enters the language only through a decision of its own, in the order of section 11.
 
+**The state since 2026-11-11.** The user ruled on 2026-11-11: "I don't want anything undefined." The
+ruling "no annotation" on Q2 stands (section 12). The decisions hold the rules (D10.6, D10.7, D10.9,
+D12.2, D17.11, D17.20, D17.21). This document changes with them at six points:
+1. Each event of the oracle has one disposition: a compile error, a runtime error, dead storage, a
+   defined leak or the trusted premise. The disposition table of 3.4 replaces the event table, the
+   rule table and the list of 5.2.
+2. The type of a place selects the obligations (D17.11). Rule (a) is O-store, rule (b) is O-use,
+   part 1 of rule (c) is O-end and part 2 of rule (c) is O-del.
+3. Rule (e) is retired (6.5), and D10.9 replaces it. A read of a view after its owner gave up the
+   allocation, or after the frame of its storage ended, reads dead storage. The text of rule (e)
+   stays as the record: the facts `T` and `P` of 4.4, their transfer in 4.5 and 4.6, the proof of
+   5.3 to 5.5 and the counts of section 6. It is no rule of fort. Premise 2 below has no rule
+   either. The fact `B` stays, because refinement R6 uses it (D17.11, Borrows).
+4. Refinements R2, R3, R4, R5, R9 and R10 are retired (section 7).
+5. Section 16 holds the form catalogue, which D17.11 makes normative.
+6. Section 17 says who decides an edge case. It holds the two caps and the precision freeze.
+
+These six points state the end state. Where the compiler, the runtime or the oracle does not
+implement a point yet, a later change implements it.
+
 The plan of 2026-10-22 asks for this design as its step 4. The design applies the eight rules for
 the next design of `notes/ownership-retrospective.md` 8, and section 13 checks each of them.
 
@@ -30,6 +50,13 @@ the language. It has five points, and this design applies each of them:
 5. Precision comes later: one refinement in each PR, each with its own proof and review. Section
    7 lists the candidate refinements as later tickets. They are not part of the first version.
 
+Two points changed on 2026-11-11. Point 1 has one more exception, which D17.11 states (The one fact
+of another function): at a call that names a release-only fort function as its callee, kill rule 5
+also keeps the facts that D17.11 names. This exception has no entry in section 7. The change that
+implements it gives its proof, as point 4 says. The analysis of rule (b) reads no bit, so a call
+vacates each memory owner there (D17.21). Point 2 was the base of rule (e), which is retired (6.5),
+so no rule pins an owner.
+
 The **first version**, V1, is the set of rules of sections 4 to 6 with no refinement.
 
 Each number says how this document got it:
@@ -53,7 +80,8 @@ This design adds the rules of the plan one at a time. Each rule is a compile err
   that drops owners that can hold allocations (a leak);
 - (d) a double `del`. Section 6.4 gives it no error of its own, by the ruling on Q3;
 - (e) a view that the program reads after its owner gave up the allocation, or after the frame of
-  its storage ended;
+  its storage ended. Retired on 2026-11-11: such a read is no compile error. It reads dead storage
+  (D10.9, 6.5);
 - (f) the rules through calls: in V1 the coarse call rule of 4.6; summaries are refinements (7, 8).
 
 Four properties hold for each rule:
@@ -62,8 +90,9 @@ Four properties hold for each rule:
 2. One analysis on FIR checks all the rules, one function at a time (section 4).
 3. An obligation that the analysis cannot prove is a compile error, as in D17.11 ("Unknown is an
    error", the user, 2026-10-22). So no rule needs a ledger of known gaps.
-4. Each rule names its scope. Outside it the rule makes no claim, and D10.7 says what stays
-   undefined behavior. Section 5.2 lists each case outside a scope in one place.
+4. Each rule names its scope. Outside it the rule makes no claim. A case outside the scope of each
+   rule has a defined result at run time: a runtime error, dead storage or a defined leak (D10.7).
+   The disposition table of 3.4 gives each case in one place.
 
 Each rule is sound by construction, with a coarse rule where a precise one is hard (section 5).
 
@@ -85,11 +114,13 @@ Each rule is sound by construction, with a coarse rule where a precise one is ha
 - **Stale**: a view local is stale when an origin that it borrows can have had a release, or its
   frame can have ended, since the view local got its value. **Pinned**: a borrow of the owner can
   be in storage that is no view local.
-- **Event**: a report of the oracle (3.4). **Obligation**: what the analysis must prove at one
-  **site**, the source position of the obligation and of its error.
-- **False accept**: a function that the analysis accepts, while the oracle reports an event that
-  the scope of the rule covers, for some input. **False reject**: an error of a rule at a site
-  where no input gives such an event.
+- **Event**: a report of the oracle (3.4). **Disposition**: what fort does about an event: a compile
+  error, a runtime error, dead storage, a defined leak or the trusted premise (3.4). An **event of
+  an error kind** is an event whose disposition is a compile error (D17.11). **Obligation**: what
+  the analysis must prove at one **site**, the source position of the obligation and of its error.
+- **False accept**: a function that the analysis accepts with no report line of an owner rule, while
+  the oracle reports an event of an error kind, for some input. **False reject**: an error of a rule
+  at a site where no input gives such an event.
 - **Migration count**: the sites of a rule over the corpora `src/fort`, `src/lsp`, `std`,
   `test/fort` (the module tests) and `test/lang`, before the rule becomes an error.
 
@@ -144,6 +175,9 @@ so each import has one reading (`notes/style.md` 3.1 rule 1).
   zeroes an owner slot marks it vacated. Any other store clears the marks of the slots it writes.
 - The slots of a local die at its `dead` marker and at the return of its frame. The slots inside an
   allocation die at its release.
+- A store of an owning value into dead storage (D10.9) marks the word that it writes as an owner
+  slot, as each store of an owning value does. So the allocation keeps its owner count, and a later
+  `move` or `del` of that place goes through an owner slot.
 - The interpreter tests the owner counts at the end of each statement and terminator. During that
   test, the value that a `move` operand passes to the destination of its statement, and the value
   that a `return` passes in `_0`, count as owners. So a transfer makes no event.
@@ -189,50 +223,106 @@ tag.
 An access by the name of a local goes through no value. The interpreter writes the parameters of a
 new frame and reads the `_0` of a frame that returns by their names.
 
-### 3.4 The events
+### 3.4 The events and their dispositions
 
-Each event names the function, the FIR location and one of these kinds:
+Each event names the function, the FIR location and one of these ten kinds:
+- `overwrite`: a store writes an owner slot that holds a live allocation.
+- `leak`: the owner count of a live allocation becomes 0 with no `overwrite`.
+- `leak at exit`: at the end of `main`, no owner chain from a global reaches a live allocation.
+- `double release`: a `del` of the start of a released allocation.
+- `invalid release`: a `del` of an address that is no start of an allocation (D10.9).
+- `use after release`: a load or a store in the range of a released allocation.
+- `use after move`: a load or a store through a null that a vacated slot gave. In the end state a
+  `check` of the kind `null` stands before the load or the store (`fir.md` 8), and the event stands
+  at that `check` when it fails.
+- `use after scope`: a load or a store in a slot of a dead local or of a returned frame.
+- `duplicate owner`: an owner count becomes 2, or a `del` frees through no owner slot.
+- `forged`: a load or a store of a local through a value with no address of it.
 
-| event               | when                                                                  |
-|---------------------|-----------------------------------------------------------------------|
-| `overwrite`         | a store writes an owner slot that holds a live allocation             |
-| `leak`              | the owner count of a live allocation becomes 0 with no `overwrite`    |
-| `leak at exit`      | at the end of `main`, no owner chain from a global reaches a live one |
-| `double release`    | a `del` of the start of a released allocation                         |
-| `invalid release`   | a `del` of an address that is no start of an allocation (D10.7)       |
-| `use after release` | a load or a store in the range of a released allocation               |
-| `use after move`    | a load or a store through a null that a vacated slot gave             |
-| `use after scope`   | a load or a store in a slot of a dead local or of a returned frame    |
-| `duplicate owner`   | an owner count becomes 2, or a `del` frees through no owner slot      |
-| `forged`            | a load or a store of a local through a value with no address of it    |
+Each event has one **disposition**, and so has each case of the table that gives no event:
+- **compile error**: an obligation of D17.11 refuses each program that can give the event. The table
+  names the obligation.
+- **runtime error**: the program stops with a message of D11.4, in both build modes.
+- **dead storage**: the access has a result of D10.9. It reads or changes dead storage only, or the
+  program stops with a memory fault.
+- **defined leak**: the allocation stays until the process ends (D10.7).
+- **trusted premise**: no fort code gives the event. A run gives it only through a case of the
+  trusted premise of D10.7, which is outside the guarantee.
 
-`leak at exit` finds the allocations of a cycle of owners, whose counts never become 0. A load or a
-store through a value is `forged` when it reaches a byte of a local of a run that stands, and the
-value does not derive from an address of the entry of that local that the run took (D10.7). A byte
-of padding counts as a byte of the local before it. D10.7 gives padding between locals no address
-that fort code takes, so no program that compiles reaches it, and the oracle reports no event of
-its own there.
-After a `forged` event the run reports no event, because each rule assumes A8 (5.1). A run also has
-an outcome: its output, its exit status, or its runtime error. A load through a null that no
-vacated slot gave is the outcome `null dereference`, which is no ownership event.
+This table replaces the event table and the rule table that stood here before 2026-11-11, and the
+list of 5.2. Each row gives one event with its condition, and the conditions of one event cover each
+case of it:
 
-Each event belongs to at most one rule, by the scope of that rule (sections 5.2 and 6). An event
-that no rule covers is counted apart, and it is no false accept:
+| event and condition                                            | disposition            | rule   |
+|----------------------------------------------------------------|------------------------|--------|
+| `overwrite` at a store into a place whose type has a slot      | compile error: O-store | D17.11 |
+| `overwrite` at a store into a place of another type (X6)       | trusted premise        | D3.14  |
+| `leak` at the `dead` or the `return` of a local                | compile error: O-end   | D17.20 |
+| `leak` at a `del` of an object, from an owner slot inside it   | compile error: O-del   | D17.20 |
+| `leak` at a `del` of a span, from an owner slot in an element  | compile error: O-del   | D17.9  |
+| `leak at exit` (X3)                                            | defined leak           | D10.7  |
+| `use after move`: F reads the vacated slot of a local of F     | compile error: O-use   | D17.21 |
+| `use after move` in each other case (X2)                       | runtime error          | D10.6  |
+| `use after release` (X4, X5)                                   | dead storage           | D10.9  |
+| `use after scope` (X4)                                         | dead storage           | D10.9  |
+| `double release`, `invalid release`                            | runtime error          | D10.9  |
+| `duplicate owner`                                              | trusted premise        | D10.7  |
+| `forged`                                                       | trusted premise        | D10.7  |
+| no event: a load through a null that no vacated slot gave (X1) | runtime error          | D10.6  |
+| no event: a call of a null function pointer                    | runtime error          | D10.6  |
+| no event: an owner holds an allocation when the run ends (X3)  | defined leak           | D10.7  |
 
-| event and condition                                              | rule            |
-|------------------------------------------------------------------|-----------------|
-| `overwrite` at a store into an `own` reference place             | (a)             |
-| `overwrite` at a store of an owning aggregate or of another type | none (D17.11)   |
-| `leak` at the `dead` or `return` of a local owner                | (c)             |
-| `leak` at a `del` of an object, from an owner slot inside it     | (c)             |
-| `leak` at a `del` of a span, from an owner slot in an element    | (c) or none: Q7 |
-| `leak at exit`                                                   | none (X3)       |
-| `use after move`, when F reads the vacated slot of a local of F  | (b)             |
-| `use after move`, when a callee reads that slot                  | none (X2)       |
-| `use after release`, `double release`, through an owner tag      | (e) part 1      |
-| `use after scope` through a frame tag that is not kept           | (e) part 2      |
-| `invalid release`, `duplicate owner`                             | assumption A2   |
-| `forged`                                                         | assumption A8   |
+The rows are exact as follows. An **event of an error kind** is an event whose disposition is a
+compile error. The gate of D17.11 fails when a program that the compiler accepts, with no report
+line of an owner rule, gives an event of an error kind for some input. An event of another
+disposition is no failure of the gate, and the test of 3.6 counts it apart.
+
+O-store is rule (a), and it covers a whole store of an aggregate. O-end is part 1 of rule (c). O-del
+is part 2 of rule (c): its error stands at the `del`, or at the `cast` that carries `own` to another
+pointee type (D17.20), and a `del` of a span of owners takes `del(s, d)` (D17.9). O-use is rule (b).
+
+`use after move` in each other case has two forms. In the first, a callee reads the vacated slot of
+a local of F through a pointer (X2). In the second, the owner is no local owner: it is in a global,
+in a place through a pointer or in an element of a span (D17.21). The slot holds the zero value
+(D17.6), so the program stops with `null dereference` (D10.6). An index of an emptied span or
+`string` owner fails the index check of D10.6 before each load, so it gives the index error and no
+event.
+
+`double release` and `invalid release` are the runtime error `invalid release`: rule 4 of D10.9
+tests each `del` against the starts of the live allocations. A `regrow` makes the same test of the
+`.ptr` of its operand, and it gives the same runtime error (D12.2). `use after release` and `use
+after scope` have the results of dead storage in each case, also when F itself reads the view: D10.9
+replaces rule (e) (6.5).
+
+`leak at exit` has one disposition in each case. It finds the allocations of a cycle of owners,
+whose counts never become 0. It also finds an allocation whose owner slot is in dead storage (3.3),
+and each allocation that the run reaches only through such an allocation. Each is a defined leak of
+D10.7. A `leak at exit` of an allocation that a leaked allocation holds follows the `leak` event of
+that allocation, and the `leak` event carries the compile error. The last row of the table covers
+two cases. An owner chain from a global reaches the allocation of an owner in a global, so the test
+of `leak at exit` reports nothing. On a path that calls `exit` or ends in a runtime error, the run
+makes no test of `leak at exit` (3.2).
+
+The three rows of the trusted premise need no rule of their own. D3.14 refuses the view that a store
+of another type over an owner slot needs (X6). A cast never adds `own` (D3.14). A `move`, a `del`
+and a `regrow` store the zero value into each owner slot that they take an owner out of (D17.6,
+D17.9, D12.2), so a `move` through a view of dead storage gives no second owner (rule 2 of D10.9).
+So no fort code makes a second owner of an allocation. D10.7 gives A8 as a guarantee (5.1). So a
+run that reports `duplicate owner`, `forged` or an `overwrite` of X6 shows a case of the trusted
+premise, or a defect of a compile rule or of the runtime.
+
+A load or a store through a value is `forged` when it reaches a byte of a local of a run that
+stands, and the value does not derive from an address of the entry of that local that the run took
+(D10.7). A byte of padding counts as a byte of the local before it. D10.7 gives padding between
+locals no address that fort code takes, so no program that compiles reaches it, and the oracle
+reports no event of its own there. After a `forged` event the run reports no event, because each
+rule assumes A8 (5.1). In the end state each entry of a block gives its local new storage (D10.9).
+So an access through an address of an earlier entry reaches dead storage: it is `use after scope`
+and no `forged`. A later change of the interpreter implements this.
+
+A run also has an outcome: its output, its exit status, or its runtime error. A load through a null
+that no vacated slot gave is the outcome `null dereference`, which is no ownership event (X1). A
+call of a null function pointer is the outcome `null call`.
 
 ### 3.5 The tests of the oracle
 
@@ -245,7 +335,8 @@ that no rule covers is counted apart, and it is no false accept:
   cover a tag through a cast to `u64` and back, and a kept frame tag. The tests of `forged` cover
   each step of the derivation that 3.3 lists, each kind of access through a value, the first byte
   of the next local, a byte of padding, a local of 0 bytes, an address of an earlier entry, and a
-  derivation of more than 4 entries.
+  derivation of more than 4 entries. In the end state the access through an address of an earlier
+  entry is a test of `use after scope` (3.4).
 
 ### 3.6 The tests of a rule against the oracle
 
@@ -257,8 +348,9 @@ Three sets of programs test each rule:
    the oracle and the analysis on each function and input in the process.
 3. The tree: each build runs the analysis on the sources, and the oracle runs the run corpus.
 
-`test/fort/owner/oracle_test.ft` prints the false accepts, the false rejects and the events outside
-each scope, for sets 1 and 2. A PR merges only with 0 false accepts (retrospective rule 7).
+`test/fort/owner/oracle_test.ft` prints the false accepts, the false rejects and the events of each
+other disposition (3.4), for sets 1 and 2. A PR merges only with 0 false accepts (retrospective rule
+7).
 
 ### 3.7 The generator
 
@@ -453,6 +545,11 @@ A callback that an earlier call registered is no special case. A `signal` handle
 | (e)2 | a frame origin in a destination of 4.5        | a view local or a call argument         |
 | (e)3 | a release of a local owner `o` (4.5, 4.6)     | `P(o) = 0`                              |
 
+Since 2026-11-11 the type of the place selects each obligation (D17.11). Rule (a) is O-store over
+each slot of the destination, a whole store included. Rule (b) is O-use. The first row (c) is O-end.
+The second row (c) is O-del, and a span of owners takes `del(s, d)` (D17.9). The rows (e)1 to (e)3
+are retired (6.5): they are no obligation.
+
 There is one error for each site. A deferred statement expands into one site for each exit, and
 the report keeps the first site of each location, as `fir.emptiness` does. An exit in an abort
 block has no obligation, because a runtime error runs no deferred code either (D7.8, D11.4).
@@ -473,8 +570,20 @@ of the fixpoint (low) they are 976,365, 2,275,408 and 260,010 (measured, P4). No
 ### 5.1 The assumptions
 
 These are all the assumptions of the rules. A program that breaks one gets no claim from the rules.
-- **A1**: no operation accesses storage through a dangling pointer outside the scopes of rules (b)
-  and (e). D17.11 already assumes this.
+
+Since 2026-11-11 no assumption leaves a case of a fort program undefined. A7, with a standard
+library that the compiler checked, is the trusted premise of D10.7. A1 and A4 are rules of the
+runtime (D10.9). A5 holds for each program, because a fort program has one thread (D10.7). A8 is a
+guarantee of D10.7. No fort code breaks A2: a cast never adds `own` (D3.14), a plain read of an
+owner lends a view, and only `move` takes the owner out (D17.4, D17.6). A break of A2 or A3 through
+C is a case of the trusted premise. It still has a defined result at a `del`: a `del` of a pointer
+that is no start of a live allocation is the runtime error `invalid release` (D10.9). A6 is a
+property of the compiler.
+
+- **A1**: an access through a pointer or a span to dead storage reads or changes dead storage only
+  (D10.9).
+  Before 2026-11-11, A1 assumed that no operation accesses storage through a dangling pointer
+  outside the scopes of rules (b) and (e).
 - **A2**: each allocation has at most one owner slot, and an extern whose result says `own` returns
   a new allocation (D17.13). The 15 casts of an address in `src` and `std` cast no owning value
   (measured with `grep`, then read). The oracle reports a break as `duplicate owner` or `invalid
@@ -487,7 +596,8 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   pointer.
 - **A3**: an `own` reference designates the start of a live allocation, or it is null (D17.1).
 - **A4**: a frame and an allocation never share storage (D10.1).
-- **A5**: one thread: no data race (D10.7).
+- **A5**: one thread: no data race (D10.7). No trusted module declares a C function that starts a
+  thread (D9.8).
 - **A6**: the invariants of the FIR verifier hold (`fir.md` 10), such as rule V13.
 - **A7**: only a trusted module meets C (D9.8): a module that the compiler loads from its standard
   library or builds with `fort --lib std <root>`, or a module whose first item is
@@ -510,7 +620,14 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
     argument of an integer type. A function pointer that C gives names a function of its type. So
     `extern fn memchr(void* s, i32 c, u64 n) i64*` breaks A7 for a search of one byte. A C
     function that gives back an argument whose storage can be empty, as `memcpy` gives back
-    `dst`, has a `void*` result or no result.
+    `dst`, has a `void*` result or no result. Storage that C gave, and that the runtime does not
+    hold as an allocation or as frame storage, is storage of C: C can release it or change it, and
+    D10.9 gives no result for an access to it after C released it. A function of a trusted module
+    gives its caller no pointer, no span and no string to storage of C that C can release or change
+    while fort code holds the value, or the row of the function says why C never does (D9.8). The
+    function itself makes no load and no store through such a value after a call that can release
+    the storage, or its row says why the call released no byte that the access reaches. A row that
+    cannot say so is wrong, and it is case 1 of the trusted premise (D10.7).
   - `writes:` C reads and writes only the storage that its arguments name, as the contract of
     the C function says: a C string ends in a NUL inside its storage, and a length fits its
     buffer. C writes only a level that the type of its parameter marks `mut`, and it writes a
@@ -571,7 +688,7 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   question that a reviewer answers for one declaration or one callee: the C function, the source
   of its contract, the five points, and the bounds of each call. A module outside the trusted set
   declares no `extern fn` and calls none, so A7 asks nothing of it. D10.7 names a row that is
-  wrong, and C code that breaks A7, as outside its guarantee. The user directed this form on
+  wrong, and C code that breaks A7, as cases of the trusted premise. The user directed this form on
   2026-11-02: "Rework the design at the correct, i.e. vaguest/weakest link and course correct",
   and the coordinator ruled the call rule on the same day (section 12). Before, A7 applied to each
   declaration and each call of each module, and the compile rules of D3.5 and D17.13 each checked
@@ -594,8 +711,9 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   it, and no cast takes it (D3.5). Only a trusted module declares or calls an `extern fn`, and the
   audit rows of each declaration and each call give A7 for it (D9.8). With A7 for C, a pointer
   that fort code holds is `null`, a value that derives from an address and keeps its whole pointee
-  inside the object of that address, or a dangling pointer. So A8 holds for each program that
-  compiles, in a build without `--no-bounds-check`, and keeps A1 and A7, for a `del` too.
+  inside the object of that address, or a pointer to dead storage (D10.9). So A8 holds for each
+  program that compiles and keeps A7, in each build, for a `del` too. Before 2026-11-11 the
+  compiler had the option `--no-bounds-check`, and A8 held only in a build without it (D10.6).
   **Code outside the trusted set.** A module outside the trusted set declares no `extern fn`, calls
   none, and names no boundary function (D9.8). So no code in it can misstate C or break the contract
   of a C function. It reaches C only through functions of trusted modules that are no boundary
@@ -613,7 +731,10 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   address and reads no pointee. `args_init` takes the `argc` and the `argv` that C gives to `main`.
   Each pointer that the code of the module holds derives through operations of fort code, which the
   compile rules above check, or comes from a function of a trusted module. So A8 holds for its code
-  with no condition on that code (D10.7). A trusted module keeps five things: rows that hold; for
+  with no condition on that code (D10.7). A pointer to storage of C that a function of a trusted
+  module gave is under the row of that function (A7, `gives:`), and the code of a module outside
+  the trusted set has no duty for it. A trusted module keeps five things: rows that hold, the rows
+  for storage of C included; for
   each function that a module outside the set can call, A8 for each argument that the checker
   accepts; a boundary function or a function pointer that C gave goes as a value only to C (D9.8);
   each compile rule, as each module does; and in `std`, the two functions of D6.9 that take a span
@@ -623,9 +744,9 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   (lemma (ii)). Refinement R6 needs A8 for each local (section 7). Rules (a) and (c), and kill rule
   5 of D17.11, need only that no write and no release goes through a forged pointer. D3.14 gives
   that for a cast alone, because a cast from an integer marks no level `mut` and no level `own`.
-  D10.6 gives it for an index in each build without `--no-bounds-check`, and D10.7 gives it for a
-  slice. A same-size reinterpretation cannot load a pointer from the bytes of an integer: D3.14
-  refuses the view in each form, an argument of an `extern fn` included. A write
+  D10.6 gives it for an index and for a slice in each build: the compiler has no option that
+  removes the check. A same-size reinterpretation cannot load a pointer from the bytes of an
+  integer: D3.14 refuses the view in each form, an argument of an `extern fn` included. A write
   through a same-size reinterpretation of a value that derives from the address of the slot stays
   defined as an access, but D3.14 refuses the cast that makes the view: at the first level that
   its result marks `mut`, a cast must keep each pointer place of its source with its exact type,
@@ -672,26 +793,37 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   `cast(memmove(cast(&o, u8 mut*), cast(&o, u8*), 0), u64 mut*)` for a `u64* own mut o`, then a
   store of an integer. D3.14 now refuses the argument `cast(&o, u8 mut*)`, because it hides the
   owner place, so no form stays outside. The oracle reports a break of A8 as `forged` (3.4). A run
-  that reports `forged` shows a program that breaks A1 or A7, or a defect of a compile rule.
+  that reports `forged` shows a case of the trusted premise (D10.7), or a defect of a compile rule
+  or of the runtime.
 
-### 5.2 Outside the scopes
+### 5.2 The cases X1 to X6
 
-These cases are outside the scope of every rule. The oracle counts their events apart (3.4).
-- **X1**: nullness: a load through a null that no vacated slot gave.
-- **X2**: rule (b): a vacated slot of a local of F that a callee reads through a pointer.
-- **X3**: rule (c): a leak through a cycle of owners (`leak at exit`), and a store over an owning
-  aggregate (D17.11). A leak on a path that calls `exit` or ends in a runtime error. With option
-  (1) of Q7, a `del` or a `cast` of a span whose elements hold owners.
-- **X4**: rule (e): a lend that a callee makes from an owner of F and keeps or writes out through
-  an out-parameter. Such a lend has no tag. A frame tag that a callee keeps, and each value that a
-  function reaches through it. A tag of F that a cast to an integer in a callee removes (3.3).
+Since 2026-11-11 the disposition table of 3.4 replaces the list that stood here. Before that date
+these cases were outside the scope of every rule, and D10.7 left some of them undefined. Each case
+now has a defined result. The names X1 to X6 stay, because other texts cite them.
+- **X1**: nullness: a load through a null that no vacated slot gave. It is the runtime error `null
+  dereference` (D10.6).
+- **X2**: rule (b): a vacated slot of a local of F that a callee reads through a pointer. The callee
+  reads the zero value, so a load through it is the runtime error `null dereference` (D10.6,
+  D17.21).
+- **X3**: rule (c): a leak through a cycle of owners (`leak at exit`), a leak of an owner in a
+  global, and a leak on a path that calls `exit` or ends in a runtime error. Each is a defined leak
+  (D10.7). Two cases left X3. A store over an owning aggregate is a compile error by O-store
+  (D17.11). A `del` of a span whose elements hold owners is a compile error by O-del when it has one
+  operand, and it takes `del(s, d)` (D17.9). A `cast` of such a span that carries `own` to another
+  element type is a compile error by O-del too (D17.20).
+- **X4**: rule (e): a lend that a callee makes from an owner of F and keeps or writes out through an
+  out-parameter. Such a lend has no tag. A frame tag that a callee keeps, and each value that a
+  function reaches through it. A tag of F that a cast to an integer in a callee removes (3.3). An
+  access through each of them after the release, or after the frame ended, reads or changes dead
+  storage (D10.9).
 - **X5**: rule (e): a view of an owner in a global or through a pointer, such as `p->data` in a
-  callee. To cover it costs 93 more sites in 20 more functions of `src/fort`, 6 in `std` and in
+  callee. An access through it after the release reads or changes dead storage (D10.9). To cover it
+  with rule (e) cost 93 more sites in 20 more functions of `src/fort`, 6 in `std` and in
   `test/fort`, and 40 in `test/lang` (measured, P4). The sources hold one global owner (read).
-- **X6**: no rule checks a store of another type over an owner slot, because rule (a) checks only
-  `own` reference places (D17.11). D3.14 refuses the `mut` view that such a store needs, as an
-  argument of an `extern fn` too (A8). No rule
-  checks a `double release` through a value with no tag (X4, X5).
+- **X6**: a store of another type over an owner slot. D3.14 refuses the `mut` view that such a store
+  needs, as an argument of an `extern fn` too (A8), so no fort code gives it. A `double release`
+  through a value with no tag (X4, X5) is the runtime error `invalid release` (D10.9).
 
 ### 5.3 The state lemma
 
@@ -754,7 +886,9 @@ Statements (7):
   borrows. A destination that is no view local pins (iv) or fails rule (e) part 2 (v).
 - `del(move p)`: the reads of the loads of `p`, the obligation of rule (c), then the update of a
   `move`.
-- `live(_n)`: no change. The storage of each local exists for the whole function (D19.4).
+- `live(_n)`: no change. The storage of a local that no `&` names exists for the whole function
+  (D19.4). A local that an `&` names is in frame storage, and each `live` of it starts new storage
+  (D10.1, D10.9).
 - `dead(_n)`: the obligation of rule (c). The frame of `_n` ends, so each view local that borrows
   it becomes stale (iii).
 
@@ -1052,9 +1186,19 @@ whose elements hold owners, for which no element is tracked, waits for R8.
 
 There is no error for rule (d). D17.9 empties the operand of `del`, so `del(p); del(p);` frees once.
 A double release at run time needs two owner slots of one allocation, which A2 excludes, or a `del`
-through a view of a released allocation, which is rule (e). The ruling on Q3 keeps this reading.
+through a view of a released allocation. Since 2026-11-11 such a `del` is the runtime error `invalid
+release` (D10.9); before, it was a case of rule (e). The ruling on Q3 keeps this reading.
 
 ### 6.5 (e) A view that outlives its owner or its frame
+
+**Retired 2026-11-11.** D10.9 replaces rule (e). The user ruled on 2026-11-11: "I don't want
+anything undefined." The ruling "no annotation" on Q2 stands, and the two leave no proof at compile
+time for a view. A read or a write through a view after its owner gave up the allocation, or after
+the frame of its storage ended, reads or changes dead storage only, or the program stops with a
+memory fault. A `del` through such a view is the runtime error `invalid release`. Part 2 does not
+amend D6.7: the return of the address of a local compiles, and the result points at dead storage.
+The text below stays as the record of the rule that the design proposed. It is no rule of fort, and
+no ticket implements it.
 
 Proposed text, part 1: Take a local owner `o`. A lend of `o` (D17.4), `o.ptr`, a slice of `o` and an
 address through `o` borrow `o`. When `o` is memory, a copy through any pointer, of any type,
@@ -1129,16 +1273,23 @@ counts of its rules before and after it. A report count can change the order of 
   design.
 - **R2 `kept` lines.** The callee returns with `(*_k).q` holding its entry value, so the caller
   keeps `S(x.p.q)` after step 3. It helps (b) and (e)1 for memory owners.
+  **Retired 2026-11-11.** The release-only bit of D17.11 keeps the facts at a call of a release-only
+  callee, and each other site takes a form of section 16.
 - **R3 `result` lines.** A line names what a result borrows: the origins of argument `k`, or the
   owner at a path through it. It replaces step 4 of 4.6. Bound (P4): with R6, rule (e) in `src/fort`
   falls from 900/113 to no fewer than 365/87.
+  **Retired 2026-11-11.** It refines rule (e), and D10.9 replaces that rule (6.5).
 - **R4 `keep` lines.** A line says that the callee can store a borrow of argument `k` outside its
   frame. An argument with no line pins nothing; a call that can change an owner that an argument
   borrows stays an error. Bound (P4, with R1, R3 and R6): rule (e) falls to no fewer than 57
   functions of `src/fort`. An argument with no line can also expose no frame for R6. With no
   exposure by an argument, (e)3 at a call with R3 and R6 falls from 229/20 to 78/8 (a bound).
+  **Retired 2026-11-11.** It refines rule (e), and D10.9 replaces that rule (6.5). The "keep" bit of
+  the cost list of D10.9 is no refinement of a rule: it is an optimization of frame storage that
+  changes no result.
 - **R5 view places for aggregates**: a struct local with a view field tracks its borrows, with weak
   updates. It helps (e)2 and (e)3.
+  **Retired 2026-11-11.** It refines rule (e), and D10.9 replaces that rule (6.5).
 - **R6 alias by borrow and exposure.** A path **exposes** a memory local `x` when it sends a frame
   borrow of `x` to a destination that pins an owner in 4.5. A call argument is one of them. `x` is
   exposed at a point when a path to that point exposes it. A copy borrows the origin `exposed` when
@@ -1214,9 +1365,13 @@ counts of its rules before and after it. A report count can change the order of 
   (`src/fort/fir/release.ft`), so it adds no line to the cap of section 9.
 - **R9 privacy**: a memory local whose address only view locals hold keeps its facts at a call.
   The ruling of 2026-10-23 removed it from V1. It helps (c) for aggregates.
+  **Retired 2026-11-11.** The release-only bit of D17.11 keeps the facts at a call of a release-only
+  callee, and each other site takes a form of section 16.
 - **R10 typed aliasing**: a place through a pointer can be only a memory place of a matching type.
   D17.4 drops `own` at the second level and D3.14 allows casts, so it needs an assumption on the
   program that the user rules on. Revision 3 measured a typed form that missed D17.4.
+  **Retired 2026-11-11.** Fort keeps no strict-aliasing rule (D10.7), so no rule reads the type of a
+  place through a pointer. A site that the analysis rejects takes a form of section 16.
 - **R11 a fresh allocation at a call.** A call keeps each fact about a place through a fresh
   pointer local: no pointer but the local names the object of its `new`, the local is no memory,
   and an operand of the call that copies or moves the local ends its freshness before the kill, so
@@ -1238,7 +1393,9 @@ them adds one kind of line to one file: `empty <path>` (R1), `kept <path>` (R2),
 (R3) and `keep <token>` (R4). A path holds fields and constant indexes of fixed arrays below
 `(*_k)`, where parameter `k` is never written and never memory. A token is `_k`, the origins of
 argument `k`, or a path. The user dropped R1 on 2026-11-01 (section 7), so no analysis gives an
-`empty` line.
+`empty` line. R2, R3 and R4 are retired since 2026-11-11 (section 7), so no analysis gives a
+`kept`, a `result` or a `keep` line either. The file holds one more fact, which is no refinement of
+this list: the release-only bit of each function (D17.9, D9.11).
 
 ### 8.1 The order and the fixpoint
 
@@ -1334,8 +1491,11 @@ digits   = "0" | nonzero { digit } ;
    keeps known false accepts. A false accept found after a merge blocks the next rule PR until its
    fix merges. Each PR also counts its false rejects, in its test or its ticket (rule 7).
 5. The review depth is `rev-deep` for the oracle, the analysis and each refinement, and `rev-std`
-   for a migration. The limits of `AGENTS.md` (Review Workflow) hold. A class of findings that two
-   rounds find goes to the user as a rule question, and a ticket that reaches round 3 splits.
+   for a migration. The limits of `AGENTS.md` (Review Workflow) hold. Since 2026-11-11 the
+   implementor decides a class of findings by the table of section 17, and only its case 7 reaches
+   the user. Before, a class of findings that two rounds found went to the user as a rule question.
+   A ticket that passes round 3 gets one more fix round. Then the rule that fails goes into a new
+   ticket.
 
 ## 11. Tickets
 
@@ -1343,7 +1503,8 @@ The ids are names. A ticket starts when its dependencies merge. S is hours, M is
 is up to one agent-day. A decision comes before each code ticket of its rule (retrospective rule 6).
 The order follows the ruling on Q1. The leak checks on `own` locals and the shallow `del` come
 first. The aggregates follow their migration (6.3), rule (b) follows a sound R6, and rule (e)
-follows R3, R4 and R6.
+follows R3, R4 and R6. Since 2026-11-11 rule (e) and the refinements R2 to R5, R9 and R10 are
+retired (6.5, section 7), so items 11, 12, 13 and 16 have no ticket, and item 15 keeps R7 only.
 
 A rule of V1 has four tickets in a row. The decision is S, for the user. The report (M, impl-hard,
 rev-deep) adds its facts and gives the count and the oracle test. The migration is impl-std and
@@ -1371,13 +1532,16 @@ one PR (impl-hard, rev-deep). The oracle and the move are impl-hard and rev-deep
    Its decision is D17.11 (Borrows), with the five points of R6 (section 7).
 10. `move-*`, after 9: rule (b). Migration M. The ruling on A8 (5.1) is done (D10.7, 2026-10-26).
     The user ruled "Migrate only" for its migration (6.2, 2026-10-31).
-11. `refine-result` (R3, L), after 6. 12. `refine-keep` (R4, L), after 11.
+11. `refine-result` (R3, L), after 6. 12. `refine-keep` (R4, L), after 11. Both are retired
+    (2026-11-11).
 13. `view-*`, after 9, 11 and 12: rule (e). The report adds `T` and `P`. Migration L in at least
-    five tickets. The ruling on A8 (5.1) is done (D10.7, 2026-10-26).
+    five tickets. The ruling on A8 (5.1) is done (D10.7, 2026-10-26). Retired (2026-11-11): D10.9
+    replaces rule (e).
 14. `refine-span-del` (R8, M), after 5, by the ruling on Q7.
 15. `refine-kept` (R2), `refine-view-aggregate` (R5), `refine-null-edge` (R7) and `refine-typed`
-    (R10): M each, after 6 or 5, only when a report count needs one.
-16. `refine-private` (R9, L), after 6, only if the user rules for it.
+    (R10): M each, after 6 or 5, only when a report count needs one. `refine-kept`,
+    `refine-view-aggregate` and `refine-typed` are retired (2026-11-11).
+16. `refine-private` (R9, L), after 6, only if the user rules for it. Retired (2026-11-11).
 
 A report ticket adds a temporary option that lists each site, as `--overwrite-report` did, and the
 error ticket removes it. A ticket that changes a pass or a test method updates `notes/compiler.md`
@@ -1421,7 +1585,8 @@ functions of `std`, and a pointer from C that adds `mut` (D3.14, D6.9, D17.13). 
 grows: C gives back only storage that C gave, or storage that fort code gave to C, with its whole
 pointee inside. D10.7 lists no forged value and states A8 as a guarantee, so A8 holds for each
 read, each write and each `del` of each program that compiles, in a build without
-`--no-bounds-check`, and keeps A1 and A7 (5.1). A
+`--no-bounds-check`, and keeps A1 and A7 (5.1). Since 2026-11-11 the compiler has no such option,
+and A1 is a rule of the runtime (D10.6, D10.9). A
 count at 855b512f over `src`, `std`, `test/fort`, `test/lsp`, `test/lang` and `test/library` found
 165 sites and 2 extern declarations that the rules refuse.
 
@@ -1480,7 +1645,21 @@ Linux and 6 on Darwin in `test/fort`, and 235 in 80 files of `test/lang`; 21 bou
 times in 27 files and `str.from_cstr` 35 times. They go behind about 31 functions of `std` that take
 spans and strings. 131 files of `test/lang` and `test/fort/support/heap.ft` write `import extern;`.
 
-The questions, their options and their counts stay below as the record.
+The user ruled on 2026-11-11: "I don't want anything undefined." The ruling "no annotation" on Q2
+stands. The two rulings leave no proof at compile time for a view. So rule (e) is retired, and the
+storage rules of D10.9 give each access through a view a defined result at run time (6.5). A
+dereference of `null`, a call of a null function pointer, and a `del` or a `regrow` of a pointer
+that is no start of a live allocation are runtime errors in both build modes (D10.6). The compiler
+has no option that removes a check. A fort program has one thread. `regrow` replaces the loop that
+grows a span of owners (D12.2). The owner rules stay compile errors, the type of a place selects
+their obligations, and "Unknown is an error" stays (D17.11). D10.7 names the trusted premise as the
+one source of undefined behavior. Three earlier rulings change with this one. On Q1, rule (e) waits
+for no refinement. On Q4, what a callee keeps or writes out reads dead storage (X4). On Q7, a `del`
+of a span of owners with one operand is a compile error (D17.9). The user approved the plan of that
+date, which holds the form catalogue of section 16 and the table of section 17.
+
+The questions, their options and their counts stay below as the record. They state the rules as
+they stood on 2026-10-23. Since 2026-11-11 no case of them is undefined behavior (D10.7).
 
 **Q1. Which rules of V1 become errors, and when?**
 - Functions of V1 in `src/fort` (measured, P4): (c) on `own` locals 1, (c) part 2 10, (b) 26, (c)
@@ -1625,3 +1804,133 @@ These choices are the coordinator's, and the coordinator ratified them on 2026-1
 - the order of the refinements (7, 11), and the file `summaries/ownership` with the hash over both
   files (8.2), which amend D9.11 and `toolchain.md` 2.2;
 - the numbers D17.20 and up (6.6), and the work limits 2^24 and 2^26 (4.8, 8.1).
+
+## 16. The form catalogue
+
+D17.11 holds the form catalogue and makes it normative. This section repeats it in the same words;
+only the pointer to section 17 differs. When the two texts differ, D17.11 wins (D1.2).
+
+Each form of this list must compile with no error of an owner rule and with no report line of one,
+in each storage class and for each type that the form can name. A form that does not compile is a
+defect of the compiler. A site that the compiler rejects takes one of these forms: no new gen rule,
+no kill exception and no exclusion answers such a site (section 17). In the forms, `T` is an owning
+type: an `own` reference or an owning aggregate (D17.7). `P` is a place of type `T`. `T_drop` is the
+value drop of `T` (D13.5), a fort function that takes a `T` and releases each owner in it; for an
+`own` reference, `T_drop(move(x))` stands for `del(x)`. The storage classes are the places that can
+hold an owner: a local that is not memory, a memory local, a global, a field of each, an element of
+a fixed array, an element of a span, and a place through a pointer. In the examples, `box` is
+`struct box { u8 mut@ own data; }`, `box_drop` is its value drop, `make` returns a `box`, `holder`
+is `struct holder { box b; i32 n; }`, and `v->items` is a `box mut@ own`.
+1. Swap: `T nv = <value>; T old = move(P); P = move(nv); T_drop(move(old));`, in this order. When
+   the lvalue is no tracked place, the form takes its address first, `T mut* q = &<lvalue>;`, and
+   `P` is `*q`. An element of a fixed array takes a key local as its index.
+
+   ```fort
+   // in place of `v->items[i] = make();`
+   box nv = make();
+   box mut* q = &v->items[i];
+   box old = move(*q);
+   *q = move(nv);
+   box_drop(move(old));
+   ```
+2. Return the value, in place of `*out = f(...)`.
+
+   ```fort
+   // in place of `fn fill(box mut* out) void { *out = make(); }`
+   fn fill() box { return make(); }
+   ```
+3. Hoist the call: put the result of a call in a local, then write `move(b)` in the literal.
+
+   ```fort
+   // in place of `*p = holder{make(), 0};`
+   box b = make();
+   holder mut* own p = new(holder);
+   *p = holder{move(b), 0};
+   ```
+4. `drop_made`: `if (p == null) { return; } T v = move(*p); del(p); T_drop(move(v));`, with `p` in
+   a pointer local.
+
+   ```fort
+   fn box_drop_made(box mut* own p) void {
+       if (p == null) { return; }
+       box v = move(*p);
+       del(p);
+       box_drop(move(v));
+   }
+   ```
+5. `del(s, T_drop)`. Move the span into a local first when it is a field, a global or an element.
+
+   ```fort
+   box mut@ own s = move(v->items);
+   del(s, box_drop);
+   ```
+6. `T_drop(move(x))` as the last use of `x`.
+
+   ```fort
+   box b = make();
+   u64 n = b.data.len;
+   box_drop(move(b));
+   ```
+7. `regrow(move(s), n)` (D12.2).
+
+   ```fort
+   v->items = regrow(move(v->items), cap);
+   ```
+
+## 17. Edge cases: who decides
+
+The user ruled on 2026-11-11: "I don't want anything undefined." Since that ruling each event has
+one disposition (3.4), so an edge case of the owner rules or of the storage rules needs no question
+to the user. The table says who decides each case. The user approved it with the plan of 2026-11-11.
+
+| case                                                    | action                   | who decides |
+|---------------------------------------------------------|--------------------------|-------------|
+| 1. an accepted program gives an event of an error kind  | fix it; add its test row | implementor |
+| 2. the prover rejects a site that is safe               | use a catalogue form     | implementor |
+| 3. a form of the catalogue does not compile             | fix the prover           | implementor |
+| 4. a text is silent or has two readings                 | reject more; record it   | implementor |
+| 5. a path has no check at run time                      | fix it                   | implementor |
+| 6. a cost is above its target                           | the next optimization    | coordinator |
+| 7. the guarantee, a decision or the surface must change | a specification change   | user        |
+
+The rows are exact as follows.
+1. A program that the compiler accepts, with no report line of an owner rule, gives an event of an
+   error kind (3.4). This is a defect of the compiler. The implementor fixes it and adds the
+   generator row or the mutation row that holds the fix.
+2. The prover rejects a site, and no input gives an event at that site. The site takes a form of the
+   catalogue (section 16). No new gen rule, no kill exception and no exclusion answers it.
+3. A form of the catalogue does not compile, or it compiles with a report line. This is a defect of
+   the prover. The implementor fixes it, and the form corpus gets the case. The form corpus holds
+   each form of the catalogue in each storage class and for each type that the form can name. Each
+   of its programs compiles with 0 report lines and runs with 0 events.
+4. A text is silent, or it has two readings. The implementor takes the reading that rejects more
+   programs and records it in the Notes of the ticket.
+5. A path reaches a case of a runtime error of D10.6, or an access to dead storage, with no check at
+   run time and no rule of the runtime that gives its result. This is a defect against the run gate.
+   The run gate compares two runs of each program: the compiled binary and the interpreter of the
+   reference semantics of section 3. A read of dead storage gives the value that the storage held
+   last in each of the two runs (rule 2 of D10.9). So the two runs give equal output and an equal
+   end, or the binary stops with a memory fault at an access that the interpreter marks as an access
+   to dead storage. In that case the output of the binary is a prefix of the output of the
+   interpreter: a memory fault flushes no buffered output (D10.9, D11.5), so the binary can lose
+   output that it wrote before the access. Each other difference is a defect against the run gate.
+6. A cost is above a target of D10.9. The coordinator starts the next optimization of the fixed list
+   of D10.9. The guarantee does not change.
+7. The guarantee table of D10.7, a decision or the language surface must change. That change is a
+   change of the specification of its own, and it is the only case that reaches the user.
+
+An open question with `owner: user` is legal only for case 7. The coordinator does not resolve a
+question of the user alone, and the coordinator adds no refinement.
+
+**The caps.** `src/fort/owner/` holds at most 9,000 lines: the user raised the cap of section 9 from
+8,000 lines on 2026-11-07. `src/fort/fir/release.ft` holds at most 500 lines. `wc -l` gives each
+count. A change that would pass a cap goes to the user, as section 9 says.
+
+**The precision freeze.** After the change that gives kill rule 5 its release-only exception
+(D17.11), no change adds a gen rule or a kill exception until each of the three reports of D17.11 is
+a compile error. During the freeze a site that the prover rejects takes a form of section 16, as
+case 2 says.
+
+The process rules of `AGENTS.md` stay: the round limit of a review, no ticket before its
+dependencies merge, no count in a file that parallel changes share, targeted local tests, and the
+merge queue.
