@@ -8,15 +8,26 @@ The rows of D9.8: each `extern fn` of a trusted module has a declaration row, th
 each function of a trusted module count each call of an `extern fn`, of a boundary function and
 through a function value, and a name of a boundary function goes only to C (row_problems).
 A call row that cites `the gives: of <callee>` or `the writes: of <callee>` names a callee that
-the body calls, whose row holds a line with that word (citation_problems). A function that is no
-boundary function gives no `mut` global whose type reaches a byte pointer to a call of C
-(mut_global_to_c).
+the body calls, a fort function of a trusted module whose row holds a line with that word
+(citation_problems). Text that starts a citation and that the lint cannot read as one is a
+problem too. A function that is no boundary function gives no `mut` global whose type reaches a
+byte pointer to a call of C (mut_global_to_c).
 
 The lint does not read the sources of a row. It does not check a bound, a length or a NUL: a row
 that claims the bound of the whole array for `&g[0][1][0]` of a `char@[1][2] g` passes, and a
-reviewer reads it against rule 2. It sees a `mut` global only by its name in the arguments of
-the call: a value that a local copies from a `mut` global first, and a length or a NUL of a `mut`
-global of another type, go past it.
+reviewer reads it against rule 2. It sees a `mut` global only by its name, anywhere between the
+brackets of the call: as an argument, and inside a cast, a nested call, an index, or a struct or
+array literal there. It does not see a value that a local copies from a `mut` global
+first, a value that another function takes from a `mut` global and returns or stores, as
+`strlen(get())` for `fn get() char* { return name; }`, a length or a NUL of a `mut` global
+whose type reaches no byte pointer, or a `mut` global between the brackets of a call through a
+function pointer that C gave. It does see a `mut` global between the brackets of a call whose
+callee holds a boundary function as a value, as `(first ? take : other)(name)`.
+
+One function reads the callee of a call, through each group around it (call_callee), and each
+check takes the callee from it: `(strlen)(name)` is a call of `strlen` for each check, and its
+call row names the callee `(strlen)`. A citation names its callee in the same forms, so the
+same function reads it. A keyword is the callee of no call (KEYWORDS).
 
 A boundary function is found by the types of its parameters in the source, with the structs that
 the index records resolve, so the answer is the checker's own for each struct and each name
@@ -594,8 +605,20 @@ VALUE_KINDS = ("local", "parameter", "global", "field", "constant")
 # The base types whose pointer is a byte pointer (D9.8): a pointer to one of them, any marks.
 BYTE_BASES = ("char", "u8", "void")
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-# The keywords that can stand before a group that a body calls, and are no part of the callee:
-# `return (k)(x)` and `defer (k)(x)` call `(k)`. No other keyword stands before such a group.
+IDENTIFIER_CHAR = re.compile(r"[A-Za-z0-9_]")
+# The 41 keywords and the 10 reserved words of spec/grammar.md (D2.4). No one of them is a name,
+# so no one is the callee of a call: `if (`, `return (`, `cast(`, `sizeof(` and `fn (` open no
+# argument list of a callee. `call_callee` reads this list, and a test holds it equal to the
+# grammar.
+KEYWORDS = frozenset((
+    "as bool break case cast char continue default defer do else enum extern f32 f64 false fn "
+    "for i8 i16 i32 i64 if import mut new noreturn null own return sizeof string struct switch "
+    "true u8 u16 u32 u64 void while "
+    "async await const match pub priv trait type union yield").split())
+# The keywords of that list that can stand before a group that a body calls, and are no part of
+# the callee: `return (k)(x)` and `defer (k)(x)` call `(k)`. No other keyword stands before such
+# a group: `cast`, `sizeof` and `new` take a list of their own, and a block follows the list of
+# `if`, `while`, `for` and `switch`.
 STATEMENT_KEYWORDS = ("return", "defer")
 ROWS = "D9.8"
 
@@ -1014,14 +1037,37 @@ def spelled_callee(code, start):
     return begin, re.sub(r"\s+", "", code[begin:start]) + name
 
 
-def callee_text(code, open_at):
-    """The callee of the call whose `(` stands at `open_at`, with no white space: a name with
-    its module path or its members (`h.on`, `z->introspect->enumerator`), an element
-    (`table[0]`), or a call (`pick()`)."""
-    j = open_at - 1
+class Callee:
+    """The callee of one call, as `call_callee` reads it.
+
+    `text` is the callee as the body spells it, with each group around it and with no white
+    space: `libc.write`, `(strlen)`, `table[0]`, `pick()`. A call row names it. `groups` is the
+    count of the groups around the whole callee. `name` is the callee inside those groups, with
+    no white space: `libc.strlen` for `((libc.strlen))`. A citation names it. `name_at` is the
+    offset of the last name of the callee, where the index holds its record, or -1 when the
+    callee ends with no name: an element, the result of a call or another expression.
+    `begin` and `end` are the offsets of the callee in the code, its groups included.
+    """
+
+    def __init__(self, text, groups, name, name_at, begin, end):
+        self.text = text
+        self.groups = groups
+        self.name = name
+        self.name_at = name_at
+        self.begin = begin
+        self.end = end
+
+
+def callee_span(code, end):
+    """The offsets (start, stop) of the place that ends before `end`, white space left out: a
+    name with its module path or its members (`h.on`, `z->introspect->enumerator`), an element
+    (`table[0]`), a call (`pick()`) or a group (`(k)`). A `(` starts a group when no name, `)`
+    or `]` stands before it, or a statement keyword does. The offsets are equal when no place
+    ends there. Only `call_callee` calls this function."""
+    j = end - 1
     while j >= 0 and code[j].isspace():
         j -= 1
-    end = j + 1
+    stop = j + 1
     while j >= 0:
         c = code[j]
         if c in ")]":
@@ -1049,7 +1095,73 @@ def callee_text(code, open_at):
             break
         while j >= 0 and code[j].isspace():
             j -= 1
-    return re.sub(r"\s+", "", code[j + 1:end])
+    start = j + 1
+    while start < stop and code[start].isspace():
+        start += 1
+    return start, stop
+
+
+def call_callee(code, open_at):
+    """The callee of the call whose `(` stands at `open_at`, read through each group around
+    it: `strlen`, `(strlen)` and `((libc.strlen))` name one callee. The result is None when the
+    `(` opens no argument list: it opens a group, it follows the list of a function type, or
+    a keyword or a compiler form stands before it. A keyword is no name (KEYWORDS), so `if (`,
+    `return (`, `sizeof(` and `$cfg(` call nothing, also in a group, `(if)(`, and after a path,
+    `m.if(`. The result of a `cast` is a callee: `cast(f, T)(x)` calls `cast(f,T)`.
+
+    This function is the one reader of a callee. Each place of the lint that needs the callee
+    of a call takes it from here, at the `(` of the call, or through `named_call` from the
+    name. So each place reads the same forms (D9.8, "The lint"), and a test holds the places.
+    """
+    begin, end = callee_span(code, open_at)
+    if begin == end:
+        return None
+    if code[end - 1] == ")":
+        word = re.search(r"[A-Za-z_][A-Za-z0-9_]*\s*\Z", code[:matching_open(code, end - 1)])
+        if word is not None and word.group(0).strip() == "fn":
+            # `fn () (void)`: the list of a function type and a grouped result
+            return None
+    whole = (begin, end)
+    groups = 0
+    while code[begin] == "(" and matching_close(code, begin) == end - 1:
+        groups += 1
+        begin, end = begin + 1, end - 1
+        while begin < end and code[begin].isspace():
+            begin += 1
+        while begin < end and code[end - 1].isspace():
+            end -= 1
+    name_at = -1
+    if begin < end and IDENTIFIER_CHAR.match(code[end - 1]) and (
+            groups == 0 or callee_span(code, end)[0] == begin):
+        name_at = end - 1
+        while name_at > begin and IDENTIFIER_CHAR.match(code[name_at - 1]):
+            name_at -= 1
+        if code[name_at:end] in KEYWORDS:
+            return None
+        if name_at > 0 and code[name_at - 1] == "$":
+            # `$cfg(key)` and `$if (...)` are compiler forms (D21.1, D21.2) and no call.
+            return None
+    return Callee(re.sub(r"\s+", "", code[whole[0]:whole[1]]), groups,
+                  re.sub(r"\s+", "", code[begin:end]), name_at, whole[0], whole[1])
+
+
+def named_call(code, start):
+    """The callee of the call whose callee is the name at `start`, plain or in each group
+    around it, or None when that name is the callee of no call. The name is the last name of
+    the callee, after its module path: `strlen` of `(libc.strlen)(p)`. The scan forward only
+    finds the `(`; `call_callee` reads the callee there and decides."""
+    name = IDENTIFIER.match(code, start)
+    if name is None:
+        return None
+    after, after_at = next_char(code, name.end())
+    while after == ")":
+        after, after_at = next_char(code, after_at + 1)
+    if after != "(":
+        return None
+    callee = call_callee(code, after_at)
+    if callee is None or callee.name_at != start:
+        return None
+    return callee
 
 
 def matching_open(code, close_at):
@@ -1071,32 +1183,25 @@ def matching_open(code, close_at):
 def value_calls(rows, path, source, body_open, body_close):
     """The callees of the calls through a function value in `code[body_open:body_close]`: a
     call whose callee is a local, a parameter, a global, a field or a constant of a function
-    type, an element (`table[0](...)`), or the result of a call or a group (`pick()(...)`). The
-    lint does not tell a function pointer that C gave from one of fort code (D9.8), so each such
-    call needs a call row."""
+    type, an element (`table[0](...)`), or the result of a call or a group (`pick()(...)`,
+    `(k)(...)`). The lint does not tell a function pointer that C gave from one of fort code
+    (D9.8), so each such call needs a call row."""
     code = source.code
     found = []
     for at in range(body_open + 1, body_close):
         if code[at] != "(":
             continue
-        before, before_at = prev_char(code, at)
-        if before in ")]":
-            if before == ")":
-                opened = matching_open(code, before_at)
-                word = re.search(r"[A-Za-z_][A-Za-z0-9_]*\s*\Z", code[:opened])
-                if word is not None and word.group(0).strip() == "fn":
-                    # `fn () (void)`: the list of a function type and a grouped result
-                    continue
-            found.append(callee_text(code, at))
+        callee = call_callee(code, at)
+        if callee is None:
             continue
-        word = re.search(r"[A-Za-z_][A-Za-z0-9_]*\Z", code[:before_at + 1])
-        if word is None:
+        if callee.groups > 0 or callee.name_at < 0:
+            found.append(callee.text)
             continue
-        line = source.line_of(word.start())
-        col = word.start() - source.starts[line - 1] + 1
+        line = source.line_of(callee.name_at)
+        col = callee.name_at - source.starts[line - 1] + 1
         for record in rows.records_at(path, line, col):
             if record["kind"] in VALUE_KINDS and is_function_type(record.get("type")):
-                found.append(callee_text(code, at))
+                found.append(callee.text)
                 break
     return found
 
@@ -1143,26 +1248,34 @@ def call_open(code, before):
 
 def goes_to_c(rows, path, source, start, end):
     """Whether the name at `start`..`end` of `source` stands as the callee of a call, or as a
-    whole argument of a call whose callee is an `extern fn` or a function pointer (D9.8)."""
+    whole argument of a call whose callee is an `extern fn` or a function pointer (D9.8). A
+    callee in a group is that callee here too: `(keep)(0, size)` gives `size` to `keep`. An
+    argument in a group is that argument: `take_cb((takep))` gives what `take_cb(takep)` gives."""
     code = source.code
-    after, after_at = next_char(code, end)
-    if after == "(":
+    if named_call(code, start) is not None:
         return True
+    after, after_at = next_char(code, end)
     begin, _ = spelled_callee(code, start)
     before, before_at = prev_char(code, begin)
-    if before not in "(," or after not in ",)" or not before:
+    while True:
+        if before not in "(," or after not in ",)" or not before:
+            return False
+        open_at = before_at if before == "(" else call_open(code, before_at)
+        if open_at < 0:
+            return False
+        callee = call_callee(code, open_at)
+        if callee is not None or before != "(" or after != ")":
+            break
+        # The `(` opens a group around the name, and no argument list: look around the group.
+        after, after_at = next_char(code, after_at + 1)
+        before, before_at = prev_char(code, before_at)
+    if callee is None:
         return False
-    open_at = before_at if before == "(" else call_open(code, before_at)
-    if open_at < 0:
-        return False
-    callee, callee_at = prev_char(code, open_at)
-    if callee in ")]":
+    if callee.name_at < 0:
+        # An element, the result of a call or another expression: a function pointer.
         return True
-    word = re.search(r"[A-Za-z_][A-Za-z0-9_]*\Z", code[:callee_at + 1])
-    if word is None:
-        return False
-    line = source.line_of(word.start())
-    col = word.start() - source.starts[line - 1] + 1
+    line = source.line_of(callee.name_at)
+    col = callee.name_at - source.starts[line - 1] + 1
     for record in rows.records_at(path, line, col):
         kind = record["kind"]
         if kind == "extern fn":
@@ -1228,14 +1341,17 @@ def call_rows(run):
 
 
 def text_calls(code, callee, start, end):
-    """The count of calls `callee(` in `code[start:end]`, with no name and no member access
-    (`.` or `->`) before it; a range `..` or an operator `>` can stand before it. The pattern
-    takes white space between each two characters of the callee, which has none of its own
-    (spelled_callee, callee_text). This count only places the rows: the count of the index is
-    the authority (function_row_problems)."""
-    parts = [re.escape(c) for c in callee]
-    pattern = r"(?<![A-Za-z0-9_])(?<!->)(?<![^.]\.)%s\s*\(" % r"\s*".join(parts)
-    return len(re.findall(pattern, code[start:end]))
+    """The count of the calls in `code[start:end]` whose callee, as the body spells it, is
+    `callee`: each `(` there that `call_callee` reads as that callee. So `x.libc.write(` and
+    `p->write(` are no calls of `write`, and `pick (k)(x)` is no call of `(k)`. This count only
+    places the rows: the count of the index is the authority (function_row_problems)."""
+    count = 0
+    for at in range(start, end):
+        if code[at] == "(":
+            found = call_callee(code, at)
+            if found is not None and found.text == callee:
+                count += 1
+    return count
 
 
 def function_row_problems(rows, path, source, record, calls, values=()):
@@ -1294,33 +1410,87 @@ def function_row_problems(rows, path, source, record, calls, values=()):
 
 
 # A citation in a call row of the word of the row of another trusted function (D9.8 rule 3):
-# `the gives: of rt.alloc` or `the writes: of rt.decimal_text`.
-CITATION = re.compile(r"\b(?i:the) (gives|writes): of "
-                      r"([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)")
+# `the gives: of rt.alloc` or `the writes: of rt.decimal_text`. A sentence can start with `The`.
+# One space stands between the words, and `the` and its word stand on one line. A line wrap can
+# take the place of the space after the colon and of the space after `of`. The callee follows.
+CITATION = re.compile(r"[Tt]he (gives|writes):[ \n]of[ \n]")
+# Text that starts a citation: `the gives:`, `the gives of` and `gives: of`, and the same with
+# `writes`, in each case. White space and quote characters can stand between the words, as in
+# "the `gives:` of". Each such text reads as a citation or it is a problem, so no text that a
+# reviewer takes for a citation passes with no check. A `_` of the pattern is one such character.
+CITATION_GAP = "[\\s`'\"]"
+CITATION_START = re.compile(
+    r"(?i)\bthe_+(?:gives|writes)_*:|\bthe_+(?:gives|writes)_+of\b|\b(?:gives|writes)_*:_*of\b"
+    .replace("_", CITATION_GAP))
+# The callee of a citation with no group: a name with its module path.
+CITED_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 
 
-def citation_problems(rows, source, record, called):
+def cited_callee(text, at):
+    """The callee that a citation names at `at` of the text of a row, with no group and no white
+    space, or None when no callee stands there. A citation names the callee as the body spells
+    it, so `call_callee` reads it as it reads the callee of a call: `rt.alloc`, `(rt.alloc)` and
+    `(( rt . alloc ))` name `rt.alloc`. A keyword, a number and a group that holds no one name
+    are no callee."""
+    if text[at:at + 1] == "(":
+        close = matching_close(text, at)
+        if close < 0:
+            return None
+        spelled = text[at:close + 1]
+    else:
+        found = CITED_NAME.match(text, at)
+        if found is None:
+            return None
+        spelled = found.group(0)
+    callee = call_callee(spelled + "(", len(spelled))
+    if callee is None or callee.name_at < 0:
+        return None
+    return callee.name
+
+
+def citation_problems(rows, source, record, called, externs):
     """The problems of the citations in the call rows of one function of a trusted module: each
     cited callee is called in the body (`called` maps the callee as the body spells it to the key
-    of its declaration), and the row of that function, its `//` lines directly above it, holds a
-    line that starts with the cited word (D9.8 rule 3)."""
+    of its declaration), it is a fort function of a trusted module, and the row of that function,
+    its `//` lines directly above it, holds a line that starts with the cited word (D9.8 rule 3).
+    `externs` holds each `extern fn` that the body calls, as the body spells it: the citation
+    form names no extern, and the message says so. Text that starts a citation and does not
+    read as one is a problem: the lint reads each citation or reports it."""
     at = source.offset(record["line"], record["col"])
     start = keyword_before(source.code, at, "fn")
     run = comment_run(source, source.line_of(start if start >= 0 else at))
     problems = []
-    # A citation can wrap, so the lines join with a space, and each keeps its first offset.
+    # A citation can wrap, so the lines join with a line end, and each keeps its first offset.
     joined = ""
     starts = []
     for line, text in run:
         starts.append((len(joined), line))
-        joined += text[2:].strip() + " "
-    for found in CITATION.finditer(joined):
-        line = [number for offset, number in starts if offset <= found.start()][-1]
-        word, callee = found.group(1) + ":", found.group(2)
+        joined += text[2:].strip() + "\n"
+    for start in CITATION_START.finditer(joined):
+        line = [number for offset, number in starts if offset <= start.start()][-1]
+        found = CITATION.match(joined, start.start())
+        callee = cited_callee(joined, found.end()) if found is not None else None
+        if callee is None:
+            problems.append((line, 1, "a call row of fn '%s' starts a citation that the lint "
+                             "cannot read: write 'the gives: of <the callee>' or 'the writes: of "
+                             "<the callee>', with the callee a name as the body spells it "
+                             "(rule 3) (%s)" % (record["name"], ROWS)))
+            continue
+        word = found.group(1) + ":"
+        if callee in externs:
+            problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', which is an "
+                             "`extern fn`: a citation names a fort function of a trusted module "
+                             "(rule 3) (%s)" % (record["name"], word, callee, ROWS)))
+            continue
         key = called.get(callee)
         if key is None:
             problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', which its "
                              "body does not call (%s)" % (record["name"], word, callee, ROWS)))
+            continue
+        if not rows.trusted(key[0]):
+            problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', a function "
+                             "of a module that is not trusted: no audit holds its row (rule 3) "
+                             "(%s)" % (record["name"], word, callee, ROWS)))
             continue
         if not cited_word_stands(rows, key, word):
             problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', and the row "
@@ -1344,7 +1514,10 @@ def cited_word_stands(rows, key, word):
 
 def enclosing_opens(code, start, stop):
     """The offsets of the `(` of each call whose argument list holds the offset `start`, inner
-    first, up to the statement and not before `stop`."""
+    first, up to the statement and not before `stop`. An open `[` of an index and an open `{` of
+    a struct or array literal do not end the search: the offset is still inside the call that
+    holds them. The `{` of a block does not end it either, and each `(` before a block is closed,
+    so a block adds no call."""
     opens = []
     depth = 0
     i = start - 1
@@ -1357,9 +1530,8 @@ def enclosing_opens(code, start, stop):
                 depth -= 1
             elif c == "(":
                 opens.append(i)
-            else:
-                break
         elif c == ";" and depth == 0:
+            # The stop bounds the work to one statement. It changes no verdict.
             break
         i -= 1
     return opens
@@ -1367,7 +1539,8 @@ def enclosing_opens(code, start, stop):
 
 def mut_global_to_c(rows, path, source, use, stop):
     """Whether the use record `use` of a global names a `mut` global whose type reaches a byte
-    pointer, inside the arguments of a call of an `extern fn` or of a boundary function."""
+    pointer, anywhere between the brackets of a call of an `extern fn` or of a boundary
+    function."""
     # The index names a `mut` global `global` and a module constant `constant`, so each record of
     # kind `global` is a `mut` global.
     key = rows.decl_key(use)
@@ -1381,18 +1554,25 @@ def mut_global_to_c(rows, path, source, use, stop):
         return False
     code = source.code
     for open_at in enclosing_opens(code, source.offset(use["line"], use["col"]), stop):
-        callee, callee_at = prev_char(code, open_at)
-        word = re.search(r"[A-Za-z_][A-Za-z0-9_]*\Z", code[:callee_at + 1])
-        if word is None:
+        # A callee in a group, `(strlen)(name)` or `((libc.memcmp))(...)`, is that callee.
+        callee = call_callee(code, open_at)
+        if callee is None:
             continue
-        at_line = source.line_of(word.start())
-        at_col = word.start() - source.starts[at_line - 1] + 1
-        for record in rows.records_at(path, at_line, at_col):
-            if record["kind"] == "extern fn":
-                return True
-            target = rows.decl_key(record) if record["kind"] == "fn" else None
-            if target is not None and rows.is_boundary(target):
-                return True
+        # A callee that is no name can hold a boundary function as a value, as
+        # `(first ? take : other)(...)`, and the call can reach it: each name in the callee
+        # counts. The callee of a call inside the callee does not: the call is through its
+        # result, a function pointer, which the lint does not tell from one of fort code (D9.8).
+        for name in IDENTIFIER.finditer(code, callee.begin, callee.end):
+            if name.start() != callee.name_at and named_call(code, name.start()) is not None:
+                continue
+            at_line = source.line_of(name.start())
+            at_col = name.start() - source.starts[at_line - 1] + 1
+            for record in rows.records_at(path, at_line, at_col):
+                if record["kind"] == "extern fn":
+                    return True
+                target = rows.decl_key(record) if record["kind"] == "fn" else None
+                if target is not None and rows.is_boundary(target):
+                    return True
     return False
 
 
@@ -1414,6 +1594,7 @@ def row_problems(rows, path, records):
     uses = []
     globals_used = []
     fn_calls = []
+    extern_calls = []
     for record in records:
         if record.get("is_decl"):
             if rows.decl_key(record) != (path, record["line"], record["col"]):
@@ -1432,11 +1613,16 @@ def row_problems(rows, path, records):
             globals_used.append(record)
         if record["kind"] == "extern fn":
             uses.append((record, False))
+            start = source.offset(record["line"], record["col"])
+            callee = named_call(source.code, start)
+            if callee is not None:
+                extern_calls.append((start, callee.name))
         elif record["kind"] == "fn":
             key = rows.decl_key(record)
             start = source.offset(record["line"], record["col"])
-            if key is not None and next_char(source.code, start + len(record["name"]))[0] == "(":
-                fn_calls.append((start, spelled_callee(source.code, start)[1], key))
+            callee = named_call(source.code, start)
+            if key is not None and callee is not None:
+                fn_calls.append((start, callee.name, key))
             if key is not None and rows.is_boundary(key):
                 uses.append((record, True))
     for record, boundary in uses:
@@ -1449,12 +1635,13 @@ def row_problems(rows, path, records):
                              "an argument of a call of an extern fn or a function pointer (%s)"
                              % (spelled_callee(source.code, start)[1], ROWS)))
             continue
-        if next_char(source.code, end)[0] != "(":
+        callee = named_call(source.code, start)
+        if callee is None or callee.groups > 0:
+            # A callee in a group counts below, as the function value that the brackets give.
             continue
         for body_open, body_close, _, calls in functions:
             if body_open < start < body_close:
-                callee = spelled_callee(source.code, start)[1]
-                calls[callee] = calls.get(callee, 0) + 1
+                calls[callee.text] = calls.get(callee.text, 0) + 1
                 break
     for body_open, body_close, record, calls in functions:
         values = set()
@@ -1464,7 +1651,8 @@ def row_problems(rows, path, records):
                 values.add(callee)
         problems.extend(function_row_problems(rows, path, source, record, calls, values))
         called = {callee: key for at, callee, key in fn_calls if body_open < at < body_close}
-        problems.extend(citation_problems(rows, source, record, called))
+        externs = {callee for at, callee in extern_calls if body_open < at < body_close}
+        problems.extend(citation_problems(rows, source, record, called, externs))
         if not rows.is_boundary((path, record["line"], record["col"])):
             for use in globals_used:
                 at = source.offset(use["line"], use["col"])

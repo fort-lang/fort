@@ -11,7 +11,18 @@
     "lint with the compiler. The table runs in the VM with the debug preset after `tools/vm build`.",
     "The rows D9.8-lang-* break the checks of the files of test/lang: D9.8 only, with the",
     "`--cfg` options of the `//! flags:` directive of their test. The rows D9.8-cite-* break the check",
-    "of a citation of the row of a fort function, and D9.8-mut-global-* the check of a `mut` global."
+    "of a citation of the row of a fort function, and D9.8-mut-global-* the check of a `mut` global.",
+    "D9.8-mut-global-literal and -enclosing break the search for the call that holds the name, and",
+    "D9.8-cite-body, -extern, -extern-body, -extern-path and -trusted the callee that a citation",
+    "may name. The rows D9.8-group-* break the one reader of a callee, `call_callee`, and each place",
+    "that takes a callee from it through a group, `(strlen)(p)`. The text count reads a callee",
+    "through that reader too, so the range rule of the text is the row D9.8-callee-range.",
+    "The rows D9.8-cite-wrap, -wrap-callee and -capital break a form of a citation that the lint",
+    "accepts. D9.8-cite-start-*, -unread, -group and -callee-name break the rule that text that",
+    "starts a citation reads as one or is a problem. D9.8-keyword-* and D9.8-compiler-form break",
+    "the rule that a keyword and a compiler form are the callee of no call. D9.8-group-argument and",
+    "-argument-each break an argument in a group, `take_cb((takep))`, and D9.8-group-alone a name",
+    "in the list of a `cast`."
   ],
   "sources": [
     "tools/fort_lint.py"
@@ -91,15 +102,15 @@
     {
       "decision": "D9.8-call-text",
       "file": "tools/fort_lint.py",
-      "old": "    return len(re.findall(pattern, code[start:end]))",
-      "new": "    return 0 * len(re.findall(pattern, code[start:end]))",
+      "old": "                count += 1\n    return count\n",
+      "new": "                count += 1\n    return 0 * count\n",
       "what": "a call through a function pointer counts as no call"
     },
     {
       "decision": "D9.8-callee-path",
       "file": "tools/fort_lint.py",
-      "old": "        if dot != \".\":\n            break",
-      "new": "        if True:\n            break",
+      "old": "        if k >= 0 and code[k] == \".\" and not (k >= 1 and code[k - 1] == \".\"):\n            j = k - 1\n",
+      "new": "        if False:\n            j = k - 1\n",
       "what": "the callee of a row is the name of a call without its module path"
     },
     {
@@ -182,9 +193,9 @@
     {
       "decision": "D9.8-value-bracket",
       "file": "tools/fort_lint.py",
-      "old": "    if callee in \")]\":\n        return True",
-      "new": "    if callee in \")]\":\n        return False",
-      "what": "a boundary function as an argument of a call after `)` or `]` is a value"
+      "old": "    if callee.name_at < 0:\n        # An element, the result of a call or another expression: a function pointer.\n        return True\n",
+      "new": "    if callee.name_at < 0:\n        # An element, the result of a call or another expression: a function pointer.\n        return False\n",
+      "what": "a boundary function as an argument of a call through an element or the result of a call is a value"
     },
     {
       "decision": "D9.8-value-kinds",
@@ -210,15 +221,15 @@
     {
       "decision": "D9.8-value-call-bracket",
       "file": "tools/fort_lint.py",
-      "old": "        if before in \")]\":\n            if before == \")\":",
-      "new": "        if False:\n            if before == \")\":",
+      "old": "        if callee.groups > 0 or callee.name_at < 0:\n",
+      "new": "        if callee.groups > 0:\n",
       "what": "a call through an element or a call result needs no call row"
     },
     {
       "decision": "D9.8-value-call-fn-type",
       "file": "tools/fort_lint.py",
-      "old": "                if word is not None and word.group(0).strip() == \"fn\":",
-      "new": "                if False:",
+      "old": "        if word is not None and word.group(0).strip() == \"fn\":\n",
+      "new": "        if False:\n",
       "what": "the list of a function type with a grouped result is a call"
     },
     {
@@ -229,24 +240,17 @@
       "what": "the calls through a function value count no row"
     },
     {
-      "decision": "D9.8-text-range",
-      "file": "tools/fort_lint.py",
-      "old": "(?<![A-Za-z0-9_])(?<!->)(?<![^.]\\.)%s",
-      "new": "(?<![A-Za-z0-9_])(?<!->)(?<!\\.)%s",
-      "what": "a call after a range `..` counts as a member"
-    },
-    {
       "decision": "D9.8-text-member",
       "file": "tools/fort_lint.py",
-      "old": "(?<![A-Za-z0-9_])(?<!->)(?<![^.]\\.)%s",
-      "new": "(?<![A-Za-z0-9_])(?<![^.]\\.)%s",
+      "old": "        elif k >= 1 and code[k - 1:k + 1] == \"->\":\n            j = k - 2\n",
+      "new": "        elif False:\n            j = k - 2\n",
       "what": "a call after `->` counts as a call of the callee"
     },
     {
       "decision": "D9.8-text-space",
       "file": "tools/fort_lint.py",
-      "old": "    pattern = r\"(?<![A-Za-z0-9_])(?<!->)(?<![^.]\\.)%s\\s*\\(\" % r\"\\s*\".join(parts)",
-      "new": "    pattern = r\"(?<![A-Za-z0-9_])(?<!->)(?<![^.]\\.)%s\\s*\\(\" % \"\".join(parts)",
+      "old": "    return Callee(re.sub(r\"\\s+\", \"\", code[whole[0]:whole[1]]), groups,\n",
+      "new": "    return Callee(code[whole[0]:whole[1]], groups,\n",
       "what": "a callee with white space in the text counts no call"
     },
     {
@@ -254,7 +258,7 @@
       "file": "tools/fort_lint.py",
       "old": "    return begin, re.sub(r\"\\s+\", \"\", code[begin:start]) + name",
       "new": "    return begin, code[begin:start] + name",
-      "what": "a callee keeps the white space of the text"
+      "what": "the name of a boundary function in a message keeps the white space of the text"
     },
     {
       "decision": "D9.8-row-word-case",
@@ -364,9 +368,9 @@
     {
       "decision": "D9.8-cite-wrap",
       "file": "tools/fort_lint.py",
-      "old": "        joined += text[2:].strip() + \" \"",
-      "new": "        joined += text[2:].strip() + \"\\n\"",
-      "what": "a citation that wraps to the next line is no citation"
+      "old": "CITATION = re.compile(r\"[Tt]he (gives|writes):[ \\n]of[ \\n]\")",
+      "new": "CITATION = re.compile(r\"[Tt]he (gives|writes): of[ \\n]\")",
+      "what": "a citation that wraps before `of` is no citation, and the lint cannot read it"
     },
     {
       "decision": "D9.8-mut-global",
@@ -399,8 +403,8 @@
     {
       "decision": "D9.8-mut-global-callee",
       "file": "tools/fort_lint.py",
-      "old": "            if target is not None and rows.is_boundary(target):\n                return True",
-      "new": "            if target is not None and rows.is_boundary(target):\n                return False",
+      "old": "                if target is not None and rows.is_boundary(target):\n                    return True\n",
+      "new": "                if target is not None and rows.is_boundary(target):\n                    return False\n",
       "what": "a `mut` global in an argument of a boundary function goes to no call of C"
     },
     {
@@ -416,6 +420,286 @@
       "old": "        folder = folder.parent",
       "new": "        break",
       "what": "a module below a subdirectory of a directory test misses its main.ft"
+    },
+    {
+      "decision": "D9.8-mut-global-literal",
+      "file": "tools/fort_lint.py",
+      "old": "            elif c == \"(\":\n                opens.append(i)\n        elif c == \";\" and depth == 0:",
+      "new": "            elif c == \"(\":\n                opens.append(i)\n            else:\n                break\n        elif c == \";\" and depth == 0:",
+      "what": "the search for the call of a `mut` global stops at the `{` of a literal and at the `[` of an index"
+    },
+    {
+      "decision": "D9.8-mut-global-enclosing",
+      "file": "tools/fort_lint.py",
+      "old": "            elif c == \"(\":\n                opens.append(i)\n        elif c == \";\" and depth == 0:",
+      "new": "            elif c == \"(\":\n                opens.append(i)\n                break\n        elif c == \";\" and depth == 0:",
+      "what": "the search for the call of a `mut` global reads the innermost call only, so a cast hides the extern"
+    },
+    {
+      "decision": "D9.8-cite-body",
+      "file": "tools/fort_lint.py",
+      "old": "        called = {callee: key for at, callee, key in fn_calls if body_open < at < body_close}",
+      "new": "        called = {callee: key for at, callee, key in fn_calls}",
+      "what": "a cited callee that only another function of the file calls is no problem"
+    },
+    {
+      "decision": "D9.8-cite-extern",
+      "file": "tools/fort_lint.py",
+      "old": "        if callee in externs:\n",
+      "new": "        if False:\n",
+      "what": "a citation of an extern that the body calls gives the message of a callee with no call"
+    },
+    {
+      "decision": "D9.8-cite-extern-body",
+      "file": "tools/fort_lint.py",
+      "old": "        externs = {callee for at, callee in extern_calls if body_open < at < body_close}",
+      "new": "        externs = {callee for at, callee in extern_calls}",
+      "what": "a cited extern that only another function of the file calls reads as a call of the body"
+    },
+    {
+      "decision": "D9.8-cite-trusted",
+      "file": "tools/fort_lint.py",
+      "old": "        if not rows.trusted(key[0]):\n            problems.append((line, 1,",
+      "new": "        if False:\n            problems.append((line, 1,",
+      "what": "a citation of a function of a module that is not trusted is no problem"
+    },
+    {
+      "decision": "D9.8-cite-extern-path",
+      "file": "tools/fort_lint.py",
+      "old": "                extern_calls.append((start, callee.name))",
+      "new": "                extern_calls.append((start, record[\"name\"]))",
+      "what": "a cited extern counts by its bare name, so a citation with its module path reads as no call"
+    },
+    {
+      "decision": "D9.8-group-callee",
+      "file": "tools/fort_lint.py",
+      "old": "    while after == \")\":\n        after, after_at = next_char(code, after_at + 1)\n",
+      "new": "    while False:\n        after, after_at = next_char(code, after_at + 1)\n",
+      "what": "a name in a group is no callee: a citation misses the call and a boundary function is a value"
+    },
+    {
+      "decision": "D9.8-group-mut-global",
+      "file": "tools/fort_lint.py",
+      "old": "        if callee is None:\n            continue\n        # A callee that is no name",
+      "new": "        if callee is None or callee.groups > 0:\n            continue\n        # A callee that is no name",
+      "what": "a callee in a group hides the call from the search for a `mut` global"
+    },
+    {
+      "decision": "D9.8-group-open",
+      "file": "tools/fort_lint.py",
+      "old": "    if callee is None or callee.name_at != start:\n",
+      "new": "    if callee is None:\n",
+      "what": "a name that ends the argument list of a call is the callee of the next list, so `takep` in `pick(takep)(p)` is no value"
+    },
+    {
+      "decision": "D9.8-value-path",
+      "file": "tools/fort_lint.py",
+      "old": "        if dot != \".\":\n            break\n",
+      "new": "        if True:\n            break\n",
+      "what": "the name of a boundary function has no module path, so the whole argument `m.takep` reads as an operand"
+    },
+    {
+      "decision": "D9.8-group-each",
+      "file": "tools/fort_lint.py",
+      "old": "    while code[begin] == \"(\" and matching_close(code, begin) == end - 1:\n",
+      "new": "    if code[begin] == \"(\" and matching_close(code, begin) == end - 1:\n",
+      "what": "the reader takes one group off a callee, so a name in two groups is the callee of no call"
+    },
+    {
+      "decision": "D9.8-group-callee-each",
+      "file": "tools/fort_lint.py",
+      "old": "    while after == \")\":\n",
+      "new": "    if after == \")\":\n",
+      "what": "the search from a name to its call passes one `)` only, so a boundary function in two groups is a value"
+    },
+    {
+      "decision": "D9.8-group-name",
+      "file": "tools/fort_lint.py",
+      "old": "            groups == 0 or callee_span(code, end)[0] == begin):\n",
+      "new": "            True):\n",
+      "what": "the last name of an expression in a group is the callee: `(n + takep)(p)` names no value"
+    },
+    {
+      "decision": "D9.8-group-name-space",
+      "file": "tools/fort_lint.py",
+      "old": "                  re.sub(r\"\\s+\", \"\", code[begin:end]), name_at, whole[0], whole[1])\n",
+      "new": "                  code[begin:end], name_at, whole[0], whole[1])\n",
+      "what": "the callee in a group keeps the white space of the text, so a citation of `m.labs` misses the call `( m . labs )(4)`"
+    },
+    {
+      "decision": "D9.8-group-count-once",
+      "file": "tools/fort_lint.py",
+      "old": "        if callee is None or callee.groups > 0:\n",
+      "new": "        if callee is None:\n",
+      "what": "a call of an extern in a group counts twice: by its name and as a function value"
+    },
+    {
+      "decision": "D9.8-group-value-call",
+      "file": "tools/fort_lint.py",
+      "old": "        if callee.groups > 0 or callee.name_at < 0:\n",
+      "new": "        if callee.name_at < 0:\n",
+      "what": "a call of an extern or of a boundary function in a group counts no call, so it needs no row"
+    },
+    {
+      "decision": "D9.8-group-value-callee",
+      "file": "tools/fort_lint.py",
+      "old": "    if callee.name_at < 0:\n        # An element,",
+      "new": "    if callee.name_at < 0 or callee.groups > 0:\n        # An element,",
+      "what": "a callee in a group is a function pointer: `(keep)(0, takep)` gives `takep` to no fort function"
+    },
+    {
+      "decision": "D9.8-group-alone",
+      "file": "tools/fort_lint.py",
+      "old": "    if callee is None:\n        return False\n",
+      "new": "    if callee is None:\n        return True\n",
+      "what": "a boundary function in the list of a `cast` goes to C: `fn (char*) u64 g = cast(takep, fn (char*) u64);` names no value"
+    },
+    {
+      "decision": "D9.8-value-callee",
+      "file": "tools/fort_lint.py",
+      "old": "    if named_call(code, start) is not None:\n        return True\n",
+      "new": "    if named_call(code, start) is not None:\n        return False\n",
+      "what": "a boundary function as the callee of a call is a value"
+    },
+    {
+      "decision": "D9.8-text-callee",
+      "file": "tools/fort_lint.py",
+      "old": "            if found is not None and found.text == callee:\n",
+      "new": "            if found is not None and found.name == callee:\n",
+      "what": "a row counts the calls of its callee in each group, so the row `(strlen)` counts no call"
+    },
+    {
+      "decision": "D9.8-mut-global-inner-callee",
+      "file": "tools/fort_lint.py",
+      "old": "            if name.start() != callee.name_at and named_call(code, name.start()) is not None:\n",
+      "new": "            if False:\n",
+      "what": "the callee of a call inside a callee counts, so a `mut` global to the result of `get_hook()` is reported"
+    },
+    {
+      "decision": "D9.8-mut-global-own-callee",
+      "file": "tools/fort_lint.py",
+      "old": "            if name.start() != callee.name_at and named_call(code, name.start()) is not None:\n",
+      "new": "            if named_call(code, name.start()) is not None:\n",
+      "what": "the name of the callee is no name of the callee, so `strlen(name)` gives no `mut` global to C"
+    },
+    {
+      "decision": "D9.8-mut-global-value-callee",
+      "file": "tools/fort_lint.py",
+      "old": "        if callee is None:\n            continue\n        # A callee that is no name",
+      "new": "        if callee is None or callee.name_at < 0:\n            continue\n        # A callee that is no name",
+      "what": "a `mut` global to a callee that holds a boundary function as a value is not seen"
+    },
+    {
+      "decision": "D9.8-cite-wrap-callee",
+      "file": "tools/fort_lint.py",
+      "old": "CITATION = re.compile(r\"[Tt]he (gives|writes):[ \\n]of[ \\n]\")",
+      "new": "CITATION = re.compile(r\"[Tt]he (gives|writes):[ \\n]of \")",
+      "what": "a citation that wraps after `of` is no citation, and the lint cannot read it"
+    },
+    {
+      "decision": "D9.8-cite-capital",
+      "file": "tools/fort_lint.py",
+      "old": "CITATION = re.compile(r\"[Tt]he (gives|writes):[ \\n]of[ \\n]\")",
+      "new": "CITATION = re.compile(r\"the (gives|writes):[ \\n]of[ \\n]\")",
+      "what": "a citation that starts a sentence, `The gives: of`, is no citation, and the lint cannot read it"
+    },
+    {
+      "decision": "D9.8-cite-group",
+      "file": "tools/fort_lint.py",
+      "old": "    if text[at:at + 1] == \"(\":\n        close = matching_close(text, at)\n",
+      "new": "    if text[at:at + 1] == \"((\":\n        close = matching_close(text, at)\n",
+      "what": "a citation names its callee by a plain name only: the lint cannot read `the gives: of (bare)`"
+    },
+    {
+      "decision": "D9.8-cite-callee-name",
+      "file": "tools/fort_lint.py",
+      "old": "    if callee is None or callee.name_at < 0:\n        return None\n    return callee.name\n",
+      "new": "    if callee is None:\n        return None\n    return callee.name\n",
+      "what": "a group that holds no one name, `(a + b)`, is the callee of a citation"
+    },
+    {
+      "decision": "D9.8-cite-unread",
+      "file": "tools/fort_lint.py",
+      "old": "        if callee is None:\n            problems.append((line, 1, \"a call row of fn '%s' starts a citation that the lint \"\n",
+      "new": "        if callee is None:\n            continue\n            problems.append((line, 1, \"a call row of fn '%s' starts a citation that the lint \"\n",
+      "what": "text that starts a citation and that the lint cannot read is no problem"
+    },
+    {
+      "decision": "D9.8-cite-start-case",
+      "file": "tools/fort_lint.py",
+      "old": "    r\"(?i)\\bthe_+(?:gives|writes)_*:|\\bthe_+(?:gives|writes)_+of\\b|\\b(?:gives|writes)_*:_*of\\b\"\n",
+      "new": "    r\"\\bthe_+(?:gives|writes)_*:|\\bthe_+(?:gives|writes)_+of\\b|\\b(?:gives|writes)_*:_*of\\b\"\n",
+      "what": "text starts a citation in lower case only: `THE GIVES: of x` passes with no check"
+    },
+    {
+      "decision": "D9.8-cite-start-colon",
+      "file": "tools/fort_lint.py",
+      "old": "    r\"(?i)\\bthe_+(?:gives|writes)_*:|\\bthe_+(?:gives|writes)_+of\\b|\\b(?:gives|writes)_*:_*of\\b\"\n",
+      "new": "    r\"(?i)\\bthe (?:gives|writes):|\\bthe_+(?:gives|writes)_+of\\b|\\b(?:gives|writes)_*:_*of\\b\"\n",
+      "what": "`the gives:` starts a citation with one space and no more: `the  gives : of x` passes with no check"
+    },
+    {
+      "decision": "D9.8-cite-start-of",
+      "file": "tools/fort_lint.py",
+      "old": "    r\"(?i)\\bthe_+(?:gives|writes)_*:|\\bthe_+(?:gives|writes)_+of\\b|\\b(?:gives|writes)_*:_*of\\b\"\n",
+      "new": "    r\"(?i)\\bthe_+(?:gives|writes)_*:|\\b(?:gives|writes)_*:_*of\\b\"\n",
+      "what": "`the gives of x`, with no colon, starts no citation"
+    },
+    {
+      "decision": "D9.8-cite-start-bare",
+      "file": "tools/fort_lint.py",
+      "old": "    r\"(?i)\\bthe_+(?:gives|writes)_*:|\\bthe_+(?:gives|writes)_+of\\b|\\b(?:gives|writes)_*:_*of\\b\"\n",
+      "new": "    r\"(?i)\\bthe_+(?:gives|writes)_*:|\\bthe_+(?:gives|writes)_+of\\b\"\n",
+      "what": "`gives: of x`, with no `the`, starts no citation"
+    },
+    {
+      "decision": "D9.8-cite-start-quote",
+      "file": "tools/fort_lint.py",
+      "old": "CITATION_GAP = \"[\\\\s`'\\\"]\"\n",
+      "new": "CITATION_GAP = \"[\\\\s]\"\n",
+      "what": "a quote character between the words hides text that starts a citation: \"the `gives:` of x\" passes with no check"
+    },
+    {
+      "decision": "D9.8-keyword-callee",
+      "file": "tools/fort_lint.py",
+      "old": "        if code[name_at:end] in KEYWORDS:\n            return None\n",
+      "new": "        if code[name_at:end] in ():\n            return None\n",
+      "what": "a keyword before a `(` is the callee of a call: the row `// C call if: x.` counts each `if (`"
+    },
+    {
+      "decision": "D9.8-keyword-list",
+      "file": "tools/fort_lint.py",
+      "old": "\"true u8 u16 u32 u64 void while \"",
+      "new": "\"true u8 u16 u32 u64 void \"",
+      "what": "`while` is no keyword of the lint, so the row `// C call while: x.` counts each `while (`"
+    },
+    {
+      "decision": "D9.8-compiler-form",
+      "file": "tools/fort_lint.py",
+      "old": "        if name_at > 0 and code[name_at - 1] == \"$\":\n",
+      "new": "        if name_at > 0 and code[name_at - 1] == \"$$\":\n",
+      "what": "the compiler form `$cfg(key)` is a call of `cfg`"
+    },
+    {
+      "decision": "D9.8-group-argument",
+      "file": "tools/fort_lint.py",
+      "old": "        if callee is not None or before != \"(\" or after != \")\":\n            break\n",
+      "new": "        if True:\n            break\n",
+      "what": "an argument in a group is a value: `take_cb((takep))` gets the problem that `take_cb(takep)` does not get"
+    },
+    {
+      "decision": "D9.8-group-argument-each",
+      "file": "tools/fort_lint.py",
+      "old": "        before, before_at = prev_char(code, before_at)\n    if callee is None:\n",
+      "new": "        before, before_at = prev_char(code, before_at)\n        if before == \"(\" and after == \")\" and call_callee(code, before_at) is None:\n            return False\n    if callee is None:\n",
+      "what": "the search from an argument to its call passes one group only, so `take_cb(((takep)))` names a value"
+    },
+    {
+      "decision": "D9.8-name-start",
+      "file": "tools/fort_lint.py",
+      "old": "    name = IDENTIFIER.match(code, start)\n    if name is None:\n        return None\n",
+      "new": "    name = IDENTIFIER.match(code, start)\n    if name is None:\n        return Callee(\"\", 0, \"\", start, start, start)\n",
+      "what": "an offset that starts no name is the callee of a call"
     }
   ]
 }
