@@ -657,6 +657,18 @@ fn zero_bytes(machine mut* it, u64 addr, u64 n) void {
     }
 }
 
+// The zero bytes of a `live`: a store of 0 into each of the `n` bytes of the local at `addr`,
+// which the run names.
+fn clear_bytes(machine mut* it, u64 addr, u64 n) void {
+    it->sh.place = shadow.tag{};
+    it->sh.place.d.named = true;
+    u8 mut@ to = bytes_mut(it, addr, n);
+    shadow.write(&it->sh, addr, to.len);
+    for (u64 mut k = 0; k < to.len; k++) {
+        to[k] = 0;
+    }
+}
+
 fn read_bytes(machine mut* it, u64 addr, u8 mut@ to) void {
     u8@ from = bytes_at(it, addr, to.len);
     for (u64 mut k = 0; k < from.len; k++) {
@@ -1979,7 +1991,10 @@ fn execute(machine mut* it, u64 k, fir.statement* s) void {
         del_from(it, k, s);
         return;
     case fir.stmt_kind.st_live:
+        // each byte of the local holds 0 when its declaration runs, padding included (D10.1)
+        types.node* t = fir.local_at(it->frames.items[k].f, s->local)->ty;
         shadow.revive(&it->sh, local_address(it, k, s->local));
+        clear_bytes(it, local_address(it, k, s->local), size_of(t));
     case fir.stmt_kind.st_dead:
         types.node* t = fir.local_at(it->frames.items[k].f, s->local)->ty;
         shadow.kill(&it->sh, local_address(it, k, s->local), size_of(t));

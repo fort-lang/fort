@@ -1,0 +1,157 @@
+//! run
+//! flags: -Xcc -O0
+//! stdout:
+//| 1 1 1 argument
+//| 1 1 conditional
+//| 1 1 conditional
+//| 1 3 1 3 member
+//| 1 1 1 loop
+//| 18446744073709551615 copy
+//| 1 1 result
+//| 1 1 parameter
+// The zero bytes of a local hold for a parameter and for a temporary too (D10.1). `show` reads the
+// word that holds the field `a` and the padding bytes 1 to 7 of its parameter, whose storage holds
+// the argument. The argument is a literal in a temporary, a named local, the result of a call, a
+// conditional, and a member of a literal in a temporary. `stack` leaves bytes that are not 0 where
+// the next call puts its temporaries. The line `copy` shows that an argument carries each byte of
+// its place: the view wrote the padding of `l`, and no store wrote it again. The line `result`
+// holds the result slot: `g` and `l` hold padding that is not 0 before the call writes them. The
+// line `parameter` holds a `mut` parameter: call 1 writes the padding of its parameter through a
+// view, and call 2 reads the bytes of its own argument. This program stands at the default level,
+// at `-Xcc -O0` and at `-Xcc -O2`: before the compiler wrote the zero bytes, `-Xcc -O0` printed a
+// value that was not 1 for a temporary.
+struct holed {
+    u8 a;
+    u64 b;
+}
+
+struct raw {
+    u64 x;
+    u64 y;
+}
+
+struct outer {
+    holed h;
+    u8 t;
+}
+
+struct raw3 {
+    u64 x;
+    u64 y;
+    u64 z;
+}
+
+holed mut g = holed{1, 2};
+
+fn mk(u8 a, u64 b) holed {
+    return holed{a, b};
+}
+
+fn pick(bool first, holed other) holed {
+    return first ? holed{1, 2} : other;
+}
+
+fn soil(holed mut* p) void {
+    raw mut* r = cast(p, raw mut*);
+    r->x = 0xFFFFFFFFFFFFFFFF;
+}
+
+fn word(holed* p) u64 {
+    raw* r = cast(p, raw*);
+    return r->x;
+}
+
+fn stack() u64 {
+    u64[32] mut junk = {};
+    for (u64 mut i = 0; i < 32; i++) {
+        junk[i] = 0xFFFFFFFFFFFFFFFF;
+    }
+    u64 mut t = 0;
+    for (u64 mut i = 0; i < 32; i++) {
+        t ^= junk[i];
+    }
+    return t;
+}
+
+fn show(holed p) u64 {
+    return word(&p);
+}
+
+fn show_outer(outer p) u64 {
+    raw3* r = cast(&p, raw3*);
+    print(r->x, " ");
+    return r->z;
+}
+
+fn argument() void {
+    holed h = holed{1, 2};
+    print(show(holed{1, 2}), " ");
+    print(show(h), " ");
+    print(show(mk(1, 2)), " ");
+    println("argument");
+}
+
+fn conditional(bool c) void {
+    holed h = holed{1, 2};
+    print(show(c ? holed{1, 2} : h), " ");
+    print(show(c ? h : holed{1, 2}), " ");
+    println("conditional");
+}
+
+fn member() void {
+    print(show_outer(outer{holed{1, 2}, 3}), " ");
+    print(show_outer(outer{mk(1, 2), 3}), " ");
+    println("member");
+}
+
+fn loop() void {
+    for (u64 mut i = 0; i < 3; i++) {
+        u64 t = stack();
+        print(show(holed{1, 2 + t}), " ");
+    }
+    println("loop");
+}
+
+fn copy() void {
+    holed mut l = holed{1, 2};
+    soil(&l);
+    print(show(l), " ");
+    println("copy");
+}
+
+fn result() void {
+    soil(&g);
+    g = mk(1, 2);
+    print(word(&g), " ");
+    holed mut l = holed{1, 2};
+    soil(&l);
+    l = pick(true, l);
+    print(word(&l), " ");
+    println("result");
+}
+
+fn again(holed mut p) u64 {
+    u64 w = word(&p);
+    soil(&p);
+    p.b += w;
+    return w;
+}
+
+fn parameter() void {
+    print(again(holed{1, 2}), " ");
+    print(again(holed{1, 2}), " ");
+    println("parameter");
+}
+
+fn main() i32 {
+    u64 t = stack();
+    argument();
+    conditional(t == 0);
+    conditional(t != 0);
+    member();
+    loop();
+    copy();
+    result();
+    parameter();
+    return 0;
+}

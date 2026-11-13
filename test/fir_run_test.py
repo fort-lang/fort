@@ -50,8 +50,45 @@ EVENT_RE = re.compile(rb"^fort: event [^\n]*\n?", re.MULTILINE)
 # The programs of the corpus that make an event: each with its ownership defect and the lines of
 # its events, in the order of the run, as
 # `"programs/<name>.ft": ("<defect>", ["fort: event leak in <function> at <line>:<col>"])`.
-# No program of the corpus makes one.
-EXPECTED_EVENTS = {}
+# Four programs make one, and they are one program at four levels. It reads a scalar local of
+# the loop run before through a kept pointer, between the zero bytes of the declaration and the
+# initializer (D10.1). No program reads those bytes with no kept pointer, because the checker
+# asks for an initializer. The program takes the loop route. On the other route, a pointer to a
+# local of a call that returned, the builds give different output until frame storage is in the
+# compiler (D10.9), so the program does not take it. The access is a `use after scope` of D10.9,
+# which the interpreter reports as `forged` until each entry of a block gives its local new
+# storage (spec/ownership-design.md 3.4).
+STALE_SCALAR = "a read of a scalar local of the loop run before through a kept pointer"
+EXPECTED_EVENTS = {
+    "run/declarations/002_scalar_zero_bytes.ft": (
+        STALE_SCALAR,
+        [
+            "fort: event forged in 002_scalar_zero_bytes.peek at 31:12"
+            " through frame 002_scalar_zero_bytes.integer _5"
+        ],
+    ),
+    "run/declarations/003_scalar_zero_bytes_o0.ft": (
+        STALE_SCALAR,
+        [
+            "fort: event forged in 003_scalar_zero_bytes_o0.peek at 32:12"
+            " through frame 003_scalar_zero_bytes_o0.integer _5"
+        ],
+    ),
+    "run/declarations/004_scalar_zero_bytes_o2.ft": (
+        STALE_SCALAR,
+        [
+            "fort: event forged in 004_scalar_zero_bytes_o2.peek at 32:12"
+            " through frame 004_scalar_zero_bytes_o2.integer _5"
+        ],
+    ),
+    "run/declarations/005_scalar_zero_bytes_release.ft": (
+        STALE_SCALAR,
+        [
+            "fort: event forged in 005_scalar_zero_bytes_release.peek at 32:12"
+            " through frame 005_scalar_zero_bytes_release.integer _5"
+        ],
+    ),
+}
 # The longest run of a program under the interpreter in a debug build in the Linux VM was 70 s
 # (run/stdlib/095_rt_round_trip_floats.ft), so a program gets more time than the corpus gives.
 TIMEOUT = 300.0

@@ -1404,8 +1404,8 @@ fn aggregate_operand(lowerer mut* lw, ast.node* n, fir.operand mut* out) bool {
 // aggregate_operand, where `zeroing` says that the value is a member of a literal or the operand
 // of a cast, which the translator copies whole into its destination. Then a new temporary of a
 // type with padding is `const zero` first, so that the copy writes zero padding into a designated
-// literal, whose padding is zero (D6.5), and never stale bytes. A designated literal and a cast
-// write the whole temporary, so they need no zero first.
+// literal, whose padding is zero (D6.5), and never stale bytes. A literal and a cast write the
+// whole temporary, so they need no zero first.
 fn built_operand(lowerer mut* lw, ast.node* n, bool zeroing, fir.operand mut* out) bool {
     if (n->kind == ast.ast_kind.k_call && (n->ann & check.ANN_MOVE) != 0) {
         return lower_move(lw, n, out);
@@ -1430,17 +1430,29 @@ fn built_operand(lowerer mut* lw, ast.node* n, bool zeroing, fir.operand mut* ou
     return true;
 }
 
-// Whether the value `n` writes every byte of its destination: a designated literal, `{.f = v}` or
-// `T{.f = v}`, which `llvm.memset` zeroes first, or a cast, which `llvm.memmove` copies.
+// Whether the value `n` writes every byte of a temporary: a literal, which lower_literal writes
+// as `const zero` or as `aggregate zeroed` there, or a cast, which `llvm.memmove` copies.
 fn writes_whole(ast.node* n) bool {
-    if (n->kind == ast.ast_kind.k_cast) {
+    switch (n->kind) {
+    case ast.ast_kind.k_cast, ast.ast_kind.k_brace_init, ast.ast_kind.k_struct_lit,
+        ast.ast_kind.k_array_lit:
         return true;
+    default:
+        return false;
     }
-    ast.node* mut list = n;
-    if (n->kind == ast.ast_kind.k_struct_lit) {
-        list = n->b;
+}
+
+// Whether the place `dst` is the whole storage of a temporary or of the result slot `_0`. No
+// statement before the store gives a byte of that storage a value that the program can read
+// through a pointer to live storage, so a store into it writes each byte (D10.1). A kept pointer
+// to a dead parameter or to a dead local of a call that returned can read the storage before
+// the store, until frame storage of D10.9 is in the compiler (spec/fir.md 7).
+fn fresh_storage(lowerer* lw, fir.place dst) bool {
+    if (dst.base != fir.base_kind.bk_local || dst.proj_len != 0) {
+        return false;
     }
-    return list->kind == ast.ast_kind.k_brace_init && (list->flags & ast.FLAG_DESIGNATED) != 0;
+    fir.local_kind kind = fir.local_at(lw->f, dst.local)->kind;
+    return kind == fir.local_kind.lk_temp || kind == fir.local_kind.lk_return;
 }
 
 // Whether the checker folded `n` to a string constant.
@@ -1911,9 +1923,11 @@ fn member_slot(ast.node* n, u64 i) u64 {
 // The brace initializer `n` of type `t` into `dst` (spec/fir.md 9.4, D6.5): `const zero T` for
 // `{}`, and else `aggregate T(...)` with one operand for each field or element, in declaration or
 // index order, and `const zero` for a field that a designated literal leaves out. A designated
-// literal is `aggregate zeroed T(...)`, whose padding the translator zeroes. The members run in
-// source order under the materialization rule (D6.3). The translator reads every operand before
-// it writes `dst`, so a member that reads `dst` reads the old value (spec/fir.md 6).
+// literal is `aggregate zeroed T(...)`, whose padding the translator zeroes. So is a literal of a
+// type with padding whose `dst` is the whole storage of a temporary or of `_0`: each byte of that
+// storage holds 0 before the literal goes in (D10.1). The members run in source order under the
+// materialization rule (D6.3). The translator reads every operand before it writes `dst`, so a
+// member that reads `dst` reads the old value (spec/fir.md 6).
 fn lower_literal(lowerer mut* lw, ast.node* n, types.node* t, fir.place dst, diag.loc at)
     bool {
     u64 count = ast.ast_len(n);
@@ -1955,8 +1969,9 @@ fn lower_literal(lowerer mut* lw, ast.node* n, types.node* t, fir.place dst, dia
         }
         k += 1;
     }
-    if ((n->flags & ast.FLAG_DESIGNATED) != 0) {
-        // the designated form zeroes the whole value, padding included (D6.5)
+    if ((n->flags & ast.FLAG_DESIGNATED) != 0 || (fir.type_padded(t) && fresh_storage(lw, dst))) {
+        // the designated form zeroes the whole value, padding included (D6.5), and fresh
+        // storage holds 0 in each padding byte (D10.1)
         assign(lw, dst, fir.rvalue_aggregate_zeroed(t, first, cast(slots, u32)), at);
         return true;
     }

@@ -89,13 +89,14 @@ string[62] SOURCE = {
 fn a_narrow_call_extends_its_result_and_its_arguments() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[16] want = {
+    string[17] want = {
         "define dso_local zeroext i1 @\"main.call_narrow\"(i8 zeroext %x.in, i16 signext %y.in) \\",
         "#0 {",
         "entry:",
         "  %result = alloca i8, align 1",
         "  %x.0 = alloca i8, align 1",
         "  %y.1 = alloca i16, align 2",
+        "  store i8 0, ptr %result, align 1",
         "  store i8 %x.in, ptr %x.0, align 1",
         "  store i16 %y.in, ptr %y.1, align 2",
         "  %t0 = load i8, ptr %x.0, align 1",
@@ -124,13 +125,15 @@ fn a_narrow_call_extends_its_result_and_its_arguments() void {
 fn an_aggregate_result_and_an_aggregate_argument() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[24] want = {
+    string[26] want = {
         "define dso_local i32 @\"main.use_pair\"() #0 {",
         "entry:",
         "  %result = alloca i32, align 4",
         "  %q.0 = alloca %struct.main.pair, align 8",
         "  %tmp0 = alloca %struct.main.pair, align 8",
         "  %tmp1 = alloca %struct.main.pair, align 8",
+        "  store i32 0, ptr %result, align 4",
+        "  call void @llvm.memset.p0.i64(ptr align 8 %q.0, i8 0, i64 16, i1 false)",
         "  call void @\"main.make\"(ptr sret(%struct.main.pair) %q.0, i32 1)",
         "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %q.0, i64 16, \\",
         "i1 false)",
@@ -168,11 +171,13 @@ fn an_aggregate_result_and_an_aggregate_argument() void {
 fn a_wide_result_takes_sret_too() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[10] want = {
+    string[12] want = {
         "define dso_local i64 @\"main.call_wide\"() #0 {",
         "entry:",
         "  %result = alloca i64, align 8",
         "  %w.0 = alloca %struct.main.big, align 8",
+        "  store i64 0, ptr %result, align 8",
+        "  call void @llvm.memset.p0.i64(ptr align 8 %w.0, i8 0, i64 24, i1 false)",
         "  call void @\"main.wide\"(ptr sret(%struct.main.big) %w.0)",
         "  %t0 = getelementptr inbounds %struct.main.big, ptr %w.0, i32 0, i32 2",
         "  %t1 = load i64, ptr %t0, align 8",
@@ -197,13 +202,15 @@ fn a_wide_result_takes_sret_too() void {
 fn the_result_address_comes_after_the_arguments() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[16] want = {
+    string[18] want = {
         "define dso_local i32 @\"main.fill\"(i32 %v.in) #0 {",
         "entry:",
         "  %result = alloca i32, align 4",
         "  %v.0 = alloca i32, align 4",
         "  %w.1 = alloca %struct.main.outer, align 8",
+        "  store i32 0, ptr %result, align 4",
         "  store i32 %v.in, ptr %v.0, align 4",
+        "  call void @llvm.memset.p0.i64(ptr align 8 %w.1, i8 0, i64 24, i1 false)",
         "  call void @llvm.memset.p0.i64(ptr align 8 %w.1, i8 0, i64 24, i1 false)",
         "  %t0 = load i32, ptr %v.0, align 4",
         "  %t1 = getelementptr inbounds %struct.main.outer, ptr %w.1, i32 0, i32 1",
@@ -226,15 +233,17 @@ fn the_result_address_comes_after_the_arguments() void {
 fn a_call_through_a_pointer_writes_its_type() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[17] want = {
+    string[19] want = {
         "define dso_local i32 @\"main.through\"(ptr %op.in, ptr %mk.in) #0 {",
         "entry:",
         "  %result = alloca i32, align 4",
         "  %op.0 = alloca ptr, align 8",
         "  %mk.1 = alloca ptr, align 8",
         "  %r.2 = alloca %struct.main.pair, align 8",
+        "  store i32 0, ptr %result, align 4",
         "  store ptr %op.in, ptr %op.0, align 8",
         "  store ptr %mk.in, ptr %mk.1, align 8",
+        "  call void @llvm.memset.p0.i64(ptr align 8 %r.2, i8 0, i64 16, i1 false)",
         "  %t0 = load ptr, ptr %mk.1, align 8",
         "  call void (ptr, i32) %t0(ptr sret(%struct.main.pair) %r.2, i32 3)",
         "  %t1 = load ptr, ptr %op.0, align 8",
@@ -285,7 +294,7 @@ fn a_moved_argument_is_copied_then_zeroed() void {
 fn an_extern_call_carries_its_c_form() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[20] want = {
+    string[22] want = {
         "define dso_local i64 @\"main.c_calls\"(ptr %fmt.in, ptr %buf.in, i8 signext %n.in) #0 {",
         "entry:",
         "  %result = alloca i64, align 8",
@@ -293,11 +302,13 @@ fn an_extern_call_carries_its_c_form() void {
         "  %buf.1 = alloca ptr, align 8",
         "  %n.2 = alloca i8, align 1",
         "  %k.3 = alloca i8, align 1",
+        "  store i64 0, ptr %result, align 8",
         "  store ptr %fmt.in, ptr %fmt.0, align 8",
         "  store ptr %buf.in, ptr %buf.1, align 8",
         "  store i8 %n.in, ptr %n.2, align 1",
         "  %t0 = load ptr, ptr %fmt.0, align 8",
         "  %t1 = call i32 (ptr, ...) @printf(ptr %t0, i32 5, double 0x4004000000000000) #3",
+        "  store i8 0, ptr %k.3, align 1",
         "  %t2 = load i8, ptr %n.2, align 1",
         "  %t3 = call signext i8 @c_narrow(i8 signext %t2, i16 zeroext 7) #3",
         "  store i8 %t3, ptr %k.3, align 1",
@@ -491,10 +502,11 @@ fn each_print_entry_is_a_fort_call() void {
 fn a_string_equality_calls_str_eq() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[17] want = {
+    string[18] want = {
         "define dso_local zeroext i1 @\"main.same\"(ptr %a.in, ptr %b.in) #0 {",
         "entry:",
         "  %result = alloca i8, align 1",
+        "  store i8 0, ptr %result, align 1",
         "  %t0 = getelementptr inbounds %fort.span, ptr %a.in, i32 0, i32 0",
         "  %t1 = load ptr, ptr %t0, align 8",
         "  %t2 = getelementptr inbounds %fort.span, ptr %a.in, i32 0, i32 1",
@@ -521,12 +533,13 @@ fn a_string_equality_calls_str_eq() void {
 fn a_shift_check_calls_fail_shift() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[24] want = {
+    string[25] want = {
         "define dso_local i32 @\"main.shift\"(i32 %a.in, i32 %n.in) #0 {",
         "entry:",
         "  %result = alloca i32, align 4",
         "  %a.0 = alloca i32, align 4",
         "  %n.1 = alloca i32, align 4",
+        "  store i32 0, ptr %result, align 4",
         "  store i32 %a.in, ptr %a.0, align 4",
         "  store i32 %n.in, ptr %n.1, align 4",
         "  %t0 = load i32, ptr %n.1, align 4",
@@ -557,12 +570,13 @@ fn a_shift_check_calls_fail_shift() void {
 fn a_division_calls_fail_div_zero_and_fail_div_overflow() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[34] want = {
+    string[35] want = {
         "define dso_local i32 @\"main.quot\"(i32 %a.in, i32 %n.in) #0 {",
         "entry:",
         "  %result = alloca i32, align 4",
         "  %a.0 = alloca i32, align 4",
         "  %n.1 = alloca i32, align 4",
+        "  store i32 0, ptr %result, align 4",
         "  store i32 %a.in, ptr %a.0, align 4",
         "  store i32 %n.in, ptr %n.1, align 4",
         "  %t0 = load i32, ptr %n.1, align 4",
@@ -653,12 +667,13 @@ fn a_span_check_calls_fail_span() void {
 fn an_allocation_calls_fail_alloc_count() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[22] want = {
+    string[23] want = {
         "define dso_local void @\"main.many\"(i64 %m.in) #0 {",
         "entry:",
         "  %m.0 = alloca i64, align 8",
         "  %z.1 = alloca %fort.span, align 8",
         "  store i64 %m.in, ptr %m.0, align 8",
+        "  call void @llvm.memset.p0.i64(ptr align 8 %z.1, i8 0, i64 16, i1 false)",
         "  call void @llvm.memset.p0.i64(ptr align 8 %z.1, i8 0, i64 16, i1 false)",
         "  %t0 = load i64, ptr %m.0, align 8",
         "  %t1 = icmp slt i64 %t0, 0",
