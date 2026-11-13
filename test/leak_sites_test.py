@@ -162,7 +162,9 @@ def report(job):
     argv = [OPTIONS.fort, "--target", triple, "--std-dir", std, "--leak-report"]
     argv += [flag for flag in flags if flag not in run_tests.NOT_WITH_CHECK]
     argv.append(entry)
-    proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
+    # A fail entry of D2.1 holds bytes that are no UTF-8 text, and the compiler shows its line.
+    # The decoder gives U+FFFD for each such byte. A line of the report is ASCII text.
+    proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, errors="replace")
     if proc.returncode != 0 and not (may_fail and proc.returncode == 1):
         raise AssertionError("%s in %s exits %d: %s"
                              % (argv, cwd, proc.returncode, proc.stderr[-2000:]))

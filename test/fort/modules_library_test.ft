@@ -672,6 +672,24 @@ fn a_lexical_error_in_the_file_is_reported_and_refuses_the_library() void {
     assert(r.loc.line == 4 && str.ends_with(r.loc.file, "geom.flib/interface.ft"));
 }
 
+// The lexer reads the interface file as it reads each source file, so bytes that are no UTF-8
+// text (D2.1) refuse the library, in a comment too. The byte 0xE9 alone is Latin-1 text.
+fn bytes_that_are_no_utf8_text_refuse_the_library() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    library_env.env mut* own e = library_env.make();
+    defer library_env.drop_made(move(e));
+    string[5] lines = {"== fort interface 1", "== library geom", "== module geom.a",
+                       "// caf\xE9", "i32 A = 1;"};
+    string text = text_of(lines[..], &b);
+    assert(!modules.use_library(&e->m.s, &e->m.set, "geom", "geom.flib/interface.ft", text));
+    assert(library_env.reports(e) == 1);
+    diag.record r = library_env.report_at(e, 0);
+    assert(r.loc.line == 4 && r.loc.col == 7);
+    assert(str.ends_with(r.loc.file, "geom.flib/interface.ft"));
+    assert(r.msg == "invalid UTF-8 sequence at byte 0xE9");
+}
+
 fn a_comment_line_inside_a_section_is_no_section(library_env.env mut* e) void {
     string[6] lines = {"== fort interface 1", "== library geom", "== module geom.a",
                        "// a comment", "== note", "i32 A = 1;"};
@@ -911,6 +929,7 @@ fn main() i32 {
     library_env.run(a_bodiless_function_checks_and_a_client_calls_it);
     a_wrong_call_of_a_bodiless_function_is_the_client_s_error();
     a_lexical_error_in_the_file_is_reported_and_refuses_the_library();
+    bytes_that_are_no_utf8_text_refuse_the_library();
     library_env.run(a_comment_line_inside_a_section_is_no_section);
     a_bodiless_main_of_a_section_is_an_ordinary_function();
     one_extern_in_two_sections_is_one_symbol();

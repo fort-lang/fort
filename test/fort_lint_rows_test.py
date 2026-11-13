@@ -1248,29 +1248,52 @@ class Rules(unittest.TestCase):
         return ("%s:%d:%d: byte 0x%02x is no UTF-8 text: fort source is UTF-8 (D2.1)"
                 % (name, line, col, byte))
 
+    def closure_line(self, name, data, line, col, byte):
+        """The line of the lint for the error of the compiler at that byte. The compiler skips
+        a byte order mark and gives it no column, so its column in line 1 of such a file is 3
+        less than the column of the lint."""
+        if data.startswith(b"\xef\xbb\xbf") and line == 1:
+            col -= 3
+        return ("%s:1:1: fort could not check this closure: %s:%d:%d: "
+                "invalid UTF-8 sequence at byte 0x%02X" % (name, name, line, col, byte))
+
     def test_a_file_that_is_no_utf8_is_reported(self):
         # D2.1: source is UTF-8. The lint reports the first byte of a file that is no UTF-8
         # text, with the file, the line and the byte column, and exits 1. It reports it for a
         # trusted module and for a module that is not trusted, and no error of the decoder
-        # reaches the caller.
+        # reaches the caller. The compiler rejects the file too and reports the byte, so the
+        # index holds no record of the file: the lint gives that error at the first position of
+        # the file, as it gives each error of the compiler. The lint thus gives 2 lines for the
+        # file.
         self.assertEqual(len(self.NO_UTF8), 12)
         for name, data, line, col, byte in self.NO_UTF8:
             with self.subTest(name=name):
                 self.assertEqual(data.split(b"\n")[line - 1][col - 1], byte)
                 with self.assertRaises(UnicodeDecodeError):
                     data.decode("utf-8")
-                output = self.check({name: data}, [(name, line, "is no UTF-8 text")])
+                output = self.check({name: data}, [
+                    (name, 1, "fort could not check this closure: %s:%d:" % (name, line)),
+                    (name, line, "byte 0x%02x is no UTF-8 text" % byte)])
                 self.assertNotIn("Traceback", output)
                 self.assertNotIn("UnicodeDecodeError", output)
-                self.assertEqual(output.splitlines()[0], self.no_utf8_line(name, line, col, byte))
-                self.assertIn("fort_lint: 1 problem(s) in 1 of 1 file(s)", output)
-        # One run over the 12 files and a file of UTF-8 text reports each of the 12 once.
+                self.assertEqual(output.splitlines()[0],
+                                 self.closure_line(name, data, line, col, byte))
+                self.assertEqual(output.splitlines()[1], self.no_utf8_line(name, line, col, byte))
+                self.assertIn("fort_lint: 2 problem(s) in 1 of 1 file(s)", output)
+        # One run over the 12 files and a file of UTF-8 text reports each of the 12, with the
+        # line of the lint once and the line of the compiler once.
         files = {name: data for name, data, _, _, _ in self.NO_UTF8}
         files["good.ft"] = "// é中\U0001f600\nfn one() i64 {\n    return 1; // é\n}\n"
-        output = self.check(files, [(name, line, "byte 0x%02x is no UTF-8 text" % byte)
-                                    for name, _, line, _, byte in self.NO_UTF8])
+        expected = []
+        for name, data, line, col, byte in self.NO_UTF8:
+            expected.append((name, 1, "fort could not check this closure: %s:%d:" % (name, line)))
+            expected.append((name, line, "byte 0x%02x is no UTF-8 text" % byte))
+        output = self.check(files, expected)
         self.assertNotIn("Traceback", output)
-        self.assertIn("fort_lint: 12 problem(s) in 12 of 13 file(s)", output)
+        self.assertIn("fort_lint: 24 problem(s) in 12 of 13 file(s)", output)
+        for name, data, line, col, byte in self.NO_UTF8:
+            self.assertEqual(output.count(self.closure_line(name, data, line, col, byte)), 1)
+            self.assertEqual(output.count(self.no_utf8_line(name, line, col, byte)), 1)
 
     def test_a_file_of_utf8_text_and_a_byte_order_mark_pass(self):
         # UTF-8 text of 2, 3 and 4 bytes in a comment and in a string literal is no problem,
@@ -1280,30 +1303,45 @@ class Rules(unittest.TestCase):
         self.check({"good.ft": text, "mark.ft": b"\xef\xbb\xbf" + text.encode("utf-8")}, [])
 
     def test_a_file_that_is_no_utf8_keeps_its_other_problems(self):
-        # The byte stops no other check: the file gets the checks of the names, of the width and
-        # of the rows too, and a file of test/lang/run gets the checks of D9.8.
+        # The byte stops no check of the text: the file gets the check of the width too. The
+        # checks of the names and of the rows read the index. The compiler rejects the file
+        # (D2.1), so the index holds no record of it, and those checks report when the byte is
+        # gone.
         text = (b"import extern;\n\n// caf\xe9 " + b"x" * 100 + b"\nstruct Bad_Name {\n"
                 b"    i64 v;\n}\n\nextern fn labs(i64 v) i64;\n")
         output = self.check({"other/bad.ft": text, "test/lang/run/ffi/001_bad.ft": text}, [
+            ("other/bad.ft", 1, "fort could not check this closure: other/bad.ft:3:7: "
+             "invalid UTF-8 sequence at byte 0xE9"),
             ("other/bad.ft", 3, "byte 0xe9 is no UTF-8 text"),
+            ("other/bad.ft", 3, "line is 108 columns"),
+            ("test/lang/run/ffi/001_bad.ft", 1, "fort could not check this closure: "
+             "test/lang/run/ffi/001_bad.ft:3:7: invalid UTF-8 sequence at byte 0xE9"),
+            ("test/lang/run/ffi/001_bad.ft", 3, "byte 0xe9 is no UTF-8 text")])
+        self.assertNotIn("Traceback", output)
+        # The same file with the letter `e` for the byte gets the checks of the names and of
+        # the rows, and a file of test/lang/run gets the checks of D9.8.
+        text = text.replace(b"\xe9", b"e")
+        output = self.check({"other/bad.ft": text, "test/lang/run/ffi/001_bad.ft": text}, [
             ("other/bad.ft", 3, "line is 108 columns"),
             ("other/bad.ft", 4, "struct 'Bad_Name' is not lower_case"),
             ("other/bad.ft", 8, "extern 'labs' has no declaration row"),
-            ("test/lang/run/ffi/001_bad.ft", 3, "byte 0xe9 is no UTF-8 text"),
             ("test/lang/run/ffi/001_bad.ft", 8, "extern 'labs' has no declaration row")])
         self.assertNotIn("Traceback", output)
 
     def test_a_module_of_a_directory_test_reads_a_main_that_is_no_utf8(self):
         # A module of a directory test takes the `--cfg` options of the main.ft beside it. A
         # main.ft that is no UTF-8 text still gives its options, and the lint reports the byte
-        # when main.ft is a file of the run.
+        # when main.ft is a file of the run. The compiler reports the byte too (D2.1), and the
+        # lint gives that error at the first position of main.ft.
         main = (b"//! run\n//! flags: --cfg mode=good\n// caf\xe9\nimport dep;\n\n"
                 b"fn main() i32 {\n    return cast(dep.KEY.len, i32);\n}\n")
         dep = "string KEY = $cfg(mode);\n"
         files = {"test/lang/run/modules/keyed/main.ft": main,
                  "test/lang/run/modules/keyed/dep.ft": dep}
-        output = self.check(files, [("test/lang/run/modules/keyed/main.ft", 3,
-                                     "byte 0xe9 is no UTF-8 text")])
+        output = self.check(files, [
+            ("test/lang/run/modules/keyed/main.ft", 1, "fort could not check this closure: "
+             "test/lang/run/modules/keyed/main.ft:3:7: invalid UTF-8 sequence at byte 0xE9"),
+            ("test/lang/run/modules/keyed/main.ft", 3, "byte 0xe9 is no UTF-8 text")])
         self.assertNotIn("Traceback", output)
         with tempfile.TemporaryDirectory() as out:
             root = os.path.realpath(out)

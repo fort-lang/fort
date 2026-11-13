@@ -253,6 +253,33 @@ fn a_lexical_error_stops_the_file() void {
     assert(modules_env.errors(e) == 1);
 }
 
+// Bytes that are no UTF-8 text (D2.1) are a lexical error of the entry file, in a comment too.
+// The byte 0xE9 alone is Latin-1 text.
+fn bytes_that_are_no_utf8_text_stop_the_entry_file() void {
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "fn main() i32 {\n    // caf\xE9\n    return 0;\n}\n");
+    assert(!modules_env.load(e, "main.ft"));
+    assert(modules_env.errors(e) == 1);
+    assert(modules_env.said(e, "invalid UTF-8 sequence at byte 0xE9"));
+    diag.record r = modules_env.report_at(e, 0);
+    assert(r.loc.line == 2 && r.loc.col == 11 && str.ends_with(r.loc.file, "main.ft"));
+}
+
+// The loader lexes an imported module through the same function, so the error names the file
+// of that module.
+fn bytes_that_are_no_utf8_text_stop_an_imported_module() void {
+    modules_env.env mut* own e = modules_env.make();
+    defer modules_env.drop_made(move(e));
+    modules_env.add(e, "main.ft", "import text;\nfn main() i32 {\n    return text.A;\n}\n");
+    modules_env.add(e, "text.ft", "i32 A = 1;\nstring S = \"caf\xE9\";\n");
+    assert(!modules_env.load(e, "main.ft"));
+    assert(modules_env.errors(e) == 1);
+    assert(modules_env.said(e, "invalid UTF-8 sequence at byte 0xE9"));
+    diag.record r = modules_env.report_at(e, 0);
+    assert(r.loc.line == 2 && r.loc.col == 16 && str.ends_with(r.loc.file, "text.ft"));
+}
+
 fn a_syntax_error_stops_the_file() void {
     modules_env.env mut* own e = modules_env.make();
     defer modules_env.drop_made(move(e));
@@ -937,6 +964,8 @@ fn main() i32 {
     println("entry ok");
     an_unreadable_entry_file_is_reported();
     a_lexical_error_stops_the_file();
+    bytes_that_are_no_utf8_text_stop_the_entry_file();
+    bytes_that_are_no_utf8_text_stop_an_imported_module();
     a_syntax_error_stops_the_file();
     a_syntax_error_in_an_imported_module_stops_the_compilation();
     a_file_reports_at_most_twenty_errors();

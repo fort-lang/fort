@@ -476,6 +476,25 @@ i64 BOM_1 = 187;
 i64 BOM_2 = 191;
 u64 BOM_LEN = 3;
 
+// The bounds of a well-formed UTF-8 sequence (The Unicode Standard, table 3-7).
+// The first byte gives the length. The bytes 0xC0 and 0xC1 start only an overlong form of an
+// ASCII byte, and the bytes 0xF5 to 0xFF start only a code point above U+10FFFF.
+i64 UTF8_LEAD2_FIRST = 0xC2;
+i64 UTF8_LEAD3_FIRST = 0xE0;
+i64 UTF8_LEAD4_FIRST = 0xF0;
+i64 UTF8_LEAD4_LAST = 0xF4;
+// Each byte after the first is a continuation byte.
+i64 UTF8_TAIL_FIRST = 0x80;
+i64 UTF8_TAIL_LAST = 0xBF;
+// Four first bytes take a second byte from a shorter range.
+// Below 0xA0, 0xE0 starts an overlong form. Below 0x90, 0xF0 starts one.
+i64 UTF8_E0_SECOND_FIRST = 0xA0;
+i64 UTF8_F0_SECOND_FIRST = 0x90;
+// Above 0x9F, 0xED starts a surrogate. Above 0x8F, 0xF4 starts a code point above U+10FFFF.
+i64 UTF8_SURROGATE_LEAD = 0xED;
+i64 UTF8_ED_SECOND_LAST = 0x9F;
+i64 UTF8_F4_SECOND_LAST = 0x8F;
+
 // The radices of the integer literal forms.
 i64 RADIX_BIN = 2;
 i64 RADIX_OCT = 8;
@@ -651,6 +670,80 @@ fn fail_text(lexer mut* lx, diag.loc at, string text) bool {
     return fail(lx, at);
 }
 
+// ---- UTF-8 text ---------------------------------------------------------------------
+//
+// Source is UTF-8 (D2.1). The lexer reads a non-ASCII byte in five places: a comment, a string
+// literal, a char literal, the byte after the backslash of an escape, and the start of a token.
+// Each place asks utf8_len first. Thus, a byte sequence that is no UTF-8 text is a lexical
+// error wherever it stands, unless its line has an earlier lexical error.
+
+// The length in bytes of the UTF-8 sequence at the next byte, which is non-ASCII: 2, 3 or 4.
+// 0 when the bytes there are no well-formed sequence: a continuation byte with no first byte,
+// an overlong form, a surrogate, a code point above U+10FFFF, or a sequence that the end of
+// the file or a byte that is no continuation byte cuts. peek_at gives -1 past the end, which is
+// below each bound.
+fn utf8_len(lexer* lx) u64 {
+    i64 lead = peek(lx);
+    if (lead < UTF8_LEAD2_FIRST || lead > UTF8_LEAD4_LAST) {
+        return 0;
+    }
+    u64 mut len = 2;
+    i64 mut low = UTF8_TAIL_FIRST;
+    i64 mut high = UTF8_TAIL_LAST;
+    if (lead >= UTF8_LEAD4_FIRST) {
+        len = 4;
+        if (lead == UTF8_LEAD4_FIRST) {
+            low = UTF8_F0_SECOND_FIRST;
+        }
+        if (lead == UTF8_LEAD4_LAST) {
+            high = UTF8_F4_SECOND_LAST;
+        }
+    } else if (lead >= UTF8_LEAD3_FIRST) {
+        len = 3;
+        if (lead == UTF8_LEAD3_FIRST) {
+            low = UTF8_E0_SECOND_FIRST;
+        }
+        if (lead == UTF8_SURROGATE_LEAD) {
+            high = UTF8_ED_SECOND_LAST;
+        }
+    }
+    i64 second = peek_at(lx, 1);
+    if (second < low || second > high) {
+        return 0;
+    }
+    u64 mut i = 2;
+    while (i < len) {
+        i64 tail = peek_at(lx, i);
+        if (tail < UTF8_TAIL_FIRST || tail > UTF8_TAIL_LAST) {
+            return 0;
+        }
+        i += 1;
+    }
+    return len;
+}
+
+// Reports the next byte as the first byte of a sequence that is no UTF-8 text.
+fn fail_utf8(lexer mut* lx) bool {
+    msg_begin(lx);
+    msg_str(lx, "invalid UTF-8 sequence at byte ");
+    msg_hex_byte(lx, peek(lx));
+    return fail(lx, here(lx));
+}
+
+// The length in bytes of the character at the next byte, which exists: 1 for an ASCII byte and
+// the length of the sequence for UTF-8 text. For bytes that are no UTF-8 text, reports the
+// error and gives 0. A comment and a string literal take their text through this function.
+fn text_len(lexer mut* lx) u64 {
+    if (!is_non_ascii(peek(lx))) {
+        return 1;
+    }
+    u64 len = utf8_len(lx);
+    if (len == 0) {
+        fail_utf8(lx);
+    }
+    return len;
+}
+
 // A token of `kind` starting at `start` (whose position is `at`) and ending at
 // the next byte, with the source bytes as text. An empty source has no bytes
 // to point at and gives the empty view, which is what the end-of-file token of
@@ -664,7 +757,7 @@ fn make_token(lexer* lx, tok_kind kind, u64 start, diag.loc at) token {
 // Skips whitespace and line comments, the only comment form. False on the
 // adjacent pair `/*`, which is a lexical error rather than a division by a
 // dereference. `a / *p`, with the operators separated, is that division and
-// reaches lex_operator.
+// reaches lex_operator. False also on a comment whose bytes are no UTF-8 text.
 fn skip_blanks(lexer mut* lx) bool {
     while (true) {
         i64 c = peek(lx);
@@ -672,7 +765,14 @@ fn skip_blanks(lexer mut* lx) bool {
             advance(lx);
         } else if (c == byte_of('/') && peek_at(lx, 1) == byte_of('/')) {
             while (!at_end(lx) && peek(lx) != BYTE_LF) {
-                advance(lx);
+                u64 mut left = text_len(lx);
+                if (left == 0) {
+                    return false;
+                }
+                while (left > 0) {
+                    advance(lx);
+                    left -= 1;
+                }
             }
         } else if (c == byte_of('/') && peek_at(lx, 1) == byte_of('*')) {
             return fail_text(lx, here(lx), "block comments are not supported, use '//'");
@@ -934,6 +1034,9 @@ fn lex_escape(lexer mut* lx, i64 mut* out) bool {
         *out = v;
         return true;
     } else {
+        if (is_non_ascii(c) && utf8_len(lx) == 0) {
+            return fail_utf8(lx);
+        }
         msg_begin(lx);
         msg_str(lx, "unknown escape ");
         if (is_printable(c)) {
@@ -968,6 +1071,9 @@ fn lex_char(lexer mut* lx) bool {
     } else if (c < 0 || c == BYTE_LF) {
         return fail_text(lx, at, "unterminated char literal");
     } else if (is_non_ascii(c)) {
+        if (utf8_len(lx) == 0) {
+            return fail_utf8(lx);
+        }
         return fail_text(lx, here(lx), "non-ASCII byte in char literal; use a string");
     } else if (!is_printable(c)) {
         return fail_text(lx, here(lx), "control character in char literal; use an escape");
@@ -1003,18 +1109,28 @@ fn lex_string(lexer mut* lx) bool {
         if (c < 0 || c == BYTE_LF) {
             return fail_text(lx, at, "unterminated string literal");
         }
-        i64 mut byte = c;
         if (c == byte_of('\\')) {
             if (escape_is_cut(lx)) {
                 return fail_text(lx, at, "unterminated string literal");
             }
+            i64 mut byte = 0;
             if (!lex_escape(lx, &byte)) {
                 return false;
             }
+            strbuf.push_byte(&lx->buf, cast(byte, u8));
         } else {
-            advance(lx);
+            // A plain character is source text: the literal keeps each byte of it. An escape
+            // is not source text, so `\xHH` puts each byte into the value (D3.7).
+            u64 mut left = text_len(lx);
+            if (left == 0) {
+                return false;
+            }
+            while (left > 0) {
+                strbuf.push_byte(&lx->buf, cast(peek(lx), u8));
+                advance(lx);
+                left -= 1;
+            }
         }
-        strbuf.push_byte(&lx->buf, cast(byte, u8));
     }
     token mut t = make_token(lx, tok_kind.string_lit, start, at);
     // Intern the decoded bytes before appending the token.
@@ -1185,6 +1301,9 @@ fn lex_operator(lexer mut* lx) bool {
         i64 c = peek(lx);
         msg_begin(lx);
         if (is_non_ascii(c)) {
+            if (utf8_len(lx) == 0) {
+                return fail_utf8(lx);
+            }
             msg_str(lx, "non-ASCII byte outside a string literal or comment");
         } else if (is_printable(c)) {
             msg_str(lx, "unexpected character ");
