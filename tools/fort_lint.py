@@ -13,6 +13,22 @@ the body calls, a fort function of a trusted module whose row holds a line with 
 problem too, and its message names that text. A function that is no boundary function gives no
 `mut` global whose type reaches a byte pointer to a call of C (mut_global_to_c).
 
+The `// gives:` line. A function of a trusted module whose result type reaches a pointer, a span
+or a string has a row line `// gives: <text>` (gives_row_problems). The line says which storage
+the result names and, for storage of C, why nothing releases or changes it. This form is a
+convention of the lint: D9.8 does not state it. The lint checks that the line is there and that
+it holds text: `// `, the word, white space and text, on one line. The lint does not check rule
+1 or rule 2 of "Storage of C" (D9.8). A reviewer reads the reason of the line against these 2
+rules. The row of a function is the `//` lines directly above the line of its `fn`. It is the
+row of the first item of that line. A function that stands after another item on its line has no
+row, so one line does not stand for 2 functions. The reach is the one of a boundary function,
+with each pointer, each span and each string in the place of a byte pointer
+(Rows.gives_storage). So an owner, a `string[2]` and a struct with a pointer field at any depth
+ask for the line. A function type with a pointer in it asks for the line too. The lint reads the
+result type only. It does not see a value that a function gives through an out parameter or by a
+store into a global. It does not see a value that goes to a call as an argument. It does not see
+a load or a store after a call that can release the storage.
+
 The lint does not read the sources of a row. It does not check a bound, a length or a NUL. A
 row that claims the bound of the whole array for `&g[0][1][0]` of a `char@[1][2] g` passes. A
 reviewer reads that row against rule 2. The lint sees a `mut` global only by its name, anywhere
@@ -973,13 +989,14 @@ class Rows:
 
     def struct_facts(self, key):
         """(whether a field type is a byte pointer, the keys of the structs that the fields
-        name) of the struct declared at `key`."""
+        name, whether a field type is a pointer, a span or a string) of the struct declared at
+        `key`."""
         facts = self.memo.setdefault("structs", {})
         if key in facts:
             return facts[key]
         path, line, col = key
         source = self.source(path)
-        direct, names = False, []
+        direct, names, storage = False, [], False
         if source is not None:
             name_at = source.offset(line, col)
             open_at = source.code.find("{", name_at)
@@ -989,8 +1006,9 @@ class Rows:
                     continue
                 ty = self.type_at(path, at, "{;")
                 direct = direct or type_is_byte_pointer(ty)
+                storage = storage or type_names_storage(ty)
                 names.extend(self.struct_names(path, ty))
-        facts[key] = (direct, names)
+        facts[key] = (direct, names, storage)
         return facts[key]
 
     def reaches(self, path, ty):
@@ -1006,8 +1024,29 @@ class Rows:
             if key in seen:
                 continue
             seen.add(key)
-            direct, names = self.struct_facts(key)
+            direct, names, _ = self.struct_facts(key)
             if direct:
+                return True
+            todo.extend(names)
+        return False
+
+    def gives_storage(self, path, ty):
+        """Whether the parsed type `ty` of the file `path` reaches a pointer, a span or a string
+        (D9.8, "Storage of C"). The reach is the type itself, a pointee, an element and a
+        field, at any depth. A parameter and the result of a function pointer type count too. It
+        is the reach of `reaches` with each pointer, each span and each string in the place of a
+        byte pointer."""
+        if type_names_storage(ty):
+            return True
+        seen = set()
+        todo = list(self.struct_names(path, ty))
+        while todo:
+            key = todo.pop()
+            if key in seen:
+                continue
+            seen.add(key)
+            _, names, storage = self.struct_facts(key)
+            if storage:
                 return True
             todo.extend(names)
         return False
@@ -1054,6 +1093,29 @@ def type_is_byte_pointer(ty):
         elif "fn" in base:
             todo.extend(base["fn"])
             todo.append(base["result"])
+    return False
+
+
+def type_names_storage(ty):
+    """Whether the parsed type is a pointer, a span or a string, or holds one with no struct
+    between (D9.8, "Storage of C"). It can hold one as a pointee, as an element, and as a
+    parameter or the result of a function pointer type. The test is a `*` or an `@` at any
+    place of the type, or the base `string`. So `i32*`, `u8@`, `string[2]`, `(char*)[4]` and
+    `fn (i64*) i32` are such types, and `i64`, `u8[32]` and `fn (i32) i32` are none. A function
+    pointer names a function and no storage."""
+    todo = [ty]
+    while todo:
+        item = todo.pop()
+        if "*" in item["suffixes"] or "@" in item["suffixes"]:
+            return True
+        base = item["base"]
+        if "group" in base:
+            todo.append(base["group"])
+        elif "fn" in base:
+            todo.extend(base["fn"])
+            todo.append(base["result"])
+        elif base["name"] == "string":
+            return True
     return False
 
 
@@ -1578,16 +1640,53 @@ def citation_problems(rows, source, record, called, externs):
 
 
 def cited_word_stands(rows, key, word):
-    """Whether the row of the fort function declared at `key`, its `//` lines directly above it,
-    holds a line that starts with `word`."""
+    """Whether the row of the fort function declared at `key` holds a line of `word`: `// `,
+    the word, white space and text, on one line. The row is the `//` lines directly above the
+    line of its `fn`, and it is the row of the first item of that line. A function that stands
+    after another item on its line has no row."""
     path, line, col = key
     source = rows.source(path)
     if source is None:
         return False
     at = source.offset(line, col)
     start = keyword_before(source.code, at, "fn")
-    run = comment_run(source, source.line_of(start if start >= 0 else at))
-    return any(text.startswith("// " + word) for _, text in run)
+    first = start if start >= 0 else at
+    if source.code[source.code.rfind("\n", 0, first) + 1:first].strip():
+        return False
+    stated = re.compile(r"// %s\s+\S" % re.escape(word))
+    return any(stated.match(text) for _, text in comment_run(source, source.line_of(first)))
+
+
+def result_type(source, record, body_open):
+    """The parsed result type of the fort function of `record` (grammar.md 3, `fn_decl`). It is
+    the text between the `)` of its parameter list and the `{` of its body at `body_open`. With
+    no `{` after the name, `body_open` is -1: that text is empty, and so is the type. A
+    parameter list that does not close gives the empty type too."""
+    open_at = source.code.find("(", source.offset(record["line"], record["col"]))
+    close = matching_close(source.code, open_at) if open_at >= 0 else -1
+    if close < 0:
+        return TypeParser([]).parse_type()
+    return TypeParser(type_tokens(source.code, close + 1, body_open)).parse_type()
+
+
+def gives_row_problems(rows, path, source, record, body_open):
+    """The problem of a function of a trusted module with no `// gives:` line. The function has
+    a result type that reaches a pointer, a span or a string, and its row holds no line
+    `// gives: <text>` (cited_word_stands). The line says which storage the result names. Its
+    form is a convention of this lint, which checks that the line is there and holds text. The
+    lint does not read that text: a reviewer reads it against rule 1 and rule 2 of "Storage of
+    C" (D9.8)."""
+    if not rows.gives_storage(path, result_type(source, record, body_open)):
+        return []
+    if cited_word_stands(rows, (path, record["line"], record["col"]), "gives:"):
+        return []
+    return [(record["line"], record["col"], "fn '%s' of a trusted module gives a result whose "
+             "type reaches a pointer, a span or a string, and its row has no line '// gives: "
+             "...' with text after the word: write which storage the result names and, for "
+             "storage of C, why nothing releases or changes it while fort code holds the value. "
+             "The row is the `//` lines directly above the function, and the function is the "
+             "first item of its line (%s)"
+             % (record["name"], ROWS))]
 
 
 def enclosing_opens(code, start, stop):
@@ -1731,6 +1830,7 @@ def row_problems(rows, path, records):
         called = {callee: key for at, callee, key in fn_calls if body_open < at < body_close}
         externs = {callee for at, callee in extern_calls if body_open < at < body_close}
         problems.extend(citation_problems(rows, source, record, called, externs))
+        problems.extend(gives_row_problems(rows, path, source, record, body_open))
         if not rows.is_boundary((path, record["line"], record["col"])):
             for use in globals_used:
                 at = source.offset(use["line"], use["col"])

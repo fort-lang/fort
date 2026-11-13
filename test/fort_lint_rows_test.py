@@ -20,6 +20,7 @@ parameter type, and one over each function of the standard library of the build.
 import argparse
 import ast
 import os
+from pathlib import Path
 import re
 import shutil
 import subprocess
@@ -235,7 +236,10 @@ class Rules(unittest.TestCase):
         self.check({"values.ft": text}, [
             ("values.ft", 4, message), ("values.ft", 11, message), ("values.ft", 18, message),
             ("values.ft", 19, message), ("values.ft", 20, message), ("values.ft", 21, message),
-            ("values.ft", 17, "fn 'store' has 1 call(s) of 'keep' and no call row")])
+            ("values.ft", 17, "fn 'store' has 1 call(s) of 'keep' and no call row"),
+            # A function type with a pointer in it, as the result and as a field of the result.
+            ("values.ft", 10, "fn 'give' of a trusted module gives a result"),
+            ("values.ft", 17, "fn 'store' of a trusted module gives a result")])
 
     def test_a_boundary_function_that_goes_to_c_is_no_value(self):
         text = ("import extern;\nimport std.str.from_cstr;\n\n"
@@ -614,7 +618,8 @@ class Rules(unittest.TestCase):
              "fn 'plain' gives the `mut` global 'name'")])
         called = plain.replace("return strlen(name);", "return strlen(pick(name));").replace(
             "// C call strlen: name.", "// C call strlen: name.\n// C call pick: name.")
-        called += "\nfn pick(char* p) char* {\n    return p;\n}\n"
+        called += ("\n// gives: p, storage of the caller.\n"
+                   "fn pick(char* p) char* {\n    return p;\n}\n")
         self.check({"globals.ft": called}, [
             ("globals.ft", lines_of(called, "return strlen(pick(name));")[0],
              "fn 'plain' gives the `mut` global 'name'")])
@@ -652,6 +657,7 @@ class Rules(unittest.TestCase):
         # A block is no argument list: a name in the block of an `if` whose condition calls C
         # stands in no call, and a statement ends the search.
         block = (self.GLOBALS + "// C call strlen: a literal with its NUL (rule 4).\n"
+                 "// gives: the value of name or of names[0].\n"
                  "fn f() char* {\n    if (strlen(&\"a\"[0]) > 0) {\n        return name;\n    }\n"
                  "    return names[0];\n}\n")
         self.check({"globals.ft": block}, [])
@@ -681,7 +687,8 @@ class Rules(unittest.TestCase):
         forms = {
             "a local copy": ("// C call strlen: p.\nfn f() u64 {\n    char* p = name;\n"
                              "    return strlen(p);\n}\n"),
-            "the result of a function": ("fn get() char* {\n    return name;\n}\n\n"
+            "the result of a function": ("// gives: the value of name.\n"
+                                         "fn get() char* {\n    return name;\n}\n\n"
                                          "// C call strlen: get().\nfn f() u64 {\n"
                                          "    return strlen(get());\n}\n"),
             "a length of another type": ("// C call libc.memcmp: a literal twice, count bytes.\n"
@@ -750,6 +757,7 @@ class Rules(unittest.TestCase):
         "// C call strlen: p is a parameter source.\nfn takep(char* p) u64 {\n"
         "    return strlen(p);\n}\n\n"
         "fn keep(u64 n, fn (char*) u64 g) u64 {\n    return g == null ? n : n + 1;\n}\n\n"
+        "// gives: g, a function and no storage.\n"
         "fn pick(fn (char*) u64 g) fn (char*) u64 {\n    return g;\n}\n")
 
     # The forms of a callee at a call: (the form, the text before the argument list, the callee
@@ -919,7 +927,8 @@ class Rules(unittest.TestCase):
                  ("u64", "    return other.run(%s, 0);\n" % cast))
         for result, body in forms:
             with self.subTest(body=body):
-                text = head + "fn f() %s {\n%s}\n" % (result, body)
+                text = (head + "// gives: a function or a count, and no storage.\n"
+                        "fn f() %s {\n%s}\n" % (result, body))
                 self.check({"other.ft": other, "globals.ft": text}, [
                     ("globals.ft", lines_of(text, "(takep")[0],
                      "boundary function 'takep' goes here as a value")])
@@ -1221,8 +1230,8 @@ class Rules(unittest.TestCase):
         ("trusted_declaration.ft", b"import extern;\n\n// C: labs, ISO C11 7.22.6.1 \xff, "
          b"labs(3).\n" + ROW.encode().split(b"\n", 1)[1] + b"extern fn labs(i64 v) i64;\n",
          3, 30, 0xff),
-        ("trusted_string.ft", TRUSTED_HEAD + b"fn text() string {\n    return \"caf\xe9\";\n}\n",
-         9, 16, 0xe9),
+        ("trusted_string.ft", TRUSTED_HEAD + b"// gives: a constant of the program.\n"
+         b"fn text() string {\n    return \"caf\xe9\";\n}\n", 10, 16, 0xe9),
         ("plain_comment.ft", b"// caf\xe9 \xff\nfn one() i64 {\n    return 1;\n}\n", 1, 7, 0xe9),
         ("plain_string.ft", b"fn text() string {\n    return \"\xc0\x80\";\n}\n", 2, 13, 0xc0),
         ("plain_continuation.ft", b"fn one() i64 {\n    return 1; // \x80\n}\n", 2, 18, 0x80),
@@ -1377,10 +1386,361 @@ class Rules(unittest.TestCase):
                 "    return (raw == null ? cast(sizeof(char*), u64) : 1);\n}\n")
         self.check({"globals.ft": text}, [])
         value = "boundary function 'takep' goes here as a value"
-        text = (self.GLOBALS + takep + "fn f() fn (char*) u64 {\n    if (takep == null) {\n"
+        text = (self.GLOBALS + takep + "// gives: takep, a function and no storage.\n"
+                "fn f() fn (char*) u64 {\n    if (takep == null) {\n"
                 "        return (takep);\n    }\n    return (takep);\n}\n")
         self.check({"globals.ft": text}, [
             ("globals.ft", line, value) for line in lines_of(text, "(takep")])
+
+    # A trusted module with one function for each form of a result. The 8 functions of GIVERS
+    # give a result whose type reaches a pointer, a span or a string; the 5 of PLAIN give none.
+    GIVES_MODULE = (
+        "import extern;\n\n"
+        "struct box {\n    i64* at;\n}\n\n"
+        "struct outer {\n    box[2] inner;\n}\n\n"
+        "struct plain {\n    i64 a;\n    u8[4] b;\n}\n\n"
+        "i64 mut count = 0;\ni64[2] mut pair = {};\n\n"
+        "fn pointer() i64* {\n    return &count;\n}\n\n"
+        "fn writer() i64 mut* {\n    return &count;\n}\n\n"
+        "fn span() i64@ {\n    return pair[0..2];\n}\n\n"
+        "fn text() string {\n    return \"a\";\n}\n\n"
+        "fn in_array() string[2] {\n    string[2] two = {\"a\", \"b\"};\n    return two;\n}\n\n"
+        "fn in_struct() outer {\n    return outer{};\n}\n\n"
+        "fn in_function(fn () i64* g) fn () i64* {\n    return g;\n}\n\n"
+        "fn owner() i64 mut* own {\n    return new(i64);\n}\n\n"
+        "fn number() i64 {\n    return count;\n}\n\n"
+        "fn bytes() u8[4] {\n    u8[4] b = {};\n    return b;\n}\n\n"
+        "fn by_value() plain {\n    return plain{};\n}\n\n"
+        "fn function(fn (i64) i64 g) fn (i64) i64 {\n    return g;\n}\n\n"
+        "fn nothing() void {\n}\n")
+    GIVERS = ("pointer", "writer", "span", "text", "in_array", "in_struct", "in_function",
+              "owner")
+    PLAIN = ("number", "bytes", "by_value", "function", "nothing")
+    GIVES = "fn '%s' of a trusted module gives a result whose type reaches a pointer"
+
+    def test_a_result_that_reaches_a_pointer_a_span_or_a_string_needs_a_gives_line(self):
+        # D9.8, "Storage of C": the row of a function says which storage its result names. The lint
+        # asks for the line by the type of the result: a pointer, a span, a string or an owner. It
+        # asks for each of them in an element, in a field and in a function type too.
+        text = self.GIVES_MODULE
+        self.assertEqual(len(re.findall(r"^fn ", text, re.MULTILINE)),
+                         len(self.GIVERS) + len(self.PLAIN))
+        output = self.check({"gives.ft": text}, [
+            ("gives.ft", lines_of(text, "fn %s(" % name)[0], self.GIVES % name)
+            for name in self.GIVERS])
+        self.assertIn("its row has no line '// gives: ...'", output)
+        for name in self.PLAIN:
+            self.assertNotIn("fn '%s'" % name, output)
+
+    def test_a_gives_line_in_the_row_of_the_function_stands(self):
+        # The line stands alone, below `///` text, and before or after a call row.
+        text = self.GIVES_MODULE
+        for name in self.GIVERS:
+            text = text.replace("fn %s(" % name, "// gives: storage of this module.\nfn %s("
+                                % name)
+        self.assertEqual(text.count("// gives:"), len(self.GIVERS))
+        self.check({"gives.ft": text}, [])
+        head = ("import extern;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\ni64 mut count = 0;\n\n")
+        body = "fn at(i64 v) i64* {\n    count = labs(v);\n    return &count;\n}\n"
+        call = "// C call labs: no pointer argument.\n"
+        gives = "// gives: the global count, which no function of C names.\n"
+        for rows in (gives + call, call + gives, "/// The count.\n" + call + gives,
+                     "/// The count.\n" + gives + "// No function of C releases it.\n" + call):
+            with self.subTest(rows=rows):
+                self.check({"gives.ft": head + rows + body}, [])
+        # A citation of the `gives:` of a function and this check read the same line. With no line,
+        # the lint reports the function and the row that cites it.
+        user = ("import extern;\nimport gives;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                "// C call labs: the gives: of gives.at states an i64 of the global count.\n"
+                "fn use() i64 {\n    return labs(*gives.at(4));\n}\n")
+        self.check({"gives.ft": head + gives + call + body, "user.ft": user}, [])
+        bare = head + call + body
+        self.check({"gives.ft": bare, "user.ft": user}, [
+            ("gives.ft", lines_of(bare, "fn at(")[0], self.GIVES % "at"),
+            ("user.ft", lines_of(user, "// C call labs")[0],
+             "the row of 'gives.at' has no line '// gives: ...'")])
+
+    def test_text_that_is_no_gives_line_of_the_row_does_not_stand(self):
+        # The line starts with `// gives:` and stands in the `//` lines directly above the
+        # function. Each form below is no such line, so the lint reports the function.
+        head = "import extern;\n\ni64 mut count = 0;\n\n"
+        body = "fn at() i64* {\n    return &count;\n}\n"
+        forms = {
+            "no line": "",
+            "doc text": "/// gives: the global count.\n",
+            "the word in a line": "// The row gives: the global count.\n",
+            "a capital": "// Gives: the global count.\n",
+            "no colon": "// gives the global count.\n",
+            "another word": "// writes: the global count.\n",
+            "no space before the word": "//gives: the global count.\n",
+            "two spaces before the word": "//  gives: the global count.\n",
+            "a tab before the word": "//\tgives: the global count.\n",
+            "a blank line below": "// gives: the global count.\n\n",
+            "above the doc text": "// gives: the global count.\n/// The count.\n",
+            "above another item": "// gives: the global count.\ni64 OTHER = 1;\n",
+            "a block of another function": "// gives: the global count.\nfn other() void {\n}\n",
+        }
+        for form, rows in forms.items():
+            with self.subTest(form=form):
+                text = head + rows + body
+                self.check({"gives.ft": text}, [
+                    ("gives.ft", lines_of(text, "fn at(")[0], self.GIVES % "at")])
+        inside = head + body.replace("{\n", "{\n    // gives: the global count.\n", 1)
+        self.check({"gives.ft": inside}, [
+            ("gives.ft", lines_of(inside, "fn at(")[0], self.GIVES % "at")])
+
+    def test_a_gives_line_with_no_text_does_not_stand(self):
+        # The line holds text: white space after the word, and then a character that is no
+        # white space, on the line of the word. A line with the word only says nothing about
+        # the storage, so the lint reports the function. The lint does not read the text.
+        head = "import extern;\n\ni64 mut count = 0;\n\n"
+        body = "fn at() i64* {\n    return &count;\n}\n"
+        forms = {
+            "the word only": "// gives:\n",
+            "spaces only": "// gives:   \n",
+            "a tab only": "// gives:\t\n",
+            "text glued to the word": "// gives:the global count.\n",
+            "text on the next line": "// gives:\n// the global count.\n",
+            "text on the line above": "// The global count.\n// gives:\n",
+        }
+        for form, rows in forms.items():
+            with self.subTest(form=form):
+                text = head + rows + body
+                self.check({"gives.ft": text}, [
+                    ("gives.ft", lines_of(text, "fn at(")[0], self.GIVES % "at")])
+        for form, rows in (("one character", "// gives: x\n"),
+                           ("a tab after the word", "// gives:\tthe global count.\n"),
+                           ("two spaces after the word", "// gives:  the global count.\n"),
+                           ("a line with text below one with none",
+                            "// gives:\n// gives: the global count.\n")):
+            with self.subTest(form=form):
+                self.check({"gives.ft": head + rows + body}, [])
+        # A citation reads the same line. The word with no text in the row of the callee does not
+        # hold the citation, for `gives:` and for `writes:`.
+        for word in ("gives", "writes"):
+            with self.subTest(word=word):
+                maker = ("import extern;\n\n// %s: 4 zero bytes.\nfn make() u64 {\n"
+                         "    return 4;\n}\n" % word)
+                user = ("import extern;\nimport maker;\n\n" + ROW
+                        + "extern fn labs(i64 v) i64;\n\n"
+                        "// C call labs: the %s: of maker.make states 4 bytes.\n"
+                        "fn use() i64 {\n    return labs(cast(maker.make(), i64));\n}\n" % word)
+                self.check({"maker.ft": maker, "user.ft": user}, [])
+                bare = maker.replace("// %s: 4 zero bytes.\n" % word, "// %s:\n" % word)
+                self.assertNotEqual(bare, maker)
+                self.check({"maker.ft": bare, "user.ft": user}, [
+                    ("user.ft", lines_of(user, "// C call labs")[0],
+                     "the row of 'maker.make' has no line '// %s: ...'" % word)])
+
+    def test_the_report_of_a_function_with_no_gives_line_stands_at_its_name(self):
+        # The report holds the line and the byte column of the name of the function, as the
+        # index gives them (D20.3). The last case has 2 bytes for one character before the
+        # name, so its column counts bytes and not characters.
+        head = "import extern;\n\ni64 mut count = 0;\n\n"
+        cases = (
+            ("fn at() i64* {\n    return &count;\n}\n", 5, 4),
+            ("fn    at() i64* {\n    return &count;\n}\n", 5, 7),
+            ("fn\n        at() i64* {\n    return &count;\n}\n", 6, 9),
+            ("// caf\u00e9.\n\nfn at() i64* {\n    return &count;\n}\n", 7, 4),
+            ("string NAME = \"\u00e9\"; fn at() i64* {\n    return &count;\n}\n", 5, 24),
+        )
+        for body, line, col in cases:
+            with self.subTest(body=body):
+                text = head + body
+                at = text.split("\n")[line - 1].encode("utf-8")
+                self.assertEqual(at[col - 1:col + 2], b"at(")
+                output = self.check({"gives.ft": text}, [("gives.ft", line, self.GIVES % "at")])
+                self.assertEqual([found.group("col") for found in
+                                  map(PROBLEM.match, output.splitlines()) if found is not None],
+                                 [str(col)])
+
+    def test_a_function_that_is_not_first_on_its_line_has_no_row(self):
+        # The row of a function is the `//` lines directly above the line of its `fn`. It is the row
+        # of the first item of that line. A function that stands after another item on one line has
+        # no row, so one `// gives:` line does not stand for 2 functions.
+        head = "import extern;\n\ni64 mut count = 0;\n\n"
+        gives = "// gives: the global count, which no function of C names.\n"
+        one = "fn %s() i64* { return &count; }"
+        cases = (
+            (gives + one % "first" + " " + one % "second" + "\n", ["second"]),
+            (one % "first" + " " + one % "second" + "\n", ["first", "second"]),
+            (gives + "i64 OTHER = 1; " + one % "second" + "\n", ["second"]),
+            (gives + "struct pair { i64 a; } " + one % "second" + "\n", ["second"]),
+            (gives + one % "first" + "\n" + gives + one % "second" + "\n", []),
+            (gives + "    " + one % "first" + "\n", []),
+            (gives + "\t" + one % "first" + "\n", []),
+        )
+        for body, reported in cases:
+            with self.subTest(body=body):
+                text = head + body
+                self.check({"gives.ft": text}, [
+                    ("gives.ft", lines_of(text, "fn %s(" % name)[0], self.GIVES % name)
+                    for name in reported])
+        # A citation reads the same row: the callee that is second on its line has none.
+        maker = ("import extern;\n\n// gives: 4 zero bytes.\n"
+                 "fn other() u64 { return 1; } fn make() u64 { return 4; }\n")
+        user = ("import extern;\nimport maker;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                "// C call labs: the gives: of maker.%s states 4 bytes.\n"
+                "fn use() i64 {\n    return labs(cast(maker.%s(), i64));\n}\n")
+        self.check({"maker.ft": maker, "user.ft": user % ("other", "other")}, [])
+        self.check({"maker.ft": maker, "user.ft": user % ("make", "make")}, [
+            ("user.ft", lines_of(user, "// C call labs")[0],
+             "the row of 'maker.make' has no line '// gives: ...'")])
+
+    def test_a_module_that_is_not_trusted_needs_no_gives_line(self):
+        # The row is the duty of a trusted module (D9.8). The checker holds each other module.
+        text = self.GIVES_MODULE.replace("import extern;\n\n", "", 1)
+        self.assertNotIn("import extern", text)
+        self.check({"gives.ft": text}, [])
+
+    def test_the_result_is_the_type_after_the_parameter_list(self):
+        # A pointer in a parameter is no result. The result starts after the `)` that closes
+        # the parameter list, also when a parameter holds a function type with its own `)`.
+        head = "import extern;\n\ni64 mut count = 0;\n\n"
+        cases = (
+            ("fn f(i64* p, i64@ s, string t) i64 {\n    return count;\n}\n", False),
+            ("fn f(fn (i64*) i64* g) i64 {\n    return count;\n}\n", False),
+            ("fn f(fn (fn (i64*) i64*) string g) void {\n}\n", False),
+            ("fn f(fn (fn (i64) i64) i64 g) i64* {\n    return &count;\n}\n", True),
+            ("fn f(fn () void g, i64 n) fn (i64@) void {\n    return null;\n}\n", True),
+            ("fn f(i64 n) (i64[2])* {\n    return null;\n}\n", True),
+            ("fn f(i64 n)\n        i64 mut* {\n    return null;\n}\n", True),
+            ("fn  f  ( i64 n )  string  {\n    return \"\";\n}\n", True),
+        )
+        for body, reported in cases:
+            with self.subTest(body=body):
+                text = head + body
+                expected = [("gives.ft", lines_of(text, "fn ")[0], self.GIVES % "f")]
+                self.check({"gives.ft": text}, expected if reported else [])
+
+    def test_a_result_reaches_through_the_structs_of_each_module(self):
+        # The reach of a result is the reach of a boundary function (Rows.reaches). Each pointer,
+        # span and string stands in the place of a byte pointer. The cases are a struct of another
+        # module, a struct in a struct, and a struct that names itself.
+        other = ("struct leaf {\n    string name;\n}\n\nstruct node {\n    i64 value;\n"
+                 "    node* next;\n}\n\nstruct flat {\n    i64 a;\n    f64[2] b;\n}\n\n"
+                 "struct ring {\n    i64 value;\n    flat inner;\n}\n\n"
+                 "struct first {\n    i64* at;\n    i64 count;\n}\n\n"
+                 "struct middle {\n    i64 count;\n    u8@ bytes;\n    flat inner;\n}\n")
+        head = "import extern;\nimport other;\n\nstruct mine {\n    other.leaf[2] leaves;\n}\n\n"
+        # `first` and `middle` hold the pointer and the span before a field with none: each
+        # field of a struct counts, not the last one only.
+        cases = (("other.leaf", True), ("other.node", True), ("mine", True),
+                 ("mine[3]", True), ("other.first", True), ("other.middle", True),
+                 ("other.flat", False), ("other.ring", False), ("other.ring[2]", False))
+        for result, reported in cases:
+            with self.subTest(result=result):
+                text = head + "fn f() %s {\n    %s v = {};\n    return v;\n}\n" % (result, result)
+                expected = [("user.ft", lines_of(text, "fn f(")[0], self.GIVES % "f")]
+                self.check({"other.ft": other, "user.ft": text}, expected if reported else [])
+
+    def test_a_function_of_std_without_its_gives_line_is_reported(self):
+        # A module of std/ is trusted by its root (D9.8). The test removes the `// gives:` line of 3
+        # functions from a copy of std. One gives storage of the runtime, one gives a view of
+        # storage of C, and one gives the argument strings.
+        target = "darwin" if sys.platform == "darwin" else "linux"
+        cases = (("rt.ft", "alloc"), ("str.ft", "from_cstr"), ("sys.ft", "args"))
+        for module, name in cases:
+            with self.subTest(module=module, name=name), tempfile.TemporaryDirectory() as out:
+                root = os.path.realpath(out)
+                subprocess.run(["cp", "-R", os.path.join(OPTIONS.source, "std"), root], check=True)
+                path = os.path.join(root, "std", module)
+                with open(path, encoding="utf-8") as handle:
+                    lines = handle.read().split("\n")
+                at = [i for i, text in enumerate(lines) if text.startswith("fn %s(" % name)][0]
+                row = [i for i in range(at - 1, -1, -1) if lines[i].startswith("// gives:")][0]
+                # The line is in the `//` lines directly above the function.
+                self.assertTrue(all(text.startswith("//") and not text.startswith("///")
+                                    for text in lines[row:at]), lines[row:at])
+                lines[row] = "// It " + lines[row][len("// "):]
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write("\n".join(lines))
+                argv = [sys.executable, os.path.join(OPTIONS.source, "tools", "fort_lint.py"),
+                        "--fort", OPTIONS.fort, "--root", root, "--target", target,
+                        "std/" + module]
+                proc = subprocess.run(argv, cwd=root, capture_output=True, text=True)
+                output = proc.stdout + proc.stderr
+                self.assertEqual(proc.returncode, 1, output)
+                self.assertIn("std/%s:%d:" % (module, at + 1), output)
+                self.assertIn(self.GIVES % name, output)
+
+    def test_the_program_for_storage_of_c_holds_its_gives_lines(self):
+        # test/lang/run/modules/c_storage holds a trusted module with two blocks of C. Its
+        # function `get` gives a copy, so it needs no line. `kept` and `block_of` give a
+        # pointer: each has its `// gives:` line, and the lint reports each one without it.
+        folder = os.path.join(OPTIONS.source, "test", "lang", "run", "modules", "c_storage")
+        files = {}
+        for name in ("cbox.ft", "main.ft"):
+            with open(os.path.join(folder, name), encoding="utf-8") as handle:
+                files[name] = handle.read()
+        self.check(files, [])
+        text = files["cbox.ft"]
+        self.assertEqual(text.count("\n// gives:"), 4, "2 externs and 2 functions")
+        for name in ("kept", "block_of"):
+            with self.subTest(name=name):
+                lines = text.split("\n")
+                at = [i for i, line in enumerate(lines) if line.startswith("fn %s(" % name)][0]
+                row = [i for i in range(at - 1, -1, -1) if lines[i].startswith("// gives:")][0]
+                self.assertTrue(all(line.startswith("//") and not line.startswith("///")
+                                    for line in lines[row:at]), lines[row:at])
+                lines[row] = "// It gives" + lines[row][len("// gives:"):]
+                self.check({"cbox.ft": "\n".join(lines), "main.ft": files["main.ft"]},
+                           [("cbox.ft", at + 1, self.GIVES % name)])
+        # The form that gives a view of the block that `reset` releases. Its result is a pointer, so
+        # the lint asks for the line. No true line can say that the view stands.
+        self.assertEqual(text.count("fn get() rec {"), 1)
+        self.assertEqual(text.count("    return *slot;\n"), 1)
+        view = text.replace("fn get() rec {", "fn get() rec* {")
+        view = view.replace("        rec zero = {};\n        return zero;\n",
+                            "        return null;\n")
+        self.assertEqual(view.count("return null;"), 1)
+        view = view.replace("    return *slot;\n", "    return slot;\n")
+        self.check({"cbox.ft": view}, [("cbox.ft", lines_of(view, "fn get(")[0],
+                                        self.GIVES % "get")])
+
+    def test_each_function_of_std_with_such_a_result_has_its_gives_line(self):
+        # The count of the functions of std whose result reaches a pointer, a span or a string. The
+        # test counts the modules that both targets share, and each target directory. The lint holds
+        # the line of each one: this test holds the count, so a change of the reach that drops a
+        # function fails here. Rows.gives_storage counts, and the text gives the line.
+        fort_lint = lint_module()
+        found = {}
+        plain = fort_lint.row_problems
+
+        def collect(rows, path, records):
+            relative = os.path.relpath(path, os.path.realpath(OPTIONS.source))
+            if relative.startswith("std" + os.sep):
+                source = rows.source(path)
+                for record in records:
+                    if record["kind"] != "fn" or not record.get("is_decl") or \
+                            rows.decl_key(record) != (path, record["line"], record["col"]):
+                        continue
+                    body_open = source.code.find("{", source.offset(record["line"], record["col"]))
+                    ty = fort_lint.result_type(source, record, body_open)
+                    if rows.gives_storage(path, ty):
+                        run = fort_lint.comment_run(source, record["line"])
+                        found[(relative, record["name"])] = any(
+                            text.startswith("// gives:") for _, text in run)
+            return plain(rows, path, records)
+
+        root = Path(os.path.realpath(OPTIONS.source))
+        std = root / "std"
+        shared = [p for p in sorted(std.rglob("*.ft"))
+                  if p.relative_to(std).parts[0] not in fort_lint.TARGETS]
+        fort_lint.row_problems = collect
+        try:
+            for target in fort_lint.TARGETS:
+                files = [(p, ()) for p in shared + sorted((std / target).rglob("*.ft"))]
+                fort_lint.lint_files(OPTIONS.fort, root, files, None, target)
+        finally:
+            fort_lint.row_problems = plain
+        by_module = {}
+        for (relative, _), _ in found.items():
+            by_module[relative] = by_module.get(relative, 0) + 1
+        self.assertEqual(by_module, {
+            "std/rt.ft": 3, "std/str.ft": 5, "std/strbuf.ft": 5, "std/strmap.ft": 1,
+            "std/sys.ft": 2, "std/vec.ft": 2})
+        self.assertEqual(sorted(key for key, has in found.items() if not has), [])
 
     def test_a_row_in_the_standard_library_is_checked(self):
         # A module of std/ is trusted by its root (D9.8). The test removes the declaration row
@@ -1443,6 +1803,75 @@ class Parts(unittest.TestCase):
         for text, want in reach.items():
             with self.subTest(text=text):
                 self.assertEqual(fort_lint.type_is_byte_pointer(parsed(text)), want)
+
+    def test_a_type_names_storage_by_each_pointer_span_and_string(self):
+        # D9.8, "Storage of C": a pointer, a span or a string, at each place of the type but a
+        # struct, which Rows.gives_storage resolves.
+        fort_lint = lint_module()
+        names = {
+            "i64*": True, "i64 mut*": True, "char*": True, "void* own": True, "u8@": True,
+            "i64 mut@": True, "string": True, "string own": True, "string[2]": True,
+            "i64*[4]": True, "i64[4]*": True, "(i64[4])*": True, "(i64*)[4]": True,
+            "((string))": True, "u8@*": True, "holder*": True, "m.holder mut@": True,
+            "fn (i64*) i32": True, "fn () string": True, "fn (i64, u8@) void": True,
+            "fn () fn () i64*": True, "(fn (string) void)[2]": True,
+            "fn (fn (fn (i64*) void) void) void": True,
+            "i64": False, "u8[32]": False, "char[4]": False, "bool": False, "f64[2][2]": False,
+            "void": False, "noreturn": False, "holder": False, "m.holder[2]": False,
+            "fn (i32) i32": False, "fn () void": False, "(fn (i64) i64)[2]": False,
+            "fn (fn (i64) void) fn () i64": False, "(i64)": False, "stringy": False,
+        }
+        for text, want in names.items():
+            with self.subTest(text=text):
+                self.assertEqual(fort_lint.type_names_storage(parsed(text)), want)
+
+    def test_the_result_type_is_the_text_between_the_parameters_and_the_body(self):
+        fort_lint = lint_module()
+        cases = (
+            ("fn f() i64* {", ["*"], "i64"),
+            ("fn f(i64* p, fn (i64) string g) i64 {", [], "i64"),
+            ("fn f(fn (fn () void) void g) string {", [], "string"),
+            ("fn f() u8 mut@ {", ["@"], "u8"),
+            ("export fn f(i64 n) m.holder[2] {", ["[]"], "holder"),
+            ("fn f(i64 n)\n        i64 mut* own {", ["*"], "i64"),
+            ("fn f() void {", [], "void"),
+        )
+        for text, suffixes, base in cases:
+            with self.subTest(text=text):
+                source = fort_lint.Source(text)
+                record = {"line": 1, "col": text.index("f(") + 1, "name": "f"}
+                ty = fort_lint.result_type(source, record, text.index("{"))
+                self.assertEqual(ty["suffixes"], suffixes)
+                self.assertEqual(ty["base"]["name"], base)
+        # A function type as the result keeps its own parameters and result.
+        text = "fn f(i64 n) fn (i64*) string {"
+        record = {"line": 1, "col": 4, "name": "f"}
+        ty = fort_lint.result_type(fort_lint.Source(text), record, text.index("{"))
+        self.assertEqual(ty["base"]["fn"][0]["suffixes"], ["*"])
+        self.assertEqual(ty["base"]["result"]["base"]["name"], "string")
+        # A comment between the parameters and the body is no part of the type.
+        text = "fn f() i64 // gives: a string*\n{"
+        ty = fort_lint.result_type(fort_lint.Source(text), record, text.index("{"))
+        self.assertFalse(fort_lint.type_names_storage(ty))
+        # With no `{` after the name the body is at -1, and the result is the empty type.
+        empty = {"base": {"name": "", "at": -1}, "suffixes": []}
+        text = "fn f() i64*"
+        self.assertEqual(fort_lint.result_type(fort_lint.Source(text), record, -1), empty)
+        # A parameter list that does not close gives the empty type: the text before the
+        # function is no part of its result.
+        text = "string\nfn f(i64 n {"
+        record = {"line": 2, "col": 4, "name": "f"}
+        ty = fort_lint.result_type(fort_lint.Source(text), record, text.index("{"))
+        self.assertEqual(ty, empty)
+        # A name with no parameter list after it gives the empty type too.
+        text = "string\nfn f"
+        self.assertEqual(fort_lint.result_type(fort_lint.Source(text), record, -1), empty)
+        # A `{` before the first `(` after the name: the text from the `)` back to the `{` is
+        # no text, and the result is the empty type.
+        text = "fn f { g(i64* p) string* }"
+        record = {"line": 1, "col": 4, "name": "f"}
+        ty = fort_lint.result_type(fort_lint.Source(text), record, text.index("{"))
+        self.assertEqual(ty, empty)
 
     def test_a_type_names_its_structs_where_the_source_spells_them(self):
         ty = parsed("libc.dirent_head mut*")
@@ -1847,12 +2276,13 @@ class Parts(unittest.TestCase):
         })
         # No other function reads a callee. Each function that looks at a bracket of the code
         # is the reader, a place that asks the reader, or one of these: the two that pair
-        # brackets, the two that find the `(` around an offset, and the four that read a type.
+        # brackets, the two that find the `(` around an offset, and the five that read a type.
         self.assertEqual(brackets, {
             "callee_span", "call_callee", "named_call",
             "value_calls", "goes_to_c", "text_calls", "cited_callee",
             "matching_open", "matching_close", "call_open", "enclosing_opens",
-            "TypeParser.parse_base", "type_start", "is_function_type", "Rows.is_boundary"})
+            "TypeParser.parse_base", "type_start", "is_function_type", "Rows.is_boundary",
+            "result_type"})
         # Only the reader walks a callee. `spelled_callee` steps back over the module path of
         # a name for a message and for the start of an argument, and `goes_to_c` looks at the
         # `(` or `,` before an argument and the `,` or `)` after it.

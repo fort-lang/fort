@@ -94,6 +94,15 @@ extern fn read(i32 fd, u8 mut* buf, u64 n) i64;
 // C: write, write(2) of POSIX.1-2017.
 // writes: nothing in fort storage; C reads at most n bytes at buf. gives: the count of bytes, or
 // -1. keeps: no pointer. calls: no fort function. frees: nothing.
+// Audit: the point for the writes of this row does not hold for one class of descriptor. The class
+// is a file of the kernel that maps the storage of this process. On Linux it has the paths
+// /proc/self/mem, /proc/thread-self/mem, /proc/<pid>/mem and /proc/<pid>/task/<tid>/mem, for the
+// pid and a tid of this process (proc(5)). The kernel then stores the n bytes into the storage of
+// the process at the file offset, and that can be fort storage. No function of std opens such a
+// file by its own choice: std.io opens the path that its caller gives. A descriptor that the parent
+// process gave, as descriptor 1, is outside that sentence. No function of std opened it, and it can
+// be a file of this class. The row does not cover a write to a descriptor of this class. It is a
+// limit of this row that a reader must know.
 extern fn write(i32 fd, u8* buf, u64 n) i64;
 // C: close, close(2) of POSIX.1-2017.
 // gives: 0 or -1. writes: no fort storage. keeps: no pointer. calls: no fort function.
@@ -115,10 +124,21 @@ extern fn isatty(i32 fd) i32;
 // calls: no fort function. frees: nothing.
 extern fn __errno_location() i32 mut*;
 
-// Returns the errno slot for internal standard-library calls.
-// C call __errno_location: no pointer argument.
-fn errno_slot() i32 mut* {
-    return __errno_location();
+// Returns the errno of the calling thread, as a value. No function of this module gives the
+// address of errno to its caller. The int errno is storage of C, and each later call of C can
+// change it (D9.8, "Storage of C").
+// C call __errno_location: no pointer argument. The load through the result stands before each
+// other call of C. The errno of a thread lives as long as the thread. So no call released or
+// changed the int that the load reads.
+fn errno() i32 {
+    return *__errno_location();
+}
+
+// Sets the errno of the calling thread to `code`.
+// C call __errno_location: no pointer argument. The store through the result stands before each
+// other call of C, as the load of errno does. It writes one int, which C reads as an int.
+fn set_errno(i32 code) void {
+    *__errno_location() = code;
 }
 
 // The float formatting arguments pass through a variadic call.

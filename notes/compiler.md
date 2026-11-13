@@ -1526,7 +1526,7 @@ came here.
   Set the length byte to 16 before bind and connect.
   Use Darwin SOL_SOCKET 65535 and SO_REUSEADDR 4.
   Mac `std.libc` declares seven socket calls with a 4-byte `socklen_t`.
-  Mac `std.net` uses `libc.errno_slot()` for its two errno writes.
+  Mac `std.net` uses `libc.set_errno()` for its two errno writes.
   Linux `std/linux/net.ft` and `std/linux/libc.ft` keep their Linux layout and calls.
 
 - **`src/fort` and the suites of `test/fort` call C only through functions of `std` that take
@@ -1538,7 +1538,14 @@ came here.
   `std` that a module outside the trusted set calls copies what C gives into storage of the
   caller: a view of storage of C can end at the next call of C (`strerror(3)`, `setenv(3)`). The
   exception is `sys.args`, whose views name the `argv` storage that C gives to `main` and that
-  no call of C frees while the process runs. A
+  no call of C frees while the process runs. Four functions of `std` give storage of C to their
+  caller. `rt.args_init`, `rt.args` and `sys.args` give the argument strings. `str.from_cstr`
+  gives a view of what its trusted caller gave. Their `// gives:` lines say why nothing releases
+  or changes that storage (D9.8, "Storage of C"). `libc.errno()` and `libc.set_errno()` give and
+  take errno as a value. No function of `std` gives the address of errno, which each later call
+  of C can change. A function of a trusted module whose result reaches a pointer, a span or a
+  string states the storage in a `// gives:` line. The lint reports the function without that
+  line, and it does not judge what the line says (`notes/testing.md` 8). A
   new C call of the compiler goes into such a function of `std`, with a run test in
   `test/lang/run/stdlib`.
   `git grep -nE 'libc\.[a-z_0-9]+\(|str\.from_cstr\(|^\s*extern fn' -- src/fort` finds nothing.
