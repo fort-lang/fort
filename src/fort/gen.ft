@@ -22,6 +22,10 @@ string ENUM_MEMBER_TYPE = "%fort.enum_member";
 // Represents `std.rt`'s `struct enum_member` as `%fort.enum_member`. One named type defines this
 // layout. The emitter also uses this layout for enum metadata.
 string ENUM_MEMBER_STRUCT = "std.rt.enum_member";
+// The intrinsic that copies an aggregate. Its call and its declaration use this one name. LLVM
+// gives no result for `llvm.memcpy` when the two ranges overlap in part, so the emitter writes
+// no `llvm.memcpy` (D6.3, D19.3).
+string COPY_INTRINSIC = "@llvm.memmove.p0.p0.i64";
 
 // The alignment of a span or `string` header: a pointer and a 64-bit length.
 u64 SPAN_ALIGN = 8;
@@ -37,11 +41,11 @@ u32 BITS_PER_U64 = 64;
 u64 SPAN_FIELD_PTR = 0;
 u64 SPAN_FIELD_LEN = 1;
 
-// Lists intrinsics in a fixed order. memcpy and memset come first. Overflow intrinsics follow by
+// Lists intrinsics in a fixed order. memmove and memset come first. Overflow intrinsics follow by
 // operation and width. Saturating conversions and llvm.trap come last. These values are module
 // constants, not an enum. Slot calculation uses family and width arithmetic, which an enum does not
 // support.
-u64 IN_MEMCPY = 0;
+u64 IN_MEMMOVE = 0;
 u64 IN_MEMSET = 1;
 u64 IN_OVERFLOW_FIRST = 2;
 u64 IN_FPCONV_FIRST = 26;
@@ -77,7 +81,7 @@ u64 ATTR_FN_NORET = 1;  // #1, a `noreturn` definition
 u64 ATTR_UNUSED_2 = 2;  // #2, never emitted: it held the C runtime's declarations
 u64 ATTR_NOBUILTIN = 3; // #3, every extern call site
 u64 ATTR_OVERFLOW = 4;  // #4, the overflow and conversion intrinsics
-u64 ATTR_MEMCPY = 5;    // #5
+u64 ATTR_MEMMOVE = 5;   // #5, llvm.memmove
 u64 ATTR_MEMSET = 6;    // #6
 u64 ATTR_TRAP = 7;      // #7, llvm.trap
 u64 ATTR_RT_NORET = 8;  // #8, a cold `noreturn` runtime entry point
@@ -1125,13 +1129,16 @@ fn gen_span_init(emitter mut* g, gen_val base, gen_val ptr, gen_val len) void {
 
 // ---- aggregates ----------------------------------------------------------
 
-// `llvm.memcpy` of `size` bytes from `src` to `dst`, the copy of every
-// aggregate.
-fn gen_memcpy(emitter mut* g, gen_val dst, u64 dst_align, gen_val src, u64 src_align,
-                   u64 size) void {
-    gen_use_intrinsic(g, IN_MEMCPY);
-    gen_use_attr(g, ATTR_MEMCPY);
-    strbuf.append(&g->body, "  call void @llvm.memcpy.p0.p0.i64(ptr align ");
+// `llvm.memmove` of `size` bytes from `src` to `dst`, the copy of every aggregate. The two
+// ranges can overlap in part: the destination gets the bytes that the source held before the
+// copy (D6.3, D19.3).
+fn gen_memmove(emitter mut* g, gen_val dst, u64 dst_align, gen_val src, u64 src_align,
+                    u64 size) void {
+    gen_use_intrinsic(g, IN_MEMMOVE);
+    gen_use_attr(g, ATTR_MEMMOVE);
+    strbuf.append(&g->body, "  call void ");
+    strbuf.append(&g->body, COPY_INTRINSIC);
+    strbuf.append(&g->body, "(ptr align ");
     strbuf.append_u64(&g->body, dst_align);
     strbuf.push(&g->body, ' ');
     strbuf.append(&g->body, dst.val);

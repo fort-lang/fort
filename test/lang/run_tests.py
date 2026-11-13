@@ -8,7 +8,8 @@ fresh temporary directory, and judged against its directives. `xfail.txt`
 lists the tests the compiler cannot pass yet. A listed test that passes is an
 XPASS and fails the run. `--lint` validates the directives without a compiler, and
 `--verify-ir` runs the LLVM verifier over the module of every test that
-compiles. `--check-json` is a mode of its own: it runs `fort --check --json`
+compiles, and fails a module that holds `llvm.memcpy`. `--check-json` is a
+mode of its own: it runs `fort --check --json`
 over each fail test and compares JSON diagnostics with text diagnostics.
 A test with an `index.json` file is
 selected too, and its golden identifier index is held against the `"symbols"`
@@ -1489,6 +1490,17 @@ def verify_command(config, module):
     return [config.opt, "-passes=verify", "-disable-output", module]
 
 
+def memcpy_lines(text):
+    """Return each line of the module `text` that calls or declares `llvm.memcpy`.
+
+    The emitter copies each aggregate with `llvm.memmove`, because the two ranges of a copy can
+    overlap in part (D6.3, D19.3). A line that starts with `@` defines a global: the bytes of a
+    string constant are no call, so such a line does not count.
+    """
+    return [line for line in text.splitlines()
+            if "@llvm.memcpy." in line and not line.startswith("@")]
+
+
 def verify_module(config, test, workdir, env, procs):
     """Emit the test's LLVM IR with `-S` and verify it (`--verify-ir`).
 
@@ -1496,6 +1508,7 @@ def verify_module(config, test, workdir, env, procs):
     where that is checked. Return (verdict, reason), or (None, "")
     when the module verifies. A module the verifier rejects is the compiler's
     fault, hence a FAIL. A verifier launch failure, timeout, or signal is an ERROR.
+    A module that the verifier accepts and that holds `llvm.memcpy` is a FAIL too (D19.3).
     """
     module = os.path.join(workdir, "prog.ll")
     argv = compile_command(config, test, module, emit_ir=True)
@@ -1514,6 +1527,11 @@ def verify_module(config, test, workdir, env, procs):
         return "ERROR", "the IR verifier was killed by signal %d" % -proc.returncode
     if proc.returncode != 0:
         return "FAIL", "the IR verifier rejected the module: " + _first_line(proc.stderr)
+    with open(module, encoding="utf-8", errors="replace") as handle:
+        copies = memcpy_lines(handle.read())
+    if copies:
+        return "FAIL", "the module holds llvm.memcpy %d times (D19.3): %s" % (
+            len(copies), copies[0].strip())
     return None, ""
 
 

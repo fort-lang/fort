@@ -311,7 +311,7 @@ fn every_attribute_group_has_its_text() void {
     assert(gen_data.attr_text(gen.ATTR_NOBUILTIN) == "nobuiltin");
     assert(gen_data.attr_text(gen.ATTR_OVERFLOW) ==
            "nocallback nofree nosync nounwind speculatable willreturn memory(none)");
-    assert(gen_data.attr_text(gen.ATTR_MEMCPY) ==
+    assert(gen_data.attr_text(gen.ATTR_MEMMOVE) ==
            "nocallback nofree nounwind willreturn memory(argmem: readwrite)");
     assert(gen_data.attr_text(gen.ATTR_MEMSET) ==
            "nocallback nofree nounwind willreturn memory(argmem: write)");
@@ -329,14 +329,18 @@ fn the_intrinsic_table_is_in_the_order_item_eight_gives() void {
     defer del(out.data);
     gen_env.env mut* own e = gen_env.make();
     defer gen_env.drop_made(move(e));
-    gen_data.emit_intrinsic(&out, gen.IN_MEMCPY);
+    // the copy intrinsic is entry 0 and `llvm.memset` is entry 1 of the table
+    assert(gen.IN_MEMMOVE == 0);
+    assert(gen.IN_MEMSET == 1);
+    assert(gen.COPY_INTRINSIC == "@llvm.memmove.p0.p0.i64");
+    gen_data.emit_intrinsic(&out, gen.IN_MEMMOVE);
     gen_data.emit_intrinsic(&out, gen.IN_MEMSET);
     gen_data.emit_intrinsic(&out, gen.IN_OVERFLOW_FIRST);
     gen_data.emit_intrinsic(&out, gen.IN_OVERFLOW_FIRST + gen.OVF_UMUL * gen.OVF_WIDTHS + 3);
     gen_data.emit_intrinsic(&out, gen.IN_TRAP);
     string[7] mut want = {
-        "declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly, ",
-        "ptr noalias nocapture readonly, i64, i1 immarg) #5\n",
+        "declare void @llvm.memmove.p0.p0.i64(ptr nocapture writeonly, ",
+        "ptr nocapture readonly, i64, i1 immarg) #5\n",
         "declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg) #6\n",
         "declare { i8, i1 } @llvm.sadd.with.overflow.i8(i8, i8) #4\n",
         "declare { i64, i1 } @llvm.umul.with.overflow.i64(i64, i64) #4\n",
@@ -344,6 +348,77 @@ fn the_intrinsic_table_is_in_the_order_item_eight_gives() void {
         "",
     };
     gen_env.expect_text(strbuf.view(&out), gen_env.join_lines(e, want[0..6]));
+}
+
+// The number of times `needle` stands in `s`.
+fn count_of(string s, string needle) u64 {
+    u64 mut n = 0;
+    u64 mut at = 0;
+    while (true) {
+        i64 next = str.find(s[at..s.len], needle);
+        if (next < 0) {
+            return n;
+        }
+        n += 1;
+        at += cast(next, u64) + needle.len;
+    }
+    return n;
+}
+
+// A module that copies an aggregate into an argument slot, between two places behind pointers,
+// and into the members of a result. Each copy is `llvm.memmove`, and the module holds no
+// `llvm.memcpy`: no call and no declaration. The declaration has no `noalias`, because the two
+// ranges of a copy can overlap in part (D6.3). It stands once, before `llvm.memset`, with the
+// group `#5`.
+fn a_module_copies_with_memmove_and_holds_no_memcpy() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    strbuf.append(&b, "struct pair {\n    i32 a;\n    u64 b;\n}\n");
+    strbuf.append(&b, "struct outer {\n    pair p;\n    pair q;\n}\n");
+    strbuf.append(&b, "fn take(pair p) void {\n}\n");
+    strbuf.append(&b, "fn pass(pair* from) void {\n    take(*from);\n}\n");
+    strbuf.append(&b, "fn through(pair mut* to, pair* from) void {\n    *to = *from;\n}\n");
+    strbuf.append(&b, "fn nest(pair* from) outer {\n    return outer{*from, *from};\n}\n");
+    strbuf.append(&b, "fn clear(pair mut* to) void {\n    *to = pair{};\n}\n");
+    strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
+    assert(gen_env.open_module(e, strbuf.view(&b)));
+    assert(gen_fir.gen_program(&e->g, &e->c.ck, &e->c.m.set));
+    string got = gen_env.module_text(e);
+    gen_env.expect_blocks(e, got);
+    string[3] mut decls = {
+        "declare void @llvm.memmove.p0.p0.i64(ptr nocapture writeonly, ",
+        "ptr nocapture readonly, i64, i1 immarg) #5\n",
+        "declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg) #6\n",
+    };
+    assert(str.find(got, gen_env.join_lines(e, decls[0..3])) >= 0);
+    assert(count_of(got, "declare void @llvm.memmove.") == 1);
+    // one copy in `pass`, one in `through`, and two into slots and two out of them in `nest`
+    assert(count_of(got, "  call void @llvm.memmove.p0.p0.i64(") == 6);
+    assert(count_of(got, "llvm.memcpy") == 0);
+    assert(count_of(got, "noalias") == 0);
+    assert(count_of(got, "attributes #5 = { nocallback nofree nounwind willreturn ") == 1);
+    assert(count_of(got, "attributes #5 = ") == 1);
+}
+
+// A module with no copy of an aggregate declares no copy intrinsic and no group `#5`.
+fn a_module_with_no_copy_declares_no_copy_intrinsic() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    strbuf.append(&b, "struct pair {\n    i32 a;\n    u64 b;\n}\n");
+    strbuf.append(&b, "fn clear(pair mut* to) void {\n    *to = pair{};\n}\n");
+    strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
+    assert(gen_env.open_module(e, strbuf.view(&b)));
+    assert(gen_fir.gen_program(&e->g, &e->c.ck, &e->c.m.set));
+    string got = gen_env.module_text(e);
+    gen_env.expect_blocks(e, got);
+    assert(count_of(got, "llvm.memmove") == 0);
+    assert(count_of(got, "llvm.memcpy") == 0);
+    assert(count_of(got, "attributes #5 = ") == 0);
+    assert(count_of(got, "declare void @llvm.memset.") == 1);
 }
 
 // A section a module does not need leaves no trace, and the ones it has are
@@ -374,6 +449,8 @@ fn main() i32 {
     mac_extern_declarations_protect_allocator_effects();
     every_attribute_group_has_its_text();
     the_intrinsic_table_is_in_the_order_item_eight_gives();
+    a_module_copies_with_memmove_and_holds_no_memcpy();
+    a_module_with_no_copy_declares_no_copy_intrinsic();
     an_empty_section_is_left_out_entirely();
     println("declarations ok");
     println("ok");

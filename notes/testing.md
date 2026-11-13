@@ -1236,7 +1236,10 @@ bullet at a time and without a rewrite.
 ## 6. Generated code
 
 - `run_tests.py --verify-ir` runs `opt -passes=verify` over the `-S` output of every language
-  test that compiles, and every emitter suite verifies each module it emits. The worked examples
+  test that compiles, and every emitter suite verifies each module it emits. Under that option
+  the harness also fails a module that calls or declares `llvm.memcpy`: each copy of an
+  aggregate is `llvm.memmove` (D19.3). It reads each line that does not start with `@`, so the
+  text of a string constant does not count. The worked examples
   of `spec/toolchain.md` 6 are held by the goldens of `bootstrap0/test/gen_module_test.c`. Until
   2026-09-25 hand-written modules under `test/ir/` and `test/pipeline_test.sh` ran the pipeline
   over them, and four host scripts (`core`, `net-layout`, `allocation-failure`, `abi-probe`)
