@@ -1095,12 +1095,62 @@ fn v4_aggregates_fill_every_field_or_element() void {
         fir_verify.V4_MEMBER, 0, 0);
     red(e, lets, "bb0: { _6 = aggregate i32@(copy _7, const i32 1); return; }", 4,
         fir_verify.V4_MEMBER, 0, 0);
-    green(e, lets, "bb0: { _2 = aggregate pair(const i32 1, const u64 2); return; }");
+    green(e, lets, "bb0: { _2 = aggregate zeroed pair(const i32 1, const u64 2); return; }");
     green(e, lets, "bb0: { _4 = aggregate string(const bytes \"a\", const u64 1); return; }");
     green(e, lets, "bb0: { _6 = aggregate i32@(copy _7, const u64 1); return; }");
     green(e, lets, "bb0: { _8 = aggregate u8 mut@ own(move _9, const u64 1); return; }");
     green(e, "let _1: i32[2]; bb0: {",
           "_1 = aggregate i32[2](const i32 1, const i32 2); return; }");
+}
+
+// V4: `aggregate T(a, ...)` with no `zeroed` leaves each padding byte of its destination as it was
+// (spec/fir.md 6). The whole storage of a temporary and of `_0` takes each byte from its store
+// (D10.1), so a type with padding needs the mark there. `pair` has 4 padding bytes after `a`,
+// `pair[2]` has them in each element, and `holder` has none.
+fn v4_a_literal_with_padding_is_zeroed_in_a_temporary_and_in_the_result() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    strbuf.str_buf mut two = strbuf.create();
+    defer del(two.data);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    strbuf.append(&b, "let _1: pair; let _2 (h): pair; let _3: pair[2]; let _4: u64;");
+    strbuf.append(&b, "let _5: pair mut*; let _6: holder; let _7: i32[2];");
+    string lets = strbuf.view(&b);
+    string result = "fn main.t3(_1 (p): pair) -> pair";
+    red(e, lets, "bb0: { _1 = aggregate pair(const i32 1, const u64 2); return; }", 4,
+        fir_verify.V4_PADDING, 0, 0);
+    red(e, lets, "bb0: { _3 = aggregate pair[2](copy _1, copy _1); return; }", 4,
+        fir_verify.V4_PADDING, 0, 0);
+    red_in(e, result, "", "bb0: { _0 = aggregate pair(const i32 1, const u64 2); return; }", 4,
+           fir_verify.V4_PADDING, 0, 0);
+    // a store that wrote each byte before it does not excuse the form
+    red(e, lets,
+        "bb0: { _1 = const zero pair; _1 = aggregate pair(const i32 1, const u64 2); return; }", 4,
+        fir_verify.V4_PADDING, 0, 1);
+    strbuf.append(&two, "bb0: { _0 = copy _1; goto bb1; }");
+    strbuf.append(&two, "bb1: { _0 = aggregate pair(const i32 1, copy _1.1); return; }");
+    red_in(e, result, "", strbuf.view(&two), 4, fir_verify.V4_PADDING, 1, 0);
+    // the mark makes each of them legal
+    green(e, lets, "bb0: { _1 = aggregate zeroed pair(const i32 1, const u64 2); return; }");
+    green(e, lets, "bb0: { _3 = aggregate zeroed pair[2](copy _1, copy _1); return; }");
+    green_in(e, result, "",
+             "bb0: { _0 = aggregate zeroed pair(const i32 1, const u64 2); return; }");
+    // a named local, a parameter, a part of a temporary, a pointer and a global keep their
+    // padding
+    green(e, lets, "bb0: { live(_2); _2 = aggregate pair(const i32 1, const u64 2); return; }");
+    green_in(e, result, "",
+             "bb0: { _1 = aggregate pair(const i32 1, const u64 2); _0 = copy _1; return; }");
+    green(e, lets, "bb0: { _3[_4] = aggregate pair(const i32 1, const u64 2); return; }");
+    green(e, lets, "bb0: { (*_5) = aggregate pair(const i32 1, const u64 2); return; }");
+    green(e, lets,
+          "bb0: { global main.origin = aggregate pair(const i32 1, const u64 2); return; }");
+    // a type with no padding takes the form with no mark in each place
+    green(e, lets,
+          "bb0: { _6 = aggregate holder(const null u8 mut* own, const u64 0); return; }");
+    green(e, lets, "bb0: { _7 = aggregate i32[2](const i32 1, const i32 2); return; }");
+    green_in(e, "fn main.keep(_1 (h): holder) -> holder", "",
+             "bb0: { _0 = aggregate holder(const null u8 mut* own, const u64 0); return; }");
 }
 
 fn v4_calls_switches_and_checks() void {
@@ -2344,7 +2394,7 @@ string[READ_ROWS] READ_BLOCKS = {
     "bb0: { check(const false, bounds, copy _1, const u64 4) -> bb1; } bb1: { return; }",
     "bb0: { fail(panic, copy _1); }",
     "bb0: { _2.1 = copy _1; return; }",
-    "bb0: { _2 = aggregate pair(copy _1, const u64 0); return; }",
+    "bb0: { _2 = aggregate zeroed pair(copy _1, const u64 0); return; }",
 };
 
 u32[READ_ROWS] READ_AT = {0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -2674,6 +2724,7 @@ fn main() i32 {
     v4_casts_follow_d3_14();
     v4_slices_and_allocations();
     v4_aggregates_fill_every_field_or_element();
+    v4_a_literal_with_padding_is_zeroed_in_a_temporary_and_in_the_result();
     v4_calls_switches_and_checks();
     v4_an_rvalue_has_the_count_of_its_form();
     v4_a_switch_names_each_value_once();

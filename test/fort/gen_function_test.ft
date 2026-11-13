@@ -190,7 +190,8 @@ fn the_allocas_are_the_parameters_then_the_locals_in_declaration_order() void {
 
 // The entry block zeroes an owning local once. The emptiness pass reads that
 // store as the entry zeroing of D17.11, which proves the first store into the
-// local.
+// local. The second store is the zero value that the declaration writes each
+// time it runs (D10.1).
 fn an_owning_local_is_zeroed_in_the_entry_block() void {
     strbuf.str_buf mut src = strbuf.create();
     defer del(src.data);
@@ -201,12 +202,13 @@ fn an_owning_local_is_zeroed_in_the_entry_block() void {
     strbuf.append(&src, "fn main() i32 {\n    return 0;\n}\n");
     assert(gen_env.open_module_rt(e, strbuf.view(&src)));
     string got = gen_env.emit_function(e, "owning");
-    string[3] mut want = {
+    string[4] mut want = {
         "  %p.0 = alloca ptr, align 8\n",
+        "  store ptr null, ptr %p.0, align 8\n",
         "  store ptr null, ptr %p.0, align 8\n",
         "  %t0 = call ptr @\"std.rt.alloc\"(",
     };
-    assert(str.find(got, gen_env.join_lines(e, want[0..3])) >= 0);
+    assert(str.find(got, gen_env.join_lines(e, want[0..4])) >= 0);
     gen_env.expect_blocks(e, got);
 }
 
@@ -225,18 +227,19 @@ fn the_tail_of_a_body_that_falls_off_its_end() void {
     // After a terminating statement the lowering opens a fresh block for the
     // unreachable statements the parser allows, and that block gets the same
     // tail.
-    string[8] mut want = {
+    string[9] mut want = {
         "define dso_local void @\"main.quiet\"() #0 {\n",
         "entry:\n",
         "  %dead.0 = alloca i64, align 8\n",
         "  ret void\n",
         "\n",
         "L1:\n",
+        "  store i64 0, ptr %dead.0, align 8\n",
         "  store i64 1, ptr %dead.0, align 8\n",
         "  ret void\n}\n",
     };
     string got = gen_env.emit_function(e, "quiet");
-    gen_env.expect_text(got, gen_env.join_lines(e, want[0..8]));
+    gen_env.expect_text(got, gen_env.join_lines(e, want[0..9]));
     gen_env.expect_blocks(e, got);
 }
 

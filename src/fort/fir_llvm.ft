@@ -508,6 +508,23 @@ fn place_zero(translator mut* t, fir.place p) void {
     place_store(t, p, zero_value(t->g, ty));
 }
 
+// The zero bytes of `live(_n)` (D10.1): `llvm.memset` over the storage of an aggregate, and a
+// store of the zero constant for a scalar. A `bool` is `i8` in memory, so its zero byte takes no
+// `zext`. Rule V10 gives `live` a named local, whose storage is an alloca.
+fn live_zero(translator mut* t, u32 local) void {
+    fir.place p = fir.place_local(local);
+    types.node* ty = fir.place_type(t->f, p);
+    if (fir.type_aggregate(ty)) {
+        memset_at(t, place_addr(t, p), ty);
+        return;
+    }
+    gen.gen_val mut zero = zero_value(t->g, ty);
+    if (gen.place_is_bool(ty)) {
+        zero = gen.gen_const_unsigned(t->g, "i8", 0);
+    }
+    gen.gen_store(t->g, zero, place_addr(t, p), types.type_alignof(ty));
+}
+
 // `llvm.memcpy` of a value of type `ty` from `from` to `to`.
 fn copy_to(translator mut* t, gen.gen_val to, gen.gen_val from, types.node* ty) void {
     u64 align = types.type_alignof(ty);
@@ -1135,12 +1152,13 @@ fn del_place(translator mut* t, fir.place p) void {
 }
 
 /// Translates the statement `s` of the block being translated (spec/fir.md 12.2). An assignment
-/// reads its rvalue before it computes the address of its place (12.5). `live` and `dead` print
-/// nothing.
+/// reads its rvalue before it computes the address of its place (12.5). `live` writes the zero
+/// value into each byte of the storage of its local, padding included (D10.1): `llvm.memset` for
+/// an aggregate and a store of the zero constant for a scalar. `dead` prints nothing.
 fn translate_statement(translator mut* t, fir.statement* s) void {
-    if (s->kind == fir.stmt_kind.st_assign || s->kind == fir.stmt_kind.st_del) {
+    if (s->kind != fir.stmt_kind.st_dead) {
         // a statement after the intrinsic can write one of its operands, so the note of the block
-        // holds only for an intrinsic that no assignment and no `del` follows
+        // holds only for an intrinsic that no assignment, no `del` and no `live` follows
         t->notes[cast(t->block, u64)].set = false;
     }
     switch (s->kind) {
@@ -1152,16 +1170,19 @@ fn translate_statement(translator mut* t, fir.statement* s) void {
         }
     case fir.stmt_kind.st_del:
         del_place(t, s->place);
-    case fir.stmt_kind.st_live, fir.stmt_kind.st_dead:
+    case fir.stmt_kind.st_live:
+        live_zero(t, s->local);
+    case fir.stmt_kind.st_dead:
         return;
     }
-    // only the first assignment of a continuation takes the note of its check
+    // only the first assignment of a continuation takes the note of its check, and a `del` or a
+    // `live` before that assignment ends the note
     t->pending.set = false;
 }
 
 /// Starts the translation of block `b`: the note of the overflow check whose continuation `b` is
-/// becomes pending, when that check tests the flag of the note and no assignment and no `del`
-/// follows the intrinsic in its block.
+/// becomes pending, when that check tests the flag of the note and no assignment, no `del` and no
+/// `live` follows the intrinsic in its block.
 fn begin_block(translator mut* t, u32 b) void {
     t->block = b;
     t->pending = overflow_note{};

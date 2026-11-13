@@ -302,7 +302,7 @@ fn a_fail_with_no_runtime_entry_is_an_error_and_an_overwrite_check_needs_none() 
 }
 
 // A designated literal and a positional one of a struct with seven padding bytes after `a`.
-string[13] LITERALS = {
+string[16] LITERALS = {
     "struct pair {\n",
     "    u8 a;\n",
     "    u64 b;\n",
@@ -313,6 +313,9 @@ string[13] LITERALS = {
     "fn listed(u64 b) pair {\n",
     "    return pair{0, b};\n",
     "}\n",
+    "fn stored(pair mut* p, u64 b) void {\n",
+    "    *p = pair{0, b};\n",
+    "}\n",
     "fn main() i32 {\n",
     "    return 0;\n",
     "}\n",
@@ -320,12 +323,14 @@ string[13] LITERALS = {
 
 // A designated literal is `aggregate zeroed`: the translator reads its members, zeroes the whole
 // destination with `llvm.memset`, the padding included, and stores the named field alone. A
-// positional literal stores each field and writes no memset.
+// positional literal that a function returns is `aggregate zeroed` too, because no store gave the
+// padding of `_0` a value: the memset comes first and each field follows. A positional literal
+// into a place that holds a value stores each field and writes no memset.
 fn a_designated_literal_zeroes_its_padding() void {
     gen_env.env mut* own e = gen_env.make();
     defer gen_env.drop_made(move(e));
     assert(emit(e, LITERALS[..], false));
-    assert(e->g.lowered == 3);
+    assert(e->g.lowered == 4);
     string text = gen_env.funcs(e);
     string named = definition(text, "named");
     string memset = "call void @llvm.memset.p0.i64(ptr align 8 %ret.sret, i8 0, i64 16, i1 false)";
@@ -334,8 +339,12 @@ fn a_designated_literal_zeroes_its_padding() void {
     assert(zeroed >= 0 && stored > zeroed);
     assert(str.find(named, "store i8") < 0);
     string listed = definition(text, "listed");
-    assert(str.find(listed, "@llvm.memset") < 0);
-    assert(str.find(listed, "store i8 0, ptr ") >= 0);
+    i64 cleared = str.find(listed, memset);
+    assert(cleared >= 0 && str.find(listed, "store i8 0, ptr ") > cleared);
+    assert(str.find(listed, "  store i64 %t0, ptr ") > cleared);
+    string kept = definition(text, "stored");
+    assert(str.find(kept, "@llvm.memset") < 0);
+    assert(str.find(kept, "store i8 0, ptr ") >= 0);
     gen_env.expect_blocks(e, gen_env.module_text(e));
 }
 

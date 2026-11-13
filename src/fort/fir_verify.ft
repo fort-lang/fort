@@ -81,6 +81,7 @@ string V4_ADDR_VOID = "an addr of a place of type void";
 string V4_AGGREGATE = "an aggregate of a type with no members";
 string V4_MEMBER_COUNT = "an aggregate with the wrong count of members";
 string V4_MEMBER = "an aggregate member that does not agree";
+string V4_PADDING = "an aggregate with padding and no zeroed into a temporary or _0";
 string V4_CALLEE = "a call of a value that is not a function";
 string V4_SWITCH = "a switch on a type that a switch does not take";
 string V4_ARM = "a switch arm of another type";
@@ -696,6 +697,23 @@ fn rvalue_fault(fir.func* f, fir.rvalue r) string {
     }
 }
 
+// Whether the assignment `s` writes `aggregate T(a, ...)` with no `zeroed`, where `T` has padding,
+// into the whole storage of a temporary or of `_0`. That rvalue leaves each padding byte as it
+// was (spec/fir.md 6), and no statement before it gives those bytes of a temporary a value. `_0`
+// of an aggregate type is the destination of the caller in the translation and new storage in the
+// interpreter, so the two would differ.
+fn keeps_padding(fir.func* f, fir.statement* s) bool {
+    fir.rvalue r = s->value;
+    if (r.kind != fir.rvalue_kind.rv_aggregate || r.zeroed || !fir.type_padded(r.ty)) {
+        return false;
+    }
+    if (s->place.base != fir.base_kind.bk_local || s->place.proj_len != 0) {
+        return false;
+    }
+    fir.local_kind kind = fir.local_at(f, s->place.local)->kind;
+    return kind == fir.local_kind.lk_temp || kind == fir.local_kind.lk_return;
+}
+
 fn v4_statement(walk mut* w, fir.statement* s, u32 b, u32 i) bool {
     if (s->kind != fir.stmt_kind.st_assign) {
         return true;
@@ -707,6 +725,9 @@ fn v4_statement(walk mut* w, fir.statement* s, u32 b, u32 i) bool {
     types.node* dst = fir.place_type(w->f, s->place);
     if (!types_agree(dst, fir.rvalue_type(w->f, s->value))) {
         return fail(w, RULE_V4, V4_ASSIGN, b, i);
+    }
+    if (keeps_padding(w->f, s)) {
+        return fail(w, RULE_V4, V4_PADDING, b, i);
     }
     return true;
 }

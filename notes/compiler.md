@@ -1302,6 +1302,8 @@ came here.
     a `move` zeroes its place after its read, an aggregate reads each member before its first
     store, and the address of a destination comes after the right side. A positional `aggregate`
     writes each member and keeps the padding of its destination; `aggregate zeroed` zeroes it.
+    A `live` gives each byte of its local the value 0 (D10.1), so run 2 of a loop body reads no
+    byte of run 1 (`test/fir/run/010_live_zero.fir`).
   - A call reads each argument before it pushes the new frame, so a fault in an argument names
     the call and not the callee. It copies each argument into the parameters of the frame, the
     caller-made copy of `toolchain.md` 6 item 7, and the result goes from the `_0` of the callee
@@ -1499,6 +1501,15 @@ came here.
   `fort -S src/fort/main.ft` took 3.2 s to 3.4 s through FIR and 1.4 s to 1.6 s through the
   direct path, and `fort --fir` alone took 2.1 s to 2.2 s, so the lowering and the verifier take
   most of the difference.
+  Each byte of a local holds 0 when its declaration runs (D10.1), and three parts give that.
+  `fir_llvm.live_zero` writes the zero value at each `live`, the padding included, and
+  `interpreter.clear_bytes` does the same. A parameter takes a whole store. The lowering writes a
+  positional literal of a type with padding as `aggregate zeroed` when its destination is the
+  whole storage of a temporary or of `_0` (`fir_lower.fresh_storage`), and rule V4 refuses the
+  form with no `zeroed` there. Before this, `run/structs/016_local_padding` printed
+  18446744073709551361 at `-Xcc -O0` and 1 at `-O1`: no store wrote the padding of the `alloca`,
+  so LLVM read `undef`. A `live` writes its local, so it ends the note of an overflow check as an
+  assignment does (`spec/fir.md` 12.2).
 - **A unit defines its own modules alone** (module-system.md 10.4). A module with
   `module.interface` set is a section of an interface file: `gen_fir.gen_declaration` puts each
   bodiless function of it in `g->declared`, and `gen_data.gen_finish` writes those `declare

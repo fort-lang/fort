@@ -1,0 +1,180 @@
+//! run
+//! stdout:
+//| 1 1 1 literal
+//| 1 1 1 call
+//| 1 1 1 copy
+//| 1 1 1 designated
+//| 1 1 1 empty
+//| 1 3 1 3 1 3 nested
+//| 1 3 1 3 1 3 array
+//| 1 3 1 3 range
+//| 1 1 1 1 skip
+//| the padding byte is 0
+// A local of a loop body gets its zero bytes at each run of its declaration (D10.1). Each loop
+// prints the word that holds the field `a` and the padding bytes 1 to 7 of its local. Then `soil`
+// writes 255 into each of those bytes through a view. The next run of the declaration gives the
+// padding bytes the value 0 again, so each run prints the value of `a` alone. Each line holds one
+// form of the initializer, and the last loop reaches its declaration after a `continue`. The
+// last line is a branch on one padding byte. This program stands at the default level, at
+// `-Xcc -O0` and at `-Xcc -O2`: before the compiler wrote the zero bytes, the second run printed
+// 18446744073709551361, and the default build printed no last line.
+struct holed {
+    u8 a;
+    u64 b;
+}
+
+struct raw {
+    u64 x;
+    u64 y;
+}
+
+struct outer {
+    holed h;
+    u8 t;
+}
+
+struct raw3 {
+    u64 x;
+    u64 y;
+    u64 z;
+}
+
+fn mk(u8 a, u64 b) holed {
+    return holed{a, b};
+}
+
+fn soil(holed mut* p) void {
+    raw mut* r = cast(p, raw mut*);
+    r->x = 0xFFFFFFFFFFFFFFFF;
+}
+
+fn soil_outer(outer mut* p) void {
+    raw3 mut* r = cast(p, raw3 mut*);
+    r->x = 0xFFFFFFFFFFFFFFFF;
+    r->z = 0xFFFFFFFFFFFFFFFF;
+}
+
+fn word(holed* p) u64 {
+    raw* r = cast(p, raw*);
+    return r->x;
+}
+
+fn literal() void {
+    for (u64 mut i = 0; i < 3; i++) {
+        holed mut h = holed{1, 2};
+        print(word(&h), " ");
+        soil(&h);
+    }
+    println("literal");
+}
+
+fn call() void {
+    u64 mut i = 0;
+    while (i < 3) {
+        holed mut h = mk(1, 2);
+        print(word(&h), " ");
+        soil(&h);
+        i += 1;
+    }
+    println("call");
+}
+
+fn copy() void {
+    holed other = holed{1, 2};
+    u64 mut i = 0;
+    do {
+        holed mut h = other;
+        print(word(&h), " ");
+        soil(&h);
+        i += 1;
+    } while (i < 3);
+    println("copy");
+}
+
+fn designated() void {
+    for (u64 mut i = 0; i < 3; i++) {
+        holed mut h = {.a = 1};
+        print(word(&h), " ");
+        soil(&h);
+    }
+    println("designated");
+}
+
+fn empty() void {
+    for (u64 mut i = 0; i < 3; i++) {
+        holed mut h = {};
+        h.a = 1;
+        print(word(&h), " ");
+        soil(&h);
+    }
+    println("empty");
+}
+
+fn nested() void {
+    for (u64 mut i = 0; i < 3; i++) {
+        outer mut o = outer{holed{1, 2}, 3};
+        raw3* r = cast(&o, raw3*);
+        print(r->x, " ", r->z, " ");
+        soil_outer(&o);
+    }
+    println("nested");
+}
+
+fn array() void {
+    for (u64 mut i = 0; i < 3; i++) {
+        holed[2] mut a = {holed{1, 2}, mk(3, 4)};
+        print(word(&a[0]), " ", word(&a[1]), " ");
+        soil(&a[0]);
+        soil(&a[1]);
+    }
+    println("array");
+}
+
+fn range() void {
+    holed[2] a = {holed{1, 2}, holed{3, 4}};
+    for (holed mut e : a) {
+        print(word(&e), " ");
+        soil(&e);
+    }
+    for (holed mut e : a) {
+        print(word(&e), " ");
+        soil(&e);
+    }
+    println("range");
+}
+
+fn skip() void {
+    for (u64 mut i = 0; i < 8; i++) {
+        if (i % 2 == 1) {
+            continue;
+        }
+        holed mut h = holed{1, i};
+        print(word(&h), " ");
+        soil(&h);
+    }
+    println("skip");
+}
+
+fn byte(u8 v) u8 {
+    holed x = holed{v, 5};
+    u8[16]* b = cast(&x, u8[16]*);
+    return (*b)[1];
+}
+
+fn main() i32 {
+    literal();
+    call();
+    copy();
+    designated();
+    empty();
+    nested();
+    array();
+    range();
+    skip();
+    if (byte(7) == 0) {
+        println("the padding byte is 0");
+    } else {
+        println("the padding byte is not 0");
+    }
+    return 0;
+}
