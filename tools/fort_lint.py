@@ -13,6 +13,17 @@ the body calls, a fort function of a trusted module whose row holds a line with 
 problem too. A function that is no boundary function gives no `mut` global whose type reaches a
 byte pointer to a call of C (mut_global_to_c).
 
+Storage of C (D9.8): a function of a trusted module whose result type reaches a pointer, a span
+or a string has a row line that starts with `// gives:` (gives_row_problems). The line says which
+storage the result names and, for storage of C, why nothing releases or changes it. The reach is
+the one of a boundary function with each pointer, each span and each string in the place of a
+byte pointer (Rows.gives_storage), so an owner, a `string[2]`, a struct with a pointer field at
+any depth and a function type with a pointer in it ask for the line. The lint reads the result
+type only. It does not see a value that a function gives through an out parameter, by a store
+into a global, or as an argument of a call, and it does not see a load or a store after a call
+that can release the storage. It does not read what the line says: a reviewer reads the row
+against the first two rules for storage of C.
+
 The lint does not read the sources of a row. It does not check a bound, a length or a NUL: a row
 that claims the bound of the whole array for `&g[0][1][0]` of a `char@[1][2] g` passes, and a
 reviewer reads it against rule 2. It sees a `mut` global only by its name, anywhere between the
@@ -944,13 +955,14 @@ class Rows:
 
     def struct_facts(self, key):
         """(whether a field type is a byte pointer, the keys of the structs that the fields
-        name) of the struct declared at `key`."""
+        name, whether a field type is a pointer, a span or a string) of the struct declared at
+        `key`."""
         facts = self.memo.setdefault("structs", {})
         if key in facts:
             return facts[key]
         path, line, col = key
         source = self.source(path)
-        direct, names = False, []
+        direct, names, storage = False, [], False
         if source is not None:
             name_at = source.offset(line, col)
             open_at = source.code.find("{", name_at)
@@ -960,8 +972,9 @@ class Rows:
                     continue
                 ty = self.type_at(path, at, "{;")
                 direct = direct or type_is_byte_pointer(ty)
+                storage = storage or type_names_storage(ty)
                 names.extend(self.struct_names(path, ty))
-        facts[key] = (direct, names)
+        facts[key] = (direct, names, storage)
         return facts[key]
 
     def reaches(self, path, ty):
@@ -977,8 +990,28 @@ class Rows:
             if key in seen:
                 continue
             seen.add(key)
-            direct, names = self.struct_facts(key)
+            direct, names, _ = self.struct_facts(key)
             if direct:
+                return True
+            todo.extend(names)
+        return False
+
+    def gives_storage(self, path, ty):
+        """Whether the parsed type `ty` of the file `path` reaches a pointer, a span or a string
+        (D9.8, "Storage of C"): itself, or through a pointee, an element, a field, or a parameter
+        or the result of a function pointer type, at any depth. It is the reach of `reaches`
+        with each pointer, each span and each string in the place of a byte pointer."""
+        if type_names_storage(ty):
+            return True
+        seen = set()
+        todo = list(self.struct_names(path, ty))
+        while todo:
+            key = todo.pop()
+            if key in seen:
+                continue
+            seen.add(key)
+            _, names, storage = self.struct_facts(key)
+            if storage:
                 return True
             todo.extend(names)
         return False
@@ -1025,6 +1058,28 @@ def type_is_byte_pointer(ty):
         elif "fn" in base:
             todo.extend(base["fn"])
             todo.append(base["result"])
+    return False
+
+
+def type_names_storage(ty):
+    """Whether the parsed type is a pointer, a span or a string, or holds one as a pointee, an
+    element, or a parameter or the result of a function pointer type, with no struct between
+    (D9.8, "Storage of C"): a `*` or an `@` at any place of it, or the base `string`. So `i32*`,
+    `u8@`, `string[2]`, `(char*)[4]` and `fn (i64*) i32` are such types, and `i64`, `u8[32]` and
+    `fn (i32) i32` are none. A function pointer names a function and no storage."""
+    todo = [ty]
+    while todo:
+        item = todo.pop()
+        if "*" in item["suffixes"] or "@" in item["suffixes"]:
+            return True
+        base = item["base"]
+        if "group" in base:
+            todo.append(base["group"])
+        elif "fn" in base:
+            todo.extend(base["fn"])
+            todo.append(base["result"])
+        elif base["name"] == "string":
+            return True
     return False
 
 
@@ -1519,6 +1574,33 @@ def cited_word_stands(rows, key, word):
     return any(text.startswith("// " + word) for _, text in run)
 
 
+def result_type(source, record, body_open):
+    """The parsed result type of the fort function of `record`: the text between the `)` of its
+    parameter list and the `{` of its body at `body_open` (grammar.md 3, `fn_decl`)."""
+    open_at = source.code.find("(", source.offset(record["line"], record["col"]))
+    close = matching_close(source.code, open_at) if open_at >= 0 else -1
+    if close < 0 or body_open < close:
+        return TypeParser([]).parse_type()
+    return TypeParser(type_tokens(source.code, close + 1, body_open)).parse_type()
+
+
+def gives_row_problems(rows, path, source, record, body_open):
+    """The problem of a function of a trusted module whose result type reaches a pointer, a span
+    or a string and whose row, its `//` lines directly above it, holds no line that starts with
+    `// gives:` (D9.8, "Storage of C"). The line says which storage the result names. The lint
+    does not read what the line says: a reviewer reads it against the first two rules for
+    storage of C."""
+    if body_open < 0 or not rows.gives_storage(path, result_type(source, record, body_open)):
+        return []
+    if cited_word_stands(rows, (path, record["line"], record["col"]), "gives:"):
+        return []
+    return [(record["line"], record["col"], "fn '%s' of a trusted module gives a result whose "
+             "type reaches a pointer, a span or a string, and its row has no line '// gives: "
+             "...': write which storage the result names and, for storage of C, why nothing "
+             "releases or changes it while fort code holds the value (%s)"
+             % (record["name"], ROWS))]
+
+
 def enclosing_opens(code, start, stop):
     """The offsets of the `(` of each call whose argument list holds the offset `start`, inner
     first, up to the statement and not before `stop`. An open `[` of an index and an open `{` of
@@ -1660,6 +1742,7 @@ def row_problems(rows, path, records):
         called = {callee: key for at, callee, key in fn_calls if body_open < at < body_close}
         externs = {callee for at, callee in extern_calls if body_open < at < body_close}
         problems.extend(citation_problems(rows, source, record, called, externs))
+        problems.extend(gives_row_problems(rows, path, source, record, body_open))
         if not rows.is_boundary((path, record["line"], record["col"])):
             for use in globals_used:
                 at = source.offset(use["line"], use["col"])

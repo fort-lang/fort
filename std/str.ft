@@ -101,6 +101,7 @@ fn find(string s, string needle) i64 {
 
 /// Copies s without a NUL terminator.
 /// An empty string produces a zero-length, non-null allocation.
+// gives: an allocation of `new` that holds a copy of s. It is no storage of C.
 fn dup(string s) string own {
     u8 mut@ own buf = new(u8, s.len);
     mem.copy(buf, cast(s, u8@));
@@ -108,6 +109,7 @@ fn dup(string s) string own {
 }
 
 /// Copies a followed by b without a NUL terminator.
+// gives: an allocation of `new` that holds a copy of a and of b. It is no storage of C.
 fn concat(string a, string b) string own {
     u8 mut@ own buf = new(u8, a.len + b.len);
     mem.copy(buf[..a.len], cast(a, u8@));
@@ -117,6 +119,7 @@ fn concat(string a, string b) string own {
 
 /// Copies s and adds a trailing NUL for C.
 /// If s contains a NUL, C reads only the prefix.
+// gives: an allocation of `new` that holds a copy of s and a NUL. It is no storage of C.
 fn to_cstr(string s) char mut@ own {
     char mut@ own buf = new(char, s.len + 1);
     mem.copy(cast(buf[..s.len], u8 mut@), cast(s, u8@));
@@ -126,6 +129,9 @@ fn to_cstr(string s) char mut@ own {
 /// Wraps the bytes of b before its first NUL without copying. It reads only the b.len bytes of b,
 /// and it panics when none of them is a NUL. A buffer that C wrote a C string into goes here, and
 /// not to from_cstr, which takes no `.ptr` (D3.5).
+// gives: a view of b, storage that the caller holds, with no copy. It names storage of C only
+// when b does, and the row of the function that gave b to fort code then covers it (D9.8,
+// "Storage of C").
 fn from_cbuf(u8@ b) string {
     u64 mut i = 0;
     while (i < b.len) {
@@ -141,6 +147,11 @@ fn from_cbuf(u8@ b) string {
 // C call libc.strlen: p and its NUL are parameter sources (D9.8 rule 1), so from_cstr is a
 // boundary function, and each caller gives a p that is not null here and that ends in a NUL
 // inside its storage.
+// gives: a view of the bytes at p before its NUL, with no copy, or the empty string for null.
+// The string names the storage that the caller gave. When that is storage of C, the row of the
+// caller says why nothing releases or changes it while the string lives, or the caller copies
+// the bytes before the next call that can do so (D9.8, "Storage of C"). Each caller is a
+// function of a trusted module, because from_cstr is a boundary function.
 fn from_cstr(char* p) string {
     if (p == null) {
         string zero = {};
@@ -204,14 +215,13 @@ fn parse_i64(string s, i64 mut* out) bool {
 fn parse_f64(string s, f64 mut* out) bool {
     char mut@ own text = to_cstr(s);
     defer del(text);
-    i32 mut* slot = libc.errno_slot();
-    i32 saved = *slot;
-    *slot = 0;
+    i32 saved = libc.errno();
+    libc.set_errno(0);
     *out = libc.strtod(&text[0], null);
-    if (*slot != 0) {
+    if (libc.errno() != 0) {
         return false;
     }
-    *slot = saved;
+    libc.set_errno(saved);
     return true;
 }
 
@@ -221,14 +231,13 @@ fn parse_f64(string s, f64 mut* out) bool {
 fn parse_f32(string s, f32 mut* out) bool {
     char mut@ own text = to_cstr(s);
     defer del(text);
-    i32 mut* slot = libc.errno_slot();
-    i32 saved = *slot;
-    *slot = 0;
+    i32 saved = libc.errno();
+    libc.set_errno(0);
     *out = libc.strtof(&text[0], null);
-    if (*slot != 0) {
+    if (libc.errno() != 0) {
         return false;
     }
-    *slot = saved;
+    libc.set_errno(saved);
     return true;
 }
 

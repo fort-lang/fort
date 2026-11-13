@@ -1561,7 +1561,14 @@ bullet at a time and without a rewrite.
   reports a `mut` global whose type reaches a byte pointer between the brackets of a call of C,
   in a function that is no boundary function. It reports each `extern fn` with one of the 15
   names of D9.8 ("One thread", "Calls from C"). That check reads the text of each file and no
-  index, so it sees each branch of a `$if` and a module that is not trusted. The lint finds a
+  index, so it sees each branch of a `$if` and a module that is not trusted. It reports a
+  function of a trusted module whose result type reaches a pointer, a span or a string, in the
+  type or in a struct at any depth, and whose row holds no line that starts `// gives:` (D9.8,
+  "Storage of C"; `gives_row_problems`). That check reads the result type only. It does not see
+  an out parameter, a store into a global or a value that goes to another function as an
+  argument, and it does not read what the line says: a reviewer reads the reason against the
+  first two rules for storage of C. The rows `D9.8-gives-*` of
+  `tools/mutations/rows_lint.json` hold it. The lint finds a
   boundary function by the parameter types that the index records spell, and `fort_lint_rows`
   holds that answer equal to the one of the compiler. A call row names the callee as the body
   spells it, with no white space (`libc.write`, `table[i+1]`). The rows count the calls in the

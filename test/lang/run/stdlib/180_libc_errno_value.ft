@@ -1,0 +1,47 @@
+//! run
+//! stdout:
+//| errno after set_errno(7): 7
+//| errno after set_errno(0): 0
+//| sys.errno reads the value that libc.set_errno set: true
+//| libc.errno reads the value that sys.set_errno set: 9
+//| a held value stays when errno changes: 9 11
+//| open of an absent path: -1 ENOENT: true
+//| open of an absent path after another value: -1 ENOENT: true
+import std.io;
+import std.libc;
+import std.sys;
+
+// libc.errno gives the errno of the calling thread as a value, and libc.set_errno takes the new
+// value as a value. No function of std gives the address of errno: errno is storage of C, and
+// each later call of C can change it (D9.8, "Storage of C"). So a value that a program holds
+// does not change when errno changes. sys.errno and sys.set_errno are the same two functions
+// under the names of stdlib.md 2.1.
+
+string ABSENT = "fort_t_no_such_file_180";
+
+fn main() i32 {
+    libc.set_errno(7);
+    i32 seven = libc.errno();
+    libc.set_errno(0);
+    i32 zero = libc.errno();
+    println("errno after set_errno(7): ", seven);
+    println("errno after set_errno(0): ", zero);
+    libc.set_errno(8);
+    bool same = sys.errno() == 8;
+    println("sys.errno reads the value that libc.set_errno set: ", same);
+    sys.set_errno(9);
+    i32 held = libc.errno();
+    libc.set_errno(11);
+    i32 later = libc.errno();
+    println("libc.errno reads the value that sys.set_errno set: ", held);
+    println("a held value stays when errno changes: ", held, " ", later);
+    libc.set_errno(0);
+    i32 fd = io.open(ABSENT, libc.O_RDONLY, 0);
+    bool absent = libc.errno() == libc.ENOENT;
+    println("open of an absent path: ", fd, " ENOENT: ", absent);
+    libc.set_errno(libc.EINVAL);
+    i32 fd2 = io.open(ABSENT, libc.O_RDONLY, 0);
+    bool absent2 = sys.errno() == libc.ENOENT;
+    println("open of an absent path after another value: ", fd2, " ENOENT: ", absent2);
+    return 0;
+}

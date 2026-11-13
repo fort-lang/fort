@@ -140,7 +140,7 @@ fn path_mode(string path, u32 mut* mode) bool {
 // bytes (D9.8 rule 2), and its last byte is the NUL (rule 4).
 fn make_fifo(string path, u32 mode) bool {
     if ((mode & ~PERMISSION_BITS) != 0 || (mode & SET_ID_BITS) != 0) {
-        *libc.errno_slot() = libc.EINVAL;
+        libc.set_errno(libc.EINVAL);
         return false;
     }
     char mut@ own c_path = str.to_cstr(path);
@@ -183,10 +183,16 @@ u32 UMASK_BITS = 0o777;
 // C call libc.strerror: no pointer argument.
 // C call str.from_cstr: the result of strerror in this call, storage that C gave (D9.8 rule 3),
 // a C string with the NUL that the row of strerror states.
+// gives: in *out a copy of the text in storage of `new`, and no view of the storage of strerror.
+// That storage is storage of C, which a later call of strerror can change or release. The view
+// of it goes to str.from_cstr and to strbuf.append only, and it ends with the call of
+// strbuf.append. The calls of C between strerror and that end are strlen, calloc, memmove, free
+// of a buffer of `new`, and the calls of a panic, which ends the process: none of them is a
+// call of strerror (D9.8, "Storage of C").
 fn error_text(i32 code, strbuf.str_buf mut* out) void {
-    i32 saved = *libc.errno_slot();
+    i32 saved = libc.errno();
     strbuf.append(out, str.from_cstr(libc.strerror(code)));
-    *libc.errno_slot() = saved;
+    libc.set_errno(saved);
 }
 
 /// Reports whether the process can reach the file `path` for `mode`, an access(2) mode such as
@@ -219,7 +225,7 @@ fn make_dir(string path, u32 mode) bool {
 // bytes (D9.8 rule 2), and its last byte is the NUL (rule 4).
 fn set_mode(string path, u32 mode) bool {
     if ((mode & SET_ID_BITS) != 0) {
-        *libc.errno_slot() = libc.EINVAL;
+        libc.set_errno(libc.EINVAL);
         return false;
     }
     char mut@ own c_path = str.to_cstr(path);
@@ -310,7 +316,7 @@ fn read_link(string path, strbuf.str_buf mut* out) bool {
         }
         cap = cap * 2;
     }
-    *libc.errno_slot() = libc.ERANGE;
+    libc.set_errno(libc.ERANGE);
     return false;
 }
 
@@ -328,7 +334,7 @@ fn current_dir(strbuf.str_buf mut* out) bool {
             strbuf.append(out, str.from_cbuf(cast(buf[..], u8@)));
             return true;
         }
-        if (*libc.errno_slot() != libc.ERANGE) {
+        if (libc.errno() != libc.ERANGE) {
             return false;
         }
         cap = cap * 2;
@@ -369,9 +375,9 @@ fn list_dir(string path, strbuf.str_buf mut* out) bool {
         return false;
     }
     bool listed = append_entries(stream, out);
-    i32 failure = *libc.errno_slot();
+    i32 failure = libc.errno();
     libc.closedir(move(stream));
-    *libc.errno_slot() = failure;
+    libc.set_errno(failure);
     return listed;
 }
 
@@ -394,7 +400,7 @@ fn list_dir_fd(i32 dir_fd, strbuf.str_buf mut* out) bool {
         return false;
     }
     if ((mode & S_IFMT) != S_IFDIR) {
-        *libc.errno_slot() = libc.ENOTDIR;
+        libc.set_errno(libc.ENOTDIR);
         return false;
     }
     if (libc.lseek(dir_fd, 0, libc.SEEK_SET) < 0) {
@@ -407,15 +413,15 @@ fn list_dir_fd(i32 dir_fd, strbuf.str_buf mut* out) bool {
     // closedir(3) closes `copy` as well
     void mut* own stream = libc.fdopendir(copy);
     if (stream == null) {
-        i32 failure = *libc.errno_slot();
+        i32 failure = libc.errno();
         libc.close(copy);
-        *libc.errno_slot() = failure;
+        libc.set_errno(failure);
         return false;
     }
     bool listed = append_entries(stream, out);
-    i32 failure = *libc.errno_slot();
+    i32 failure = libc.errno();
     libc.closedir(move(stream));
-    *libc.errno_slot() = failure;
+    libc.set_errno(failure);
     return listed;
 }
 
@@ -427,19 +433,25 @@ fn list_dir_fd(i32 dir_fd, strbuf.str_buf mut* out) bool {
 // whole name and no byte past the record (D9.8).
 // C call libc.readdir: stream is a parameter source (D9.8 rule 1), so append_entries is a
 // boundary function, and its callers in this module give a stream that opendir or fdopendir
-// gave.
+// gave. The stream is storage of C that only closedir releases. This function does not call
+// closedir, and each caller calls it after this function returns (D9.8, "Storage of C").
 // C call libc.memcpy: cast(&entry, u8 mut*) keeps the bound of the local entry,
 // sizeof(libc.dirent) bytes (rule 2). cast(head, u8*) keeps the bound of the record that readdir
 // gave in this function, reclen bytes, as the row of readdir states (rule 3). The length size is
 // reclen, which fits both: the test above holds it at most sizeof(libc.dirent). The two do not
 // overlap, because entry is a local and the record is storage of C.
+// gives: in *out a copy of the kind and of the name of each entry in storage of `new`, and no
+// view of a record of readdir. A record is storage of C, which the next readdir or closedir of
+// the stream can change or release. The function loads `reclen` through head and gives head to
+// memcpy before each other call of C, so no call released a byte that the two read. Each later
+// read is a read of the local entry, which holds no pointer (D9.8, "Storage of C").
 fn append_entries(void mut* stream, strbuf.str_buf mut* out) bool {
     u64 start = out->len;
     while (true) {
-        *libc.errno_slot() = 0;
+        libc.set_errno(0);
         libc.dirent_head* head = libc.readdir(stream);
         if (head == null) {
-            if (*libc.errno_slot() != 0) {
+            if (libc.errno() != 0) {
                 out->len = start;
                 return false;
             }
@@ -448,7 +460,7 @@ fn append_entries(void mut* stream, strbuf.str_buf mut* out) bool {
         u64 size = cast(head->reclen, u64);
         if (size < sizeof(libc.dirent_head) || size > sizeof(libc.dirent)) {
             out->len = start;
-            *libc.errno_slot() = libc.EINVAL;
+            libc.set_errno(libc.EINVAL);
             return false;
         }
         libc.dirent mut entry = {};
