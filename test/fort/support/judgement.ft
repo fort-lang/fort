@@ -11,24 +11,31 @@
 // counts the events of the run by kind.
 //
 // The compiler gives exit 0 for a function with the verdict `accepted` or `reported`, and the
-// judgement covers both. Each event of a run of such a function goes through the gate of the
-// oracle tests, disposition.is_error (test/fort/support/disposition.ft), and gets a ruling (rule).
-// The gate takes two events as no error. A `leak` at a `dead` marker of a block that ends in an
+// judgement covers both. Each event of a run of such a function gets a ruling (rule). The rule
+// reads the one disposition table of the event kinds (test/fort/support/disposition.ft). The gate
+// of the oracle tests (test/fort/owner/oracle_test.ft) takes the ruling of each event of its items
+// from the same function (ruling_of). So one rule judges the hand items, the seeded family, the
+// shapes and the typed family.
+//
+// The rule takes two events as no error. A `leak` at a `dead` marker of a block that ends in an
 // abort has an excuse, because a path that ends in a runtime error keeps its memory (D17.20). A
-// `leak at exit` of a cycle of owners is defined behavior. The gate does not judge the six kinds
-// that its table trusts. The judgement does: an event of such a kind is an error here, so each of
-// the ten event kinds is an error. A report option owns an event kind, and a line of that option
-// that names the line of the event takes an error of the gate: `--leak-report` owns `leak` and
-// `leak at exit`, `--whole-store-report` owns `overwrite`, and `--span-del-report` owns the `leak`
-// on the line of a `del` that it lists. A report line takes no event on another line of its
-// function. No report option owns another kind, so a report line does not take a `use after move`
-// or a `use after release`.
+// `leak at exit` of a cycle of owners is defined behavior. The table trusts six kinds: such an
+// event needs a program that breaks an assumption of the rules. The rule takes an event of such
+// a kind as an error, because the compiler must not accept that program. So each of the ten
+// event kinds is an error. A report option owns an event kind, and a line of that option that
+// names the line of the event takes the error: `--leak-report` owns `leak`,
+// `--whole-store-report` owns `overwrite`, and `--span-del-report` owns the `leak` on the line of
+// a `del` that it lists. A report line takes no event on another line of its function, and a
+// line of a pass takes no event of another function. No report option owns another kind, so a
+// report line does not take a `leak at exit`, a `use after move` or a `use after release`.
 //
 // A function with an error event is a failure, and so is a function with a run that ends in a
 // fault other than `null dereference` with no error event. The judgement keeps one record for a
 // failure, with what its first error is, the place of it, and each kind of error of its runs.
 // Each failure has a class of CLASSES or no class (class_of). A class is a known cause, which a
 // later change of the compiler or of the run time removes. A failure with no class is a new one.
+// KNOWN is the one list of the known failures: the count of the failures of each class of each
+// unit, for the three sets of the gate and for each part of the typed family (holds_known).
 import check_env;
 import disposition;
 import fort.ast;
@@ -42,6 +49,7 @@ import fort.fir_lower;
 import fort.fir_verify;
 import fort.owner.prover;
 import fort.owner.report;
+import fort.types;
 import generator;
 import modules_env;
 import run_env;
@@ -88,16 +96,30 @@ enum verdict {
 u64 VERDICTS = 4;
 string[VERDICTS] VERDICT_TEXT = {"accepted", "reported", "rejected", "refused"};
 
-/// The report options that own an event kind, as bits: `--leak-report` and
-/// `--whole-store-report`.
+/// The report options that own an event kind, as bits: `--leak-report`, `--whole-store-report`
+/// and `--span-del-report`.
 u32 REPORT_LEAK = 1;
 u32 REPORT_WHOLE = 2;
+u32 REPORT_SPAN = 4;
+
+/// The count of the report options that own an event kind, and the name of each in the order of
+/// its bit.
+u64 REPORTS = 3;
+string[REPORTS] REPORT_TEXT = {"leak report", "whole store report", "span del report"};
 
 /// A line of the text of a batch that a line of a report option names, and the REPORT bit of
-/// that option.
+/// that option. `of` is the function of a line that a pass of the prover reports. It is null for
+/// a line of `--span-del-report`, which the checker reports with no function.
 struct named_line {
     u32 bit;
     u32 line;
+    ast.sym* of;
+}
+
+/// The lines that the report lines of one batch name, in the order of the report (push_named).
+struct named_vec {
+    named_line mut@ own items;
+    u64 len;
 }
 
 /// What the judgement says about an event of a run of a function with exit 0, in the order of
@@ -176,8 +198,9 @@ struct failure_vec {
     u64 len;
 }
 
-/// The counts of the judgement. `verdicts` counts the functions by verdict, `runs` each run, and
-/// `events` each event of each run by kind. The other counts are of the runs of the functions
+/// The counts of the judgement. `verdicts` counts the functions by verdict, `runs` each run,
+/// `events` each event of each run by kind, and `named` the lines that the report lines of each
+/// batch name, by option, with each repeat. The other counts are of the runs of the functions
 /// with exit 0: `judged` counts those runs and `ends` counts them by their end, `rulings` counts
 /// their events by ruling, `errors` their error events by kind, and `silent` the runs that end in
 /// a fault other than `null dereference` with no error event. `failures` holds one record for
@@ -191,13 +214,14 @@ struct totals {
     u64[KINDS] events;
     u64[KINDS] errors;
     u64[RULINGS] rulings;
+    u64[REPORTS] named;
     u64 silent;
     failure_vec failures;
 }
 
-/// Empty counts in an allocation of their own. It stops when the table of the gate of the oracle
-/// tests does not name each event kind in the order of fir.shadow (disposition.is_complete):
-/// print_totals reads row `kind` of that table for the kind at position `kind`.
+/// Empty counts in an allocation of their own. It stops when the disposition table does not name
+/// each event kind in the order of fir.shadow (disposition.is_complete): print_totals reads row
+/// `kind` of that table for the kind at position `kind`.
 fn make() totals mut* own {
     if (!disposition.is_complete()) {
         panic("judgement.make: the table of disposition.ft does not name each event kind");
@@ -228,9 +252,9 @@ struct item {
 
 // One batch: the cell, the count `n` of the operations of each function, the vocabulary of the
 // cell, the items, the text, the functions as the lowering makes them, for each `dead` marker
-// whether its block ends in an abort, and the first `names` elements of `named`: each line that a
-// line of `--leak-report` or of `--whole-store-report` names. A batch of hand_make has no cell:
-// `reads` holds the inputs that each of its functions reads.
+// whether its block ends in an abort, and `named`: each line that a line of a report option
+// names (name_reports, prove_batch). A batch of hand_make has no cell: `reads` holds the inputs
+// that each of its functions reads.
 struct batch {
     u64 ty;
     u64 st;
@@ -243,8 +267,7 @@ struct batch {
     fir.module m;
     bool mut@ own aborts;
     u64 deads;
-    named_line mut@ own named;
-    u64 names;
+    named_vec named;
 }
 
 // A batch of `count` functions of `n` operations of the cell, from function `first`, in an
@@ -279,7 +302,7 @@ fn batch_drop(batch mut bt) void {
     strbuf.drop(move(bt.text));
     fir.module_drop(move(bt.m));
     del(bt.aborts);
-    del(bt.named);
+    del(bt.named.items);
 }
 
 // Ends a batch of batch_make that the caller moves in: the value moves out before the `del` of the
@@ -460,7 +483,7 @@ fn prove_one(check_env.env mut* c, batch mut* bt, fir.func* f) void {
     u64 k = item_at(bt, line);
     prover.proof mut* own p = prover.prove_made(f);
     defer prover.drop_made(move(p));
-    bool reported = name_reports(c, bt, f, p);
+    bool reported = name_reports(c, &bt->named, f, p) != 0;
     if (k != NONE) {
         bt->items[k].sym = f->sym;
     }
@@ -471,19 +494,19 @@ fn prove_one(check_env.env mut* c, batch mut* bt, fir.func* f) void {
     }
 }
 
-// Appends `add` to the named lines of `bt`.
-fn push_named(batch mut* bt, named_line add) void {
-    if (bt->names == bt->named.len) {
+/// Appends `add` to `v`.
+fn push_named(named_vec mut* v, named_line add) void {
+    if (v->len == v->items.len) {
         named_line mut@ own bigger = new(named_line,
-                                         fir.grown_capacity(bt->names, "judgement: capacity"));
-        for (u64 mut i = 0; i < bt->names; i++) {
-            bigger[i] = bt->named[i];
+                                         fir.grown_capacity(v->len, "judgement: capacity"));
+        for (u64 mut i = 0; i < v->len; i++) {
+            bigger[i] = v->items[i];
         }
-        del(bt->named);
-        bt->named = move(bigger);
+        del(v->items);
+        v->items = move(bigger);
     }
-    bt->named[bt->names] = add;
-    bt->names += 1;
+    v->items[v->len] = add;
+    v->len += 1;
 }
 
 /// The line that the line `text` of a report names, as fort.owner.report writes it at the start:
@@ -504,50 +527,109 @@ fn named_of(string text) u32 {
     return cast(line, u32);
 }
 
-// Records the line that each line of the text `lines` of the report option `bit` names. A note of
-// a site stands at the position of the site, so it names the line of the site again.
-fn name_lines(batch mut* bt, u32 bit, string lines) void {
+/// The end of a line of `--leak-report` that stands at a `cast` (fort.owner.report).
+string CAST_END = "before this cast";
+
+/// Whether the type `t` holds an owner in its fixed storage: an `own` reference, or an owning
+/// aggregate (D17.7), from the mark of the checker.
+fn holds_owners(types.node* t) bool {
+    return (types.type_is_reference(t) && t->is_own) || types.type_is_owning_aggregate(t);
+}
+
+/// Whether the statement `st` of `f` is a `del` of an `own` pointer to an object that holds no
+/// owner by its type: a `void` pointer, or a pointer to a type with no owner. Such a `del` gives a
+/// `leak` only after a `cast` that carried `own` there from a pointer to an object with owners,
+/// and the pass reports that `cast` (D17.20, part 2).
+fn is_bare_del(fir.func* f, fir.statement* st) bool {
+    if (st->kind != fir.stmt_kind.st_del) {
+        return false;
+    }
+    types.node* t = fir.place_type(f, st->place);
+    if (t->kind == types.type_kind.k_voidptr) {
+        return t->is_own;
+    }
+    return t->kind == types.type_kind.k_ptr && t->is_own && !holds_owners(t->elem);
+}
+
+// Records the line of each `del` of `f` that is_bare_del names, for the option REPORT_LEAK: a
+// line of `--leak-report` at a `cast` of `f` names them too. The owners of the object of the
+// `cast` leak at the `del` of its result, which stands on a line of its own.
+fn name_bare_dels(named_vec mut* v, fir.func* f) void {
+    for (u32 mut b = 0; b < fir.block_count(f); b++) {
+        fir.block* bl = fir.block_at(f, b);
+        for (u64 mut k = 0; k < bl->statements.len; k++) {
+            fir.statement* st = &bl->statements.items[k];
+            if (is_bare_del(f, st) && st->loc.line < DEAD_LINE) {
+                push_named(v, named_line{REPORT_LEAK, st->loc.line, f->sym});
+            }
+        }
+    }
+}
+
+// Records the line that each line of the text `lines` names, for the report option `bit` and the
+// function `f` of the report. A note of a site stands at the position of the site, so it names
+// the line of the site again. A line of `--leak-report` at a `cast` names the line of the
+// `cast`, and it names each `del` of `f` that only such a `cast` makes leak (name_bare_dels).
+fn name_lines(named_vec mut* v, u32 bit, fir.func* f, string lines) void {
     u64 mut start = 0;
     for (u64 mut k = 0; k < lines.len; k++) {
         if (lines[k] != '\n') {
             continue;
         }
-        u32 line = named_of(lines[start..k]);
+        string text = lines[start..k];
+        u32 line = named_of(text);
         if (line != 0) {
-            push_named(bt, named_line{bit, line});
+            push_named(v, named_line{bit, line, f->sym});
+        }
+        if (line != 0 && bit == REPORT_LEAK && str.ends_with(text, CAST_END)) {
+            name_bare_dels(v, f);
         }
         start = k + 1;
     }
 }
 
-// Records each line that fort.owner.report names for the proof `p` of `f`, with the bit
-// REPORT_LEAK for a line of `--leak-report` and REPORT_WHOLE for a line of
-// `--whole-store-report`, and gives whether the report writes a line of one of them.
-fn name_reports(check_env.env mut* c, batch mut* bt, fir.func* f, prover.proof* p) bool {
+/// Appends to `v` each line that fort.owner.report names for the proof `p` of `f`, with the bit
+/// REPORT_LEAK for a line of `--leak-report` and REPORT_WHOLE for a line of
+/// `--whole-store-report`, and gives the REPORT bits of the options that write a line for `f`.
+/// The gate of the oracle tests and the typed judgement both take their report lines from here.
+fn name_reports(check_env.env mut* c, named_vec mut* v, fir.func* f, prover.proof* p) u32 {
     strbuf.str_buf mut lines = strbuf.create();
     defer del(lines.data);
     report.write_inners(f, p, &c->m.s, &lines);
-    bool leak = lines.len > 0;
-    name_lines(bt, REPORT_LEAK, strbuf.view(&lines));
+    u32 leak = lines.len > 0 ? REPORT_LEAK : 0;
+    name_lines(v, REPORT_LEAK, f, strbuf.view(&lines));
     strbuf.clear(&lines);
     report.write_wholes(f, p, &c->m.s, &lines);
-    name_lines(bt, REPORT_WHOLE, strbuf.view(&lines));
-    return leak || lines.len > 0;
+    name_lines(v, REPORT_WHOLE, f, strbuf.view(&lines));
+    return leak | (lines.len > 0 ? REPORT_WHOLE : 0);
 }
 
 /// The REPORT bits of the report options with a line in `named` that names the line `line` of
-/// the file `file`. A file that is not the entry module (is_entry) gets no bit. An event on a
-/// line of a reported function that no report line names gets no bit, so `rule` gives it no
-/// report ruling. The test compares the line and not the column: two sites on one line of the
-/// text are one site here.
-fn reports_at(named_line@ named, string file, u32 line) u32 {
+/// the file `file` for an event of the function `of`. A file that is not the entry module
+/// (is_entry) gets no bit. A line that a pass reports for a function names that function only: a
+/// FIR text gives two functions the same lines. A line of `--span-del-report` has no function and
+/// names its line for each. An event on a line of a reported function that no report line names
+/// gets no bit, so `rule` gives it no report ruling. The test compares the line and not the
+/// column: two sites on one line of the text are one site here.
+fn reports_at(named_line@ named, ast.sym* of, string file, u32 line) u32 {
     u32 mut bits = 0;
     for (u64 mut k = 0; is_entry(file) && k < named.len; k++) {
-        if (named[k].line == line) {
+        if (named[k].line == line && (named[k].of == null || named[k].of == of)) {
             bits = bits | named[k].bit;
         }
     }
     return bits;
+}
+
+/// The line of the entry module of the `del(s, d)` at `i` of the checker of `c` when the pass
+/// refuses it, or 0: its drop `d` is not release-only by `drops` (D17.9). The gate of the oracle
+/// tests and the typed judgement both give the function on that line an error.
+fn refused_drain(check_env.env mut* c, release.table* drops, u64 i) u32 {
+    ast.node* d = ast.ast_child(check.drain_at(&c->ck, i), 1);
+    if (release.is_release_only(drops, d->sym) || !is_entry(d->loc.file)) {
+        return 0;
+    }
+    return d->loc.line;
 }
 
 // Gives each item its verdict, as overwrite_entry of fort.driver does with each report option:
@@ -565,15 +647,16 @@ fn prove_batch(check_env.env mut* c, batch mut* bt) void {
     }
     release.solve(drops);
     for (u64 mut i = 0; i < check.drain_count(&c->ck); i++) {
-        ast.node* d = ast.ast_child(check.drain_at(&c->ck, i), 1);
-        if (!release.is_release_only(drops, d->sym) && is_entry(d->loc.file)) {
-            mark(bt, d->loc.line, verdict.vd_rejected);
+        u32 line = refused_drain(c, drops, i);
+        if (line != 0) {
+            mark(bt, line, verdict.vd_rejected);
         }
     }
     for (u64 mut i = 0; i < check.span_del_count(&c->ck); i++) {
         diag.loc at = check.span_del_at(&c->ck, i)->a->loc;
         if (is_entry(at.file)) {
             mark(bt, at.line, verdict.vd_reported);
+            push_named(&bt->named, named_line{REPORT_SPAN, at.line, null});
         }
     }
 }
@@ -661,52 +744,48 @@ fn at_abort(bool@ aborts, u32 line) bool {
         && aborts[cast(line - DEAD_LINE, u64)];
 }
 
-// Whether `at` is on the line of a `del` of the batch that `--span-del-report` lists: a `del` of
-// a span of owners with one operand. The test compares the line and not the column: a second
-// statement on the line of such a `del` has the line of the `del`.
-fn is_span_del(check_env.env mut* c, diag.loc at) bool {
-    for (u64 mut i = 0; i < check.span_del_count(&c->ck); i++) {
-        diag.loc listed = check.span_del_at(&c->ck, i)->a->loc;
-        if (listed.line == at.line && is_entry(listed.file) && is_entry(at.file)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/// Whether the gate of the oracle tests does not judge an event of kind `kind`: its table trusts
-/// the kind (disposition.TABLE).
+/// Whether the disposition table trusts the kind `kind` (disposition.TABLE): an event of that
+/// kind needs a program that breaks an assumption of the rules. `rule` takes such an event as an
+/// error.
 fn is_trusted(shadow.event_kind kind) bool {
     return disposition.TABLE[disposition.index_of(kind)].disposition
         == disposition.disposition_kind.dk_trusted;
 }
 
 /// The ruling of the event `ev` of a run of a function with exit 0. `at_abort` says that the
-/// event stands at a `dead` marker of a block that ends in an abort, `reports` holds the REPORT
-/// bits of the options with a report line that names the line of the event (reports_at), and
-/// `at_span_del` says that the event stands on the line of a `del` that `--span-del-report`
-/// lists. The event goes through the gate of the oracle tests first (disposition.is_error), which
-/// reads its kind, its cycle mark and `at_abort`. The gate takes a `leak` at an abort (D17.20)
-/// and a `leak at exit` of a cycle of owners as no error. An event of a kind that the gate trusts
-/// is an error here, so each kind is an error unless a rule takes the event: one of those two, or
-/// a line of the report option that owns the kind, on the line of the event. `--leak-report` owns
-/// `leak` and `leak at exit`, `--whole-store-report` owns `overwrite`, and `--span-del-report`
-/// owns the `leak` on the line of its `del`. No option owns another kind.
-fn rule(shadow.event* ev, bool at_abort, u32 reports, bool at_span_del) ruling {
+/// event stands at a `dead` marker of a block that ends in an abort, and `reports` holds the
+/// REPORT bits of the options with a report line that names the line of the event (reports_at).
+/// The event goes through the disposition table first (disposition.is_error), which reads its
+/// kind, its cycle mark and `at_abort`. The table takes a `leak` at an abort (D17.20) and a `leak
+/// at exit` of a cycle of owners as no error. An event of a kind that the table trusts is an
+/// error here, so each kind is an error unless a rule takes the event: one of those two, or a
+/// line of the report option that owns the kind, on the line of the event. `--leak-report` and
+/// `--span-del-report` own `leak`, and `--whole-store-report` owns `overwrite`. No option owns
+/// another kind. A `leak at exit` stands at the last statement of its run and not at the
+/// statement that lost the allocation, so no report line names it and no option owns it.
+fn rule(shadow.event* ev, bool at_abort, u32 reports) ruling {
     shadow.event_kind kind = ev->kind;
     bool leak = kind == shadow.event_kind.ev_leak;
-    bool at_exit = kind == shadow.event_kind.ev_leak_at_exit;
     bool error = is_trusted(kind) || disposition.is_error(ev, at_abort);
     if (!error) {
-        return at_exit ? ruling.ru_cycle : ruling.ru_excused;
-    } else if (leak && at_span_del) {
+        return kind == shadow.event_kind.ev_leak_at_exit ? ruling.ru_cycle : ruling.ru_excused;
+    } else if (leak && (reports & REPORT_SPAN) != 0) {
         return ruling.ru_span_report;
-    } else if ((leak || at_exit) && (reports & REPORT_LEAK) != 0) {
+    } else if (leak && (reports & REPORT_LEAK) != 0) {
         return ruling.ru_leak_report;
     } else if (kind == shadow.event_kind.ev_overwrite && (reports & REPORT_WHOLE) != 0) {
         return ruling.ru_whole_report;
     }
     return ruling.ru_error;
+}
+
+/// The ruling of the event `ev` of a run of a function with exit 0, in a batch with the `dead`
+/// markers `aborts` (at_abort) and the report lines `named` (reports_at). The gate of the oracle
+/// tests and the typed judgement both take the ruling of each event from here, so one rule judges
+/// each family.
+fn ruling_of(shadow.event* ev, bool@ aborts, named_line@ named) ruling {
+    u32 reports = reports_at(named, ev->sym, ev->at.file, ev->at.line);
+    return rule(ev, at_abort(aborts, ev->at.line), reports);
 }
 
 /// The row of END_TEXT of a run that ended with the outcome kind `kind` and, for a fault, the
@@ -757,8 +836,7 @@ fn fail(batch* bt, item mut* it, u64 what, u64 at, u64 pos, totals mut* t) void 
 
 // Counts the run `run` of item `k` and its events. For a function with exit 0 it gives each event
 // its ruling and counts the end of the run; the first error makes the item a failure.
-fn collect(check_env.env mut* c, batch mut* bt, u64 k, interpreter.machine* run,
-           totals mut* t) void {
+fn collect(batch mut* bt, u64 k, interpreter.machine* run, totals mut* t) void {
     item mut* it = &bt->items[k];
     t->runs += 1;
     if (run->end.kind == interpreter.outcome_kind.oc_none) {
@@ -773,9 +851,7 @@ fn collect(check_env.env mut* c, batch mut* bt, u64 k, interpreter.machine* run,
         if (!judged) {
             continue;
         }
-        u32 reports = reports_at(bt->named[..bt->names], ev->at.file, ev->at.line);
-        ruling said = rule(ev, at_abort(bt->aborts[..bt->deads], ev->at.line), reports,
-                           is_span_del(c, ev->at));
+        ruling said = ruling_of(ev, bt->aborts[..bt->deads], bt->named.items[..bt->named.len]);
         t->rulings[cast(cast(said, i32), u64)] += 1;
         if (said == ruling.ru_error) {
             bool inside = ev->sym == it->sym;
@@ -821,7 +897,7 @@ fn run_drive(check_env.env mut* c, batch mut* bt, u64 k, u64 input, totals mut* 
         args[bit + 1] = (input >> bit) & 1;
     }
     interpreter.run_function(run, check_env.sym_main(c, generator.DRIVE), args[..]);
-    collect(c, bt, k, run, t);
+    collect(bt, k, run, t);
 }
 
 // Whether the input `input` of run_drive changes only what a function with the inputs `reads`
@@ -863,10 +939,15 @@ fn judge_batch(check_env.env mut* c, u64 ty, u64 st, u64 n, u64 first, u64 count
     judge_prepared(c, bt, t);
 }
 
-// Gives each item of the batch `bt` after prepare its verdict, moves each `dead` marker to its
-// own line, runs each item, and adds the counts to `t`.
+// Gives each item of the batch `bt` after prepare its verdict, counts the lines that its report
+// lines name, moves each `dead` marker to its own line, runs each item, and adds the counts to `t`.
 fn judge_prepared(check_env.env mut* c, batch mut* bt, totals mut* t) void {
     prove_batch(c, bt);
+    for (u64 mut k = 0; k < bt->named.len; k++) {
+        for (u64 mut bit = 0; bit < REPORTS; bit++) {
+            t->named[bit] += cast((bt->named.items[k].bit >> cast(bit, u32)) & 1, u64);
+        }
+    }
     relocate(bt);
     run_batch(c, bt, t);
 }
@@ -939,7 +1020,7 @@ struct class_row {
 }
 
 /// The count of the rows of CLASSES, and the class of a failure with no class.
-u64 CLASS_COUNT = 5;
+u64 CLASS_COUNT = 7;
 u64 NO_CLASS = CLASS_COUNT;
 
 /// The rows of CLASSES.
@@ -948,10 +1029,14 @@ u64 CLASS_SPAN_POINTER = 1;
 u64 CLASS_RANGE_CALLBACK = 2;
 u64 CLASS_VIEW = 3;
 u64 CLASS_MOVED_VALUE = 4;
+u64 CLASS_RELEASED = 5;
+u64 CLASS_SCOPE = 6;
 
 /// The classes of the known failures (class_of). The use rule gives an owner that is no local no
 /// obligation (D17.21), and no rule holds a pointer into an `own` span, a view of an allocation
 /// or the collection of a range loop across a callback: the run time takes those four classes.
+/// It takes the classes `released` and `scope` too. They are the classes of an item of the gate of
+/// the oracle tests (class_of_kind), and no function of the typed family gets one of them.
 /// The class `moved value` has no owner yet: a `move` of a vacated place gives the zero value and
 /// a store ends the vacated state of its target (D17.21), and fir.shadow gives the event at the
 /// read of the place that took that value. The 2-operation family reaches the classes `moved`,
@@ -964,7 +1049,25 @@ class_row[CLASS_COUNT] CLASSES = {
     {"range callback", "a callback that releases the collection of a range loop"},
     {"view", "a load through a view after the release of the allocation that it points to"},
     {"moved value", "a read of a place that holds the value of the move of a vacated place"},
+    {"released", "an item of the gate that uses an allocation after its release"},
+    {"scope", "an item of the gate that uses a local after the end of its scope"},
 };
+
+/// The class of an item of the gate of the oracle tests that fails with a first error of the kind
+/// `kind`, or NO_CLASS. Such an item is a program of a hand case, of the seeded family or of the
+/// shapes. It has no row of generator.OPERATIONS, so its class reads the kind only: a narrower
+/// test (class_of) needs the names of the statements. The count of each class of each unit holds
+/// the list exactly (KNOWN), so a new item of a kind stops the test although the kind has a class.
+fn class_of_kind(shadow.event_kind kind) u64 {
+    if (kind == shadow.event_kind.ev_use_after_move) {
+        return CLASS_MOVED;
+    } else if (kind == shadow.event_kind.ev_use_after_release) {
+        return CLASS_RELEASED;
+    } else if (kind == shadow.event_kind.ev_use_after_scope) {
+        return CLASS_SCOPE;
+    }
+    return NO_CLASS;
+}
 
 // Whether row `op` of generator.OPERATIONS has the name `name`. A place that is no statement has
 // no name.
@@ -1093,7 +1196,8 @@ fn is_vacated(failure* f) bool {
 
 /// Whether the text `text` of a row of generator.OPERATIONS moves or releases an inner owner of
 /// the place: it holds a `move` or a `del` whose operand starts with the code of an inner owner,
-/// `%S` or `%O`.
+/// `%S` or `%O`. No row of OPERATIONS holds the term `move(%O`. The term stays for a new row of
+/// that shape, and the test of the judgement holds it with a text of its own.
 fn is_part_vacate_text(string text) bool {
     return str.find(text, "move(%S") >= 0 || str.find(text, "del(%S") >= 0
         || str.find(text, "move(%O") >= 0 || str.find(text, "del(%O") >= 0;
@@ -1171,6 +1275,28 @@ fn is_passed(failure* f) bool {
     return false;
 }
 
+// Whether a statement of `f` before the error runs while the whole place can be vacated: it
+// follows a statement that vacates the whole place, no statement between the two fills the place,
+// and it is no fill itself. A `defer` vacates at the end of its block and is no such statement.
+// The use rule must reject each use of a local owner in that state (D17.21). The test holds no
+// list of the statements that use the place, so each statement there counts, also one that the
+// rule permits, such as a second `move`. So the test is true for more functions than the rule
+// rejects, and each of them has no class.
+fn is_between(failure* f) bool {
+    for (u64 mut j = 1; j < f->pos && j < f->n; j++) {
+        if (is_fill(f->ops[j])) {
+            continue;
+        }
+        for (u64 mut k = 0; k < j; k++) {
+            if (is_vacate(f, f->ops[k]) && !is_op(f->ops[k], "defer")
+                && !is_filled(f, k + 1, j)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // Whether the place that the error of `f` reads can hold the value of the `move` of a vacated
 // place, and the use has no other cause. The cause: a statement before the error stores
 // `move(y)` into the place, or a statement after it passes `move` of the place to the function
@@ -1180,12 +1306,16 @@ fn is_passed(failure* f) bool {
 // whole place (is_vacated) or an inner owner of it (is_part_vacated). The inner owners of this
 // class stand in the fixed storage of the local, because is_far takes the types that hold them
 // behind a pointer. So the use rule must reject the use after each of the two (D17.21), and
-// that failure has no class.
+// that failure has no class. A third cause is a statement that runs while the whole place can be
+// vacated, before the store that ends the state (is_between): the compiler must reject the
+// function at that statement when it uses the place, so the function shows a loss of the use
+// rule and has no class. A function of 4 operations is the first with such a statement before a
+// store and a use.
 fn is_moved_value(failure* f) bool {
     u64 pos = f->pos;
     bool stored = holds_before(f, pos, "move in") || holds_before(f, pos, "choose")
         || holds_before(f, pos, "swap");
-    return !is_vacated(f) && !is_part_vacated(f) && (is_passed(f) || stored);
+    return !is_vacated(f) && !is_part_vacated(f) && !is_between(f) && (is_passed(f) || stored);
 }
 
 /// The row of CLASSES of the failure `f`, or NO_CLASS. A class takes a failure only when the
@@ -1231,6 +1361,105 @@ fn class_key(u64 class) string {
     return "none";
 }
 
+/// The units of KNOWN. The first three are the sets of the gate of the oracle tests
+/// (test/fort/owner/oracle_test.ft): the hand items with the FIR cases, the seeded family and the
+/// shapes. Then the parts of the typed family of FAMILY operations: part `k` of PARTS, from 1, is
+/// the unit UNIT_TYPED + k - 1.
+u64 UNIT_HAND = 0;
+u64 UNIT_SEEDED = 1;
+u64 UNIT_SHAPES = 2;
+u64 UNIT_TYPED = 3;
+
+/// A row of KNOWN: `count` failures of the unit `unit` have the class `class` of CLASSES.
+struct known_row {
+    u64 unit;
+    u64 class;
+    u64 count;
+}
+
+/// The count of the rows of KNOWN.
+u64 KNOWN_ROWS = 20;
+
+/// The known failures of the closed-world judgement, as one list for each family: the count of
+/// the failures of each unit by class, each a measured count. A unit and a class with no row have
+/// the count 0. A unit must give each count exactly (holds_known). So a count goes down only, and
+/// in the change that makes its function pass or makes the compiler refuse it. A count goes up
+/// only with an edit of this list. The expected output of each test names each failure: the key
+/// of a function of the typed family, and the line `fails the gate` of an item of the gate.
+known_row[KNOWN_ROWS] KNOWN = {
+    {UNIT_HAND, CLASS_MOVED, 1},
+    {UNIT_HAND, CLASS_RELEASED, 11},
+    {UNIT_HAND, CLASS_SCOPE, 2},
+    {UNIT_SEEDED, CLASS_MOVED, 1},
+    {UNIT_SEEDED, CLASS_RELEASED, 96},
+    {UNIT_SHAPES, CLASS_RELEASED, 18},
+    {UNIT_TYPED, CLASS_MOVED, 60},
+    {UNIT_TYPED, CLASS_RANGE_CALLBACK, 3},
+    {UNIT_TYPED + 1, CLASS_MOVED, 61},
+    {UNIT_TYPED + 1, CLASS_RANGE_CALLBACK, 1},
+    {UNIT_TYPED + 2, CLASS_MOVED, 58},
+    {UNIT_TYPED + 3, CLASS_MOVED, 57},
+    {UNIT_TYPED + 3, CLASS_SPAN_POINTER, 2},
+    {UNIT_TYPED + 4, CLASS_MOVED, 49},
+    {UNIT_TYPED + 5, CLASS_MOVED, 29},
+    {UNIT_TYPED + 5, CLASS_SPAN_POINTER, 3},
+    {UNIT_TYPED + 6, CLASS_MOVED, 41},
+    {UNIT_TYPED + 6, CLASS_SPAN_POINTER, 5},
+    {UNIT_TYPED + 7, CLASS_MOVED, 47},
+    {UNIT_TYPED + 7, CLASS_SPAN_POINTER, 3},
+};
+
+/// The count of the failures of the class `class` that KNOWN lists for the unit `unit`.
+fn known_count(u64 unit, u64 class) u64 {
+    u64 mut count = 0;
+    for (u64 mut r = 0; r < KNOWN.len; r++) {
+        if (KNOWN[r].unit == unit && KNOWN[r].class == class) {
+            count += KNOWN[r].count;
+        }
+    }
+    return count;
+}
+
+/// The count of the failures of the class `class` that KNOWN lists for each unit.
+fn known_of_class(u64 class) u64 {
+    u64 mut count = 0;
+    for (u64 mut r = 0; r < KNOWN.len; r++) {
+        if (KNOWN[r].class == class) {
+            count += KNOWN[r].count;
+        }
+    }
+    return count;
+}
+
+/// Holds the failures of the unit `unit` against KNOWN, and gives whether the unit gives the
+/// list exactly. `counts` holds the count of its failures of each class of CLASSES, then the count
+/// of its failures with no class. The unit must have no failure with no class, and the count that
+/// KNOWN lists for each class. It prints one line under `name` for each count that differs, and
+/// then the count of the failures that KNOWN lists for the unit. More failures than the list are
+/// new failures. Fewer mean that a function passes now: its count goes down in the same change.
+fn holds_known(string name, u64 unit, u64@ counts) bool {
+    u64 mut listed = 0;
+    bool mut held = counts[NO_CLASS] == 0;
+    if (!held) {
+        println(name, ": failures with no class ", counts[NO_CLASS], ": each is a new failure");
+    }
+    for (u64 mut class = 0; class < CLASS_COUNT; class++) {
+        u64 expected = known_count(unit, class);
+        listed += expected;
+        if (counts[class] > expected) {
+            println(name, ": class ", class_key(class), ": failures ", counts[class],
+                    ", KNOWN lists ", expected, ": a failure is new");
+            held = false;
+        } else if (counts[class] < expected) {
+            println(name, ": class ", class_key(class), ": failures ", counts[class],
+                    ", KNOWN lists ", expected, ": lower the count of KNOWN");
+            held = false;
+        }
+    }
+    println(name, ": failures in KNOWN ", listed);
+    return held;
+}
+
 /// Appends the key of the function of `f`: the names of its type, of its storage class and of
 /// each operation. A new row of a table changes the key of no function.
 fn append_key(strbuf.str_buf mut* b, failure* f) void {
@@ -1260,19 +1489,19 @@ fn append_kinds(strbuf.str_buf mut* b, failure* f) void {
 
 /// Prints the counts of `t` under `name`: the functions by verdict; the runs; the runs of the
 /// functions with exit 0 by end; the events of each run by kind, also of a rejected function;
-/// then, for the functions with exit 0, the error events by kind, the error events that the gate
-/// of the oracle tests judges and those of a kind that it trusts, the events by each other
-/// ruling, and the failures.
+/// then, for the functions with exit 0, the error events by kind, the error events of a kind
+/// that the disposition table does not trust and those of a kind that it trusts, the events by
+/// each other ruling, and the failures.
 fn print_totals(string name, totals* t) void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
-    u64 mut gated = 0;
+    u64 mut others = 0;
     u64 mut trusted = 0;
     for (u64 mut kind = 0; kind < KINDS; kind++) {
         if (disposition.TABLE[kind].disposition == disposition.disposition_kind.dk_trusted) {
             trusted += t->errors[kind];
         } else {
-            gated += t->errors[kind];
+            others += t->errors[kind];
         }
     }
     append_verdicts(&b, t);
@@ -1281,7 +1510,7 @@ fn print_totals(string name, totals* t) void {
     print_counts(name, ": ends: ", END_TEXT[1..], t->ends[1..], 5);
     print_counts(name, ": events: ", shadow.EVENT_TEXT[..], t->events[..], 4);
     print_counts(name, ": errors: ", shadow.EVENT_TEXT[..], t->errors[..], 4);
-    println(name, ": errors of the gate ", gated, ", of a kind that the gate trusts ", trusted);
+    println(name, ": errors of a trusted kind ", trusted, ", of another kind ", others);
     print_counts(name, ": not errors: ", RULING_TEXT[1..], t->rulings[1..], 2);
     println(name, ": faults with no error event ", t->silent, ", failures ", t->failures.len);
 }
@@ -1400,8 +1629,9 @@ u64 PARTS = 8;
 /// known failures of the part: a function that leaves the list, one that enters it and one that
 /// changes its class each change a line. With the arguments `<operations> <part> <parts>` it
 /// judges that part of that family, and prints the text of the first function of each class and
-/// of each function with no class after those lines. In both forms it gives 1 when a failure has
-/// no class, and 0 when each failure has a class of CLASSES.
+/// of each function with no class after those lines. With no argument it gives 0 only when the
+/// part gives the counts of KNOWN exactly (known_exit). With the arguments it gives 1 when a
+/// failure has no class, and 0 when each failure has a class of CLASSES (exit_of).
 fn run_part(u64 part, string@ args) i32 {
     u64 mut n = FAMILY;
     u64 mut k = part;
@@ -1422,16 +1652,31 @@ fn run_part(u64 part, string@ args) i32 {
     print_failures("typed", t);
     if (chosen) {
         print_examples(t);
+        return exit_of(t);
     }
-    return exit_of(t);
+    return known_exit("typed", UNIT_TYPED + part - 1, t);
 }
 
-/// The exit status of run_part for the counts `t`: 1 when a failure has no class.
+/// The exit status of run_part for the counts `t` of a family that KNOWN does not list: 1 when a
+/// failure has no class.
 fn exit_of(totals* t) i32 {
     if (class_count(t, NO_CLASS) > 0) {
         return 1;
     }
     return 0;
+}
+
+/// The exit status of run_part for the counts `t` of the unit `unit` of KNOWN: 0 when the unit
+/// gives its list exactly (holds_known), and 1 when it does not.
+fn known_exit(string name, u64 unit, totals* t) i32 {
+    u64[CLASS_COUNT + 1] mut counts = {};
+    for (u64 mut class = 0; class <= CLASS_COUNT; class++) {
+        counts[class] = class_count(t, class);
+    }
+    if (holds_known(name, unit, counts[..])) {
+        return 0;
+    }
+    return 1;
 }
 
 // Reads the three arguments of run_part, and gives whether they name a part of a family.

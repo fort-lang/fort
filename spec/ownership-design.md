@@ -355,31 +355,45 @@ other disposition (3.4), for sets 1 and 2. A PR merges only with 0 false accepts
 
 ### 3.7 The generator
 
-The vocabulary covers each case that a rule claims:
-- Locals: two `own` pointer locals, an `own` array of two elements, two index locals, two view
-  locals, and a struct local with an `own` field and a view field. Also a pointer to an `own`
-  local, a pointer to that pointer, a `u64` local, and an `own` global. Parameters: a pointer to a
-  struct with two `own` fields, a `bool` and an index.
-- Statements: `x = alloc`, `x = move y`, `del(move x)`, `x = null`, and a `del` and a `move`
-  through each pointer. A lend into each view local, into the view field and into a field through
-  the parameter, and a load through each view. A cast of a pointer to `u64` and back, a deferred
-  `del`, a call of each model extern of section 3.2, and `panic`.
-- Control: a call of a generated sibling, so that two functions form a component; an `if` on the
-  `bool`; a loop of two iterations; and `return`. Inputs: each value of the `bool`, the index
-  values 0 and 1, and each field of the struct parameter null or live.
+The typed family covers each case that a rule claims. It builds each function from three tables
+of `test/fort/support/generator.ft`. A function tests one place, a value of a type in a storage
+class, and each statement of it is an operation. So a new case is one row of a table.
+- `TYPES`: an owning pointer, a fixed array of owners, a struct with an owner field, an owner of a
+  struct with owners, an owned string, a span of owners, and a struct with a struct field that
+  holds an owner and a fixed array of owners.
+- `STORAGES`: a local, a parameter, a field through a pointer parameter, an element of a fixed
+  array, an element of an `own` span whose deferred `del(s, d)` releases it, and a global.
+- `OPERATIONS`, on the whole value: an `alloc`, a release, a store of the empty value, a `move`
+  out and in, and a drop. On an inner owner: the same. A lend into a view, a load through the
+  view and through the place, a lend through a callee, and a deferred drop. A cast of the owner,
+  a `del` that keeps the inner owners, a release and a `move` through a pointer to the place, a
+  `move` to and from a global, a call of each model extern of section 3.2, a call through a
+  function value, and `panic`.
+- Control: a call of the function itself; an `if` on the `bool`; a test of the place against null
+  in both senses; a loop of two iterations; a range loop; a `switch`; `?:`; and `return`. Inputs:
+  each value of the `bool`, the index values 0 and 1, and the place empty or live at the entry.
 
 The three families have their own bounds, so that each one reaches the length of its cases:
-1. Exhaustive: each function of at most N statements over the vocabulary. The first ticket
-   chooses N for 20 s or less in CI (estimated: N is 3).
-2. Seeded: each hand case of section 5.6, with one statement of the vocabulary inserted at each
-   point, or with one statement removed. That is about 37 × 8 × 40 = 11,840 functions (estimated).
+1. Typed: each function of at most N operations over the place of each cell of `TYPES` and
+   `STORAGES`. PR CI judges N = 2 (`test/fort/owner/typed/`), and `notes/testing.md` gives the
+   measures of N = 3 and of N = 4.
+2. Seeded: each hand case of section 5.6, with one statement over an owner place of the case
+   inserted at each point, or with one statement removed.
 3. Shapes: a chain of 1 to 4 pointers from `&x`, each a copy or the address of the one before.
    Then a release of `x`: a `del`, a `move`, a `del` through each link, or a call that can change
    `x`. Then a read through each link. Also each of 7 destinations of a borrow (a view local, a
    field, an element, memory, `_0`, a call argument, a `u64`) with each release and each read.
 
 The generator keeps only the functions that the verifier of `fir.md` 10 accepts. The test states
-the count of each family, and the three run in 60 s or less in CI.
+the count of each family. `test/fort/owner/oracle_test.ft` runs the seeded family and the shapes,
+and the typed family runs in 8 parts. Each step of a test takes 60 s or less in CI.
+
+Until 2026-11-13 the first family was the exhaustive family: each function of at most 2
+statements over a fixed list of 97 statements. The typed family took its place. It gives each
+event kind that the exhaustive family gave: `overwrite`, `leak` and `use after move`. A function
+of the typed family tests one place. A function of the exhaustive family held statements over two
+of 11 places, and its list held a pointer to a pointer to an owner and a view field. The shapes
+hold those two forms, and the hand cases hold functions with two owner places.
 
 ## 4. The analysis
 
