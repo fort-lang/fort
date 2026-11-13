@@ -16,8 +16,12 @@ local that an `&` names is in frame storage, and each `live` of it starts new st
 D10.1). Each byte of the storage of a local holds 0 when its `live` runs, and a `move` or a `del`
 leaves 0 in each byte of the place that it empties (sections 6 and 7, D10.1). A
 store of an aggregate reads the whole source before it changes the destination (section 6, D6.3,
-D19.3). The compiler implements the first five in later changes. The translator gives the
-sixth (section 12.1). No other part of FIR changes.
+D19.3). The compiler implements the first four in later changes. The translator gives the
+fifth: it writes the zero value at each `live` and into each place that a `move` or a `del`
+empties (section 12.2), and the interpreter clears the same bytes. The translator gives the
+sixth also (section 12.1). Until the fourth point is there, a local that an `&` names has one
+storage for the whole function, and each `live` of it writes the zero value into that storage.
+No other part of FIR changes.
 
 ## 1. Why FIR exists
 
@@ -374,11 +378,27 @@ Rules:
   allocate: such a local has storage for the whole function (D19.4). In the end state, a local
   that an `&` names is in frame storage (D10.1, D10.9): each `live` of it starts new storage, and
   its `dead` makes that storage dead. An `&` names a local when an `addr` or a `slice` of a fixed
-  array has a place whose base is the local. In the end state, each `live` also gives each byte of
-  the storage of its local the value 0, padding included, on the stack and in frame storage
-  (D10.1). Each byte of the storage of a parameter holds 0 when its run starts, before the argument
-  goes in, and each byte of the storage of a temporary holds 0 before the first store of the
-  statement that makes it. The lowering writes `dead` for each local of a scope at
+  array has a place whose base is the local. Each `live` also gives each byte of the storage of
+  its local the value 0, padding included (D10.1): the translator writes the zero value at the
+  `live` (12.2), and the interpreter clears the bytes. In the end state the same holds in frame
+  storage. Each byte of the storage of a parameter holds 0 when its run starts, before the
+  argument goes in, and each byte of the storage of a temporary holds 0 before the first store of
+  the statement that makes it. No statement can read that 0, so no instruction writes it. The
+  argument is a whole store, which writes each byte of the parameter (section 6). Rule V13 lets no
+  statement read a temporary before an assignment of the whole temporary, and rule V4 lets that
+  assignment leave no padding byte as it was. Rule V4 holds the same for the whole of `_0`.
+  No rule asks for an assignment of `_0` before a `return`, so `_0` gets its first value in a
+  different way. The translator stores the zero value into `%result`, the storage of a scalar
+  `_0`, in the entry block (12.1), and the interpreter gives each byte of `_0` the value 0 when
+  the call starts. Thus a `return` on a path with no assignment of `_0` gives the zero value of
+  a scalar result type in the two. The storage of an aggregate `_0` is the destination of the
+  caller (item 7), which an argument of the call can point to: `s = f(&s)` lets `f` read `s`
+  before the store of its result. Thus the translator writes no zero bytes into that storage.
+  After a `return` on a path with no assignment of an aggregate `_0`, the destination holds the
+  bytes that it held before the call in the translation, and zero bytes in the interpreter. The
+  lowering stores into `_0` on each path to a `return` of a function whose result type is not
+  `void`, so only FIR text reaches such a path. The
+  lowering writes `dead` for each local of a scope at
   each exit of that scope, after the deferred statements of that scope (section 9.5).
 - The lowering puts each store of D17.11, a write into a place of an `own` reference type that
   an lvalue of the source names, right after a `check(overwrite: p)` before the build-mode pass
@@ -665,21 +685,23 @@ so `G` is read before `bump` runs.
   builtin, which the runtime reports (D11.4).
 - **`T{...}`, `T[N]{...}` and `{...}`**: `const zero T` for `{}`, else `aggregate T(...)` with
   each member as an operand, in declaration or index order, and `const zero` for a field a
-  designated literal leaves out (D6.5). A designated literal is `aggregate zeroed T(...)`. A
+  designated literal leaves out (D6.5). A designated literal is `aggregate zeroed T(...)`. So is
+  a literal of a type with padding whose destination is the whole storage of a temporary or of
+  `_0`, because each byte of that storage holds 0 before the literal goes in (D10.1, rule V4). A
   member that is an operation goes into a temporary first. A member for a field or element of
   an owning type enters the aggregate as `move`: `move _t` for a temporary that holds an owning
   value, `move p` for a member written `move(lv)`. A
   string constant member stands as `const "..."`, and an empty literal `{}` or `T{}` as `const
   zero T` (D6.5). Any other member of an aggregate type is a place (D19.3). Every other member
   enters as `copy` or as a constant. A member that goes into a new temporary of a type with
-  padding, such as a call, a `?:` or a positional literal, is built in a temporary that
+  padding, such as a call or a `?:`, is built in a temporary that
   `_t = const zero T` zeroes first; so is the operand of a cast between aggregate types. The
   direct path built such a value in its destination and left the padding of the destination
   as it was. That padding is zero in a designated literal (D6.5), and in the field that a
   designated literal passes as the `sret` pointer of a call. So the translator leaves zero
-  padding wherever the direct path did. A designated literal and a cast write every byte of their
-  temporary, so they take no zero first, and the argument of a call takes none, since the
-  direct path built it in a temporary too.
+  padding wherever the direct path did. A literal and a cast write every byte of their
+  temporary, so they take no zero first. The argument of a call takes none: a literal writes
+  every byte of it, and the translator makes the storage of every other argument (12.3).
 
 ### 9.5 Scopes and deferred statements
 
@@ -815,7 +837,14 @@ statement index.
   requires. No two arms of one `switch` have one value, because an LLVM `switch` takes each case
   value once (12.4). A `check` of the kind `overwrite` has the place form `check(overwrite: p)`
   and not the operand form (section 8). `addr` takes a place whose type is not `void`, which has
-  no storage (5.3). `alloc` takes a type that is neither `void` nor a span (D10.2).
+  no storage (5.3). `alloc` takes a type that is neither `void` nor a span (D10.2). An `aggregate`
+  with no `zeroed` whose type has padding does not go into the whole storage of a temporary or of
+  `_0`. That rvalue leaves each padding byte as it was (section 6). No instruction writes the
+  zero bytes of a temporary (section 7), so the first store into a temporary must write each
+  padding byte (D10.1). The storage of `_0` of an aggregate type is the destination of the caller
+  in the translation and new storage in the interpreter, so the two would differ. The rule reads
+  the one statement and no path: it also refuses the form after a store that wrote the whole
+  storage. The lowering never writes that sequence.
 - **V5**: `move` applies only to a place of an owning type (5.6); `del` takes a `move` operand
   whose type is an `own` reference (D17.9).
 - **V6**: an assignment into a place of an owning type takes a `move` operand, `null T`, `zero T` or
@@ -1631,6 +1660,9 @@ does not read the tree and it does not read the build mode.
   arrives as `%<ident>.in` and is stored first (item 10).
 - `_0` of an aggregate type is `%ret.sret` (item 7). `_0` of a scalar type is the `alloca`
   `%result`, which `return` loads. The name has no dot, so no local collides with it (D19.5).
+  The entry block stores the zero value into `%result` after the last `alloca` and before the
+  store of the first parameter: `i8 0` for a `bool`, `ptr null` for a pointer, and the zero
+  constant for each other scalar type (D10.1). `%ret.sret` takes no such store (section 7).
 - A temporary of scalar type that exactly one statement assigns, and that only statements and
   terminators with the same statement index read, the failure blocks of that statement included,
   is a register `%t<N>` and has no `alloca` (item 11). The lowering of section 9 reads such a
@@ -1673,11 +1705,12 @@ does not read the tree and it does not read the build mode.
 - `add_overflows` and its two siblings print the `llvm.*.with.overflow` intrinsic of the type,
   then `extractvalue 0`, then `extractvalue 1`, in the order of item 15. The `add` of the same
   two operands in the continuation block prints nothing and takes the name of `extractvalue 0`
-  when three conditions hold: no assignment and no `del` follows the intrinsic in its block, the
-  `check` that ends that block tests the result of the intrinsic, and the `add` is the first
-  assignment or `del` of the continuation. Nothing then writes an operand between the two, and
-  the lowering of section 9.4 writes each checked `add` so. The same holds for `sub` and `mul`.
-  Every other `add` prints a plain `add`.
+  when three conditions hold: no assignment, no `del` and no `live` follows the intrinsic in its
+  block, the `check` that ends that block tests the result of the intrinsic, and the `add` is the
+  first assignment, `del` or `live` of the continuation. Nothing then writes an operand between
+  the two: a `live` writes its local, as an assignment does. The lowering of section 9.4 writes
+  each checked `add` so. The same holds for `sub` and `mul`. Every other `add` prints a plain
+  `add`.
 - `eq` to `ge` are `icmp` with the predicate the type selects, or `fcmp` for a float (item 15).
 - `cast<T>` is the instruction of item 12, or nothing when the LLVM value types are equal, in
   which case the result takes the name of its operand. A `cast` between aggregate types is a
@@ -1693,7 +1726,9 @@ does not read the tree and it does not read the build mode.
 - `call` is `call` with the signature of 12.3; an extern call carries `#3` (item 8).
 - `del(move p)` loads the pointer (field 0 for a span or `string`), calls `std.rt.free`, and
   zeroes `p` (item 17).
-- `live` and `dead` print nothing.
+- `live(_n)` writes the zero value into the storage of `_n` (section 7, D10.1): `llvm.memset` of
+  the whole `alloca` for an aggregate type, padding included, and a `store` of the zero constant
+  for a scalar type. A `bool` stores `i8 0`, with no `zext`. `dead` prints nothing.
 
 ### 12.3 Signatures
 

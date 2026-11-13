@@ -12,12 +12,14 @@ takes the option `--no-bounds-check`, which removes the index and span checks. T
 the option in a later change. Bootstrap-0 is frozen, and it keeps its option (D10.6). Sections 5 and
 6 describe the runtime and the IR of that date. Later changes of the compiler and the runtime bring
 these points to them: the allocator of the runtime (D10.3, D10.9), the check of `null` (D10.6), the
-entry of `regrow` (D12.2), frame storage (D10.9, D19.4), the release-only bit in `summaries/`
-(D9.11) and the zero bytes of a local (D10.1). Sections 2.2, 5.1 and 5.2, and item 10 of section
-6, name each point where it applies. The compiler gives `llvm.memmove` for each copy of an
-aggregate (D6.3, D19.3): items 3 and 8 of section 6 state it.
-D10.1 gives also the zero bytes of a global, of a place that a `move` or a `del` empties,
-and of an element of `regrow`. A later change measures each lowering against that rule.
+entry of `regrow` (D12.2), frame storage (D10.9, D19.4) and the release-only bit in `summaries/`
+(D9.11). Sections 2.2, 5.1 and 5.2, and item 10 of section 6, name each point where it applies.
+The compiler gives `llvm.memmove` for each copy of an aggregate (D6.3, D19.3): items 3 and 8 of
+section 6 state it. The compiler writes the zero bytes of a local on the stack (D10.1, item 10 of
+section 6); the same bytes in frame storage come with frame storage. D10.1 gives also the zero
+bytes of a global, of a place that a `move` or a `del` empties, and of an element of `regrow`.
+The run tests `run/structs/028_store_padding` to `030_store_padding_o2` hold a global and a place
+that a `move` empties. A later change measures each other lowering against that rule.
 
 Sections: 1 Command line; 2 Build pipeline; 3 Build modes; 4 Diagnostics; 5 The runtime;
 6 Code generation contract; 7 Testing; 8 Compiler architecture sketch; 9 Not in v1.
@@ -1560,9 +1562,12 @@ emitter's text is a change here.
     invents (an aggregate argument copy, a short-circuit slot). A name that embeds a fort
     identifier always contains a dot and an invented one never does, so a local named `tmp` is
     `%tmp.0` and cannot collide with `%tmp0` (D19.5). In the end state a local that an `&` names
-    is in frame storage, and it is no `alloca` (D19.4, D10.9). Each byte of the storage of a local
-    holds 0 when its declaration runs, on the stack and in frame storage (D10.1). The compiler
-    implements both in later changes.
+    is in frame storage, and it is no `alloca` (D19.4, D10.9). The compiler implements frame
+    storage in a later change. Each byte of the storage of a local holds 0 when its declaration
+    runs (D10.1). The compiler writes those bytes into the `alloca` of a named local at each run
+    of its declaration: `llvm.memset` over an aggregate, and a store of the zero constant for a
+    scalar (`fir.md` 12.2). The entry block stores the zero value into `%result` (`fir.md` 12.1).
+    In the end state the same bytes are 0 in frame storage.
 
     A scalar parameter arrives as `%<name>.in` and is stored into its slot immediately. An
     aggregate parameter is not copied again: its place is the caller-made copy the incoming
@@ -1894,6 +1899,7 @@ define dso_local i32 @"main.main"() #0 {
 entry:
   %result = alloca i32, align 4
   %tmp0 = alloca %fort.span, align 8
+  store i32 0, ptr %result, align 4
   %t0 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0
   store ptr @.str.0, ptr %t0, align 8
   %t1 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1
@@ -2002,6 +2008,7 @@ entry:
   %a.0 = alloca [3 x i32], align 4
   %i.1 = alloca i64, align 8
   %tmp0 = alloca %fort.span, align 8
+  store i32 0, ptr %result, align 4
   %t0 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0
   store ptr @.str.0, ptr %t0, align 8
   %t1 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1
@@ -2009,6 +2016,8 @@ entry:
   call void @"std.rt.print_str"(i32 1, ptr %tmp0)
   call void @"std.rt.print_char"(i32 1, i8 zeroext 10)
   call void @llvm.memset.p0.i64(ptr align 4 %a.0, i8 0, i64 12, i1 false)
+  call void @llvm.memset.p0.i64(ptr align 4 %a.0, i8 0, i64 12, i1 false)
+  store i64 0, ptr %i.1, align 8
   store i64 5, ptr %i.1, align 8
   %t2 = load i64, ptr %i.1, align 8
   %t3 = icmp uge i64 %t2, 3
@@ -2056,8 +2065,11 @@ attributes #8 = { cold noreturn nounwind "frame-pointer"="all" "probe-stack"="in
 ```
 
 The `@.str.1` constant is one line in the module and is wrapped here only to fit the page, as the
-`llvm.memmove` declaration of item 8 is. The locals are entry-block allocas, the array is zeroed
-with `llvm.memset`, the bounds check of item 16 branches to a failure block at the end of the
+`llvm.memmove` declaration of item 8 is. The locals are entry-block allocas. The first
+`llvm.memset` of `%a.0` and the `store i64 0` into `%i.1` are the zero bytes of each declaration
+(D10.1), and the second `llvm.memset` is the initializer `{}`. The `store i32 0` into `%result`
+in the entry block, here and in 6.1, is the zero value of the result (`fir.md` 12.1). The bounds
+check of item 16 branches to a failure block at the end of the
 function, the message of `print_str` is the `string` of the temporary `%tmp0`, which the call
 passes by its address (item 7), and `%fort.enum_member` is emitted although nothing uses it
 (item 2). The definition of `std.rt.fail_bounds` carries the `#8` of item 14 and ends with
