@@ -12,19 +12,35 @@
     "Rows whose name ends in a letter are further facets; D10.8 stands",
     "outside the cited universe. b0606efa replaced the direct emitter by the",
     "FIR path, so each row names the current line that decides the rule.",
-    "The stages are targeted: the FIR corpus, the area run/casts/ of the",
-    "language corpus, the gen_ and fir_ module suites, the driver_ module",
-    "suites and four more areas of the language corpus. run/casts/ stands",
+    "The stages are targeted: the FIR corpus, the verifier report of one",
+    "program, the area run/casts/ of the language corpus, the programs",
+    "that read the zero bytes of D10.1, the gen_ and fir_ module suites,",
+    "the driver_ module suites and four more areas of the language corpus.",
+    "run/casts/ stands",
     "before the module suites, so a row that changes the bytes of a copy is",
     "caught by a program that runs (D6.3) and not only by the text of a",
     "module. The table runs on a darwin host with --runner 'bash -c';",
     "ZERO_AR_DATE=1 keeps the md5 guard.",
+    "The rows of D10.1 hold the zero bytes of a local at each `live`, the",
+    "zero value of a scalar `_0` at the entry of its function and the",
+    "`aggregate zeroed` of a literal with padding into a temporary or `_0`;",
+    "row D10.1d mutates src/fort/fir_verify.ft, which holds that form.",
+    "Rule V4 of the mutant of D10.1b or D10.1c refuses the FIR of that mutant,",
+    "and a compile that the translator ends with a panic is an `ERROR` line",
+    "of a suite and no `FAIL` line. The second stage holds those two rows: it",
+    "writes the verifier report of one program whose temporaries have",
+    "padding and fails when the report is not empty. It stands before each",
+    "stage that compiles a program, because such a stage ends the round of",
+    "the two rows with `ERROR` lines only. The fourth stage runs",
+    "the programs that read the zero bytes before the IR text suites run,",
+    "so the log of a row shows the program that the mutant changes.",
     "The md5 guard reads the product compiler that the build links."
   ],
   "sources": [
     "src/fort/fir.ft",
     "src/fort/fir_llvm.ft",
     "src/fort/fir_lower.ft",
+    "src/fort/fir_verify.ft",
     "src/fort/gen.ft",
     "src/fort/gen_data.ft",
     "src/fort/gen_fir.ft"
@@ -37,8 +53,16 @@
       "command": "python3 test/fir/run_tests.py --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std"
     },
     {
+      "name": "the verifier report of a program with padded temporaries",
+      "command": "out=$(build/Darwin/debug/fort --std-dir build/Darwin/debug/std --fir-verify-report test/lang/run/structs/022_temporary_padding.ft 2>&1); status=$?; if [ $status -ne 0 ] || [ -n \"$out\" ]; then echo \"$out\"; echo \"FAIL the verifier report of test/lang/run/structs/022_temporary_padding.ft: exit $status and a report that is not empty\"; exit 1; fi; echo \"PASS the verifier report of test/lang/run/structs/022_temporary_padding.ft is empty\""
+    },
+    {
       "name": "the aggregate copies that run",
       "command": "python3 test/lang/run_tests.py --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std --cc /opt/homebrew/bin/clang --target arm64-apple-macosx11.0.0 --opt /opt/homebrew/bin/opt --verify-ir -j 10 --xfail test/lang/xfail.txt run/casts/"
+    },
+    {
+      "name": "the zero byte programs",
+      "command": "python3 test/lang/run_tests.py --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std --cc /opt/homebrew/bin/clang --target arm64-apple-macosx11.0.0 --opt /opt/homebrew/bin/opt --verify-ir -j 10 --xfail test/lang/xfail.txt run/declarations/ run/structs/ run/functions/015_"
     },
     {
       "name": "the emitter suites",
@@ -403,6 +427,83 @@
       "old": "    while (i < modules.count(set)) {\n        gen_module(g, &fp, modules.at(set, i));",
       "new": "    while (i + 1 < modules.count(set)) {\n        gen_module(g, &fp, modules.at(set, i));",
       "what": "the last module of the closure is not emitted"
+    },
+    {
+      "decision": "D10.1",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    case fir.stmt_kind.st_live:\n        live_zero(t, s->local);",
+      "new": "    case fir.stmt_kind.st_live:\n        t->pending.set = false;",
+      "what": "`live` writes no zero value into the storage of its local"
+    },
+    {
+      "decision": "D10.1b",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    if ((n->flags & ast.FLAG_DESIGNATED) != 0 || (fir.type_padded(t) && fresh_storage(lw, dst))) {",
+      "new": "    if ((n->flags & ast.FLAG_DESIGNATED) != 0) {",
+      "what": "a positional literal with padding into a temporary or `_0` is no `aggregate zeroed`"
+    },
+    {
+      "decision": "D10.1c",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    return kind == fir.local_kind.lk_temp || kind == fir.local_kind.lk_return;",
+      "new": "    return kind == fir.local_kind.lk_temp;",
+      "what": "a positional literal with padding into `_0` is no `aggregate zeroed`"
+    },
+    {
+      "decision": "D10.1d",
+      "file": "src/fort/fir_verify.ft",
+      "old": "    if (keeps_padding(w->f, s)) {",
+      "new": "    if (false && keeps_padding(w->f, s)) {",
+      "what": "rule V4 accepts an aggregate with padding and no `zeroed` into a temporary or `_0`"
+    },
+    {
+      "decision": "D10.1e",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "        live_zero(t, s->local);\n    case fir.stmt_kind.st_dead:",
+      "new": "        live_zero(t, s->local);\n        return;\n    case fir.stmt_kind.st_dead:",
+      "what": "a `live` in a continuation does not end the note of the overflow check"
+    },
+    {
+      "decision": "D10.1f",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    if (s->kind != fir.stmt_kind.st_dead) {",
+      "new": "    if (s->kind == fir.stmt_kind.st_assign || s->kind == fir.stmt_kind.st_del) {",
+      "what": "a `live` after the intrinsic in its block does not end the note of the block"
+    },
+    {
+      "decision": "D10.1g",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    case fir.stmt_kind.st_live:\n        live_zero(t, s->local);",
+      "new": "    case fir.stmt_kind.st_live:\n        if (fir.type_aggregate(fir.local_at(t->f, s->local)->ty)) {\n            live_zero(t, s->local);\n        }",
+      "what": "`live` writes no zero value into the storage of a scalar local"
+    },
+    {
+      "decision": "D10.1h",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    if (gen.place_is_bool(ty)) {\n        zero = gen.gen_const_unsigned(t->g, \"i8\", 0);\n    }\n    gen.gen_store(t->g, zero, place_addr(t, p), types.type_alignof(ty));",
+      "new": "    gen.gen_store(t->g, zero, place_addr(t, p), types.type_alignof(ty));",
+      "what": "the zero value of a `bool` local is a store of `i1`, not of the byte `i8 0`"
+    },
+    {
+      "decision": "D10.1i",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    if (t->locals[0].kind == storage.sk_result) {\n        live_zero(t, 0);",
+      "new": "    if (false && t->locals[0].kind == storage.sk_result) {\n        live_zero(t, 0);",
+      "what": "the entry block writes no zero value into `%result`, the storage of a scalar `_0`"
+    },
+    {
+      "decision": "D10.1j",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    if (t->locals[0].kind == storage.sk_result) {\n        live_zero(t, 0);",
+      "new": "    if (t->locals[0].kind == storage.sk_result || t->locals[0].kind == storage.sk_sret) {\n        live_zero(t, 0);",
+      "what": "the entry block writes zero bytes into `%ret.sret`, which an argument of the call can point to"
+    },
+    {
+      "decision": "D10.1k",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    case ast.ast_kind.k_cast, ast.ast_kind.k_brace_init, ast.ast_kind.k_struct_lit,\n        ast.ast_kind.k_array_lit:\n        return true;",
+      "new": "    case ast.ast_kind.k_cast, ast.ast_kind.k_brace_init, ast.ast_kind.k_struct_lit:\n        return true;",
+      "what": "a typed array literal with padding into a temporary takes a `const zero` first"
     },
     {
       "decision": "D10.2",

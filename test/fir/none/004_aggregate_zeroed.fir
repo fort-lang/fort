@@ -18,11 +18,11 @@
 //|     }
 //| }
 //|
-//| fn main.plain(_1 (b): u64) -> pair {
-//|     let _0: pair;
+//| fn main.plain(_1 (p): pair mut*, _2 (b): u64) -> void {
+//|     let _0: void;
 //|
 //|     bb0: {
-//|         _0 = aggregate pair(const u8 0, copy _1) #5:3 s1;
+//|         (*_1) = aggregate pair(const u8 0, copy _2) #5:3 s1;
 //|         return #6:1 s1;
 //|     }
 //| }
@@ -47,7 +47,8 @@
 // `aggregate zeroed T(...)` is the value of a designated literal: the translator zeroes the whole
 // destination, padding included (spec/fir.md 6). The parser reads `zeroed` as the mark only when
 // a type follows it, so `aggregate zeroed(...)` names a struct of that name, and the verifier
-// takes both forms.
+// takes both forms. `plain` writes the form with no `zeroed` through a pointer: `pair` has padding,
+// and rule V4 refuses that form into the whole `_0`.
 fn main.make(_1 (b): u64) -> pair {
     bb0: {
         _0 = aggregate zeroed pair(const zero u8, copy _1) #5:3 s1;
@@ -55,9 +56,9 @@ fn main.make(_1 (b): u64) -> pair {
     }
 }
 
-fn main.plain(_1 (b): u64) -> pair {
+fn main.plain(_1 (p): pair mut*, _2 (b): u64) -> void {
     bb0: {
-        _0 = aggregate pair(const u8 0, copy _1) #5:3 s1;
+        (*_1) = aggregate pair(const u8 0, copy _2) #5:3 s1;
         return #6:1 s1;
     }
 }

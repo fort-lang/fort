@@ -1,0 +1,126 @@
+//! run
+//! flags: -Xcc -O2
+//! stdout:
+//| 454040 integer
+//| 111 bool
+//| 111 float
+//| 111 pointer
+//| 111 enum
+// The declaration of a scalar local gives each byte of its storage the value 0 at each run,
+// before the initializer stores (D10.1). Each loop keeps a pointer to the local of the run before.
+// The initializer of the next run reads through that pointer. The compiler gives a local that an
+// `&` names one storage for the whole function at present (spec/fir.md 7), so the read sees the
+// storage of the new local after its zero bytes and before its first store. Each line holds one
+// class of scalar: the zero value is 0, `false`, 0.0, `null` and the first member of the enum.
+// This program stands at the default level, at `-Xcc -O0`, at `-Xcc -O2` and at `--release`: a
+// compiler that writes no zero value at the declaration prints 458625, 101, 122, 122 and 122.
+// A kept pointer reaches a scalar local between its zero bytes and its first store by 2 routes.
+// This program takes the loop route: the pointer names the local of the run before in the same
+// call, and each build and the interpreter give the same output. The other route is a pointer
+// to a local of a call that returned, which a later call reads in its own local. The builds
+// give different output on that route until frame storage is in the compiler (D10.9), so this
+// program does not take it. When a local that an `&` names gets new storage at each run
+// (D10.9), the pointer of the loop route reads dead storage, and the output of this program
+// changes to those values.
+enum color {
+    red,
+    green,
+    blue,
+}
+
+fn peek(u64* p) u64 {
+    return *p;
+}
+
+fn negated(bool* p) bool {
+    return !*p;
+}
+
+fn raised(f64* p) f64 {
+    return *p + 1.5;
+}
+
+fn chosen(u64* * p, u64* first, u64* second) u64* {
+    if (*p == null) {
+        return first;
+    }
+    return second;
+}
+
+fn after(color* p) color {
+    if (*p == color.red) {
+        return color.blue;
+    }
+    return color.green;
+}
+
+fn integer() void {
+    u64 mut keep = 5;
+    u64* mut p = &keep;
+    u64 mut sum = 0;
+    for (u64 mut i = 0; i < 3; i++) {
+        u64 x = peek(p) + 40;
+        p = &x;
+        sum = sum * 100 + x;
+    }
+    println(sum, " integer");
+}
+
+fn flag() void {
+    bool mut keep = false;
+    bool* mut p = &keep;
+    u64 mut sum = 0;
+    for (u64 mut i = 0; i < 3; i++) {
+        bool b = negated(p);
+        p = &b;
+        sum = sum * 10 + (b ? 1 : 0);
+    }
+    println(sum, " bool");
+}
+
+fn float() void {
+    f64 mut keep = 0.0;
+    f64* mut p = &keep;
+    u64 mut sum = 0;
+    for (u64 mut i = 0; i < 3; i++) {
+        f64 f = raised(p);
+        p = &f;
+        sum = sum * 10 + (f == 1.5 ? 1 : 2);
+    }
+    println(sum, " float");
+}
+
+fn pointer() void {
+    u64 one = 1;
+    u64 two = 2;
+    u64* mut keep = null;
+    u64* * mut p = &keep;
+    u64 mut sum = 0;
+    for (u64 mut i = 0; i < 3; i++) {
+        u64* q = chosen(p, &one, &two);
+        p = &q;
+        sum = sum * 10 + *q;
+    }
+    println(sum, " pointer");
+}
+
+fn member() void {
+    color mut keep = color.red;
+    color* mut p = &keep;
+    u64 mut sum = 0;
+    for (u64 mut i = 0; i < 3; i++) {
+        color c = after(p);
+        p = &c;
+        sum = sum * 10 + (c == color.blue ? 1 : 2);
+    }
+    println(sum, " enum");
+}
+
+fn main() i32 {
+    integer();
+    flag();
+    float();
+    pointer();
+    member();
+    return 0;
+}

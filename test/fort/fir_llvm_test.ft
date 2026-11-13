@@ -38,13 +38,15 @@ string[9] WORKED = {
 fn the_folded_temporary_of_the_worked_example_has_no_storage() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[25] want = {
+    string[27] want = {
         "entry:",
         "  %result = alloca i32, align 4",
         "  %c.0 = alloca i8, align 1",
         "  %p.1 = alloca ptr, align 8",
+        "  store i32 0, ptr %result, align 4",
         "  %t0 = zext i1 %c.in to i8",
         "  store i8 %t0, ptr %c.0, align 1",
+        "  store ptr null, ptr %p.1, align 8",
         "  store ptr null, ptr %p.1, align 8",
         "  %t1 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, i32 2, i32 22)",
         "  store ptr %t1, ptr %p.1, align 8",
@@ -140,11 +142,12 @@ fn a_scalar_result_is_the_alloca_result() void {
     *f = llvm_env.lower(e, SHAPES[..], "wrap", pass_env.CHECKED);
     defer fir.func_drop_made(move(f));
     assert(llvm_env.storage_of(f, 3) == fir_llvm.storage.sk_register);
-    string[10] want = {
+    string[11] want = {
         "entry:",
         "  %result = alloca i32, align 4",
         "  %a.0 = alloca i32, align 4",
         "  %b.1 = alloca i32, align 4",
+        "  store i32 0, ptr %result, align 4",
         "  store i32 %a.in, ptr %a.0, align 4",
         "  store i32 %b.in, ptr %b.1, align 4",
         "  %t0 = load i32, ptr %a.0, align 4",
@@ -153,6 +156,112 @@ fn a_scalar_result_is_the_alloca_result() void {
         "  store i32 %t2, ptr %result, align 4",
     };
     llvm_env.expect(e, llvm_env.translate(e, f), want[..]);
+}
+
+// FIR text in which a `return` runs with no assignment of `_0` before it. No rule of the verifier
+// asks for that assignment: test/fir/run/011_result_zero.fir runs the pass `verify` on such text.
+string[38] NO_RESULT = {
+    "fn main.word() -> u64 {",
+    "    bb0: {",
+    "        return;",
+    "    }",
+    "}",
+    "fn main.flag() -> bool {",
+    "    bb0: {",
+    "        return;",
+    "    }",
+    "}",
+    "fn main.real() -> f64 {",
+    "    bb0: {",
+    "        return;",
+    "    }",
+    "}",
+    "fn main.spot() -> i32* {",
+    "    bb0: {",
+    "        return;",
+    "    }",
+    "}",
+    "fn main.pick(_1 (c): bool) -> i32 {",
+    "    bb0: {",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _0 = const i32 5;",
+    "        goto bb2;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    "fn main.whole() -> pair {",
+    "    bb0: {",
+    "        return;",
+    "    }",
+    "}",
+    "",
+};
+
+// The entry block stores the zero value into `%result` before the first statement: a `return` on
+// a path with no assignment of `_0` loads that value, as the interpreter gives 0 for the bytes of
+// `_0` (spec/fir.md 12.1, D10.1). The zero is `0` for an integer, `i8 0` for a `bool`, `0.0` for
+// a float and `null` for a pointer. An aggregate `_0` is `%ret.sret`, the storage of the caller,
+// and takes no store.
+fn the_entry_block_stores_zero_into_a_scalar_result() void {
+    llvm_env.env mut* own e = llvm_env.make();
+    defer llvm_env.drop_made(move(e));
+    string[4] prelude = {"struct pair {", "    u8 a;", "    u64 b;", "}"};
+    // `m` lives in an allocation, so that the leak rule proves its end: no call changes the
+    // pointer, and drop_made holds each release once.
+    fir.module mut* own m = fir.module_make();
+    *m = llvm_env.parse(e, prelude[..], NO_RESULT[..]);
+    defer fir.module_drop_made(move(m));
+    string[3] word = {
+        "entry:",
+        "  %result = alloca i64, align 8",
+        "  store i64 0, ptr %result, align 8",
+    };
+    llvm_env.expect(e, llvm_env.translate(e, fir.module_function_at(m, 0)), word[..]);
+    string[3] flag = {
+        "entry:",
+        "  %result = alloca i8, align 1",
+        "  store i8 0, ptr %result, align 1",
+    };
+    llvm_env.expect(e, llvm_env.translate(e, fir.module_function_at(m, 1)), flag[..]);
+    string[3] real = {
+        "entry:",
+        "  %result = alloca double, align 8",
+        "  store double 0.0, ptr %result, align 8",
+    };
+    llvm_env.expect(e, llvm_env.translate(e, fir.module_function_at(m, 2)), real[..]);
+    string[3] spot = {
+        "entry:",
+        "  %result = alloca ptr, align 8",
+        "  store ptr null, ptr %result, align 8",
+    };
+    llvm_env.expect(e, llvm_env.translate(e, fir.module_function_at(m, 3)), spot[..]);
+    // the store of zero stands before the store of the parameter and before each block
+    string[5] pick = {
+        "entry:",
+        "  %result = alloca i32, align 4",
+        "  %c.0 = alloca i8, align 1",
+        "  store i32 0, ptr %result, align 4",
+        "  %t0 = zext i1 %c.in to i8",
+    };
+    llvm_env.contains(e, llvm_env.translate(e, fir.module_function_at(m, 4)), pick[..]);
+    // the whole function: the `return` loads `%result`, which only the entry block stores
+    string[6] loaded = {
+        "entry:",
+        "  %result = alloca i64, align 8",
+        "  store i64 0, ptr %result, align 8",
+        "  %t0 = load i64, ptr %result, align 8",
+        "  ret i64 %t0",
+        "}",
+    };
+    llvm_env.contains(e, llvm_env.whole(e, fir.module_function_at(m, 0)), loaded[..]);
+    // an aggregate `_0` has no alloca and no store: the entry block is empty
+    assert(llvm_env.storage_of(fir.module_function_at(m, 5), 0) == fir_llvm.storage.sk_sret);
+    string[1] none = {"entry:"};
+    llvm_env.expect(e, llvm_env.translate(e, fir.module_function_at(m, 5)), none[..]);
 }
 
 // ---- the classification -------------------------------------------------------------------------
@@ -259,16 +368,18 @@ fn a_compound_assignment_over_a_conditional() void {
     assert(llvm_env.storage_of(f, 4) == fir_llvm.storage.sk_register);
     assert(llvm_env.storage_of(f, 5) == fir_llvm.storage.sk_slot);
     assert(llvm_env.storage_of(f, 6) == fir_llvm.storage.sk_register);
-    string[29] want = {
+    string[31] want = {
         "entry:",
         "  %result = alloca i32, align 4",
         "  %c.0 = alloca i8, align 1",
         "  %x.1 = alloca i32, align 4",
         "  %y.2 = alloca i32, align 4",
         "  %tmp0 = alloca i32, align 4",
+        "  store i32 0, ptr %result, align 4",
         "  %t0 = zext i1 %c.in to i8",
         "  store i8 %t0, ptr %c.0, align 1",
         "  store i32 %x.in, ptr %x.1, align 4",
+        "  store i32 0, ptr %y.2, align 4",
         "  %t1 = load i32, ptr %x.1, align 4",
         "  store i32 %t1, ptr %y.2, align 4",
         "  %t2 = load i32, ptr %y.2, align 4",
@@ -303,10 +414,11 @@ fn an_enum_value_for_its_failure_block_is_a_register() void {
     defer fir.func_drop_made(move(f));
     assert(fir.local_count(f) == 3);
     assert(llvm_env.storage_of(f, 2) == fir_llvm.storage.sk_register);
-    string[16] want = {
+    string[17] want = {
         "entry:",
         "  %result = alloca i32, align 4",
         "  %v.0 = alloca i32, align 4",
+        "  store i32 0, ptr %result, align 4",
         "  store i32 %v.in, ptr %v.0, align 4",
         "  %t0 = load i32, ptr %v.0, align 4",
         "  %t1 = sext i32 %t0 to i64",
@@ -332,12 +444,13 @@ fn the_short_circuit_temporary_is_a_slot() void {
     *f = llvm_env.lower(e, CASES[..], "both", pass_env.CHECKED);
     defer fir.func_drop_made(move(f));
     assert(llvm_env.storage_of(f, 3) == fir_llvm.storage.sk_slot);
-    string[25] want = {
+    string[26] want = {
         "entry:",
         "  %result = alloca i8, align 1",
         "  %a.0 = alloca i8, align 1",
         "  %b.1 = alloca i8, align 1",
         "  %tmp0 = alloca i8, align 1",
+        "  store i8 0, ptr %result, align 1",
         "  %t0 = zext i1 %a.in to i8",
         "  store i8 %t0, ptr %a.0, align 1",
         "  %t1 = zext i1 %b.in to i8",
@@ -374,13 +487,15 @@ fn the_range_counter_is_a_slot() void {
     assert(llvm_env.storage_of(f, 5) == fir_llvm.storage.sk_slot);
     assert(llvm_env.storage_of(f, 6) == fir_llvm.storage.sk_register);
     assert(llvm_env.storage_of(f, 7) == fir_llvm.storage.sk_register);
-    string[37] want = {
+    string[40] want = {
         "entry:",
         "  %result = alloca i32, align 4",
         "  %t.1 = alloca i32, align 4",
         "  %x.2 = alloca i32, align 4",
         "  %tmp0 = alloca %fort.span, align 8",
         "  %tmp1 = alloca i64, align 8",
+        "  store i32 0, ptr %result, align 4",
+        "  store i32 0, ptr %t.1, align 4",
         "  store i32 0, ptr %t.1, align 4",
         "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %s.in, \\",
         "i64 16, i1 false)",
@@ -393,6 +508,7 @@ fn the_range_counter_is_a_slot() void {
         "  %t3 = icmp ult i64 %t0, %t2",
         "",
         "L2:",
+        "  store i32 0, ptr %x.2, align 4",
         "  %t4 = load i64, ptr %tmp1, align 8",
         "  %t5 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0",
         "  %t6 = load ptr, ptr %t5, align 8",
@@ -428,10 +544,12 @@ fn an_address_is_a_register_with_no_instruction() void {
     assert(llvm_env.storage_of(f, 1) == fir_llvm.storage.sk_named);
     assert(llvm_env.storage_of(f, 2) == fir_llvm.storage.sk_register);
     u64 before = llvm_env.errors(e);
-    string[6] want = {
+    string[8] want = {
         "entry:",
         "  %result = alloca i32, align 4",
         "  %v.0 = alloca i32, align 4",
+        "  store i32 0, ptr %result, align 4",
+        "  store i32 0, ptr %v.0, align 4",
         "  store i32 5, ptr %v.0, align 4",
         "  %t0 = call i32 @\"main.lend\"(ptr %v.0)",
         "  store i32 %t0, ptr %result, align 4",
@@ -548,19 +666,21 @@ fn the_rules_that_no_lowered_function_reaches() void {
     fir.func* unnamed = fir.module_function_at(m, 0);
     assert(llvm_env.storage_of(unnamed, 1) == fir_llvm.storage.sk_none);
     assert(llvm_env.storage_of(unnamed, 2) == fir_llvm.storage.sk_none);
-    string[3] none = {
+    string[4] none = {
         "entry:",
         "  %result = alloca i32, align 4",
+        "  store i32 0, ptr %result, align 4",
         "  store i32 1, ptr %result, align 4",
     };
     llvm_env.expect(e, llvm_env.translate(e, unnamed), none[..]);
     // mixed: s2 reads what s1 assigns
     fir.func* mixed = fir.module_function_at(m, 1);
     assert(llvm_env.storage_of(mixed, 1) == fir_llvm.storage.sk_slot);
-    string[6] slot = {
+    string[7] slot = {
         "entry:",
         "  %result = alloca i32, align 4",
         "  %tmp0 = alloca i32, align 4",
+        "  store i32 0, ptr %result, align 4",
         "  store i32 1, ptr %tmp0, align 4",
         "  %t0 = load i32, ptr %tmp0, align 4",
         "  store i32 %t0, ptr %result, align 4",
@@ -569,10 +689,11 @@ fn the_rules_that_no_lowered_function_reaches() void {
     // early: bb1 reads `_1` before bb2 assigns it in the order of translation
     fir.func* early = fir.module_function_at(m, 2);
     assert(llvm_env.storage_of(early, 1) == fir_llvm.storage.sk_slot);
-    string[10] late = {
+    string[11] late = {
         "entry:",
         "  %result = alloca i32, align 4",
         "  %tmp0 = alloca i32, align 4",
+        "  store i32 0, ptr %result, align 4",
         "",
         "L1:",
         "  %t0 = load i32, ptr %tmp0, align 4",
@@ -586,10 +707,11 @@ fn the_rules_that_no_lowered_function_reaches() void {
     fir.func* pointed = fir.module_function_at(m, 3);
     assert(llvm_env.storage_of(pointed, 1) == fir_llvm.storage.sk_slot);
     assert(llvm_env.storage_of(pointed, 2) == fir_llvm.storage.sk_register);
-    string[6] through = {
+    string[7] through = {
         "entry:",
         "  %result = alloca i32, align 4",
         "  %tmp0 = alloca i32, align 4",
+        "  store i32 0, ptr %result, align 4",
         "  store i32 7, ptr %tmp0, align 4",
         "  %t0 = load i32, ptr %tmp0, align 4",
         "  store i32 %t0, ptr %result, align 4",
@@ -660,10 +782,11 @@ string[42] PLACES = {
 fn a_field_through_a_pointer() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[8] want = {
+    string[9] want = {
         "entry:",
         "  %result = alloca i64, align 8",
         "  %p.0 = alloca ptr, align 8",
+        "  store i64 0, ptr %result, align 8",
         "  store ptr %p.in, ptr %p.0, align 8",
         "  %t0 = load ptr, ptr %p.0, align 8",
         "  %t1 = getelementptr inbounds %struct.main.pair, ptr %t0, i32 0, i32 1",
@@ -678,10 +801,11 @@ fn a_field_through_a_pointer() void {
 fn an_index_on_a_fixed_array() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[11] want = {
+    string[12] want = {
         "entry:",
         "  %result = alloca i32, align 4",
         "  %i.1 = alloca i64, align 8",
+        "  store i32 0, ptr %result, align 4",
         "  store i64 %i.in, ptr %i.1, align 8",
         "  %t0 = load i64, ptr %i.1, align 8",
         "  %t1 = icmp uge i64 %t0, 4",
@@ -699,10 +823,11 @@ fn an_index_on_a_fixed_array() void {
 fn an_index_on_a_span() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[15] want = {
+    string[16] want = {
         "entry:",
         "  %result = alloca i32, align 4",
         "  %i.1 = alloca i64, align 8",
+        "  store i32 0, ptr %result, align 4",
         "  store i64 %i.in, ptr %i.1, align 8",
         "  %t0 = load i64, ptr %i.1, align 8",
         "  %t1 = getelementptr inbounds %fort.span, ptr %s.in, i32 0, i32 1",
@@ -723,10 +848,11 @@ fn an_index_on_a_span() void {
 fn a_deref() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[7] want = {
+    string[8] want = {
         "entry:",
         "  %result = alloca i32, align 4",
         "  %p.0 = alloca ptr, align 8",
+        "  store i32 0, ptr %result, align 4",
         "  store ptr %p.in, ptr %p.0, align 8",
         "  %t0 = load ptr, ptr %p.0, align 8",
         "  %t1 = load i32, ptr %t0, align 4",
@@ -739,10 +865,11 @@ fn a_deref() void {
 fn an_index_on_a_string() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[15] want = {
+    string[16] want = {
         "entry:",
         "  %result = alloca i8, align 1",
         "  %i.1 = alloca i64, align 8",
+        "  store i8 0, ptr %result, align 1",
         "  store i64 %i.in, ptr %i.1, align 8",
         "  %t0 = load i64, ptr %i.1, align 8",
         "  %t1 = getelementptr inbounds %fort.span, ptr %s.in, i32 0, i32 1",
@@ -763,9 +890,10 @@ fn an_index_on_a_string() void {
 fn a_global() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[4] want = {
+    string[5] want = {
         "entry:",
         "  %result = alloca i32, align 4",
+        "  store i32 0, ptr %result, align 4",
         "  %t0 = load i32, ptr @\"main.G\", align 4",
         "  store i32 %t0, ptr %result, align 4",
     };
@@ -792,10 +920,11 @@ fn a_bool_field_stores_and_loads_through_i8() void {
         "  store i8 %t5, ptr %t4, align 1",
     };
     llvm_env.expect(e, llvm_env.lowered(e, PLACES[..], "set", pass_env.CHECKED), want[..]);
-    string[10] load = {
+    string[11] load = {
         "entry:",
         "  %result = alloca i8, align 1",
         "  %f.0 = alloca ptr, align 8",
+        "  store i8 0, ptr %result, align 1",
         "  store ptr %f.in, ptr %f.0, align 8",
         "  %t0 = load ptr, ptr %f.0, align 8",
         "  %t1 = getelementptr inbounds %struct.main.flags, ptr %t0, i32 0, i32 0",
@@ -813,11 +942,12 @@ fn a_bool_field_stores_and_loads_through_i8() void {
 fn projections_chain_in_order() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[15] want = {
+    string[16] want = {
         "entry:",
         "  %result = alloca i32, align 4",
         "  %p.0 = alloca ptr, align 8",
         "  %i.1 = alloca i64, align 8",
+        "  store i32 0, ptr %result, align 4",
         "  store ptr %p.in, ptr %p.0, align 8",
         "  store i64 %i.in, ptr %i.1, align 8",
         "  %t0 = load i64, ptr %i.1, align 8",
@@ -831,10 +961,11 @@ fn projections_chain_in_order() void {
         "  store i32 %t5, ptr %result, align 4",
     };
     llvm_env.expect(e, llvm_env.lowered(e, PLACES[..], "deep", pass_env.CHECKED), want[..]);
-    string[8] header = {
+    string[9] header = {
         "entry:",
         "  %result = alloca i64, align 8",
         "  %s.0 = alloca ptr, align 8",
+        "  store i64 0, ptr %result, align 8",
         "  store ptr %s.in, ptr %s.0, align 8",
         "  %t0 = load ptr, ptr %s.0, align 8",
         "  %t1 = getelementptr inbounds %fort.span, ptr %t0, i32 0, i32 1",
@@ -849,6 +980,7 @@ fn main() i32 {
     an_aggregate_result_and_parameter_have_no_alloca();
     a_void_result_has_no_storage();
     a_scalar_result_is_the_alloca_result();
+    the_entry_block_stores_zero_into_a_scalar_result();
     println("locals ok");
     an_index_before_a_conditional_is_a_register();
     a_compound_assignment_over_a_conditional();

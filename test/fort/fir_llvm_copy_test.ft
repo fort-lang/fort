@@ -89,14 +89,16 @@ fn copies(llvm_env.env* e, string got, u64 n) void {
 fn a_store_through_two_views_is_a_memmove() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[12] want = {
+    string[14] want = {
         "entry:",
         "  %big.0 = alloca ptr, align 8",
         "  %shifted.1 = alloca ptr, align 8",
         "  %head.2 = alloca ptr, align 8",
         "  store ptr %big.in, ptr %big.0, align 8",
+        "  store ptr null, ptr %shifted.1, align 8",
         "  %t0 = load ptr, ptr %big.0, align 8",
         "  store ptr %t0, ptr %shifted.1, align 8",
+        "  store ptr null, ptr %head.2, align 8",
         "  %t1 = load ptr, ptr %big.0, align 8",
         "  store ptr %t1, ptr %head.2, align 8",
         "  %t2 = load ptr, ptr %head.2, align 8",
@@ -156,11 +158,12 @@ fn a_parameter_into_the_result_is_a_memmove() void {
 fn a_named_local_is_copied_with_a_memmove() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[10] want = {
+    string[11] want = {
         "entry:",
         "  %from.0 = alloca ptr, align 8",
         "  %x.1 = alloca %struct.main.pair, align 8",
         "  store ptr %from.in, ptr %from.0, align 8",
+        "  call void @llvm.memset.p0.i64(ptr align 8 %x.1, i8 0, i64 16, i1 false)",
         "  %t0 = load ptr, ptr %from.0, align 8",
         "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %x.1, ptr align 8 %t0, i64 16, i1 false)",
         "  %t1 = load ptr, ptr %from.0, align 8",
@@ -195,11 +198,13 @@ fn an_argument_slot_is_filled_with_a_memmove() void {
 }
 
 // The members of an aggregate value are read before the destination is written: each goes into a
-// slot of its own, and each slot is then copied out. The 4 copies are `llvm.memmove`.
+// slot of its own, and each slot is then copied out. The 4 copies are `llvm.memmove`. `pair` has
+// padding, so `llvm.memset` writes the zero bytes of the result after the last read and before
+// the first copy out of a slot (D10.1).
 fn the_members_of_an_aggregate_go_through_slots() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
-    string[13] want = {
+    string[14] want = {
         "entry:",
         "  %from.0 = alloca ptr, align 8",
         "  %tmp0 = alloca %struct.main.pair, align 8",
@@ -209,6 +214,7 @@ fn the_members_of_an_aggregate_go_through_slots() void {
         "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %t0, i64 16, i1 false)",
         "  %t1 = load ptr, ptr %from.0, align 8",
         "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %t1, i64 16, i1 false)",
+        "  call void @llvm.memset.p0.i64(ptr align 8 %ret.sret, i8 0, i64 32, i1 false)",
         "  %t2 = getelementptr inbounds %struct.main.outer, ptr %ret.sret, i32 0, i32 0",
         "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %t2, ptr align 8 %tmp0, i64 16, i1 false)",
         "  %t3 = getelementptr inbounds %struct.main.outer, ptr %ret.sret, i32 0, i32 1",
