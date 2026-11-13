@@ -66,7 +66,11 @@ apply to it (ROWS_ONLY). Each such file is indexed with the `--cfg` options of t
 directive of its test (lang_options).
 
 Source is UTF-8 (D2.1). The lint reports the first byte of a file that is no UTF-8 text, and
-makes each other check of that file too (source_text).
+makes each text check of that file too (source_text). A text check reads the text of the file
+and no index (text_problems, refused_declaration_problems). The compiler rejects such a file,
+so the index holds no record of it. The lint gives the error of the compiler at the first
+position of the file. A check that reads the index (the names, the rows) reports nothing for
+the file until the byte is gone.
 
 The naming checks of notes/style.md 3.1 apply to a file of `src/fort`, `src/lsp` and `std`
 by its path. The prefix check applies in each directory of those roots. The function and
@@ -548,9 +552,11 @@ def source_text(data):
     """The text of the bytes `data` of one file, and the problem of its first byte that is no
     UTF-8 text, or None (D2.1).
 
-    The decoder gives U+FFFD for each such byte, so the text has each line of the file and the
-    other checks read it. The column of the problem is a byte column, as a column of the index
-    is (D20.3). The line of the problem counts `\n` only, as the line of the compiler does. A
+    The decoder gives U+FFFD for each such byte, so the text has each line of the file and
+    each text check reads it. A check that reads the index reports nothing for such a file: the
+    compiler rejects the file, so the index holds no record of it (lint_files). The column of the
+    problem is a byte column, as a column of the index is (D20.3). The line of the problem
+    counts `\n` only, as the line of the compiler does. A
     `\r` alone starts no line of the problem, and the column counts each byte after the last
     `\n`, the 3 bytes of a byte order mark too. A line end of the text is `\n`, also where the
     file holds `\r\n` or `\r`, as a read in text mode gives it.

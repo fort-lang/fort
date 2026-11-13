@@ -25,7 +25,16 @@ implement the five in later changes.
 
 Source files are UTF-8 with the extension `.ft`; an optional leading byte-order mark is skipped.
 Whitespace is space, tab, `\n` and `\r`; it separates tokens and is otherwise ignored. Non-ASCII
-bytes are permitted only inside string literals and comments. `//` starts a comment that ends at
+bytes are permitted only inside string literals and comments. The bytes there are well-formed
+UTF-8 sequences. A byte sequence that is no well-formed UTF-8 sequence is a lexical error in each
+place of the file: in code, in a comment and in a string literal. Such a sequence is an overlong
+form, a surrogate, a code point above U+10FFFF, a continuation byte with no first byte, or a
+sequence that the end of the file or another byte cuts. The compiler rejects the file. It
+reports the first byte of the sequence, with 2 exceptions (D14.2): an earlier lexical error of
+the same line is the one error of that line, and a file gives 20 diagnostics at most. A byte
+order mark at the start is no text and takes no column; U+FEFF after the start is text. The
+escape `\xHH` is ASCII text in the file, so it puts each byte into a string value (2.4, D3.7).
+`//` starts a comment that ends at
 the end of the line, and it is the only comment form: fort has no block comments, so a region is
 commented out one line at a time. The adjacent pair `/*` is a lexical error rather than a
 division by a dereference, which catches the habit brought from C; separate the operators to
@@ -72,8 +81,10 @@ f32 y = 1.0f;             // error: float literals have no suffix
 ### 2.4 Char and string literals (D2.7, D2.8, D2.9, D3.7)
 
 A char literal is `'x'` where `x` is one printable ASCII character (0x20 to 0x7E) other than `'`
-or `\`, or one escape. A string literal is `"..."` holding any bytes except `"`, `\` and a raw
-newline, plus escapes. The escapes, valid in both, are `\n` (0x0A), `\t` (0x09), `\r` (0x0D),
+or `\`, or one escape. A string literal is `"..."` holding bytes other than `"`, `\` and a raw
+newline, plus escapes. Those bytes are well-formed UTF-8 text (2.1). The escape `\xHH` gives any
+byte, so only that escape puts a byte that is no UTF-8 text into the value (D3.7).
+The escapes, valid in both, are `\n` (0x0A), `\t` (0x09), `\r` (0x0D),
 `\0` (0x00), `\\`, `\'`, `\"` and `\xHH` with exactly two hex digits; anything else after `\` is
 an error. A string literal has type `string` and is stored in read-only memory with a trailing
 NUL that `.len` does not count. A raw newline inside a string is an error, adjacent literals do

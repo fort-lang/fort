@@ -82,7 +82,10 @@ class Tree:
     def write(self, rel, text):
         path = self.root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
+        if isinstance(text, bytes):
+            path.write_bytes(text)
+        else:
+            path.write_text(text)
 
     def remove(self, rel):
         (self.root / rel).unlink()
@@ -222,6 +225,24 @@ fn bit(string who) void {
                 "//! run\n//! signal: ABRT\n//! stderr: panic: vec.pop: empty\n",
         })
         self.assertGreen(tree)
+
+    def test_a_language_file_that_is_no_utf8_text_is_read(self):
+        # A fail test of D2.1 holds bytes that are no UTF-8 text. The tool reads its header and
+        # reports no problem, with the byte in the header, after it, and at the end of the file.
+        bad = {"test/lang/fail/lexical/019_in_header.ft": b"//! fail\n// caf\xe9\nfn f() void {}\n",
+               "test/lang/fail/lexical/020_in_code.ft": b"//! fail\nstring s = \"\xed\xa0\x80\";\n",
+               "test/lang/fail/lexical/021_at_end.ft": b"//! fail\n// \xc3"}
+        for data in bad.values():
+            with self.assertRaises(UnicodeDecodeError):
+                data.decode("utf-8")
+        out = self.assertGreen(self.tree(bad))
+        self.assertIn("test/lang: 1 aborting programs answer a site\n", out)
+        # The byte changes no directive: the program still answers its site.
+        tree = self.tree({"test/lang/run/stdlib/001_vec_pop.ft":
+                          LANG_POP.encode() + b"// caf\xe9 \xff\n"})
+        out = self.assertGreen(tree)
+        self.assertIn("std/vec.ft: 1 sites, 1 tested, 0 unreachable, 0 untested\n", out)
+        self.assertIn("test/lang: 1 aborting programs answer a site\n", out)
 
     def test_a_list_line_may_carry_a_comment(self):
         tree = self.tree({"test/panic_gaps.txt": "# head\n\n" + GAPS.rstrip("\n")

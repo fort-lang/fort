@@ -63,7 +63,13 @@ compiler_form = "$cfg" | "$if" ;                     (* D21.1, D21.2 *)
 
 Notes:
 
-- Non-ASCII bytes may appear only inside string literals and comments (D2.1).
+- Non-ASCII bytes may appear only inside string literals and comments (D2.1). Source is UTF-8,
+  so "any byte" in `string_plain` and in `line_comment` reads a byte of a well-formed UTF-8
+  sequence. A byte sequence that is no well-formed UTF-8 sequence is a lexical error in code, in
+  a comment and in a string literal: an overlong form, a surrogate, a code point above U+10FFFF,
+  a continuation byte with no first byte, and a sequence that the end of the file or another
+  byte cuts. A byte that an `escape` gives is not source text, so `"\xFF"` is a string literal
+  (D3.7). The byte 0x00 is the code point U+0000 and is text.
 - `/*` is not a comment introducer: the adjacent pair is a lexical error (D2.2). Separated, `/`
   and unary `*` are the ordinary operators.
 - `1.` and `.5` are not float literals; `1.0` and `0.5` are. `1..5` lexes as `1`, `..`, `5`.

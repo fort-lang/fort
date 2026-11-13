@@ -1,0 +1,541 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| ok
+/// Checks that the lexer takes UTF-8 text only (D2.1): each class of bytes that are no UTF-8
+/// text, each bound of a well-formed sequence, the position of the error and its recovery.
+import fort.diag;
+import lex_env;
+import fort.session;
+import std.strbuf;
+
+// Each source below writes a non-ASCII byte as the escape `\xHH`. The escape puts the byte into
+// the string value that the lexer under test reads, and this file stays UTF-8 text.
+
+// ---- the queries of this suite over lex_env ------------------------------------
+
+string NON_ASCII_IN_CODE = "non-ASCII byte outside a string literal or comment";
+string NON_ASCII_IN_CHAR = "non-ASCII byte in char literal; use a string";
+
+// The lex of `src` gives the one error of bytes that are no UTF-8 text at `line`:`col`. `hex`
+// is the two digits of the byte that the message names.
+fn bad(lex_env.env mut* f, string src, u32 line, u32 col, string hex) bool {
+    strbuf.str_buf mut m = strbuf.create();
+    defer del(m.data);
+    strbuf.append(&m, "invalid UTF-8 sequence at byte 0x");
+    strbuf.append(&m, hex);
+    return lex_env.one_error(f, src, line, col, strbuf.view(&m));
+}
+
+// The source `before` `seq` `after`, in `s`.
+fn wrap(strbuf.str_buf mut* s, string before, string seq, string after) string {
+    strbuf.clear(s);
+    strbuf.append(s, before);
+    strbuf.append(s, seq);
+    strbuf.append(s, after);
+    return strbuf.view(s);
+}
+
+// `seq` starts with the byte `hex` and is no UTF-8 text. Each of the five places that reads a
+// non-ASCII byte gives the error at that byte: code, a comment, a string literal, a char
+// literal and the byte after the backslash of an escape.
+fn bad_in_each_place(lex_env.env mut* f, string seq, string hex) bool {
+    strbuf.str_buf mut s = strbuf.create();
+    defer del(s.data);
+    if (!bad(f, seq, 1, 1, hex)) {
+        return false;
+    }
+    if (!bad(f, wrap(&s, "// ", seq, ""), 1, 4, hex)) {
+        return false;
+    }
+    if (!bad(f, wrap(&s, "x; // ", seq, " y"), 1, 7, hex)) {
+        return false;
+    }
+    if (!bad(f, wrap(&s, "\"", seq, "\""), 1, 2, hex)) {
+        return false;
+    }
+    if (!bad(f, wrap(&s, "\"ab", seq, "cd\";"), 1, 4, hex)) {
+        return false;
+    }
+    if (!bad(f, wrap(&s, "'", seq, "'"), 1, 2, hex)) {
+        return false;
+    }
+    if (!bad(f, wrap(&s, "\"\\", seq, "\""), 1, 3, hex)) {
+        return false;
+    }
+    return bad(f, wrap(&s, "'\\", seq, "'"), 1, 3, hex);
+}
+
+// `seq` is one well-formed UTF-8 sequence. A comment takes it, and a string literal keeps each
+// byte of it. Code and a char literal give the errors that they gave before the UTF-8 rule.
+fn good_in_each_place(lex_env.env mut* f, string seq) bool {
+    strbuf.str_buf mut s = strbuf.create();
+    defer del(s.data);
+    if (!lex_env.clean(f, wrap(&s, "// ", seq, ""), 0)) {
+        return false;
+    }
+    if (!lex_env.clean(f, wrap(&s, "x; // ", seq, " y\nz"), 3)) {
+        return false;
+    }
+    if (!lex_env.clean(f, wrap(&s, "\"", seq, "\""), 1) || lex_env.text(f, 0) != seq) {
+        return false;
+    }
+    if (!lex_env.clean(f, wrap(&s, "\"ab", seq, "cd\";"), 2)
+        || lex_env.text(f, 0).len != seq.len + 4) {
+        return false;
+    }
+    if (!lex_env.one_error(f, seq, 1, 1, NON_ASCII_IN_CODE)) {
+        return false;
+    }
+    return lex_env.one_error(f, wrap(&s, "'", seq, "'"), 1, 2, NON_ASCII_IN_CHAR);
+}
+
+// The count of the pairs of a first byte from 0x80 to 0xFF and a second byte from 0x00 to 0xFF
+// for which the source `before` first second `tail` `after` lexes clean: 128 * 256 sources.
+fn count_clean(lex_env.env mut* f, string before, string tail, string after) u64 {
+    strbuf.str_buf mut s = strbuf.create();
+    defer del(s.data);
+    u64 mut n = 0;
+    u64 mut first = 0x80;
+    while (first <= 0xFF) {
+        u64 mut second = 0;
+        while (second <= 0xFF) {
+            strbuf.clear(&s);
+            strbuf.append(&s, before);
+            strbuf.push_byte(&s, cast(first, u8));
+            strbuf.push_byte(&s, cast(second, u8));
+            strbuf.append(&s, tail);
+            strbuf.append(&s, after);
+            if (lex_env.lex(f, strbuf.view(&s))) {
+                n += 1;
+            }
+            second += 1;
+        }
+        first += 1;
+    }
+    return n;
+}
+
+// The four tokens of `x = 1;` on line `line` are all the file lexed.
+fn resumed_line(lex_env.env* f, u32 line) bool {
+    return lex_env.count(f) == 5 && lex_env.text(f, 0) == "x" && lex_env.kind(f, 1) == "="
+        && lex_env.kind(f, 2) == "integer literal" && lex_env.kind(f, 3) == ";"
+        && lex_env.at(f, 0, line, 1);
+}
+
+// ---- the classes of bytes that are no UTF-8 text -------------------------------
+
+// The byte 0xE9 alone is Latin-1 text. It starts a sequence of three bytes, and an ASCII byte
+// or the end follows it.
+fn a_latin1_byte_is_an_error_in_each_place() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(bad_in_each_place(f, "\xE9", "E9"));
+    assert(bad(f, "// caf\xE9", 1, 7, "E9"));
+    assert(bad(f, "println(\"caf\xE9\");", 1, 13, "E9"));
+    assert(bad(f, "i32 caf\xE9 = 1;", 1, 8, "E9"));
+}
+
+// A continuation byte starts no sequence.
+fn a_lone_continuation_byte_is_an_error() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(bad_in_each_place(f, "\x80", "80"));
+    assert(bad_in_each_place(f, "\xBF", "BF"));
+    assert(bad_in_each_place(f, "\x80\x80", "80"));
+    assert(bad_in_each_place(f, "\xA9z", "A9"));
+}
+
+// One continuation byte more than the sequence takes is a lone continuation byte. The error
+// stands at that byte, after the well-formed sequence.
+fn a_continuation_byte_after_a_whole_sequence_is_an_error() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(bad(f, "// \xC3\xA9\xA9", 1, 6, "A9"));
+    assert(bad(f, "\"\xC3\xA9\xA9\"", 1, 4, "A9"));
+    assert(bad(f, "// \xE2\x82\xAC\x80", 1, 7, "80"));
+    assert(bad(f, "\"\xE2\x82\xAC\xBF\"", 1, 5, "BF"));
+    assert(bad(f, "// \xF0\x9F\x98\x80\x80", 1, 8, "80"));
+    assert(bad(f, "\"\xF0\x9F\x98\x80\xBF\"", 1, 6, "BF"));
+}
+
+// An overlong form writes a code point in more bytes than the code point needs.
+fn an_overlong_form_is_an_error() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    // Two bytes for U+0000 to U+007F: 0xC0 and 0xC1 start no sequence.
+    assert(bad_in_each_place(f, "\xC0\x80", "C0"));
+    assert(bad_in_each_place(f, "\xC0\xAF", "C0"));
+    assert(bad_in_each_place(f, "\xC1\x80", "C1"));
+    assert(bad_in_each_place(f, "\xC1\xBF", "C1"));
+    // Three bytes for U+0000 to U+07FF: 0xE0 with a second byte below 0xA0.
+    assert(bad_in_each_place(f, "\xE0\x80\x80", "E0"));
+    assert(bad_in_each_place(f, "\xE0\x80\xAF", "E0"));
+    assert(bad_in_each_place(f, "\xE0\x9F\xBF", "E0"));
+    // Four bytes for U+0000 to U+FFFF: 0xF0 with a second byte below 0x90.
+    assert(bad_in_each_place(f, "\xF0\x80\x80\x80", "F0"));
+    assert(bad_in_each_place(f, "\xF0\x80\x80\xAF", "F0"));
+    assert(bad_in_each_place(f, "\xF0\x8F\xBF\xBF", "F0"));
+}
+
+// A surrogate is U+D800 to U+DFFF: 0xED with a second byte above 0x9F.
+fn a_surrogate_is_an_error() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(bad_in_each_place(f, "\xED\xA0\x80", "ED"));
+    assert(bad_in_each_place(f, "\xED\xAF\xBF", "ED"));
+    assert(bad_in_each_place(f, "\xED\xB0\x80", "ED"));
+    assert(bad_in_each_place(f, "\xED\xBF\xBF", "ED"));
+    // A surrogate pair, each half in three bytes, is two surrogates.
+    assert(bad_in_each_place(f, "\xED\xA0\xBD\xED\xB8\x80", "ED"));
+}
+
+// The last code point is U+10FFFF: 0xF4 with a second byte above 0x8F is above it, and so is
+// each sequence that 0xF5 to 0xFF would start.
+fn a_code_point_above_the_last_is_an_error() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(bad_in_each_place(f, "\xF4\x90\x80\x80", "F4"));
+    assert(bad_in_each_place(f, "\xF4\xBF\xBF\xBF", "F4"));
+    assert(bad_in_each_place(f, "\xF5\x80\x80\x80", "F5"));
+    assert(bad_in_each_place(f, "\xF7\xBF\xBF\xBF", "F7"));
+    assert(bad_in_each_place(f, "\xF8\x88\x80\x80\x80", "F8"));
+    assert(bad_in_each_place(f, "\xFB\xBF\xBF\xBF\xBF", "FB"));
+    assert(bad_in_each_place(f, "\xFC\x84\x80\x80\x80\x80", "FC"));
+    assert(bad_in_each_place(f, "\xFD\xBF\xBF\xBF\xBF\xBF", "FD"));
+    assert(bad_in_each_place(f, "\xFE", "FE"));
+    assert(bad_in_each_place(f, "\xFF", "FF"));
+    assert(bad_in_each_place(f, "\xFF\xFE", "FF"));
+}
+
+// A sequence that lacks a continuation byte is cut. The error stands at its first byte,
+// whichever byte is absent.
+fn a_cut_sequence_is_an_error() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(bad_in_each_place(f, "\xC3", "C3"));
+    assert(bad_in_each_place(f, "\xC3z", "C3"));
+    assert(bad_in_each_place(f, "\xDF ", "DF"));
+    assert(bad_in_each_place(f, "\xE2", "E2"));
+    assert(bad_in_each_place(f, "\xE2\x82", "E2"));
+    assert(bad_in_each_place(f, "\xE2\x82z", "E2"));
+    assert(bad_in_each_place(f, "\xE2z\xAC", "E2"));
+    assert(bad_in_each_place(f, "\xF0", "F0"));
+    assert(bad_in_each_place(f, "\xF0\x9F", "F0"));
+    assert(bad_in_each_place(f, "\xF0\x9F\x98", "F0"));
+    assert(bad_in_each_place(f, "\xF0\x9F\x98z", "F0"));
+    assert(bad_in_each_place(f, "\xF0\x9Fz\x80", "F0"));
+    assert(bad_in_each_place(f, "\xF0z\x98\x80", "F0"));
+    // The first byte of the next sequence cuts this one. The error is at this one.
+    assert(bad_in_each_place(f, "\xF0\x9F\xC3\xA9", "F0"));
+    assert(bad_in_each_place(f, "\xE2\xC3\xA9", "E2"));
+    assert(bad_in_each_place(f, "\xC3\xC3\xA9", "C3"));
+}
+
+// The end of the file cuts a sequence in a comment, in a string literal and in code. The
+// string literal is open too, and the lexer meets the bad byte first.
+fn the_end_of_the_file_cuts_a_sequence() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(bad(f, "x;\n// caf\xC3", 2, 7, "C3"));
+    assert(lex_env.count(f) == 3);
+    assert(bad(f, "x;\n// \xE2\x82", 2, 4, "E2"));
+    assert(bad(f, "x;\n// \xF0\x9F\x98", 2, 4, "F0"));
+    assert(bad(f, "x;\n\"caf\xC3", 2, 5, "C3"));
+    assert(bad(f, "x;\n\"\xF0\x9F\x98", 2, 2, "F0"));
+    assert(bad(f, "x;\ny \xC3", 2, 3, "C3"));
+}
+
+// A line end cuts a sequence too: a comment and a string literal end at the newline.
+fn a_line_end_cuts_a_sequence() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(bad(f, "// \xE2\x82\nx = 1;\n", 1, 4, "E2"));
+    assert(resumed_line(f, 2));
+    assert(bad(f, "\"\xC3\nx = 1;\n", 1, 2, "C3"));
+    assert(resumed_line(f, 2));
+    assert(bad(f, "\xF0\x9F\x98\nx = 1;\n", 1, 1, "F0"));
+    assert(resumed_line(f, 2));
+    // A carriage return is one more byte that is no continuation byte.
+    assert(bad(f, "// \xC3\r\nx = 1;\n", 1, 4, "C3"));
+    assert(resumed_line(f, 2));
+}
+
+// ---- the bounds of a well-formed sequence --------------------------------------
+
+// The first and the last sequence of each row of table 3-7 of The Unicode Standard.
+fn the_first_and_the_last_sequence_of_each_range_are_text() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(good_in_each_place(f, "\xC2\x80"));             // U+0080
+    assert(good_in_each_place(f, "\xDF\xBF"));             // U+07FF
+    assert(good_in_each_place(f, "\xE0\xA0\x80"));         // U+0800
+    assert(good_in_each_place(f, "\xE0\xBF\xBF"));         // U+0FFF
+    assert(good_in_each_place(f, "\xE1\x80\x80"));         // U+1000
+    assert(good_in_each_place(f, "\xEC\xBF\xBF"));         // U+CFFF
+    assert(good_in_each_place(f, "\xED\x80\x80"));         // U+D000
+    assert(good_in_each_place(f, "\xED\x9F\xBF"));         // U+D7FF, before the surrogates
+    assert(good_in_each_place(f, "\xEE\x80\x80"));         // U+E000, after the surrogates
+    assert(good_in_each_place(f, "\xEF\xBF\xBF"));         // U+FFFF
+    assert(good_in_each_place(f, "\xF0\x90\x80\x80"));     // U+10000
+    assert(good_in_each_place(f, "\xF0\xBF\xBF\xBF"));     // U+3FFFF
+    assert(good_in_each_place(f, "\xF1\x80\x80\x80"));     // U+40000
+    assert(good_in_each_place(f, "\xF3\xBF\xBF\xBF"));     // U+FFFFF
+    assert(good_in_each_place(f, "\xF4\x80\x80\x80"));     // U+100000
+    assert(good_in_each_place(f, "\xF4\x8F\xBF\xBF"));     // U+10FFFF, the last code point
+}
+
+// Each pair of a first byte and a second byte, 32768 pairs, in a comment and in a string
+// literal. Table 3-7 gives the counts. Two bytes: 30 first bytes with 64 second bytes. Three
+// bytes: 0xE0 and 0xED take 32 second bytes each and 14 first bytes take 64. Four bytes: 0xF0
+// takes 48, 0xF1 to 0xF3 take 64 each and 0xF4 takes 16.
+fn each_pair_of_a_first_and_a_second_byte_is_judged() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(count_clean(f, "// ", "", "") == 1920);
+    assert(count_clean(f, "// ", "\x80", "") == 960);
+    assert(count_clean(f, "// ", "\x80\x80", "") == 256);
+    assert(count_clean(f, "// ", "\x80\x80\x80", "") == 0);
+    assert(count_clean(f, "\"", "", "\"") == 1920);
+    assert(count_clean(f, "\"", "\xBF", "\"") == 960);
+    assert(count_clean(f, "\"", "\xBF\xBF", "\"") == 256);
+    assert(count_clean(f, "\"", "\xBF\xBF\xBF", "\"") == 0);
+}
+
+// The third and the fourth byte take 0x80 to 0xBF. Each line gives the last byte below the
+// range, the two bounds and the first byte above it.
+fn the_third_and_the_fourth_byte_are_continuation_bytes() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(bad(f, "// \xE2\x82\x7F", 1, 4, "E2"));
+    assert(lex_env.clean(f, "// \xE2\x82\x80", 0));
+    assert(lex_env.clean(f, "// \xE2\x82\xBF", 0));
+    assert(bad(f, "// \xE2\x82\xC0", 1, 4, "E2"));
+    assert(bad(f, "// \xF0\x9F\x7F\x80", 1, 4, "F0"));
+    assert(lex_env.clean(f, "// \xF0\x9F\x80\x80", 0));
+    assert(lex_env.clean(f, "// \xF0\x9F\xBF\x80", 0));
+    assert(bad(f, "// \xF0\x9F\xC0\x80", 1, 4, "F0"));
+    assert(bad(f, "// \xF0\x9F\x98\x7F", 1, 4, "F0"));
+    assert(lex_env.clean(f, "// \xF0\x9F\x98\x80", 0));
+    assert(lex_env.clean(f, "// \xF0\x9F\x98\xBF", 0));
+    assert(bad(f, "// \xF0\x9F\x98\xC0", 1, 4, "F0"));
+    assert(bad(f, "\"\xE2\x82\x7F\"", 1, 2, "E2"));
+    assert(bad(f, "\"\xE2\x82\xC0\"", 1, 2, "E2"));
+    assert(bad(f, "\"\xF0\x9F\x98\x7F\"", 1, 2, "F0"));
+    assert(bad(f, "\"\xF0\x9F\x98\xC0\"", 1, 2, "F0"));
+}
+
+// ---- UTF-8 text stays text ---------------------------------------------------------
+
+// A comment and a string literal take text of each length, and a column counts bytes.
+fn text_of_each_length_stands_in_a_comment_and_a_string() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "// caf\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x98\x80\nx", 1));
+    assert(lex_env.at(f, 0, 2, 1));
+    assert(lex_env.clean(f, "\"caf\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x98\x80\" x", 2));
+    assert(lex_env.text(f, 0) == "caf\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x98\x80");
+    assert(lex_env.text(f, 0).len == 14);
+    assert(lex_env.covers(f, 0, 0, 16));
+    assert(lex_env.at(f, 1, 1, 18));
+    // Text and escapes stand together, and the value holds the bytes of both in order.
+    assert(lex_env.clean(f, "\"\\xE9\xC3\xA9\\n\xE2\x82\xAC\\xFF\"", 1));
+    assert(lex_env.text(f, 0) == "\xE9\xC3\xA9\n\xE2\x82\xAC\xFF");
+    assert(lex_env.text(f, 0).len == 8);
+}
+
+// The rule is a rule of the source text and not of the value (D3.7): the escape `\xHH` puts
+// each byte into a string literal and into a char literal.
+fn an_escape_puts_each_byte_into_a_literal() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "\"\\xE9\"", 1));
+    assert(lex_env.text(f, 0) == "\xE9");
+    assert(lex_env.text(f, 0).len == 1);
+    assert(lex_env.clean(f, "\"\\x80\\xBF\\xC0\\xC1\\xF5\\xFF\"", 1));
+    assert(lex_env.text(f, 0) == "\x80\xBF\xC0\xC1\xF5\xFF");
+    // The bytes of a surrogate and of an overlong form, through escapes.
+    assert(lex_env.clean(f, "\"\\xED\\xA0\\x80\\xC0\\xAF\"", 1));
+    assert(lex_env.text(f, 0) == "\xED\xA0\x80\xC0\xAF");
+    assert(lex_env.text(f, 0).len == 5);
+    assert(lex_env.clean(f, "'\\xE9' '\\x80' '\\xFF'", 3));
+    assert(lex_env.tok(f, 0).ival == 0xE9);
+    assert(lex_env.tok(f, 1).ival == 0x80);
+    assert(lex_env.tok(f, 2).ival == 0xFF);
+}
+
+// U+0000 is UTF-8 text. A comment and a string literal take each byte that is text
+// (spec/grammar.md 1), so a NUL byte stands in both, and code refuses it as before.
+fn a_nul_byte_is_text() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "// a\x00b\nx", 1));
+    assert(lex_env.clean(f, "\"a\x00b\"", 1));
+    assert(lex_env.text(f, 0).len == 3);
+    assert(lex_env.one_error(f, "x \x00", 1, 3, "unexpected byte 0x00"));
+    // The other ASCII control bytes are text of a comment and of a string literal too.
+    assert(lex_env.clean(f, "// \x01\x7F\nx", 1));
+    assert(lex_env.clean(f, "\"\x01\x7F\"", 1));
+}
+
+// ---- the byte-order mark -------------------------------------------------------------
+
+// The lexer skips the mark at the start of the file, and the mark takes no column: the error
+// of the first line counts from the byte after the mark.
+fn the_mark_at_the_start_takes_no_column() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(bad(f, "\xEF\xBB\xBF// \xE9", 1, 4, "E9"));
+    assert(bad(f, "\xEF\xBB\xBF\"\xE9\"", 1, 2, "E9"));
+    assert(bad(f, "\xEF\xBB\xBFx \xE9", 1, 3, "E9"));
+    assert(bad(f, "\xEF\xBB\xBF\nx \xE9", 2, 3, "E9"));
+}
+
+// A part of the mark is a cut sequence. Before the UTF-8 rule, the lexer gave the error of a
+// non-ASCII byte in code for it.
+fn a_part_of_the_mark_is_a_cut_sequence() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(bad(f, "\xEF", 1, 1, "EF"));
+    assert(bad(f, "\xEF\xBB", 1, 1, "EF"));
+    assert(bad(f, "\xEF\xBBx", 1, 1, "EF"));
+    assert(bad(f, "\xEFx\xBF", 1, 1, "EF"));
+    assert(bad(f, "\xBB\xBFx", 1, 1, "BB"));
+}
+
+// U+FEFF is a mark only at the start of the file. After it, U+FEFF is UTF-8 text: a comment
+// and a string literal take it, and code refuses it as it refuses each non-ASCII byte.
+fn the_mark_after_the_start_is_text() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.clean(f, "// \xEF\xBB\xBF\nx", 1));
+    assert(lex_env.clean(f, "\"\xEF\xBB\xBF\"", 1));
+    assert(lex_env.text(f, 0) == "\xEF\xBB\xBF");
+    assert(lex_env.one_error(f, "x \xEF\xBB\xBF", 1, 3, NON_ASCII_IN_CODE));
+    assert(lex_env.one_error(f, "\xEF\xBB\xBF\xEF\xBB\xBFx", 1, 1, NON_ASCII_IN_CODE));
+    assert(lex_env.one_error(f, "\n\xEF\xBB\xBFx", 2, 1, NON_ASCII_IN_CODE));
+}
+
+// ---- UTF-8 text keeps its errors ------------------------------------------------------
+
+// UTF-8 text outside a comment and a string literal keeps the error that it gave before the
+// UTF-8 rule, in code, in a char literal and after the backslash of an escape.
+fn text_outside_a_comment_and_a_string_keeps_its_error() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.one_error(f, "i32 caf\xC3\xA9 = 1;", 1, 8, NON_ASCII_IN_CODE));
+    assert(lex_env.one_error(f, "x = \xE2\x82\xAC;", 1, 5, NON_ASCII_IN_CODE));
+    assert(lex_env.one_error(f, "\xF0\x9F\x98\x80", 1, 1, NON_ASCII_IN_CODE));
+    assert(lex_env.one_error(f, "'\xC3\xA9'", 1, 2, NON_ASCII_IN_CHAR));
+    assert(lex_env.one_error(f, "'\xF0\x9F\x98\x80'", 1, 2, NON_ASCII_IN_CHAR));
+    assert(lex_env.one_error(f, "\"\\\xC3\xA9\"", 1, 2,
+                             "unknown escape '\\' followed by byte 0xC3"));
+    assert(lex_env.one_error(f, "'\\\xE2\x82\xAC'", 1, 2,
+                             "unknown escape '\\' followed by byte 0xE2"));
+}
+
+// The lexer does not read the bytes after the first character of a char literal as text: a
+// bad byte there gives the error of the char literal, which stands at the opening quote.
+fn a_bad_byte_after_a_char_gives_the_error_of_the_literal() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.one_error(f, "'a\xE9'", 1, 1, "char literal holds exactly one character"));
+    assert(lex_env.one_error(f, "'\\n\xE9'", 1, 1, "char literal holds exactly one character"));
+}
+
+// ---- recovery --------------------------------------------------------------------------
+
+// The error costs its line alone, as each lexical error does (D14.2).
+fn the_error_drops_its_line_and_resumes_at_the_next() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(bad(f, "// \xE9\nx = 1;\n", 1, 4, "E9"));
+    assert(resumed_line(f, 2));
+    assert(bad(f, "a = \"\xE9\";\nx = 1;\n", 1, 6, "E9"));
+    assert(resumed_line(f, 2));
+    assert(bad(f, "a \xE9 b\nx = 1;\n", 1, 3, "E9"));
+    assert(resumed_line(f, 2));
+    assert(bad(f, "char c = '\xE9';\nx = 1;\n", 1, 11, "E9"));
+    assert(resumed_line(f, 2));
+    assert(bad(f, "s = \"\\\xE9\";\nx = 1;\n", 1, 7, "E9"));
+    assert(resumed_line(f, 2));
+    // The tokens before a comment on the line of the error go with the line.
+    assert(bad(f, "a = 2; // \xE9\nx = 1;\n", 1, 11, "E9"));
+    assert(resumed_line(f, 2));
+    // The lines before the error keep their tokens.
+    assert(bad(f, "x = 1;\n// \xE9\n", 2, 4, "E9"));
+    assert(resumed_line(f, 1));
+}
+
+// A line reports its first lexical error only. Two bad sequences on one line give one error,
+// and an earlier error of another kind stands for the line.
+fn a_line_reports_its_first_lexical_error_only() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(bad(f, "// \xE9 \xFF \x80", 1, 4, "E9"));
+    assert(bad(f, "\"\xFF\" // \xE9", 1, 2, "FF"));
+    assert(bad(f, "\xC0 \"\xE9\"", 1, 1, "C0"));
+    assert(lex_env.one_error(f, "# // \xE9", 1, 1, "unexpected character '#'"));
+    assert(lex_env.one_error(f, "08 \"\xE9\"", 1, 1, "decimal literal may not start with '0'"));
+    assert(lex_env.one_error(f, "\xC3\xA9 // \xE9", 1, 1, NON_ASCII_IN_CODE));
+}
+
+// Each line with a bad sequence gives its own error, in the order of the lines.
+fn each_bad_line_gives_an_error() void {
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    assert(lex_env.failed(f, "// \xE9\nx = 1;\n\"\xC0\xAF\"\n\xFF\n", 3));
+    assert(lex_env.error_is(f, 0, 1, 4, "invalid UTF-8 sequence at byte 0xE9"));
+    assert(lex_env.error_is(f, 1, 3, 2, "invalid UTF-8 sequence at byte 0xC0"));
+    assert(lex_env.error_is(f, 2, 4, 1, "invalid UTF-8 sequence at byte 0xFF"));
+    assert(resumed_line(f, 2));
+}
+
+// The error counts against the twenty diagnostics of a file like each other lexical error.
+fn the_error_counts_against_the_budget_of_the_file() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    lex_env.env mut* own f = lex_env.make();
+    defer lex_env.drop_made(move(f));
+    u64 mut i = 0;
+    while (i < 25) {
+        strbuf.append(&b, "// \xE9\n");
+        i += 1;
+    }
+    strbuf.append(&b, "x = 1;\n");
+    assert(!lex_env.lex(f, strbuf.view(&b)));
+    assert(lex_env.errors(f) == 20);
+    assert(diag.record_count(session.diags(&f->sess)) == 20);
+    assert(!diag.budget_left(session.diags(&f->sess)));
+    assert(lex_env.error_is(f, 19, 20, 4, "invalid UTF-8 sequence at byte 0xE9"));
+    assert(resumed_line(f, 26));
+}
+
+fn main() i32 {
+    a_latin1_byte_is_an_error_in_each_place();
+    a_lone_continuation_byte_is_an_error();
+    a_continuation_byte_after_a_whole_sequence_is_an_error();
+    an_overlong_form_is_an_error();
+    a_surrogate_is_an_error();
+    a_code_point_above_the_last_is_an_error();
+    a_cut_sequence_is_an_error();
+    the_end_of_the_file_cuts_a_sequence();
+    a_line_end_cuts_a_sequence();
+    the_first_and_the_last_sequence_of_each_range_are_text();
+    each_pair_of_a_first_and_a_second_byte_is_judged();
+    the_third_and_the_fourth_byte_are_continuation_bytes();
+    text_of_each_length_stands_in_a_comment_and_a_string();
+    an_escape_puts_each_byte_into_a_literal();
+    a_nul_byte_is_text();
+    the_mark_at_the_start_takes_no_column();
+    a_part_of_the_mark_is_a_cut_sequence();
+    the_mark_after_the_start_is_text();
+    text_outside_a_comment_and_a_string_keeps_its_error();
+    a_bad_byte_after_a_char_gives_the_error_of_the_literal();
+    the_error_drops_its_line_and_resumes_at_the_next();
+    a_line_reports_its_first_lexical_error_only();
+    each_bad_line_gives_an_error();
+    the_error_counts_against_the_budget_of_the_file();
+    println("ok");
+    return 0;
+}

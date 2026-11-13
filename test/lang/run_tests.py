@@ -156,6 +156,7 @@ RENDERED_PREFIX = " "
 # in bootstrap0/src/lexer.c, by the part of each that never
 # varies. An unknown lexer message fails a fail test's range
 # check. Add the message here or give the diagnostic a range.
+# The message of bytes that are no UTF-8 text is of src/fort/lexer.ft only.
 LEXICAL_MESSAGES = (
     "block comments are not supported",
     "'_' must stand between two digits",
@@ -176,6 +177,7 @@ LEXICAL_MESSAGES = (
     "control character in char literal",
     "unterminated string literal",
     "non-ASCII byte outside a string literal or comment",
+    "invalid UTF-8 sequence at byte ",
     "unexpected character ",
     "unexpected byte ",
 )

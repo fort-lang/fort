@@ -253,9 +253,13 @@ def apply_declarations(site, declarations, problems):
 
 
 def directives(path):
-    """(name, value) of each directive in the header of a test file."""
+    """(name, value) of each directive in the header of a test file.
+
+    A fail test of D2.1 holds bytes that are no UTF-8 text. The decoder gives U+FFFD for each
+    such byte. A directive is ASCII text, so that byte changes no directive.
+    """
     out = []
-    for line in path.read_text(encoding="utf-8").split("\n"):
+    for line in path.read_text(encoding="utf-8", errors="replace").split("\n"):
         if line[:3] not in HEADER_MARKERS:
             break
         m = DIRECTIVE_RE.match(line)

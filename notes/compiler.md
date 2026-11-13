@@ -31,6 +31,21 @@ came here.
   since a diagnostic on an unannotated line fails the run (D14.5) and `parser_recovery_test.c`
   walks the same corpus. The cap of twenty diagnostics is the file's, not the parser's: `lex_file`
   opens it with `diag_begin_file()` and both report while `diag_file_count() < DIAG_MAX_PER_FILE`.
+- **Source is UTF-8 text** (D2.1): the lexer of `src/fort/lexer.ft` reads a byte above 0x7f in
+  five places: a comment, a string literal, a char literal, the byte after the backslash of an
+  escape, and the start of a token. Each place asks `utf8_len` first. `utf8_len` gives 0 for
+  bytes that are no well-formed sequence (The Unicode Standard, table 3-7), and the place then
+  reports `invalid UTF-8 sequence at byte 0xHH` at the first byte of the sequence. A comment and
+  a string literal step over each byte of a sequence, so a continuation byte never starts a
+  character. A new place that reads a byte above 0x7f must ask `utf8_len` too. The error costs
+  its line as each lexical error does, so a file gives one such error for each line at most. A
+  place behind an earlier error of the line gives that error: `'a` then the byte 0xE9 then `'`
+  gives "char literal holds exactly one character". An escape is ASCII text in the file, so
+  `"\xE9"` holds the byte 0xE9 (D3.7). Bootstrap-0 is frozen and does not have the rule. The
+  first compiler with it is the one that the chain builds from the tree with the rule, and
+  `tools/fixpoint.sh` then applies it to `src/fort` and `std`.
+  `tools/mutations/lexer_fort.json` holds the bounds and the five places. It holds the skip of
+  the byte order mark and the limit of 20 diagnostics (D14.2) too.
 
 ## 3. The parser
 

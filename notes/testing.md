@@ -237,6 +237,15 @@ bullet at a time and without a rewrite.
   On voyager.local, `/bin/false` is absent. This made three inherited fixture tests error (T-143).
   Use `shutil.which("false")` for a fixture that runs on Mac and Linux.
   The host and slot-2 VM suites each pass 185 of 185 tests with this fixture.
+- **20 files of `test/lang/fail` are no UTF-8 text on purpose** (D2.1): the `.ft` and `.stderr`
+  files of `fail/lexical/019` to `027`, and `text.ft` and `expected.stderr` of
+  `fail/modules/035_utf8_in_module`. The harness decodes a test file with `errors="replace"` and
+  compares a golden as bytes. `directives` of `tools/panic_coverage.py` and `report` of
+  `test/leak_sites_test.py` each stopped with a `UnicodeDecodeError` on them. A reader of the
+  corpus or of the stderr of the compiler reads bytes or decodes with `errors="replace"`. An
+  editor that saves such a file as UTF-8 text destroys its test. Write the bytes with a script.
+  Then run `python3 -c 'import sys; open(sys.argv[1], "rb").read().decode()' <file>`: it must
+  fail.
 - **Every `fail` test has a golden stderr** (T-191, D14.5). The golden rule: `NNN_name.stderr`
   stands beside `NNN_name.ft`, and `expected.stderr` stands in the directory of a directory test. It
   holds the compiler's whole stderr for the test: each header line and the rendered lines under it
@@ -1673,9 +1682,12 @@ bullet at a time and without a rewrite.
   in a function that is no boundary function. It reports each `extern fn` with one of the 15
   names of D9.8 ("One thread", "Calls from C"). That check reads the text of each file and no
   index, so it sees each branch of a `$if` and a module that is not trusted. It reports the
-  first byte of a file that is no UTF-8 text (D2.1), for each file that it checks; `fort
-  --check` accepts such a byte in a comment and in a string literal, and the lint is the one
-  check of it. A function of a trusted module whose result type reaches a pointer, a span or a
+  first byte of a file that is no UTF-8 text (D2.1), for each file that it checks. The lexer of
+  `src/fort` rejects such a file too, for a byte in code, in a comment and in a string literal
+  (`test/fort/lexer_utf8_test.ft`, `test/lang/fail/lexical/019` to `027`). The lexer gives one
+  error for each line and 20 diagnostics for a file at most (D14.2). So it gives no line for
+  that byte when an earlier lexical error stands in its line or the file is past that limit.
+  A function of a trusted module whose result type reaches a pointer, a span or a
   string needs a row line `// gives: <text>`. The lint reports the function without that line
   (`gives_row_problems`). The reach reads the type and each struct that the type names, at any
   depth. The form `// gives:` is a convention of the lint: D9.8 does not state it. The lint checks

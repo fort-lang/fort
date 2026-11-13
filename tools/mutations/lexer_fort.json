@@ -1,0 +1,264 @@
+{
+ "comment": [
+  "The table of the lexer in fort, src/fort/lexer.ft. Its rows hold the",
+  "rule that a source file is UTF-8 text (D2.1): each bound of a",
+  "well-formed sequence in utf8_len, and each of the five places that ask",
+  "it (a comment, a string literal, a char literal, the byte after a",
+  "backslash and the start of a token). 2 more rows hold the skip of a byte",
+  "order mark at the start (D2.1) and the limit of 20 diagnostics for a",
+  "file (D14.2). A row name gives the decision and the condition. The",
+  "stages are targeted: the lexer_ module suites of test/fort, then the",
+  "lexical areas of the language corpus and the one module test of the",
+  "rule. The table runs on a darwin host with --runner 'bash -c';",
+  "ZERO_AR_DATE=1 keeps the md5 guard.",
+  "The md5 guard reads the product compiler that the build links."
+ ],
+ "sources": [
+  "src/fort/lexer.ft"
+ ],
+ "binary": "build/Darwin/debug/fort",
+ "build": "ZERO_AR_DATE=1 ninja -C build/Darwin/debug fort",
+ "stages": [
+  {
+   "name": "the lexer suites",
+   "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std --cc /opt/homebrew/bin/clang --target arm64-apple-macosx11.0.0 --opt /opt/homebrew/bin/opt --verify-ir -j 10 lexer_"
+  },
+  {
+   "name": "the lexical corpus",
+   "command": "python3 test/lang/run_tests.py --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std --cc /opt/homebrew/bin/clang --target arm64-apple-macosx11.0.0 --opt /opt/homebrew/bin/opt --verify-ir -j 10 --xfail test/lang/xfail.txt fail/lexical/ run/lexical/ fail/modules/035_"
+  }
+ ],
+ "mutations": [
+  {
+   "decision": "D2.1-lead-low",
+   "file": "src/fort/lexer.ft",
+   "old": "    if (lead < UTF8_LEAD2_FIRST || lead > UTF8_LEAD4_LAST) {",
+   "new": "    if (lead > UTF8_LEAD4_LAST) {",
+   "what": "a continuation byte and the bytes 0xC0 and 0xC1 start a sequence of 2 bytes"
+  },
+  {
+   "decision": "D2.1-lead-high",
+   "file": "src/fort/lexer.ft",
+   "old": "    if (lead < UTF8_LEAD2_FIRST || lead > UTF8_LEAD4_LAST) {",
+   "new": "    if (lead < UTF8_LEAD2_FIRST) {",
+   "what": "the bytes 0xF5 to 0xFF start a sequence of 4 bytes"
+  },
+  {
+   "decision": "D2.1-lead2-first",
+   "file": "src/fort/lexer.ft",
+   "old": "i64 UTF8_LEAD2_FIRST = 0xC2;",
+   "new": "i64 UTF8_LEAD2_FIRST = 0xC1;",
+   "what": "the byte 0xC1 starts a sequence, so an overlong form of 2 bytes is text"
+  },
+  {
+   "decision": "D2.1-lead4-last",
+   "file": "src/fort/lexer.ft",
+   "old": "i64 UTF8_LEAD4_LAST = 0xF4;",
+   "new": "i64 UTF8_LEAD4_LAST = 0xF3;",
+   "what": "the byte 0xF4 starts no sequence, so U+100000 is no text"
+  },
+  {
+   "decision": "D2.1-length-four",
+   "file": "src/fort/lexer.ft",
+   "old": "    if (lead >= UTF8_LEAD4_FIRST) {",
+   "new": "    if (lead > UTF8_LEAD4_FIRST) {",
+   "what": "the byte 0xF0 starts a sequence of 3 bytes"
+  },
+  {
+   "decision": "D2.1-length-three",
+   "file": "src/fort/lexer.ft",
+   "old": "    } else if (lead >= UTF8_LEAD3_FIRST) {",
+   "new": "    } else if (lead > UTF8_LEAD3_FIRST) {",
+   "what": "the byte 0xE0 starts a sequence of 2 bytes"
+  },
+  {
+   "decision": "D2.1-overlong-three",
+   "file": "src/fort/lexer.ft",
+   "old": "            low = UTF8_E0_SECOND_FIRST;",
+   "new": "            low = UTF8_TAIL_FIRST;",
+   "what": "an overlong form of 3 bytes is text"
+  },
+  {
+   "decision": "D2.1-overlong-three-bound",
+   "file": "src/fort/lexer.ft",
+   "old": "i64 UTF8_E0_SECOND_FIRST = 0xA0;",
+   "new": "i64 UTF8_E0_SECOND_FIRST = 0xA1;",
+   "what": "the sequence 0xE0 0xA0 0x80, which is U+0800, is no text"
+  },
+  {
+   "decision": "D2.1-surrogate",
+   "file": "src/fort/lexer.ft",
+   "old": "            high = UTF8_ED_SECOND_LAST;",
+   "new": "            high = UTF8_TAIL_LAST;",
+   "what": "a surrogate is text"
+  },
+  {
+   "decision": "D2.1-surrogate-bound",
+   "file": "src/fort/lexer.ft",
+   "old": "i64 UTF8_ED_SECOND_LAST = 0x9F;",
+   "new": "i64 UTF8_ED_SECOND_LAST = 0x9E;",
+   "what": "the sequence 0xED 0x9F 0xBF, which is U+D7FF, is no text"
+  },
+  {
+   "decision": "D2.1-surrogate-lead",
+   "file": "src/fort/lexer.ft",
+   "old": "i64 UTF8_SURROGATE_LEAD = 0xED;",
+   "new": "i64 UTF8_SURROGATE_LEAD = 0xEE;",
+   "what": "the byte 0xEE and not the byte 0xED takes the short range"
+  },
+  {
+   "decision": "D2.1-overlong-four",
+   "file": "src/fort/lexer.ft",
+   "old": "            low = UTF8_F0_SECOND_FIRST;",
+   "new": "            low = UTF8_TAIL_FIRST;",
+   "what": "an overlong form of 4 bytes is text"
+  },
+  {
+   "decision": "D2.1-overlong-four-bound",
+   "file": "src/fort/lexer.ft",
+   "old": "i64 UTF8_F0_SECOND_FIRST = 0x90;",
+   "new": "i64 UTF8_F0_SECOND_FIRST = 0x91;",
+   "what": "the sequence 0xF0 0x90 0x80 0x80, which is U+10000, is no text"
+  },
+  {
+   "decision": "D2.1-above-maximum",
+   "file": "src/fort/lexer.ft",
+   "old": "            high = UTF8_F4_SECOND_LAST;",
+   "new": "            high = UTF8_TAIL_LAST;",
+   "what": "a code point above U+10FFFF is text"
+  },
+  {
+   "decision": "D2.1-above-maximum-bound",
+   "file": "src/fort/lexer.ft",
+   "old": "i64 UTF8_F4_SECOND_LAST = 0x8F;",
+   "new": "i64 UTF8_F4_SECOND_LAST = 0x8E;",
+   "what": "the sequence 0xF4 0x8F 0xBF 0xBF, which is U+10FFFF, is no text"
+  },
+  {
+   "decision": "D2.1-second-low",
+   "file": "src/fort/lexer.ft",
+   "old": "    if (second < low || second > high) {",
+   "new": "    if (second > high) {",
+   "what": "an ASCII byte or the end of the file is a second byte"
+  },
+  {
+   "decision": "D2.1-second-high",
+   "file": "src/fort/lexer.ft",
+   "old": "    if (second < low || second > high) {",
+   "new": "    if (second < low) {",
+   "what": "a byte above the range is a second byte"
+  },
+  {
+   "decision": "D2.1-tail-low",
+   "file": "src/fort/lexer.ft",
+   "old": "        if (tail < UTF8_TAIL_FIRST || tail > UTF8_TAIL_LAST) {",
+   "new": "        if (tail > UTF8_TAIL_LAST) {",
+   "what": "an ASCII byte or the end of the file is a third or a fourth byte"
+  },
+  {
+   "decision": "D2.1-tail-high",
+   "file": "src/fort/lexer.ft",
+   "old": "        if (tail < UTF8_TAIL_FIRST || tail > UTF8_TAIL_LAST) {",
+   "new": "        if (tail < UTF8_TAIL_FIRST) {",
+   "what": "a byte above 0xBF is a third or a fourth byte"
+  },
+  {
+   "decision": "D2.1-tail-first",
+   "file": "src/fort/lexer.ft",
+   "old": "i64 UTF8_TAIL_FIRST = 0x80;",
+   "new": "i64 UTF8_TAIL_FIRST = 0x7F;",
+   "what": "the byte 0x7F is a continuation byte"
+  },
+  {
+   "decision": "D2.1-tail-last",
+   "file": "src/fort/lexer.ft",
+   "old": "i64 UTF8_TAIL_LAST = 0xBF;",
+   "new": "i64 UTF8_TAIL_LAST = 0xC0;",
+   "what": "the byte 0xC0 is a continuation byte"
+  },
+  {
+   "decision": "D2.1-last-byte",
+   "file": "src/fort/lexer.ft",
+   "old": "    u64 mut i = 2;\n    while (i < len) {",
+   "new": "    u64 mut i = 2;\n    while (i + 1 < len) {",
+   "what": "the last byte of a sequence of 3 or 4 bytes is not read"
+  },
+  {
+   "decision": "D2.1-text",
+   "file": "src/fort/lexer.ft",
+   "old": "    u64 len = utf8_len(lx);\n    if (len == 0) {\n        fail_utf8(lx);\n    }\n    return len;",
+   "new": "    return 1;",
+   "what": "a comment and a string literal take each byte, as before the rule"
+  },
+  {
+   "decision": "D2.1-comment",
+   "file": "src/fort/lexer.ft",
+   "old": "                u64 mut left = text_len(lx);",
+   "new": "                u64 mut left = 1;",
+   "what": "a comment takes each byte"
+  },
+  {
+   "decision": "D2.1-comment-length",
+   "file": "src/fort/lexer.ft",
+   "old": "                while (left > 0) {\n                    advance(lx);",
+   "new": "                left = 1;\n                while (left > 0) {\n                    advance(lx);",
+   "what": "a comment steps over the first byte of a sequence only"
+  },
+  {
+   "decision": "D2.1-string",
+   "file": "src/fort/lexer.ft",
+   "old": "puts each byte into the value (D3.7).\n            u64 mut left = text_len(lx);",
+   "new": "puts each byte into the value (D3.7).\n            u64 mut left = 1;",
+   "what": "a string literal takes each byte"
+  },
+  {
+   "decision": "D2.1-string-length",
+   "file": "src/fort/lexer.ft",
+   "old": "            while (left > 0) {\n                strbuf.push_byte(&lx->buf, cast(peek(lx), u8));",
+   "new": "            left = 1;\n            while (left > 0) {\n                strbuf.push_byte(&lx->buf, cast(peek(lx), u8));",
+   "what": "a string literal steps over the first byte of a sequence only"
+  },
+  {
+   "decision": "D2.1-char",
+   "file": "src/fort/lexer.ft",
+   "old": "        if (utf8_len(lx) == 0) {\n            return fail_utf8(lx);\n        }\n        return fail_text(lx, here(lx), \"non-ASCII byte in char literal; use a string\");",
+   "new": "        return fail_text(lx, here(lx), \"non-ASCII byte in char literal; use a string\");",
+   "what": "a char literal gives its old error for bytes that are no UTF-8 text"
+  },
+  {
+   "decision": "D2.1-escape",
+   "file": "src/fort/lexer.ft",
+   "old": "        if (is_non_ascii(c) && utf8_len(lx) == 0) {\n            return fail_utf8(lx);\n        }\n",
+   "new": "",
+   "what": "the byte after a backslash gives the error of an unknown escape"
+  },
+  {
+   "decision": "D2.1-code",
+   "file": "src/fort/lexer.ft",
+   "old": "            if (utf8_len(lx) == 0) {\n                return fail_utf8(lx);\n            }\n            msg_str(lx, \"non-ASCII byte outside",
+   "new": "            msg_str(lx, \"non-ASCII byte outside",
+   "what": "a byte in code gives its old error for bytes that are no UTF-8 text"
+  },
+  {
+   "decision": "D2.1-message-byte",
+   "file": "src/fort/lexer.ft",
+   "old": "    msg_str(lx, \"invalid UTF-8 sequence at byte \");\n    msg_hex_byte(lx, peek(lx));",
+   "new": "    msg_str(lx, \"invalid UTF-8 sequence at byte \");\n    msg_hex_byte(lx, peek_at(lx, 1));",
+   "what": "the message names the second byte of the sequence"
+  },
+  {
+   "decision": "D2.1-bom-skip",
+   "file": "src/fort/lexer.ft",
+   "old": "        lx->pos = BOM_LEN;",
+   "new": "        lx->pos = 0;",
+   "what": "a byte order mark at the start is not skipped"
+  },
+  {
+   "decision": "D14.2-limit",
+   "file": "src/fort/lexer.ft",
+   "old": "    if (diag.budget_left(diags)) {\n        diag.error(diags, at, strbuf.view(&lx->msg));",
+   "new": "    if (true) {\n        diag.error(diags, at, strbuf.view(&lx->msg));",
+   "what": "the lexer reports past the limit of 20 diagnostics"
+  }
+ ]
+}
