@@ -1338,6 +1338,20 @@ fn parse_slice_ptr(fir_parser mut* p, fir.func mut* f, fir.rvalue mut* out) bool
     return true;
 }
 
+// Reads `regrow<T>(s, n)` after the name.
+fn parse_regrow(fir_parser mut* p, fir.func mut* f, fir.rvalue mut* out) bool {
+    types.node* mut ty = null;
+    fir.operand mut s = fir.operand{};
+    fir.operand mut n = fir.operand{};
+    if (!parse_angle_type(p, &ty) || !expect(p, ftok_kind.ft_lparen, "'('")
+        || !parse_operand(p, f, &s) || !parse_next_operand(p, f, &n)
+        || !expect(p, ftok_kind.ft_rparen, "')'")) {
+        return false;
+    }
+    *out = fir.rvalue_regrow(f, ty, s, n);
+    return true;
+}
+
 // Reads `call C(a, ...)` after the name: `fn m.f`, `extern name` or an operand of function type.
 fn parse_call(fir_parser mut* p, fir.func mut* f, fir.rvalue mut* out) bool {
     ast.sym* mut s = null;
@@ -1376,7 +1390,8 @@ fn parse_call(fir_parser mut* p, fir.func mut* f, fir.rvalue mut* out) bool {
 
 /// Reads an rvalue of `f` as the grammar rule `rvalue` spells it: an operand, an rvalue name of
 /// section 6 with its operands, `cast<T>(a)`, `addr [mut](p)`, `slice [mut](p, lo, hi)`,
-/// `slice_ptr(a, lo, hi)`, `alloc<T>(n)`, `aggregate T(a, ...)` or `call C(a, ...)`.
+/// `slice_ptr(a, lo, hi)`, `alloc<T>(n)`, `regrow<T>(s, n)`, `aggregate T(a, ...)` or
+/// `call C(a, ...)`.
 fn parse_rvalue(fir_parser mut* p, fir.func mut* f, fir.rvalue mut* out) bool {
     ftok t = cur(p);
     if (at_word(p, "copy") || at_word(p, "move") || at_word(p, "const")) {
@@ -1413,6 +1428,8 @@ fn parse_rvalue(fir_parser mut* p, fir.func mut* f, fir.rvalue mut* out) bool {
             return false;
         }
         *out = fir.rvalue_alloc(f, ty, a);
+    case fir.rvalue_kind.rv_regrow:
+        return parse_regrow(p, f, out);
     case fir.rvalue_kind.rv_aggregate:
         bool zeroed = take_zeroed(p);
         if (!take_type(p, &ty) || !parse_operand_list(p, f, &first, &count)) {

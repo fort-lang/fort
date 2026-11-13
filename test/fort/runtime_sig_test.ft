@@ -69,6 +69,15 @@ fn want(runtime_sig.rt_entry rt, string text) void {
 fn the_allocation_and_comparison_entry_points_are_the_ones_of_5_1() void {
     want(runtime_sig.rt_entry.rt_alloc, "ptr @\"std.rt.alloc\"(i64, i64, ptr, i32, i32)");
     want(runtime_sig.rt_entry.rt_free, "void @\"std.rt.free\"(ptr)");
+    // `regrow` takes the old pointer, the old length, the element size, the count, the sign of
+    // the count type and the source position (D12.2). `regrow_move` takes three spans, each the
+    // address of a `%fort.span`, and the element size.
+    want(runtime_sig.rt_entry.rt_regrow,
+         "ptr @\"std.rt.regrow\"(ptr, i64, i64, i64, i1 zeroext, ptr, i32, i32)");
+    want(runtime_sig.rt_entry.rt_regrow_move,
+         "void @\"std.rt.regrow_move\"(ptr, ptr, i64, ptr)");
+    assert(runtime_sig.rt_entry_of("std.rt.regrow") == runtime_sig.rt_entry.rt_regrow);
+    assert(runtime_sig.rt_entry_of("std.rt.regrow_move") == runtime_sig.rt_entry.rt_regrow_move);
     // `str_eq` answers a fort `bool`, which is `i1` as a value and `i8` only in memory. A
     // narrow result carries its extension attribute on both sides of the call.
     want(runtime_sig.rt_entry.rt_str_eq,
@@ -169,7 +178,7 @@ fn every_entry_point_is_found_by_its_own_mangled_name() void {
     // std.rt keeps fail_overwrite for the pinned compiler, and no check calls it, so it is an
     // ordinary fort function and no entry point (D17.11).
     assert(runtime_sig.rt_entry_of("std.rt.fail_overwrite") == runtime_sig.rt_entry.rt_none);
-    assert(runtime_sig.RT_ENTRY_COUNT == 27);
+    assert(runtime_sig.RT_ENTRY_COUNT == 29);
 }
 
 fn an_arity_is_read_off_the_row_and_the_row_ends_at_its_first_gap() void {
@@ -181,8 +190,12 @@ fn an_arity_is_read_off_the_row_and_the_row_ends_at_its_first_gap() void {
     assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_print_enum) == 3);
     assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_panic) == 4);
     assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_alloc) == 5);
-    // The widest runtime entry.
     assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_fail_span) == 6);
+    // The widest runtime entry.
+    assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_regrow) == 8);
+    assert(runtime_sig.RT_MAX_PARAMS == 8);
+    assert(!runtime_sig.rt_entry_noreturn(runtime_sig.rt_entry.rt_regrow));
+    assert(!runtime_sig.rt_entry_noreturn(runtime_sig.rt_entry.rt_regrow_move));
     u64 mut i = 0;
     while (i < runtime_sig.RT_ENTRY_COUNT) {
         runtime_sig.rt_entry rt = runtime_sig.rt_at(i);
@@ -201,7 +214,7 @@ fn an_arity_is_read_off_the_row_and_the_row_ends_at_its_first_gap() void {
 
 fn only_the_rows_5_1_marks_noreturn_are_noreturn() void {
     // Every `std.rt.fail_*` that a check calls, `std.rt.panic`, `std.rt.assert_fail` and
-    // `std.rt.exit` is `fn noreturn`. Nothing else is: eleven of the twenty-seven runtime
+    // `std.rt.exit` is `fn noreturn`. Nothing else is: eleven of the twenty-nine runtime
     // signatures. These definitions carry attribute group `#8`. `std.rt.fail_overwrite` has no
     // row, so its definition carries the `#1` of every other `noreturn` function.
     u64 mut noreturns = 0;
@@ -292,6 +305,22 @@ fn a_fort_signature_maps_to_the_row_the_call_site_needs() void {
     types.node* panic_sig = types.type_fn(&te->tt, voidt, message[..], true);
     same_row(runtime_sig.rt_signature_of_type("std.rt.panic", panic_sig),
              runtime_sig.rt_entry.rt_panic);
+    // `fn regrow(void* old, u64 old_len, u64 elem_size, u64 count, bool is_signed, char* file,
+    // u32 line, u32 col) void mut* own` is the one entry of 8 parameters: its last two take the
+    // slots `p6` and `p7`. With one parameter less, `p7` stays a gap.
+    types.node* voidp = types.type_voidptr(&te->tt, false, false);
+    types.node* owner = types.type_voidptr(&te->tt, true, true);
+    types.node*[8] mut grow = {voidp, i64t, i64t, i64t, boolt, charp, u32t, u32t};
+    types.node* grow_sig = types.type_fn(&te->tt, owner, grow[..], false);
+    runtime_sig.rt_sig grow_got = runtime_sig.rt_signature_of_type("std.rt.regrow", grow_sig);
+    same_row(grow_got, runtime_sig.rt_entry.rt_regrow);
+    assert(grow_got.p5 == runtime_sig.ir_form.ir_ptr);
+    assert(grow_got.p6 == runtime_sig.ir_form.ir_i32);
+    assert(grow_got.p7 == runtime_sig.ir_form.ir_i32);
+    types.node* short_sig = types.type_fn(&te->tt, owner, grow[..7], false);
+    runtime_sig.rt_sig short_got = runtime_sig.rt_signature_of_type("std.rt.regrow", short_sig);
+    assert(short_got.p6 == runtime_sig.ir_form.ir_i32);
+    assert(short_got.p7 == runtime_sig.ir_form.ir_none);
 }
 
 // Holds a row that rt_signature_of_type gave against the row of the entry `rt`.
@@ -302,6 +331,7 @@ fn same_row(runtime_sig.rt_sig got, runtime_sig.rt_entry rt) void {
     assert(got.is_noreturn == row.is_noreturn);
     assert(got.p0 == row.p0 && got.p1 == row.p1 && got.p2 == row.p2);
     assert(got.p3 == row.p3 && got.p4 == row.p4 && got.p5 == row.p5);
+    assert(got.p6 == row.p6 && got.p7 == row.p7);
 }
 
 fn a_fort_type_maps_to_the_form_the_boundary_gives_it() void {

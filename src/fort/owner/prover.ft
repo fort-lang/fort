@@ -387,6 +387,22 @@ fn gen_below(context* c, place.path p, probes mut* pr) void {
     }
 }
 
+// The kill at a vacate (spec/fir.md 11, Kill), for a statement that vacates `p`: a `move` of `p`
+// or `del(move p)`. It kills each fact of a place whose path can read a reference that it
+// empties (place.can_read_through). A fact holds only while each owner on the path of its place
+// owns the storage that the path goes through, and `p` owns its storage no more. An address that
+// the lowering holds from before the statement still names that storage, which the new owner can
+// release or fill. A store into `p` kills these facts by its own rules (kill_store).
+fn kill_past(context* c, place.path p, probes mut* pr) void {
+    u64 mut k = 0;
+    while (k < c->fact_count) {
+        if (place.can_read_through(&c->places, c->facts[k], p)) {
+            kill(pr, cast(k, u32));
+        }
+        k += 1;
+    }
+}
+
 // The gen rule of `del(move p)`: it makes `p` empty.
 fn gen_exact(context* c, place.path p, probes mut* pr) void {
     u64 mut k = 0;
@@ -536,12 +552,14 @@ fn gen_members(context* c, place.path d, fir.rvalue r, probes mut* pr) void {
     }
 }
 
-// The gen rule of each `move` operand of `s`, in operand order: it makes its place and each
-// tracked place below it empty. `del(move p)` makes `p` empty.
+// The rules of each `move` operand of `s`, in operand order: the kill rule of the vacate
+// (kill_past), then the gen rule, which makes its place and each tracked place below it empty.
+// `del(move p)` takes the same kill rule and makes `p` empty.
 fn gen_reads(context mut* c, fir.statement* s, fir_flow.bits* stale, probes mut* pr) void {
     u64 mark = c->places.steps_len;
     if (s->kind == fir.stmt_kind.st_del) {
         place.path p = place.trace(&c->places, s->place, stale);
+        kill_past(c, p, pr);
         gen_exact(c, p, pr);
         c->places.steps_len = mark;
         return;
@@ -551,6 +569,7 @@ fn gen_reads(context mut* c, fir.statement* s, fir_flow.bits* stale, probes mut*
     while (fir.stmt_reads(c->places.f, s, i, &o)) {
         if (o.kind == fir.operand_kind.ok_move) {
             place.path p = place.trace(&c->places, o.place, stale);
+            kill_past(c, p, pr);
             gen_below(c, p, pr);
             c->places.steps_len = mark;
         }

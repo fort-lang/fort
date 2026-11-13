@@ -1,0 +1,42 @@
+//! run
+//! flags: --release
+//! stdout:
+//| 4: 10 11 null null
+//| freed 2
+// `regrow` at -O2: the elements move with their owners, each new element holds the zero value,
+// and each allocation is released one time (D12.2).
+struct leaf {
+    i32 v;
+}
+
+u64 mut FREED = 0;
+
+fn leaf_drop(leaf mut* own p) void {
+    if (p != null) {
+        FREED += 1;
+    }
+    del(p);
+}
+
+fn main() i32 {
+    leaf mut* own mut@ own leaves = new(leaf mut* own, 2);
+    for (u64 mut i = 0; i < leaves.len; i += 1) {
+        leaf mut* own p = new(leaf);
+        p->v = 10 + cast(i, i32);
+        del(leaves[i]);
+        leaves[i] = move(p);
+    }
+    leaf mut* own mut@ own grown = regrow(move(leaves), 4);
+    print(grown.len, ":");
+    for (u64 mut i = 0; i < grown.len; i += 1) {
+        if (grown[i] == null) {
+            print(" null");
+        } else {
+            print(" ", grown[i]->v);
+        }
+    }
+    println();
+    del(grown, leaf_drop);
+    println("freed ", FREED);
+    return 0;
+}

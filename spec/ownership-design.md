@@ -496,6 +496,12 @@ access path.
   `S(q)`: a weak update. Each local owner that changes has a release.
 - `move p` and `del(move p)` through a pointer: the tracked place `p` gets `{vacated}`. Each memory
   place gets `vacated` added (premise 3). Each local owner among them has a release.
+- `move p` and `del(move p)`, each form: each tracked place that reads a reference that the vacate
+  can empty gets the unknown state before the update above. A place reads such a reference when a
+  dereference, or an index into a span or a `string`, stands in it right after a place that the
+  vacate can write. This is the kill at a vacate of `spec/fir.md` 11, with its three cases, so
+  the emptiness fact dies where the prover kills it. `p` owns that storage no more, so no state
+  of a place in it holds.
 - A store of `r` into an owner `p`: `S(p)` is `{null}` for a zero constant and `{live}` for `alloc`.
   It is the value of the `move` operand that `r` holds, with `entry` read as `live` and `vacated` as
   `null`. For each other `r` it is `{null, live}`. In an owning aggregate place, each owner below it

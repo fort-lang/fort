@@ -1175,6 +1175,24 @@ fn v4_calls_switches_and_checks() void {
 
 // An rvalue whose count of operands differs from its form, which only a pass that builds the
 // record by hand can make.
+// A `u8 mut@ own` temporary and a `u8 mut* own` temporary of `f`, with the element type.
+struct u8_span_local {
+    types.node* elem;
+    u32 span;
+    u32 ptr;
+}
+
+fn u8_span(env mut* e, fir.func mut* f) u8_span_local {
+    types.node* u8t = prim_ty(e, prim.prim_kind.prim_u8);
+    types.node* span = types.type_span(tt(e), u8t, true, true);
+    types.node* ptr = types.type_ptr(tt(e), u8t, true, true);
+    return u8_span_local{
+        .elem = u8t,
+        .span = fir.local_add(f, span, fir.local_kind.lk_temp, null, at(1, 1)),
+        .ptr = fir.local_add(f, ptr, fir.local_kind.lk_temp, null, at(1, 1)),
+    };
+}
+
 fn v4_an_rvalue_has_the_count_of_its_form() void {
     env mut* own e = make();
     defer drop_made(move(e));
@@ -1203,6 +1221,21 @@ fn v4_an_rvalue_has_the_count_of_its_form() void {
     fir.block_append(g, 0, fir.stmt_assign(fir.place_local(two), addr, at(1, 1), 1));
     fir.block_set_terminator(g, 0, fir.term_return(at(1, 1), 1));
     red_func(e, g, 4, fir_verify.V4_ARITY, 0, 0);
+    // a regrow has the span and the count, and no third operand
+    fir.func mut* own h = fir.func_make();
+    *h = func_of(e, "nothing");
+    defer fir.func_drop_made(move(h));
+    u8_span_local span = u8_span(e, h);
+    u32 args = fir.operand_push(h, fir.operand_move(fir.place_local(span.span)));
+    fir.rvalue grown = fir.rvalue{
+        .kind = fir.rvalue_kind.rv_regrow,
+        .ty = span.elem,
+        .ops_first = args,
+        .ops_len = 1,
+    };
+    fir.block_append(h, 0, fir.stmt_assign(fir.place_local(span.ptr), grown, at(1, 1), 1));
+    fir.block_set_terminator(h, 0, fir.term_return(at(1, 1), 1));
+    red_func(e, h, 4, fir_verify.V4_ARITY, 0, 0);
 }
 
 fn v4_a_switch_names_each_value_once() void {
@@ -1285,6 +1318,92 @@ fn v4_no_address_and_no_allocation_of_void() void {
         4, fir_verify.V4_ALLOC_SPAN, 0, 0);
     green(e, "let _1: u8[4] mut* own; bb0: {", "_1 = alloc<u8[4]>(const u64 1); return; }");
     green(e, "let _1: void*; let _2: void**; bb0: {", "_2 = addr(_1); return; }");
+}
+
+// The locals of the cases of `regrow`: a `u8 mut@ own` to move, the `u8 mut* own` of the result,
+// the two count types, and a value of each type that the form refuses.
+fn regrow_lets(strbuf.str_buf mut* b) string {
+    strbuf.append(b, "let _1: u8 mut@ own; let _2: u8 mut* own; let _3: u64; let _4: i64;");
+    strbuf.append(b, "let _5: i32; let _6: u8 mut@; let _7: u8@ own; let _8: i32 mut@ own;");
+    strbuf.append(b, "let _9: string own; let _10: void* mut* own; let _11: u8@ mut* own;");
+    strbuf.append(b, "let _12: u8 mut*; let _13: u32; let _14: bool; let _15: i32 mut* own;");
+    strbuf.append(b, "let _16: u8[4]; bb0: {");
+    return strbuf.view(b);
+}
+
+// `regrow<T>(s, n)`: `s` has the type `T mut@ own`, `n` is an `i64` or a `u64`, and the result is
+// a `T mut* own` (spec/fir.md 6, D12.2).
+fn v4_a_regrow_takes_an_own_span_of_its_element_type_and_a_wide_count() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    string lets = regrow_lets(&b);
+    green(e, lets, "_2 = regrow<u8>(move _1, copy _3); del(move _2); return; }");
+    green(e, lets, "_2 = regrow<u8>(move _1, copy _4); del(move _2); return; }");
+    green(e, lets, "_2 = regrow<u8>(move _1, const u64 4); del(move _2); return; }");
+    green(e, lets, "_2 = regrow<u8>(move _1, const i64 -1); del(move _2); return; }");
+    green(e, lets, "_15 = regrow<i32>(move _8, copy _3); del(move _15); return; }");
+    // the count has 64 bits: a narrower integer and a `bool` are refused
+    red(e, lets, "_2 = regrow<u8>(move _1, copy _5); return; }", 4, fir_verify.V4_REGROW_COUNT,
+        0, 0);
+    red(e, lets, "_2 = regrow<u8>(move _1, copy _13); return; }", 4, fir_verify.V4_REGROW_COUNT,
+        0, 0);
+    red(e, lets, "_2 = regrow<u8>(move _1, copy _14); return; }", 4, fir_verify.V4_REGROW_COUNT,
+        0, 0);
+    red(e, lets, "_2 = regrow<u8>(move _1, const i32 1); return; }", 4,
+        fir_verify.V4_REGROW_COUNT, 0, 0);
+    red(e, lets, "_2 = regrow<u8>(move _1, copy _1); return; }", 4, fir_verify.V4_REGROW_COUNT,
+        0, 0);
+    // the operand is a `T mut@ own`: no view, no span of elements that are not `mut`, no span of
+    // another element type, no string, no pointer and no fixed array
+    red(e, lets, "_2 = regrow<u8>(move _6, copy _3); return; }", 4, fir_verify.V4_REGROW_SPAN, 0,
+        0);
+    red(e, lets, "_2 = regrow<u8>(move _7, copy _3); return; }", 4, fir_verify.V4_REGROW_SPAN, 0,
+        0);
+    red(e, lets, "_2 = regrow<u8>(move _8, copy _3); return; }", 4, fir_verify.V4_REGROW_SPAN, 0,
+        0);
+    red(e, lets, "_2 = regrow<u8>(move _9, copy _3); return; }", 4, fir_verify.V4_REGROW_SPAN, 0,
+        0);
+    red(e, lets, "_2 = regrow<u8>(move _2, copy _3); return; }", 4, fir_verify.V4_REGROW_SPAN, 0,
+        0);
+    red(e, lets, "_2 = regrow<u8>(copy _16, copy _3); return; }", 4, fir_verify.V4_REGROW_SPAN,
+        0, 0);
+    red(e, lets, "_2 = regrow<u8>(copy _3, copy _3); return; }", 4, fir_verify.V4_REGROW_SPAN, 0,
+        0);
+    // the element type is one that `alloc` takes: no `void` and no span
+    red(e, lets, "_10 = regrow<void>(move _1, copy _3); return; }", 4,
+        fir_verify.V4_REGROW_VOID, 0, 0);
+    red(e, lets, "_11 = regrow<u8@>(move _1, copy _3); return; }", 4,
+        fir_verify.V4_REGROW_ELEMENT, 0, 0);
+    // the result is a pointer to the element type, and not the span
+    red(e, lets, "_1 = regrow<u8>(move _1, copy _3); return; }", 4, fir_verify.V4_ASSIGN, 0, 0);
+    red(e, lets, "_15 = regrow<u8>(move _1, copy _3); return; }", 4, fir_verify.V4_ASSIGN, 0, 0);
+    red(e, lets, "_10 = regrow<u8>(move _1, copy _3); return; }", 4, fir_verify.V4_ASSIGN, 0, 0);
+    // the violation names the statement
+    red(e, lets, "_3 = const u64 1; _2 = regrow<u8>(move _1, copy _5); return; }", 4,
+        fir_verify.V4_REGROW_COUNT, 0, 1);
+}
+
+// The span of a `regrow` is a `move`, because the `regrow` releases its storage, and the result
+// lands in a place that owns (spec/fir.md 6, D12.2).
+fn v6_a_regrow_moves_its_span_and_lands_in_an_owner() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    env mut* own e = make();
+    defer drop_made(move(e));
+    string lets = regrow_lets(&b);
+    red(e, lets, "_2 = regrow<u8>(copy _1, copy _3); return; }", 6, fir_verify.V6_REGROW, 0, 0);
+    red(e, lets, "_2 = regrow<u8>(const zero u8 mut@ own, copy _3); return; }", 6,
+        fir_verify.V6_REGROW, 0, 0);
+    red(e, lets, "_12 = regrow<u8>(move _1, copy _3); return; }", 6, fir_verify.V6_LANDS_PLACE,
+        0, 0);
+    // the count is read and never kept, so a `move` there lands nowhere
+    red(e, lets, "_2 = regrow<u8>(move _1, move _3); return; }", 5, fir_verify.V5_MOVE, 0, 0);
+    green(e, lets, "_2 = regrow<u8>(move _1, copy _3); del(move _2); return; }");
+    // the same span behind a pointer: the `move` takes the place, and the result is returned
+    green_in(e, "fn main.t6() -> u8 mut* own", "let _1: u8 mut@ own mut*; let _2: u64; bb0: {",
+             "_0 = regrow<u8>(move (*_1), copy _2); return; }");
 }
 
 // ---- V5 and V6 -------------------------------------------------------------------------------
@@ -2188,6 +2307,21 @@ fn v12_a_move_takes_effect_at_its_operand() void {
     // the move empties `_1` before the assignment fills it again
     string[3] self = {OWNED, GRAB, "_1 = move _1; del(move _1); return; }"};
     flow_green(e, NOTHING, self[..]);
+    // a regrow empties its span as a move does
+    string spans = "let _1: u8 mut@ own; let _2: u8 mut* own; let _3: u64; let _4: u8 mut@;";
+    string fill = "bb0: { _1 = const zero u8 mut@ own; _3 = const u64 2;";
+    string[3] grown = {
+        spans, fill, "_2 = regrow<u8>(move _1, copy _3); _4 = copy _1; del(move _2); return; }",
+    };
+    flow_red(e, NOTHING, grown[..], 12, fir_verify.V12_MOVED, 0, 3);
+    string[3] kept = {spans, fill, "_2 = regrow<u8>(move _1, copy _3); del(move _2); return; }"};
+    flow_green(e, NOTHING, kept[..]);
+    // an assignment after the regrow fills the span again
+    string[3] again = {
+        spans, fill,
+        "_2 = regrow<u8>(move _1, copy _3); _1 = const zero u8 mut@ own; _4 = copy _1; return; }",
+    };
+    flow_green(e, NOTHING, again[..]);
 }
 
 fn v12_follows_the_moves_of_every_path() void {
@@ -2679,6 +2813,7 @@ fn main() i32 {
     v4_a_switch_names_each_value_once();
     v4_an_overwrite_check_names_its_place();
     v4_no_address_and_no_allocation_of_void();
+    v4_a_regrow_takes_an_own_span_of_its_element_type_and_a_wide_count();
     println("V4 ok");
     v5_move_and_del_take_owning_places();
     v6_an_owning_place_takes_a_move_a_constant_or_an_owning_rvalue();
@@ -2687,6 +2822,7 @@ fn main() i32 {
     v6_an_owning_value_lands_in_an_owning_position();
     v6_a_cast_never_adds_own();
     v6_a_copy_or_a_move_adds_no_own();
+    v6_a_regrow_moves_its_span_and_lands_in_an_owner();
     println("V5 V6 ok");
     v7_a_call_matches_its_callee();
     v7_a_check_reports_what_its_runtime_entry_takes();

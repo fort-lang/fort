@@ -33,7 +33,14 @@
     "the operands of the call before its kill. The CALLS cases of test/fort/owner/prover_test.ft",
     "hold each.",
     "The row D17.11-zero-read-once holds the one read of a temporary that holds a zero value",
-    "(place.is_moved_once), which the ZERO_VALUES cases of test/fort/owner/prover_test.ft hold."
+    "(place.is_moved_once), which the ZERO_VALUES cases of test/fort/owner/prover_test.ft hold.",
+    "The rows D17.11-vacate hold the kill at a vacate (spec/fir.md 11), of a `move` operand and of `del(move",
+    "p)` (prover.kill_past, place.can_read_through and place.can_vacate): the two steps that end a",
+    "fact, a dereference and an index on a span; the `field` step that keeps it; a second base; each",
+    "of the three cases in which the vacate cannot write a place; the two statements that apply the",
+    "rule; and the order of the kill and the gen. The first stage runs",
+    "test/fort/owner/prover_vacate_test.ft too, which holds each over FIR text against the events of",
+    "the interpreter."
   ],
   "sources": [
     "src/fort/owner/alias.ft",
@@ -50,7 +57,7 @@
   "stages": [
     {
       "name": "the prover, report and alias module tests",
-      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 owner/prover_test owner/report_test owner/alias_test"
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 owner/prover_test owner/report_test owner/alias_test owner/prover_vacate_test"
     },
     {
       "name": "the build-mode suite",
@@ -76,15 +83,15 @@
     {
       "decision": "D17.11-gen-del",
       "file": "src/fort/owner/prover.ft",
-      "old": "        place.path p = place.trace(&c->places, s->place, stale);\n        gen_exact(c, p, pr);",
-      "new": "        place.path p = place.trace(&c->places, s->place, stale);",
+      "old": "        kill_past(c, p, pr);\n        gen_exact(c, p, pr);",
+      "new": "        kill_past(c, p, pr);",
       "what": "del(move p) makes nothing empty"
     },
     {
       "decision": "D17.11-gen-move",
       "file": "src/fort/owner/prover.ft",
-      "old": "        if (o.kind == fir.operand_kind.ok_move) {\n            place.path p = place.trace(&c->places, o.place, stale);\n            gen_below(c, p, pr);\n            c->places.steps_len = mark;\n        }\n        i += 1;\n    }\n}\n\n// The kill rules of the store",
-      "new": "        if (false) {\n            place.path p = place.trace(&c->places, o.place, stale);\n            gen_below(c, p, pr);\n            c->places.steps_len = mark;\n        }\n        i += 1;\n    }\n}\n\n// The kill rules of the store",
+      "old": "        if (o.kind == fir.operand_kind.ok_move) {\n            place.path p = place.trace(&c->places, o.place, stale);\n            kill_past(c, p, pr);\n            gen_below(c, p, pr);",
+      "new": "        if (false) {\n            place.path p = place.trace(&c->places, o.place, stale);\n            kill_past(c, p, pr);\n            gen_below(c, p, pr);",
       "what": "a move operand makes nothing empty"
     },
     {
@@ -370,8 +377,8 @@
     {
       "decision": "D17.11-below",
       "file": "src/fort/owner/place.ft",
-      "old": "        } else if (s.kind == step_kind.sk_deref || s.header) {\n            return false;\n        }\n        i += 1;\n    }\n    return true;\n}\n\n// Whether the paths",
-      "new": "        } else if (s.kind == step_kind.sk_deref) {\n            return false;\n        }\n        i += 1;\n    }\n    return true;\n}\n\n// Whether the paths",
+      "old": "        } else if (s.kind == step_kind.sk_deref || s.header) {\n            return false;\n        }\n        i += 1;\n    }\n    return true;\n}\n\n// Whether a vacate of",
+      "new": "        } else if (s.kind == step_kind.sk_deref) {\n            return false;\n        }\n        i += 1;\n    }\n    return true;\n}\n\n// Whether a vacate of",
       "what": "a place below p can hold an index on a span"
     },
     {
@@ -933,6 +940,111 @@
       "old": "        && c->locals[cast(t, u64)].reads == 1;\n}",
       "new": "        && c->locals[cast(t, u64)].reads >= 1;\n}",
       "what": "a temporary that a second item reads holds a zero value"
+    },
+    {
+      "decision": "D17.11-vacate-deref",
+      "file": "src/fort/owner/place.ft",
+      "old": "        if (s.kind == step_kind.sk_deref || s.header) {\n            path mut before = q;",
+      "new": "        if (s.header) {\n            path mut before = q;",
+      "what": "a vacate keeps the fact of a place below its owner through a dereference"
+    },
+    {
+      "decision": "D17.11-vacate-index",
+      "file": "src/fort/owner/place.ft",
+      "old": "        if (s.kind == step_kind.sk_deref || s.header) {\n            path mut before = q;",
+      "new": "        if (s.kind == step_kind.sk_deref) {\n            path mut before = q;",
+      "what": "a vacate keeps the fact of a place below its owner through an index on a span"
+    },
+    {
+      "decision": "D17.11-vacate-field",
+      "file": "src/fort/owner/place.ft",
+      "old": "        if (s.kind == step_kind.sk_deref || s.header) {\n            path mut before = q;",
+      "new": "        if (true) {\n            path mut before = q;",
+      "what": "a `field` step or an index on a fixed array below the vacated place ends the fact"
+    },
+    {
+      "decision": "D17.11-vacate-other-base",
+      "file": "src/fort/owner/place.ft",
+      "old": "            } else if (is_through_memory(c, before)) {\n                return true;",
+      "new": "            } else if (false) {\n                return true;",
+      "what": "a vacate through one pointer keeps each fact through another pointer"
+    },
+    {
+      "decision": "D17.11-vacate-other-local",
+      "file": "src/fort/owner/place.ft",
+      "old": "    if (!same && !is_through_memory(c, p)) {\n        return false;",
+      "new": "    if (false) {\n        return false;",
+      "what": "a vacate of a place that no pointer reaches ends the facts of another base"
+    },
+    {
+      "decision": "D17.11-vacate-separate",
+      "file": "src/fort/owner/place.ft",
+      "old": "            return !is_separate(c, b, p);\n",
+      "new": "            return true;\n",
+      "what": "a vacate ends the fact below a place that is separate from it"
+    },
+    {
+      "decision": "D17.11-vacate-same-element",
+      "file": "src/fort/owner/place.ft",
+      "old": "            return !is_separate(c, b, p);\n",
+      "new": "            return false;\n",
+      "what": "a vacate of an element keeps the fact below an element with another key"
+    },
+    {
+      "decision": "D17.11-vacate-owner",
+      "file": "src/fort/owner/place.ft",
+      "old": "    if (b.len >= p.len) {\n        return true;",
+      "new": "    if (b.len >= p.len) {\n        return false;",
+      "what": "a vacate of an owner, or of a place above it, keeps each fact below the owner"
+    },
+    {
+      "decision": "D17.11-vacate-header-field",
+      "file": "src/fort/owner/place.ft",
+      "old": "    if (first.kind != step_kind.sk_deref && !first.header) {\n        return true;",
+      "new": "    if (first.kind != step_kind.sk_deref && !first.header) {\n        return false;",
+      "what": "a vacate of a field of a header keeps each fact below the header"
+    },
+    {
+      "decision": "D17.11-vacate-pointer-local",
+      "file": "src/fort/owner/place.ft",
+      "old": "    if (!is_through_memory(c, b)) {\n        return false;",
+      "new": "    if (!is_through_memory(c, b)) {\n        return true;",
+      "what": "a vacate through a pointer local that is not memory ends each fact through that local"
+    },
+    {
+      "decision": "D17.11-vacate-second-reference",
+      "file": "src/fort/owner/place.ft",
+      "old": "        if (s.kind == step_kind.sk_deref || s.header) {\n            return true;\n        }\n        i += 1;\n    }\n    return false;\n}\n\n// Whether the path `q` can read",
+      "new": "        if (s.kind == step_kind.sk_deref || s.header) {\n            return false;\n        }\n        i += 1;\n    }\n    return false;\n}\n\n// Whether the path `q` can read",
+      "what": "a vacate through a second reference keeps each fact below the first"
+    },
+    {
+      "decision": "D17.11-vacate-object",
+      "file": "src/fort/owner/place.ft",
+      "old": "        if (s.kind == step_kind.sk_deref || s.header) {\n            return true;\n        }\n        i += 1;\n    }\n    return false;\n}\n\n// Whether the path `q` can read",
+      "new": "        if (s.kind == step_kind.sk_deref || s.header) {\n            return true;\n        }\n        i += 1;\n    }\n    return true;\n}\n\n// Whether the path `q` can read",
+      "what": "a vacate in the object that a reference in memory names ends each fact through it"
+    },
+    {
+      "decision": "D17.11-vacate-del",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        kill_past(c, p, pr);\n        gen_exact(c, p, pr);",
+      "new": "        gen_exact(c, p, pr);",
+      "what": "`del(move p)` ends no fact below `p`"
+    },
+    {
+      "decision": "D17.11-vacate-move",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            kill_past(c, p, pr);\n            gen_below(c, p, pr);",
+      "new": "            gen_below(c, p, pr);",
+      "what": "a `move` operand ends no fact below its place"
+    },
+    {
+      "decision": "D17.11-vacate-order",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            kill_past(c, p, pr);\n            gen_below(c, p, pr);",
+      "new": "            gen_below(c, p, pr);\n            kill_past(c, p, pr);",
+      "what": "a `move` operand applies its gen rule before its kill rule"
     }
   ]
 }

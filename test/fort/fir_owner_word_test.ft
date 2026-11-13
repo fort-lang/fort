@@ -1,0 +1,149 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| ok
+/// Checks fir.owner_word_count and fir.owner_word_at, the words of the owner slots in the fixed
+/// storage of a type. `regrow` stores 0 into each of these words of each old element (D12.2), so
+/// a wrong offset leaves a second owner or destroys a value that the element keeps.
+import fort.check;
+import check_env;
+import fort.fir;
+import fort.prim;
+import std.strbuf;
+import fort.types;
+
+// The declarations of the cases, one line each. On each target a pointer has 8 bytes, a span and
+// a string have 16 bytes, and `u64` aligns to 8 bytes.
+u64 DECL_LINES = 23;
+
+string[DECL_LINES] DECLS = {
+    "struct plain {",
+    "    i32 a;",
+    "    u64 b;",
+    "}",
+    "struct leaf {",
+    "    i32 mut* own p;",
+    "}",
+    "struct mixed {",
+    "    u8 tag;",
+    "    i32 mut* own p;",
+    "    u64 n;",
+    "    i32 mut@ own items;",
+    "    string own name;",
+    "    string view;",
+    "    i32* seen;",
+    "}",
+    "struct nest {",
+    "    u64 id;",
+    "    leaf[3] row;",
+    "    mixed m;",
+    "    plain q;",
+    "    leaf last;",
+    "}",
+};
+
+// Checks the declarations in the sandbox of `e`.
+fn declare(check_env.env mut* e) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
+    for (string line : DECLS) {
+        strbuf.append(&b, line);
+        strbuf.push(&b, '\n');
+    }
+    assert(check_env.check_decls(e, strbuf.view(&b)));
+}
+
+fn decl(check_env.env mut* e, string name) types.node* {
+    return check_env.sym_main(e, name)->ty;
+}
+
+// Holds that `t` has the words at `want`, in this order, and no other word.
+fn words(types.node* t, u64@ want) void {
+    assert(fir.owner_word_count(t) == want.len);
+    for (u64 mut k = 0; k < want.len; k++) {
+        if (fir.owner_word_at(t, k) != want[k]) {
+            eprintln("fir_owner_word_test: word ", k, " is at ", fir.owner_word_at(t, k),
+                     ", expected ", want[k]);
+            panic("fir_owner_word_test.words: a word at another offset");
+        }
+    }
+}
+
+fn a_type_with_no_owner_has_no_word(check_env.env mut* e) void {
+    declare(e);
+    types.table mut* tt = &e->ck.types;
+    types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
+    assert(fir.owner_word_count(i32t) == 0);
+    assert(fir.owner_word_count(decl(e, "plain")) == 0);
+    // A reference that does not own: a pointer, a span, a string and a `void*`.
+    assert(fir.owner_word_count(types.type_ptr(tt, i32t, false, true)) == 0);
+    assert(fir.owner_word_count(types.type_span(tt, i32t, false, true)) == 0);
+    assert(fir.owner_word_count(types.type_string(tt, false)) == 0);
+    assert(fir.owner_word_count(types.type_voidptr(tt, false, true)) == 0);
+    // A pointer to an owner owns nothing, and neither does a fixed array of plain values.
+    types.node* leaf_ptr = types.type_ptr(tt, decl(e, "leaf"), false, true);
+    assert(fir.owner_word_count(leaf_ptr) == 0);
+    assert(fir.owner_word_count(types.type_array(tt, decl(e, "plain"), 4)) == 0);
+    assert(fir.owner_word_count(types.type_array(tt, i32t, 4)) == 0);
+}
+
+fn an_own_reference_has_one_word_or_two(check_env.env mut* e) void {
+    declare(e);
+    types.table mut* tt = &e->ck.types;
+    types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
+    u64[1] one = {0};
+    u64[2] two = {0, 8};
+    words(types.type_ptr(tt, i32t, true, true), one[..]);
+    words(types.type_ptr(tt, i32t, true, false), one[..]);
+    words(types.type_voidptr(tt, true, true), one[..]);
+    // The pointer and the length of a span and of a string: the zero value has both at 0.
+    words(types.type_span(tt, i32t, true, true), two[..]);
+    words(types.type_span(tt, i32t, true, false), two[..]);
+    words(types.type_string(tt, true), two[..]);
+    // An `own` span of owners is one owner slot: its elements are in another allocation.
+    words(types.type_span(tt, decl(e, "leaf"), true, true), two[..]);
+}
+
+fn a_struct_has_the_words_of_its_owning_fields(check_env.env mut* e) void {
+    declare(e);
+    u64[1] leaf = {0};
+    words(decl(e, "leaf"), leaf[..]);
+    // `tag` at 0, `p` at 8, `n` at 16, `items` at 24, `name` at 40, `view` at 56, `seen` at 72.
+    assert(check_env.field_offset(e, "mixed", "p") == 8);
+    assert(check_env.field_offset(e, "mixed", "items") == 24);
+    assert(check_env.field_offset(e, "mixed", "name") == 40);
+    assert(types.type_sizeof(decl(e, "mixed")) == 80);
+    u64[5] mixed = {8, 24, 32, 40, 48};
+    words(decl(e, "mixed"), mixed[..]);
+    // `id` at 0, `row` at 8, `m` at 32, `q` at 112, `last` at 128.
+    assert(check_env.field_offset(e, "nest", "m") == 32);
+    assert(check_env.field_offset(e, "nest", "last") == 128);
+    u64[9] nest = {8, 16, 24, 40, 56, 64, 72, 80, 128};
+    words(decl(e, "nest"), nest[..]);
+}
+
+fn a_fixed_array_has_the_words_of_each_element(check_env.env mut* e) void {
+    declare(e);
+    types.table mut* tt = &e->ck.types;
+    types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
+    u64[4] leaves = {0, 8, 16, 24};
+    words(types.type_array(tt, decl(e, "leaf"), 4), leaves[..]);
+    words(types.type_array(tt, types.type_ptr(tt, i32t, true, true), 4), leaves[..]);
+    // Two spans of 16 bytes each.
+    words(types.type_array(tt, types.type_span(tt, i32t, true, true), 2), leaves[..]);
+    // The second element starts at 80.
+    u64[10] pair = {8, 24, 32, 40, 48, 88, 104, 112, 120, 128};
+    words(types.type_array(tt, decl(e, "mixed"), 2), pair[..]);
+    // An array of arrays.
+    types.node* row = types.type_array(tt, decl(e, "leaf"), 2);
+    words(types.type_array(tt, row, 2), leaves[..]);
+}
+
+fn main() i32 {
+    check_env.run(a_type_with_no_owner_has_no_word);
+    check_env.run(an_own_reference_has_one_word_or_two);
+    check_env.run(a_struct_has_the_words_of_its_owning_fields);
+    check_env.run(a_fixed_array_has_the_words_of_each_element);
+    println("ok");
+    return 0;
+}

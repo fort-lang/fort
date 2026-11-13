@@ -1,0 +1,883 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| ended ok
+//| kept ok
+//| cases 16 proved 6 refused 10 events 8
+/// Checks the kill at a vacate of owner.prover (spec/fir.md 11): a statement that vacates an owner,
+/// a `move` of it or a `del` of it, ends each fact of a place whose path can read that owner. Each
+/// case is one function of FIR text. The test holds the lines that the prover reports for it, then
+/// the lines of the whole-store report, then the report of the interpreter with its events.
+///
+/// The last line of the output counts the cases, those with 0 lines of the prover, those with a
+/// line, and those with an event. A case that the prover refuses with no event has a store into
+/// storage that is not released: its harm is an owner that holds its own storage, which no exit
+/// releases.
+import check_env;
+import fort.fir;
+import fort.owner.prover;
+import fort.owner.report;
+import run_env;
+import std.strbuf;
+
+// The structs that the FIR text names. `row` holds an `own` span of its own type, so a span of
+// rows can go into an element of its own storage.
+string[24] PRELUDE = {
+    "struct row {",
+    "    row mut@ own sub;",
+    "    u64 tag;",
+    "}",
+    "struct node {",
+    "    node mut* own next;",
+    "    u64 tag;",
+    "}",
+    "struct pair {",
+    "    u8 mut* own left;",
+    "    u8 mut* own right;",
+    "}",
+    "struct tab {",
+    "    row mut@ own rows;",
+    "    u8 mut* own extra;",
+    "}",
+    "struct knot {",
+    "    knot mut* back;",
+    "    knot mut@ own kids;",
+    "}",
+    "struct ring {",
+    "    ring mut@ own mut* self;",
+    "    ring mut@ own kids;",
+    "}",
+};
+
+// A statement vacates an owner between the `addr` of the destination and the store, and the path
+// of the destination reads that owner. The fact of the destination ends, so the prover does not
+// prove the store.
+string[364] ENDED = {
+    // `top[0].sub = move(top)`: the lowering holds the address of the element before the `move`,
+    // and the `move` of `top` ends the fact of the element, which lies in the storage that `top`
+    // owned.
+    "fn main.index_moved() -> u64 {",
+    "    let _1 (top): row mut@ own;",
+    "    let _2: row mut* own;",
+    "    let _3: row mut@ own;",
+    "    let _4: u64;",
+    "    let _5 (first): row mut@ own;",
+    "    let _6: row mut@ own mut*;",
+    "    let _7: row mut@ own;",
+    "    bb0: {",
+    "        _1 = const zero row mut@ own #1:1;",
+    "        _5 = const zero row mut@ own #1:2;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<row>(const u64 1) #2:1;",
+    "        _3 = aggregate row mut@ own(move _2, const u64 1) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        _4 = const u64 0 #2:3;",
+    "        live(_5) #2:4;",
+    "        _5 = move _1[_4].0 #2:4;",
+    "        _6 = addr mut(_1[_4].0) #3:1;",
+    "        _7 = move _1 #3:2;",
+    "        check(overwrite: (*_6)) -> bb2 #3:3;",
+    "    }",
+    "    bb2: {",
+    "        (*_6) = move _7 #3:3;",
+    "        _0 = copy _1.1 #5:1;",
+    "        del(move _5) #6:1;",
+    "        del(move _1) #6:2;",
+    "        dead(_5) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // `top[0].sub = regrow(move(top), 2)`: the same store with a `regrow`, which releases the
+    // storage of the element.
+    "fn main.index_regrown() -> u64 {",
+    "    let _1 (top): row mut@ own;",
+    "    let _2: row mut* own;",
+    "    let _3: row mut@ own;",
+    "    let _4: u64;",
+    "    let _5 (first): row mut@ own;",
+    "    let _6: row mut@ own mut*;",
+    "    let _7: row mut@ own;",
+    "    let _8: row mut* own;",
+    "    let _9: row mut@ own;",
+    "    bb0: {",
+    "        _1 = const zero row mut@ own #1:1;",
+    "        _5 = const zero row mut@ own #1:2;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<row>(const u64 1) #2:1;",
+    "        _3 = aggregate row mut@ own(move _2, const u64 1) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        _4 = const u64 0 #2:3;",
+    "        live(_5) #2:4;",
+    "        _5 = move _1[_4].0 #2:4;",
+    "        _6 = addr mut(_1[_4].0) #3:1;",
+    "        _7 = move _1 #3:2;",
+    "        _8 = regrow<row>(move _7, const u64 2) #3:2;",
+    "        _9 = aggregate row mut@ own(move _8, const u64 2) #3:2;",
+    "        check(overwrite: (*_6)) -> bb2 #3:3;",
+    "    }",
+    "    bb2: {",
+    "        (*_6) = move _9 #3:3;",
+    "        _0 = copy _1.1 #5:1;",
+    "        del(move _5) #6:1;",
+    "        del(move _1) #6:2;",
+    "        dead(_5) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // `top[0] = row{regrow(move(top), 2), 9}`: the whole store of the element. A whole store that
+    // the prover does not prove is a line of the whole-store report and no error (D17.11).
+    "fn main.whole_regrown() -> u64 {",
+    "    let _1 (top): row mut@ own;",
+    "    let _2: row mut* own;",
+    "    let _3: row mut@ own;",
+    "    let _4: u64;",
+    "    let _5 (first): row mut@ own;",
+    "    let _6: row mut*;",
+    "    let _7: row mut@ own;",
+    "    let _8: row mut* own;",
+    "    let _9: row mut@ own;",
+    "    bb0: {",
+    "        _1 = const zero row mut@ own #1:1;",
+    "        _5 = const zero row mut@ own #1:2;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<row>(const u64 1) #2:1;",
+    "        _3 = aggregate row mut@ own(move _2, const u64 1) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        _4 = const u64 0 #2:3;",
+    "        live(_5) #2:4;",
+    "        _5 = move _1[_4].0 #2:4;",
+    "        _6 = addr mut(_1[_4]) #3:1;",
+    "        _7 = move _1 #3:2;",
+    "        _8 = regrow<row>(move _7, const u64 2) #3:2;",
+    "        _9 = aggregate row mut@ own(move _8, const u64 2) #3:2;",
+    "        (*_6) = aggregate row(move _9, const u64 9) #3:3;",
+    "        _0 = copy _1.1 #5:1;",
+    "        del(move _5) #6:1;",
+    "        del(move _1) #6:2;",
+    "        dead(_5) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // `p->next = move(p)`: a deref step. The `move` of `p` ends the fact of `p->next`, which the
+    // fresh `new` gave.
+    "fn main.deref_moved() -> u64 {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _1 = const null node mut* own #1:1;",
+    "        live(_1) #1:1;",
+    "        _1 = alloc<node>(const u64 1) #2:1;",
+    "        _2 = addr mut((*_1).0) #3:1;",
+    "        _3 = move _1 #3:2;",
+    "        check(overwrite: (*_2)) -> bb1 #3:3;",
+    "    }",
+    "    bb1: {",
+    "        (*_2) = move _3 #3:3;",
+    "        _0 = const u64 0 #5:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // A `del` of `p` between the `addr` and the store: only FIR text holds it. The `del` vacates
+    // `p` as a `move` does, and the store through the address writes released storage.
+    "fn main.deref_deleted() -> u64 {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _1 = const null node mut* own #1:1;",
+    "        live(_1) #1:1;",
+    "        _1 = alloc<node>(const u64 1) #2:1;",
+    "        _3 = alloc<node>(const u64 1) #2:2;",
+    "        _2 = addr mut((*_1).0) #3:1;",
+    "        del(move _1) #3:2;",
+    "        check(overwrite: (*_2)) -> bb1 #3:3;",
+    "    }",
+    "    bb1: {",
+    "        (*_2) = move _3 #3:3;",
+    "        _0 = const u64 0 #5:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // The element holds a view `back` of the object that owns its span, and the `move` goes
+    // through that view. After a second deref a place can name any storage, so the `move` ends the
+    // fact of the element.
+    "fn main.view_moved() -> u64 {",
+    "    let _1 (n): knot mut* own;",
+    "    let _2: knot mut* own;",
+    "    let _3: knot mut@ own;",
+    "    let _4: u64;",
+    "    let _5 (old): knot mut@ own;",
+    "    let _6: knot mut@ own mut*;",
+    "    let _7: knot mut@ own;",
+    "    let _8: knot mut* own;",
+    "    let _9: knot mut@ own;",
+    "    bb0: {",
+    "        _1 = const null knot mut* own #1:1;",
+    "        _5 = const zero knot mut@ own #1:2;",
+    "        live(_1) #1:1;",
+    "        _1 = alloc<knot>(const u64 1) #2:1;",
+    "        _2 = alloc<knot>(const u64 1) #2:2;",
+    "        _3 = aggregate knot mut@ own(move _2, const u64 1) #2:2;",
+    "        check(overwrite: (*_1).1) -> bb1 #2:3;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).1 = move _3 #2:3;",
+    "        _4 = const u64 0 #2:4;",
+    "        (*_1).1[_4].0 = copy _1 #2:5;",
+    "        live(_5) #2:6;",
+    "        _5 = move (*_1).1[_4].1 #2:6;",
+    "        _6 = addr mut((*_1).1[_4].1) #3:1;",
+    "        _7 = move (*(*_1).1[_4].0).1 #3:2;",
+    "        _8 = regrow<knot>(move _7, const u64 2) #3:2;",
+    "        _9 = aggregate knot mut@ own(move _8, const u64 2) #3:2;",
+    "        check(overwrite: (*_6)) -> bb2 #3:3;",
+    "    }",
+    "    bb2: {",
+    "        (*_6) = move _9 #3:3;",
+    "        _0 = const u64 0 #5:1;",
+    "        del(move _5) #6:1;",
+    "        del(move (*_1).1) #6:2;",
+    "        del(move _1) #6:3;",
+    "        dead(_5) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // The element holds the address of the local `n` that owns its span, and the `move` goes
+    // through that address. `n` is memory, so a place through a second deref can be `n`.
+    "fn main.self_moved() -> u64 {",
+    "    let _1 (n): ring mut@ own;",
+    "    let _2: ring mut* own;",
+    "    let _3: ring mut@ own;",
+    "    let _4: u64;",
+    "    let _5 (old): ring mut@ own;",
+    "    let _6: ring mut@ own mut*;",
+    "    let _7: ring mut@ own;",
+    "    let _8: ring mut* own;",
+    "    let _9: ring mut@ own;",
+    "    let _10: ring mut@ own mut*;",
+    "    bb0: {",
+    "        _1 = const zero ring mut@ own #1:1;",
+    "        _5 = const zero ring mut@ own #1:2;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<ring>(const u64 1) #2:1;",
+    "        _3 = aggregate ring mut@ own(move _2, const u64 1) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        _4 = const u64 0 #2:3;",
+    "        _10 = addr mut(_1) #2:4;",
+    "        _1[_4].0 = copy _10 #2:4;",
+    "        live(_5) #2:5;",
+    "        _5 = move _1[_4].1 #2:5;",
+    "        _6 = addr mut(_1[_4].1) #3:1;",
+    "        _7 = move (*_1[_4].0) #3:2;",
+    "        _8 = regrow<ring>(move _7, const u64 2) #3:2;",
+    "        _9 = aggregate ring mut@ own(move _8, const u64 2) #3:2;",
+    "        check(overwrite: (*_6)) -> bb2 #3:3;",
+    "    }",
+    "    bb2: {",
+    "        (*_6) = move _9 #3:3;",
+    "        _0 = const u64 0 #5:1;",
+    "        del(move _5) #6:1;",
+    "        del(move _1) #6:2;",
+    "        dead(_5) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // The operand of the `regrow` is the place `top` itself and no temporary: only FIR text holds
+    // it. The `regrow` vacates `top` as a `move` does.
+    "fn main.bare_regrown() -> u64 {",
+    "    let _1 (top): row mut@ own;",
+    "    let _2: row mut* own;",
+    "    let _3: row mut@ own;",
+    "    let _4: u64;",
+    "    let _5 (first): row mut@ own;",
+    "    let _6: row mut@ own mut*;",
+    "    let _7: row mut* own;",
+    "    let _8: row mut@ own;",
+    "    bb0: {",
+    "        _1 = const zero row mut@ own #1:1;",
+    "        _5 = const zero row mut@ own #1:2;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<row>(const u64 1) #2:1;",
+    "        _3 = aggregate row mut@ own(move _2, const u64 1) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        _4 = const u64 0 #2:3;",
+    "        live(_5) #2:4;",
+    "        _5 = move _1[_4].0 #2:4;",
+    "        _6 = addr mut(_1[_4].0) #3:1;",
+    "        _7 = regrow<row>(move _1, const u64 2) #3:2;",
+    "        _8 = aggregate row mut@ own(move _7, const u64 2) #3:2;",
+    "        check(overwrite: (*_6)) -> bb2 #3:3;",
+    "    }",
+    "    bb2: {",
+    "        (*_6) = move _8 #3:3;",
+    "        _0 = copy _1.1 #5:1;",
+    "        del(move _5) #6:1;",
+    "        del(move _1) #6:2;",
+    "        dead(_5) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // `a[i].rows[0].sub = regrow(move(a[j].rows), 2)` with `i` and `j` equal at the run: two keys
+    // can name one element of a fixed array, so the `move` of `a[j].rows` ends the fact of a place
+    // below `a[i].rows`.
+    "fn main.key_regrown() -> u64 {",
+    "    let _1 (a): tab[2];",
+    "    let _2: row mut* own;",
+    "    let _3: row mut@ own;",
+    "    let _4 (i): u64;",
+    "    let _5 (first): row mut@ own;",
+    "    let _6: row mut@ own mut*;",
+    "    let _7: row mut@ own;",
+    "    let _8: row mut* own;",
+    "    let _9: row mut@ own;",
+    "    let _10 (j): u64;",
+    "    let _11: u64;",
+    "    let _12: u64;",
+    "    let _13: u64;",
+    "    bb0: {",
+    "        _1 = const zero tab[2] #1:1;",
+    "        _5 = const zero row mut@ own #1:2;",
+    "        live(_1) #1:1;",
+    "        live(_4) #1:3;",
+    "        _4 = const u64 0 #1:3;",
+    "        live(_10) #1:4;",
+    "        _10 = const u64 0 #1:4;",
+    "        _2 = alloc<row>(const u64 1) #2:1;",
+    "        _3 = aggregate row mut@ own(move _2, const u64 1) #2:1;",
+    "        _12 = const u64 0 #2:2;",
+    "        check(overwrite: _1[_12].0) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1[_12].0 = move _3 #2:2;",
+    "        _11 = const u64 0 #2:3;",
+    "        live(_5) #2:4;",
+    "        _5 = move _1[_4].0[_11].0 #2:4;",
+    "        _6 = addr mut(_1[_4].0[_11].0) #3:1;",
+    "        _7 = move _1[_10].0 #3:2;",
+    "        _8 = regrow<row>(move _7, const u64 2) #3:2;",
+    "        _9 = aggregate row mut@ own(move _8, const u64 2) #3:2;",
+    "        check(overwrite: (*_6)) -> bb2 #3:3;",
+    "    }",
+    "    bb2: {",
+    "        (*_6) = move _9 #3:3;",
+    "        _0 = copy _1[_12].0.1 #5:1;",
+    "        del(move _5) #6:1;",
+    "        del(move _1[_12].0) #6:2;",
+    "        _13 = const u64 1 #6:3;",
+    "        del(move _1[_13].0) #6:3;",
+    "        del(move _1[_12].1) #6:4;",
+    "        del(move _1[_13].1) #6:5;",
+    "        dead(_5) #7:1;",
+    "        dead(_10) #7:1;",
+    "        dead(_4) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // A `move` of field 0 of the header of `top`, then a `del` of the pointer: only FIR text holds
+    // it. The header owns the storage of the element no more, so the fact of the element ends.
+    "fn main.header_moved() -> u64 {",
+    "    let _1 (top): row mut@ own;",
+    "    let _2: row mut* own;",
+    "    let _3: row mut@ own;",
+    "    let _4: u64;",
+    "    let _5 (first): row mut@ own;",
+    "    let _6: row mut@ own mut*;",
+    "    let _7: row mut* own;",
+    "    let _8: row mut* own;",
+    "    let _9: row mut@ own;",
+    "    bb0: {",
+    "        _1 = const zero row mut@ own #1:1;",
+    "        _5 = const zero row mut@ own #1:2;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<row>(const u64 1) #2:1;",
+    "        _3 = aggregate row mut@ own(move _2, const u64 1) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        _4 = const u64 0 #2:3;",
+    "        live(_5) #2:4;",
+    "        _5 = move _1[_4].0 #2:4;",
+    "        _6 = addr mut(_1[_4].0) #3:1;",
+    "        _7 = move _1.0 #3:2;",
+    "        del(move _7) #3:2;",
+    "        _8 = alloc<row>(const u64 1) #3:2;",
+    "        _9 = aggregate row mut@ own(move _8, const u64 1) #3:2;",
+    "        check(overwrite: (*_6)) -> bb2 #3:3;",
+    "    }",
+    "    bb2: {",
+    "        (*_6) = move _9 #3:3;",
+    "        _0 = copy _1.1 #5:1;",
+    "        del(move _5) #6:1;",
+    "        del(move _1) #6:2;",
+    "        dead(_5) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+};
+
+// A statement vacates an owner that the path of the destination does not read. The fact of the
+// destination holds, and the prover proves the store.
+string[234] KEPT = {
+    // A `field` step stays in the storage of the moved struct value: the `move` of `a` makes
+    // `a.left` empty, and the store into it is proved.
+    "fn main.field_kept() -> u64 {",
+    "    let _1 (a): pair;",
+    "    let _2 (b): pair;",
+    "    let _3: u8 mut* own;",
+    "    let _4: u8 mut* own;",
+    "    bb0: {",
+    "        _1 = const zero pair #1:1;",
+    "        _2 = const zero pair #1:2;",
+    "        live(_1) #1:1;",
+    "        _3 = alloc<u8>(const u64 1) #2:1;",
+    "        check(overwrite: _1.0) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1.0 = move _3 #2:2;",
+    "        live(_2) #3:1;",
+    "        _2 = move _1 #3:1;",
+    "        _4 = alloc<u8>(const u64 1) #4:1;",
+    "        check(overwrite: _1.0) -> bb2 #4:2;",
+    "    }",
+    "    bb2: {",
+    "        _1.0 = move _4 #4:2;",
+    "        _0 = const u64 0 #5:1;",
+    "        del(move _1.0) #6:1;",
+    "        del(move _2.0) #6:2;",
+    "        del(move _2.1) #6:3;",
+    "        dead(_2) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // A `move` of a field through the pointer `w` keeps the fact of a field through the fresh
+    // pointer `v`: the `field` step after the deref leaves no storage, and `v` is no memory.
+    "fn main.other_base_kept() -> u64 {",
+    "    let _1 (v): pair mut* own;",
+    "    let _2 (w): pair mut* own;",
+    "    let _3: u8 mut* own;",
+    "    let _4: u8 mut* own;",
+    "    bb0: {",
+    "        _1 = const null pair mut* own #1:1;",
+    "        _2 = const null pair mut* own #1:2;",
+    "        live(_1) #1:1;",
+    "        live(_2) #1:2;",
+    "        _1 = alloc<pair>(const u64 1) #2:1;",
+    "        _2 = alloc<pair>(const u64 1) #2:2;",
+    "        _3 = move (*_2).1 #3:1;",
+    "        _4 = alloc<u8>(const u64 1) #4:1;",
+    "        check(overwrite: (*_1).0) -> bb1 #4:2;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _4 #4:2;",
+    "        _0 = const u64 0 #5:1;",
+    "        del(move _3) #6:1;",
+    "        del(move (*_1).0) #6:2;",
+    "        del(move _1) #6:3;",
+    "        del(move _2) #6:4;",
+    "        dead(_2) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // A `move` of the field `t.extra` keeps the fact of an element of `t.rows`: the two fields are
+    // separate.
+    "fn main.separate_kept() -> u64 {",
+    "    let _1 (t): tab;",
+    "    let _2: row mut* own;",
+    "    let _3: row mut@ own;",
+    "    let _4: u64;",
+    "    let _5 (first): row mut@ own;",
+    "    let _6: row mut* own;",
+    "    let _7: row mut@ own;",
+    "    let _8: u8 mut* own;",
+    "    bb0: {",
+    "        _1 = const zero tab #1:1;",
+    "        _5 = const zero row mut@ own #1:2;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<row>(const u64 2) #2:1;",
+    "        _3 = aggregate row mut@ own(move _2, const u64 2) #2:1;",
+    "        check(overwrite: _1.0) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1.0 = move _3 #2:2;",
+    "        _4 = const u64 0 #2:3;",
+    "        live(_5) #2:4;",
+    "        _5 = move _1.0[_4].0 #2:4;",
+    "        _8 = move _1.1 #3:1;",
+    "        _6 = alloc<row>(const u64 1) #4:1;",
+    "        _7 = aggregate row mut@ own(move _6, const u64 1) #4:1;",
+    "        check(overwrite: _1.0[_4].0) -> bb2 #4:2;",
+    "    }",
+    "    bb2: {",
+    "        _1.0[_4].0 = move _7 #4:2;",
+    "        del(move _8) #4:3;",
+    "        _0 = copy _1.0.1 #5:1;",
+    "        del(move _5) #6:1;",
+    "        del(move _1.0[_4].0) #6:2;",
+    "        del(move _1.0) #6:3;",
+    "        del(move _1.1) #6:4;",
+    "        dead(_5) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // A `move` of the owner of element 1 keeps the fact of element 0: the moved place lies in the
+    // storage that `t.rows` names, and `t.rows` still owns that storage.
+    "fn main.element_kept() -> u64 {",
+    "    let _1 (t): tab;",
+    "    let _2: row mut* own;",
+    "    let _3: row mut@ own;",
+    "    let _4: u64;",
+    "    let _5 (first): row mut@ own;",
+    "    let _6: row mut* own;",
+    "    let _7: row mut@ own;",
+    "    let _8: u64;",
+    "    let _9: row mut@ own;",
+    "    bb0: {",
+    "        _1 = const zero tab #1:1;",
+    "        _5 = const zero row mut@ own #1:2;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<row>(const u64 2) #2:1;",
+    "        _3 = aggregate row mut@ own(move _2, const u64 2) #2:1;",
+    "        check(overwrite: _1.0) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1.0 = move _3 #2:2;",
+    "        _4 = const u64 0 #2:3;",
+    "        live(_5) #2:4;",
+    "        _5 = move _1.0[_4].0 #2:4;",
+    "        _8 = const u64 1 #3:1;",
+    "        _9 = move _1.0[_8].0 #3:1;",
+    "        _6 = alloc<row>(const u64 1) #4:1;",
+    "        _7 = aggregate row mut@ own(move _6, const u64 1) #4:1;",
+    "        check(overwrite: _1.0[_4].0) -> bb2 #4:2;",
+    "    }",
+    "    bb2: {",
+    "        _1.0[_4].0 = move _7 #4:2;",
+    "        del(move _9) #4:3;",
+    "        _0 = copy _1.0.1 #5:1;",
+    "        del(move _5) #6:1;",
+    "        del(move _1.0[_4].0) #6:2;",
+    "        del(move _1.0) #6:3;",
+    "        del(move _1.1) #6:4;",
+    "        dead(_5) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // A `move` of an owner of an element of `t->rows` keeps the fact of the field `t->extra`: the
+    // moved place has two derefs after the local `t`, and `t` is no memory, so no place through a
+    // reference names it.
+    "fn main.local_kept() -> u64 {",
+    "    let _1 (t): tab mut* own;",
+    "    let _2: row mut* own;",
+    "    let _3: row mut@ own;",
+    "    let _4: u64;",
+    "    let _5 (first): row mut@ own;",
+    "    let _6: u8 mut* own;",
+    "    bb0: {",
+    "        _1 = const null tab mut* own #1:1;",
+    "        _5 = const zero row mut@ own #1:2;",
+    "        live(_1) #1:1;",
+    "        _1 = alloc<tab>(const u64 1) #2:1;",
+    "        _2 = alloc<row>(const u64 2) #2:2;",
+    "        _3 = aggregate row mut@ own(move _2, const u64 2) #2:2;",
+    "        check(overwrite: (*_1).0) -> bb1 #2:3;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _3 #2:3;",
+    "        _4 = const u64 0 #2:4;",
+    "        live(_5) #3:1;",
+    "        _5 = move (*_1).0[_4].0 #3:1;",
+    "        _6 = alloc<u8>(const u64 1) #4:1;",
+    "        check(overwrite: (*_1).1) -> bb2 #4:2;",
+    "    }",
+    "    bb2: {",
+    "        (*_1).1 = move _6 #4:2;",
+    "        _0 = copy (*_1).0.1 #5:1;",
+    "        del(move _5) #6:1;",
+    "        del(move (*_1).1) #6:2;",
+    "        del(move (*_1).0[_4].0) #6:3;",
+    "        del(move (*_1).0) #6:4;",
+    "        del(move _1) #6:5;",
+    "        dead(_5) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // `top[0].sub[0].sub[0].sub = new(row, 1)` after a `move` of the same place. The place has a
+    // second index on a span after `top[0].sub`, so the `move` can write `top[0].sub` and ends the
+    // fact of the place. The `move` then makes the fact, and the store is proved: the kill comes
+    // before the gen rule.
+    "fn main.swap_kept() -> u64 {",
+    "    let _1 (top): row mut@ own;",
+    "    let _2: row mut* own;",
+    "    let _3: row mut@ own;",
+    "    let _4: u64;",
+    "    let _5: row mut* own;",
+    "    let _6: row mut@ own;",
+    "    let _7: row mut* own;",
+    "    let _8: row mut@ own;",
+    "    let _9: row mut@ own;",
+    "    let _10: row mut* own;",
+    "    let _11: row mut@ own;",
+    "    let _12: row mut@ own;",
+    "    let _13: row mut@ own;",
+    "    bb0: {",
+    "        _1 = const zero row mut@ own #1:1;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<row>(const u64 1) #2:1;",
+    "        _3 = aggregate row mut@ own(move _2, const u64 1) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        _4 = const u64 0 #2:3;",
+    "        _5 = alloc<row>(const u64 1) #2:4;",
+    "        _6 = aggregate row mut@ own(move _5, const u64 1) #2:4;",
+    "        _12 = move _1[_4].0 #2:5;",
+    "        check(overwrite: _1[_4].0) -> bb2 #2:6;",
+    "    }",
+    "    bb2: {",
+    "        _1[_4].0 = move _6 #2:6;",
+    "        _7 = alloc<row>(const u64 1) #2:7;",
+    "        _8 = aggregate row mut@ own(move _7, const u64 1) #2:7;",
+    "        _13 = move _1[_4].0[_4].0 #2:8;",
+    "        check(overwrite: _1[_4].0[_4].0) -> bb3 #2:9;",
+    "    }",
+    "    bb3: {",
+    "        _1[_4].0[_4].0 = move _8 #2:9;",
+    "        _9 = move _1[_4].0[_4].0[_4].0 #3:1;",
+    "        _10 = alloc<row>(const u64 1) #4:1;",
+    "        _11 = aggregate row mut@ own(move _10, const u64 1) #4:1;",
+    "        check(overwrite: _1[_4].0[_4].0[_4].0) -> bb4 #4:2;",
+    "    }",
+    "    bb4: {",
+    "        _1[_4].0[_4].0[_4].0 = move _11 #4:2;",
+    "        _0 = copy _1[_4].0[_4].0[_4].0.1 #5:1;",
+    "        del(move _9) #6:1;",
+    "        del(move _12) #6:1;",
+    "        del(move _13) #6:1;",
+    "        del(move _1[_4].0[_4].0[_4].0) #6:2;",
+    "        del(move _1[_4].0[_4].0) #6:3;",
+    "        del(move _1[_4].0) #6:4;",
+    "        del(move _1) #6:5;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+};
+
+// The counts of the last line of the output.
+struct tally {
+    u64 cases;
+    u64 proved;
+    u64 refused;
+    u64 events;
+}
+
+// The function `name` of `m`. run_env.function panics for a name that `m` lacks.
+fn function(run_env.env* e, fir.module* m, string name) fir.func* {
+    u64 mut k = 0;
+    while (k + 1 < fir.module_function_count(m)) {
+        if (fir.module_function_at(m, k)->sym == run_env.function(e, m, name)) {
+            return fir.module_function_at(m, k);
+        }
+        k += 1;
+    }
+    return fir.module_function_at(m, k);
+}
+
+// Proves the function `name` of `m`, writes each line of the three reports as `<severity>
+// <line>:<col>: <text>` and then the lines of the whole-store report, runs the function with the
+// events of the shadow, and holds these lines and then the report of the run against `want`.
+fn holds(run_env.env mut* e, fir.module* m, tally mut* t, string name, string@ want) void {
+    strbuf.str_buf mut got = strbuf.create();
+    defer del(got.data);
+    u64[1] none = {0};
+    fir.func* f = function(e, m, name);
+    prover.proof mut* own p = prover.prove_made(f);
+    defer prover.drop_made(move(p));
+    u64 before = check_env.reports(&e->c);
+    report.write(f, p, &e->c.m.s);
+    report.write_leaks(f, p, &e->c.m.s);
+    report.write_uses(f, p, &e->c.m.s);
+    u64 after = check_env.reports(&e->c);
+    u64 mut r = before;
+    while (r < after) {
+        strbuf.append(&got, check_env.report_severity(&e->c, r));
+        strbuf.push(&got, ' ');
+        strbuf.append(&got, check_env.report_text(&e->c, r));
+        strbuf.push(&got, '\n');
+        r += 1;
+    }
+    u64 lines = got.len;
+    report.write_wholes(f, p, &e->c.m.s, &got);
+    string run = run_env.run_in(e, m, name, none[..0]);
+    t->cases += 1;
+    if (after == before && got.len == lines) {
+        t->proved += 1;
+    } else {
+        t->refused += 1;
+    }
+    if (run.len >= 6 && run[0..6] == "event ") {
+        t->events += 1;
+    }
+    strbuf.append(&got, run);
+    run_env.expect(strbuf.view(&got), want);
+}
+
+fn ended(run_env.env mut* e, tally mut* t) void {
+    // A new check drops the reports of the group before: a text parses against a check with no
+    // report only.
+    run_env.check(e, PRELUDE[..]);
+    e->events = true;
+    fir.module mut* own m = run_env.parse_made(e, ENDED[..]);
+    defer fir.module_drop_made(move(m));
+    string[3] index_moved = {
+        "error 3:3: overwriting owned value: cannot prove '(*_6)' is empty here",
+        "note 3:3: del or move '(*_6)' before this store",
+        "return u64 0",
+    };
+    holds(e, m, t, "main.index_moved", index_moved[..]);
+    string[4] index_regrown = {
+        "error 3:3: overwriting owned value: cannot prove '(*_6)' is empty here",
+        "note 3:3: del or move '(*_6)' before this store",
+        "event use after release in main.index_regrown at 3:3 through owner main.index_regrown _1",
+        "fault invalid access at 3:3",
+    };
+    holds(e, m, t, "main.index_regrown", index_regrown[..]);
+    string[5] whole_regrown = {
+        "t.fir:3:3: overwriting owned value: cannot prove '(*_6).0' is empty here",
+        "t.fir:3:3: note: del or move '(*_6).0' before this store",
+        "t.fir:3:3: note: cause 4: no fact proves that the owner is empty",
+        "event use after release in main.whole_regrown at 3:3 through owner main.whole_regrown _1",
+        "fault invalid access at 3:3",
+    };
+    holds(e, m, t, "main.whole_regrown", whole_regrown[..]);
+    string[5] deref_moved = {
+        "error 3:3: overwriting owned value: cannot prove '(*_2)' is empty here",
+        "note 3:3: del or move '(*_2)' before this store",
+        "error 7:1: leak: cannot prove 'p' is empty at this exit",
+        "note 7:1: del or move 'p' before this exit",
+        "return u64 0",
+    };
+    holds(e, m, t, "main.deref_moved", deref_moved[..]);
+    string[6] deref_deleted = {
+        "error 3:3: overwriting owned value: cannot prove '(*_2)' is empty here",
+        "note 3:3: del or move '(*_2)' before this store",
+        "error 7:1: leak: cannot prove 'p' is empty at this exit",
+        "note 7:1: del or move 'p' before this exit",
+        "event use after release in main.deref_deleted at 3:3 through owner main.deref_deleted _1",
+        "fault invalid access at 3:3",
+    };
+    holds(e, m, t, "main.deref_deleted", deref_deleted[..]);
+    string[4] view_moved = {
+        "error 3:3: overwriting owned value: cannot prove '(*_6)' is empty here",
+        "note 3:3: del or move '(*_6)' before this store",
+        "event use after release in main.view_moved at 3:3",
+        "fault invalid access at 3:3",
+    };
+    holds(e, m, t, "main.view_moved", view_moved[..]);
+    string[4] self_moved = {
+        "error 3:3: overwriting owned value: cannot prove '(*_6)' is empty here",
+        "note 3:3: del or move '(*_6)' before this store",
+        "event use after release in main.self_moved at 3:3 through owner main.self_moved _1",
+        "fault invalid access at 3:3",
+    };
+    holds(e, m, t, "main.self_moved", self_moved[..]);
+    string[4] bare_regrown = {
+        "error 3:3: overwriting owned value: cannot prove '(*_6)' is empty here",
+        "note 3:3: del or move '(*_6)' before this store",
+        "event use after release in main.bare_regrown at 3:3 through owner main.bare_regrown _1",
+        "fault invalid access at 3:3",
+    };
+    holds(e, m, t, "main.bare_regrown", bare_regrown[..]);
+    string[4] key_regrown = {
+        "error 3:3: overwriting owned value: cannot prove '(*_6)' is empty here",
+        "note 3:3: del or move '(*_6)' before this store",
+        "event use after release in main.key_regrown at 3:3 through owner main.key_regrown _1",
+        "fault invalid access at 3:3",
+    };
+    holds(e, m, t, "main.key_regrown", key_regrown[..]);
+    string[4] header_moved = {
+        "error 3:3: overwriting owned value: cannot prove '(*_6)' is empty here",
+        "note 3:3: del or move '(*_6)' before this store",
+        "event use after release in main.header_moved at 3:3 through owner main.header_moved _1",
+        "fault invalid access at 3:3",
+    };
+    holds(e, m, t, "main.header_moved", header_moved[..]);
+}
+
+fn kept(run_env.env mut* e, tally mut* t) void {
+    // A new check drops the reports of the group before: a text parses against a check with no
+    // report only.
+    run_env.check(e, PRELUDE[..]);
+    e->events = true;
+    fir.module mut* own m = run_env.parse_made(e, KEPT[..]);
+    defer fir.module_drop_made(move(m));
+    string[1] field_kept = {
+        "return u64 0",
+    };
+    holds(e, m, t, "main.field_kept", field_kept[..]);
+    string[1] other_base_kept = {
+        "return u64 0",
+    };
+    holds(e, m, t, "main.other_base_kept", other_base_kept[..]);
+    string[1] separate_kept = {
+        "return u64 2",
+    };
+    holds(e, m, t, "main.separate_kept", separate_kept[..]);
+    string[1] element_kept = {
+        "return u64 2",
+    };
+    holds(e, m, t, "main.element_kept", element_kept[..]);
+    string[1] local_kept = {
+        "return u64 2",
+    };
+    holds(e, m, t, "main.local_kept", local_kept[..]);
+    string[1] swap_kept = {
+        "return u64 1",
+    };
+    holds(e, m, t, "main.swap_kept", swap_kept[..]);
+}
+
+fn main() i32 {
+    run_env.env mut* own e = run_env.make();
+    defer run_env.drop_made(move(e));
+    tally mut t = {};
+    ended(e, &t);
+    println("ended ok");
+    kept(e, &t);
+    println("kept ok");
+    println("cases ", t.cases, " proved ", t.proved, " refused ", t.refused, " events ", t.events);
+    return 0;
+}

@@ -1512,8 +1512,61 @@ came here.
   holds each declaration against the definition of a whole-program build of the same sources,
   and the ctest `library-artifact` does so for every declaration that the programs of
   `test/library/programs` reach in `std`.
+- **`regrow` is one rvalue and three runtime calls** (D12.2, `spec/fir.md` 6, 9.4 and 12.2). The
+  lowering writes `_s = move p`, `_p = regrow<T>(move _s, copy _c)` and `dst = aggregate T mut@
+  own(move _p, copy _u)`. The form is an rvalue and no call, so `src/fort/owner/` has no line that
+  names `rv_regrow`: the prover reads the `move` of the operand, with the kill rule of a vacate (the
+  next entry), and a store of a value that is not zero. `test/fort/owner/prover_regrow_test.ft`
+  holds 14 functions of FIR text against the events of the interpreter. `fir.rvalue_owns` names
+  `rv_regrow`, which rule V6 reads. A change that makes a `switch` over `fir.rvalue_kind` exhaustive
+  in `owner/` gives `rv_regrow` the arm of each other rvalue: `alias.add_rvalue` borrows the origins
+  of its operands, and `place.is_fresh_new` is false for it. `fir_llvm.regrow_value` calls
+  `std.rt.regrow`, `std.rt.regrow_move` and `std.rt.free`, and gives `regrow_move` the private
+  constant `@.words.N`, which holds the offsets of `fir.owner_word_at`. `gen.gen_words_ref` gives
+  one name for each `regrow` site and joins no two by content (D19.5), and `gen_data.emit_data`
+  writes the constants after the enum tables. So a site stores no offset:
+  `test/fort/fir_llvm_regrow_test.ft` counts 0 such stores and 3 constants for 3 sites of 2
+  tables. `fir.interpreter` calls `std.rt.regrow` and `std.rt.free` and moves the elements and
+  their owners itself (`regrow_back`, `move_owners`), because the shadow gives each owner slot of
+  the new storage its owner there. `move_owners` and `std.rt.regrow_move` are two implementations of
+  one move, and `test/fir_run_test.py` holds the two equal on each program that it runs. The
+  interpreter makes its operand test in `regrow_from`, before the call of the entry:
+  `passes_count_tests` repeats the first three tests of D12.2, so `invalid release` comes before
+  `out of memory` (`test/fir/run/013_regrow_released.fir`).
+- **A vacate ends each fact below the owner that it vacates** (the kill at a vacate, `spec/fir.md`
+  11, Kill). Before, `del` and `move` had a gen rule only, so `top[0].sub = regrow(move(top), 2)`
+  compiled and stored an owner into released storage, and `p->next = move(p)` compiled and made a
+  cycle that no owner releases. `prover.kill_past` runs at the two vacates of `prover.gen_reads`,
+  before the gen rule. It kills each fact whose place `place.can_read_through` accepts: a `deref` or
+  a header `index` stands right after a place `b` that `place.can_vacate` accepts. For a `b` with
+  the base of the vacated place `p`, `can_vacate` refuses three cases: `b` and `p` are separate;
+  `p` lies below `b` and `b` is not reached through memory; `p` lies below `b` and has no second
+  `deref` or header `index` after the one that follows `b`. A `field` step and an `index` on a
+  fixed array keep the fact. Where the rule has two readings it rejects more: two places with two
+  bases alias when both are reached through memory, and two keys can name one element.
+  `spec/fir.md` 11 holds the exact rule. D17.11 lists 5 kill rules and does not hold it: the
+  kill holds the sentence of D17.11 that a right-hand side that can change the storage that the
+  lvalue names makes the store an error. `test/fort/owner/prover_vacate_test.ft` holds 16
+  functions of FIR text against the events of the interpreter,
+  `test/lang/fail/ownership/113` to `118` hold the errors and
+  `test/lang/run/ownership/086_vacate_keeps_fixed_storage.ft` holds the forms that pass. The cost in
+  `test/fort/owner/oracle_test.ft`: of 29954 seeded store sites, the sites with a false reject go
+  from 1121 to 1195, and the count with a false accept stays 0. A whole store below a vacated owner
+  (`top[0] = e` with `regrow(move(top), 2)` in `e`) is a line of `--whole-store-report` and no error
+  (D17.11). A fact through a view local has no owner on its path, so the rule keeps it: the read is
+  a read of dead storage (D10.9).
 
 ## 7. The runtime and the standard library
+
+- **`std.rt.regrow` takes the pointer and the length of the span, and no span** (D12.2,
+  `spec/toolchain.md` 5.1). The entry makes the tests in the order of D12.2. A null pointer with a
+  length that is not 0 is `invalid release`. The test of a pointer that is not null and starts no
+  live allocation needs the allocator of the runtime (D10.9): the change that adds the allocator
+  adds that test before the call of `alloc` in the body. Until then such a pointer goes to the
+  `free` of C, and a view of dead storage can give one: `q = &s[0]`, then `s = regrow(move(s), 2)`,
+  then `regrow(move(q->data), 3)`. So "the zero value or a memory fault" of D12.2 holds only with
+  that allocator, as for `del`. The tests `180` to `184` of `test/lang/run/stdlib` call `regrow` and
+  `regrow_move` directly, and they hold the order of the tests and the zero stores of `regrow_move`.
 
 - **Extern declarations keep allocator failure calls** (T-149).
   Apple clang `-O1` removes a `calloc` and matching `free` when the caller reads

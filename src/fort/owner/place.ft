@@ -1095,6 +1095,74 @@ fn is_below(survey* c, path q, path p) bool {
     return true;
 }
 
+// Whether a vacate of `p`, which writes the zero value into `p` and each place below it, can write
+// the place `b`. `b` has the base of `p` and holds a pointer, a span or a `string`. It cannot when
+// the two places are separate. When `p` starts with every step of `b` and has more, `p` lies in
+// storage that the reference in `b` names, and it cannot in two cases. In the first, `b` is not
+// reached through memory, and a vacate through a reference writes no byte of such a place. In the
+// second, `p` has no deref and no index on a span or a `string` after the one that follows `b`:
+// `p` is in the fixed storage of the object that `b` names. Each owner that the vacate moves lies
+// in that object, and no owner owns the storage that holds it, so the object keeps its owner.
+// After a second such step `p` can name any storage. Two indexes with two keys can name one
+// element, so they do not make the places differ.
+fn can_vacate(survey* c, path b, path p) bool {
+    u32 mut i = 0;
+    while (i < b.len && i < p.len) {
+        if (is_different(step_at(c, b, i), step_at(c, p, i))) {
+            return !is_separate(c, b, p);
+        }
+        i += 1;
+    }
+    if (b.len >= p.len) {
+        return true;
+    }
+    step first = step_at(c, p, b.len);
+    if (first.kind != step_kind.sk_deref && !first.header) {
+        return true;
+    }
+    if (!is_through_memory(c, b)) {
+        return false;
+    }
+    i = b.len + 1;
+    while (i < p.len) {
+        step s = step_at(c, p, i);
+        if (s.kind == step_kind.sk_deref || s.header) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Whether the path `q` can read a reference that a vacate of `p` empties: a deref or an index on
+// a span or a `string` stands in `q` right after a place that the vacate can write. With one base
+// that is can_vacate. With two bases the vacate can write the place when both are reached through
+// memory, because a pointer can then give one storage two names. `p` owns the storage after such
+// a step no more, so `q` names it no more.
+fn can_read_through(survey* c, path q, path p) bool {
+    bool same = is_same_base(q, p);
+    if (!same && !is_through_memory(c, p)) {
+        return false;
+    }
+    u32 mut j = 0;
+    while (j < q.len) {
+        step s = step_at(c, q, j);
+        if (s.kind == step_kind.sk_deref || s.header) {
+            path mut before = q;
+            before.len = j;
+            if (same) {
+                if (can_vacate(c, before, p)) {
+                    return true;
+                }
+            } else if (is_through_memory(c, before)) {
+                return true;
+            }
+        }
+        j += 1;
+    }
+    return false;
+}
+
 // Whether the paths `q` and `p` are one place: each is below the other.
 fn is_same(survey* c, path q, path p) bool {
     return q.len == p.len && is_below(c, q, p);
