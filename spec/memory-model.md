@@ -494,14 +494,14 @@ the same sixteen as a view, with the same alignment, layout and calling conventi
 `extern` signatures with `own` name the same C functions (D17.1, D17.13). The compiler emits
 three things for ownership, and it checks two more at compile time, with the use rule of D17.21:
 
-- **`move(lv)`** loads the operand's value and stores its zero value into the operand: eight
-  zero bytes for a pointer or `void*`, sixteen for a span or string, the whole value for an
-  owning aggregate (D17.6). After the emptying each byte of the operand holds 0, and the padding
-  bytes of an owning aggregate are among them (D10.1).
-- **`del(lv)`** passes the pointer (or the span's `ptr`) to the runtime's `free` and then
-  stores the zero value into the operand; `del(rv)` only frees (D17.9; `toolchain.md` 6).
-  The runtime releases a pointer that is the start of a live allocation of its allocator, and it
-  does nothing for `null`. Each other pointer is the runtime error `invalid release` (D10.9).
+- **`move(lv)`** loads the operand's value and empties the operand. It leaves the zero value
+  there: eight zero bytes for a pointer or `void*`, sixteen for a span or string, the whole
+  value for an owning aggregate (D17.6). After the emptying each byte of the operand holds 0, and
+  the padding bytes of an owning aggregate are among them (D10.1).
+- **`del(lv)`** passes the pointer (or the span's `ptr`) to the runtime's `free` and then empties
+  the operand; `del(rv)` only frees (D17.9; `toolchain.md` 6). The runtime releases a pointer that
+  is the start of a live allocation of its allocator, and it does nothing for `null`. Each other
+  pointer is the runtime error `invalid release` (D10.9).
 - **`regrow(s, n)`** gives the operand span to the runtime, which moves its elements into a new
   allocation of `n` elements and releases the old storage (D12.2). The first `s.len` elements keep
   their values, and each other element holds the zero value. `regrow` copies each byte of each
@@ -1185,11 +1185,14 @@ sub-span, a `.ptr`, the address of a local or a literal is a compile error (D17.
 A fort program has one thread: no trusted module declares a C function that starts a thread, and the
 lint of D9.8 reports a declaration of `pthread_create`, `clone`, `clone3`, `thrd_create` or `vfork`.
 C calls a fort function only while a call of C that fort code made runs, so no fort function runs
-between two operations of a run (D9.8, "Calls from C").
-Only `str.from_cstr` and `rt.args_init` can write `p[lo..hi]` (D6.9), and only a trusted module
-calls them, with a call row (D9.8), so a span beyond the object is a case of the trusted premise.
-The compile errors are the four obligations of D17.11, which the type of a place selects: what the
-compiler cannot prove is an error. The compiler has no option that removes a check (D10.6).
+between two operations of a run (D9.8, "Calls from C"). A call of C that fort code makes returns one
+time to its caller, or it ends the process. No row makes a declaration of `setjmp`, `_setjmp`,
+`sigsetjmp`, `__sigsetjmp`, `getcontext`, `longjmp`, `_longjmp`, `siglongjmp`, `setcontext` or
+`swapcontext` legal. The lint of D9.8 reports each one (D9.8, "Calls from C"). Only `str.from_cstr`
+and `rt.args_init` can write `p[lo..hi]` (D6.9), and only a trusted module calls them, with a call
+row (D9.8), so a span beyond the object is a case of the trusted premise. The compile errors are the
+four obligations of D17.11, which the type of a place selects: what the compiler cannot prove is an
+error. The compiler has no option that removes a check (D10.6).
 
 ```fort
 i32 mut@ own a = new(i32, 4);
@@ -1216,7 +1219,10 @@ that one of the three can release or change while fort code holds the value, or 
 none of them does (D9.8). The rule holds at any depth: it covers each pointer, each span and each
 string to storage of C that fort code loads through the value. So an access of fort code to
 storage of C that one of the three released shows a row that is wrong or absent, which is case 1
-of the trusted premise (section 8.3). Six rules hold for dead storage (D10.9):
+of the trusted premise (section 8.3). A function of a trusted module gives its caller no function
+pointer that C gave, and no value through which fort code can load one, at any depth. The rule holds
+also for a function pointer that C stores, or gives to a fort function, in a call that the function
+makes. No row makes such a value legal (D9.8). Six rules hold for dead storage (D10.9):
 
 1. The runtime never gives dead storage to another object. No later allocation, frame storage,
    global or allocation of C takes an address of it: the runtime keeps the address range reserved.
@@ -1231,12 +1237,13 @@ of the trusted premise (section 8.3). Six rules hold for dead storage (D10.9):
    back to the system and keep the address range. A read gives no third result, so a value that the
    program reads from dead storage is the value that the storage held last (section 8.4). A `move`
    of an owner out of dead storage gives no second owner. Each operation that takes an owner out of
-   a place stores the zero value into that place: a `move`, the implicit `move` of `return x`
-   included, a `del`, and a `regrow` for each owner slot of each old element (D12.2, D17.5, D17.6,
-   D17.9). So a place in dead storage whose owner went to another place held the zero value last. A
-   store of an owner into dead storage stores a new allocation, or it takes the owner out of its
-   source by one of these operations. So the place in dead storage is then the one place that holds
-   the owner. The behavior is defined.
+   a place leaves the zero value in that place. A `move` empties its operand, the implicit `move`
+   of `return x` included, a `del` empties its operand, and a `regrow` stores the zero value into
+   each owner slot of each old element (D12.2, D17.5, D17.6, D17.9). So a place in dead storage
+   whose owner went to another place held the zero value last. A store of an owner into dead
+   storage stores a new allocation, or it takes the owner out of its source by one of these
+   operations. So the place in dead storage is then the one place that holds the owner. The
+   behavior is defined.
 3. A local that an `&` names is in frame storage (section 1). Frame storage is storage
    of the same kind as an allocation: rule 1 and rule 2 hold for it.
 4. `del(p)` of a pointer that is not `null` and is no start of a live allocation of the runtime is
@@ -1279,7 +1286,7 @@ fn bad() i32* {
 }
 ```
 
-**Defined leaks.** Four cases keep an allocation until the process ends. Each is a defined result,
+**Defined leaks.** Five cases keep an allocation until the process ends. Each is a defined result,
 and no rule makes it an error (D10.7):
 
 - an allocation that only a cycle of owners holds, or that the program reaches only through such a
@@ -1289,7 +1296,9 @@ and no rule makes it an error (D10.7):
 - an allocation that an owner holds on a path that calls `exit`, or that ends in a runtime error, a
   `panic`, a failed `assert` or a memory fault;
 - an allocation whose only owner is a place in dead storage, which a store through a pointer or a
-  span to dead storage wrote, or that the program reaches only through such an owner.
+  span to dead storage wrote, or that the program reaches only through such an owner;
+- an allocation whose only owner is a place in storage of C, which a store through a pointer or a
+  span to storage of C wrote, or that the program reaches only through such an owner.
 
 ### 8.3 The trusted premise
 
@@ -1298,13 +1307,16 @@ compiler did not check. Four cases have the behavior that C gives them, and fort
 (D10.7):
 
 1. A trusted declaration or call whose row is wrong or absent (D9.8), or a function of a trusted
-   module whose row for storage of C is wrong or absent (D9.8). Examples are `memchr` declared with
-   an `i64*` result for a search of one byte, a function that gives its caller a view of a block
-   of `malloc` that a later call of `free` releases, and a declaration of `signal` whose parameter
-   gives C a fort function as the handler (D9.8, "Calls from C").
+   module whose row for storage of C is wrong or absent (D9.8). A declaration that no row makes
+   legal, and a function of a trusted module that breaks the third rule for storage of C, are this
+   case too (D9.8). Examples are `memchr` declared with an `i64*` result for a search of one byte, a
+   function that gives its caller a view of a block of `malloc` that a later call of `free`
+   releases, a function that gives its caller a pointer to a record of C whose field holds a
+   function pointer, a declaration of `signal` whose parameter gives C a fort function as the
+   handler, and a declaration of `setjmp` or of `longjmp` (D9.8, "Calls from C").
 2. C code that breaks A7 of `ownership-design.md` 5.1. Examples are C code that keeps an argument
-   and gives it back in a later call, and C code that calls a fort function when no call of C that
-   fort code made runs.
+   and gives it back in a later call, C code that calls a fort function when no call of C that
+   fort code made runs, and C code that returns a second time from a call that fort code made.
 3. A call in a trusted module whose arguments break the contract of its callee, which its call row
    states wrongly or does not state. Examples are a `char*` with no NUL inside its storage for
    `strlen`, a range of `str.from_cstr` beyond the object (section 3.1), and storage of `new` for
@@ -1317,17 +1329,18 @@ compiler did not check. Four cases have the behavior that C gives them, and fort
    (D9.11).
 
 A module outside the trusted set declares no extern, calls no extern and names no boundary function
-(D9.8), and the two rules for storage of C bind only a function of a trusted module (D9.8). So cases
-1 to 3 stand only in a trusted module. A module outside the trusted set has no undefined behavior,
-with no condition on its code: it can keep a pointer to storage of C that a function of a trusted
-module gave, copy it and load through it, because the row of that function covers each time that
-fort code holds the value. The row covers also each pointer, each span and each string to storage
-of C that fort code loads through the value, at any depth (D9.8). A pointer or a span to dead
-storage is no case of
-the trusted premise: a module outside the trusted set can give such a value to a function of a
-trusted module, which gives it to C. While each access of C stays inside the bound that the call row
-gives, rule 6 of section 8.2 gives its result (D10.9). An access of C outside that bound is case 3,
-as for live storage.
+(D9.8), and the three rules for storage of C bind only a function of a trusted module (D9.8). So
+cases 1 to 3 stand only in a trusted module. A module outside the trusted set has no undefined
+behavior, with no condition on its code: it can keep a pointer to storage of C that a function of a
+trusted module gave, copy it and load through it, because the row of that function covers each time
+that fort code holds the value. The row covers also each pointer, each span and each string to
+storage of C that fort code loads through the value, at any depth (D9.8). By the third rule, such a
+module gets no function pointer that C gave from a function of a trusted module (D9.8). That holds
+in each way that the rule names, at any depth. A pointer or a span to dead storage is no case of the
+trusted premise: a module outside the trusted set can give such a value to a function of a trusted
+module, which gives it to C. While each access of C stays inside the bound that the call row gives,
+rule 6 of section 8.2 gives its result (D10.9). An access of C outside that bound is case 3, as for
+live storage.
 
 ### 8.4 No forged pointer
 

@@ -304,12 +304,13 @@ of `leak at exit` reports nothing. On a path that calls `exit` or ends in a runt
 makes no test of `leak at exit` (3.2).
 
 The three rows of the trusted premise need no rule of their own. D3.14 refuses the view that a store
-of another type over an owner slot needs (X6). A cast never adds `own` (D3.14). A `move`, a `del`
-and a `regrow` store the zero value into each owner slot that they take an owner out of (D17.6,
-D17.9, D12.2), so a `move` through a view of dead storage gives no second owner (rule 2 of D10.9).
-So no fort code makes a second owner of an allocation. D10.7 gives A8 as a guarantee (5.1). So a
-run that reports `duplicate owner`, `forged` or an `overwrite` of X6 shows a case of the trusted
-premise, or a defect of a compile rule or of the runtime.
+of another type over an owner slot needs (X6). A cast never adds `own` (D3.14). A `move` and a `del`
+empty each owner slot that they take an owner out of, and a `regrow` stores the zero value into each
+owner slot of each old element (D17.6, D17.9, D12.2), so a `move` through a view of dead storage
+gives no second owner (rule 2 of D10.9). So no fort code makes a second owner of an allocation.
+D10.7 gives A8 as a guarantee (5.1). So a run that reports `duplicate owner`, `forged` or an
+`overwrite` of X6 shows a case of the trusted premise, or a defect of a compile rule or of the
+runtime.
 
 A load or a store through a value is `forged` when it reaches a byte of a local of a run that
 stands, and the value does not derive from an address of the entry of that local that the run took
@@ -637,7 +638,14 @@ property of the compiler.
     can release the storage, or its row says why the call released no byte that the access
     reaches. The row says the same for storage that the system or another process can release
     with no call of the program. A row that cannot say so is wrong, and it is case 1 of the
-    trusted premise (D10.7).
+    trusted premise (D10.7). A function of a trusted module gives its caller no function pointer
+    that C gave, and no value through which fort code can load a function pointer that C gave, at
+    any depth (D9.8, "Storage of C"). A function pointer that C gave is one that fort code gets from
+    C in one of the five ways above. The rule holds for each value that the first rule for storage
+    of C names. So it holds also for a function pointer that C stores, or gives to a fort function,
+    in a call that the function makes. No row makes such a value legal: a module outside the trusted
+    set has no call row for a call through it. A function that gives one is case 1 of the trusted
+    premise too.
   - `writes:` C reads and writes only the storage that its arguments name, as the contract of
     the C function says: a C string ends in a NUL inside its storage, and a length fits its
     buffer. C writes only a level that the type of its parameter marks `mut`, and it writes a
@@ -652,7 +660,13 @@ property of the compiler.
     that function only the pointers that the point `gives:` allows. A declaration that lets C or
     the system call a fort function at another time breaks this point, and no row makes it
     legal. `signal` and `sigaction` with a fort function as the handler are such declarations,
-    and `atexit` is one too (D9.8, "Calls from C").
+    and `atexit` is one too (D9.8, "Calls from C"). A call of C that fort code makes returns one
+    time to its caller, or it ends the process. C returns no second time from the call, and it
+    leaves no fort function that it called but by the return of that function. A declaration of a C
+    function that returns a second time, or that continues at another place and does not end the
+    process, breaks this point, and no row makes it legal. Such functions are `setjmp`, `_setjmp`,
+    `sigsetjmp`, `__sigsetjmp`, `getcontext`, `longjmp`, `_longjmp`, `siglongjmp`, `setcontext` and
+    `swapcontext`, and `vfork` is one too (D9.8, "Calls from C").
   - `frees:` C frees no allocation that fort still owns, but the allocation that a parameter
     that says `own` gives it (D17.13).
 
@@ -748,14 +762,14 @@ property of the compiler.
   with no condition on that code (D10.7). A pointer to storage of C that a function of a trusted
   module gave is under the row of that function (A7, `gives:`), and the code of a module outside
   the trusted set has no duty for it. The row covers each pointer to storage of C that the code
-  loads through that pointer, at any depth. A trusted module keeps five things: rows that hold,
-  the rows
-  for storage of C included; for
-  each function that a module outside the set can call, A8 for each argument that the checker
-  accepts; a boundary function or a function pointer that C gave goes as a value only to C (D9.8);
-  each compile rule, as each module does; and in `std`, the two functions of D6.9 that take a span
-  of a raw pointer.
-  Rules (b) and (e) of V1 need A8 for such a read. Without A8 the
+  loads through that pointer, at any depth. The code gets no function pointer that C gave from a
+  function of a trusted module. That holds in each of the ways that the third rule for storage of C
+  names, at any depth (D9.8, "Storage of C"). A trusted module keeps five things: rows that hold,
+  the rows for storage of C included; for each function that a module outside the set can call, A8
+  for each argument that the checker accepts; a boundary function or a function pointer that C gave
+  goes as a value only to C, and no function of the module breaks the third rule for storage of C
+  (D9.8); each compile rule, as each module does; and in `std`, the two functions of D6.9 that take
+  a span of a raw pointer. Rules (b) and (e) of V1 need A8 for such a read. Without A8 the
   read can name a local that is not memory, and it is then no use (5.5 rule (b)) and no borrow
   (lemma (ii)). Refinement R6 needs A8 for each local (section 7). Rules (a) and (c), and kill rule
   5 of D17.11, need only that no write and no release goes through a forged pointer. D3.14 gives

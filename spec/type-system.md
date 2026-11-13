@@ -112,9 +112,11 @@ char f = c & 0x0F;                   // error: char has no bitwise operators
 
 `bool` has exactly the values `true` and `false` (D3.3). A load of a `bool` place gives `true`
 when the low bit of its byte is 1, and `false` when that bit is 0. So a `bool` that a view cast
-or C wrote has one of the two values for each bit pattern of its byte (D3.3, D3.14). It supports
-`== != ! && ||` and `cast` to any integer type, yielding 0 or 1. Every condition (`if`, `while`,
-`for`, `do`, `?:`, `assert`) must be a `bool`; there is no truthiness (D3.3).
+or C wrote has one of the two values for each bit pattern of its byte (D3.3, D3.14). A copy of an
+aggregate and a `regrow` copy the byte as it is, so a `bool` field of the copy has the same value
+(D3.3, D12.2, D19.3). It supports `== != ! && ||` and `cast` to any integer type, yielding 0 or 1.
+Every condition (`if`, `while`, `for`, `do`, `?:`, `assert`) must be a `bool`; there is no
+truthiness (D3.3).
 
 ```fort
 bool b = 3 < 4;

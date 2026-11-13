@@ -53,6 +53,13 @@ by its path. The prefix check applies in each directory of those roots. The func
 glossary checks apply to a nested module only: a file in a subdirectory of `src/fort`,
 `src/lsp` or `std`, outside the target directories. The flat modules keep their names until
 they move.
+
+No row makes a declaration of 15 C functions legal (D9.8): the 5 of "One thread"
+(THREAD_NAMES and VFORK_NAMES) and the 10 of "Calls from C" (RETURN_NAMES). The lint reports
+each `extern fn` with one of these names in each file that it reads
+(refused_declaration_problems). This check reads the text of the file and no index. So it
+sees a declaration in each branch of a `$if` and in a module that is not trusted. It reports
+the 15 names and no other name: a reviewer reads the row of each other declaration.
 """
 
 import argparse
@@ -1666,6 +1673,76 @@ def row_problems(rows, path, records):
     return problems
 
 
+# ---- the C functions that no row makes legal (D9.8) -------------------------------------------
+
+# The names of "One thread" whose call starts a thread. A fort program has one thread.
+THREAD_NAMES = (
+    "pthread_create",
+    "clone",
+    "clone3",
+    "thrd_create",
+)
+# The last name of "One thread". A call of `vfork` starts no thread: its new process runs in
+# the storage of its caller, so the call returns two times in one storage.
+VFORK_NAMES = (
+    "vfork",
+)
+# The names of "Calls from C": a call returns a second time, or it continues at another place
+# and does not end the process. A call of C returns one time to its caller, or it ends the
+# process. glibc gives `sigsetjmp` as a macro of `__sigsetjmp`, so the list holds both names.
+RETURN_NAMES = (
+    "setjmp",
+    "_setjmp",
+    "sigsetjmp",
+    "__sigsetjmp",
+    "getcontext",
+    "longjmp",
+    "_longjmp",
+    "siglongjmp",
+    "setcontext",
+    "swapcontext",
+)
+# The reason of each list, and the paragraph of D9.8 that holds its rule.
+REFUSED_NAMES = (
+    (THREAD_NAMES, "a fort program has one thread", "One thread"),
+    (VFORK_NAMES, "the call returns two times in one storage", "One thread"),
+    (RETURN_NAMES, "a call of C returns one time to its caller or ends the process",
+     "Calls from C"),
+)
+# The name of an `extern fn`, with the white space of the grammar between the three tokens
+# (grammar.md 3, `extern_decl`).
+EXTERN_NAME = re.compile(r"(?<![A-Za-z0-9_])extern\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def refused_declaration_problems(text):
+    """The problems of each `extern fn` of `text` whose name is in a list of REFUSED_NAMES.
+
+    No row makes such a declaration legal, so the check reads no row. It reads the text and no
+    index: the index holds no record of a declaration in a branch of a `$if` that the compile
+    does not take (D21.2), and this check sees each branch. It gives the same answer in a
+    module that is not trusted. A comment and a literal hold no declaration
+    (blank_comments_and_literals). A fort function with a listed name is no C function. The
+    problem stands at the name, and its column is a byte column, as a column of the index is
+    (D20.3).
+    """
+    if "extern" not in text:
+        return []
+    code = blank_comments_and_literals(text)
+    problems = []
+    for found in EXTERN_NAME.finditer(code):
+        name = found.group(1)
+        for names, reason, paragraph in REFUSED_NAMES:
+            if name not in names:
+                continue
+            at = found.start(1)
+            start = code.rfind("\n", 0, at) + 1
+            line = code.count("\n", 0, at) + 1
+            col = len(text[start:at].encode("utf-8")) + 1
+            problems.append((line, col, "extern '%s': %s, and no row makes this declaration "
+                             "legal (%s, \"%s\")" % (name, reason, ROWS, paragraph)))
+    return problems
+
+
 def std_module(relative):
     """The module path of a file of `std/` in the standard root of its target, or None.
 
@@ -1844,6 +1921,8 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
     for index, (relative, _, _, text) in enumerate(entries):
         problems = [] if rows_only(relative) else text_problems(relative, text, root)
         problems += reports[index]
+        # Each file of the run gets this check, a file of ROWS_ONLY too.
+        problems += refused_declaration_problems(text)
         problems.sort(key=lambda problem: (problem[0], problem[1]))
         lines.append(
             ["%s:%d:%d: %s" % (relative, line, col, message) for line, col, message in problems]
