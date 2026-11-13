@@ -1561,7 +1561,10 @@ bullet at a time and without a rewrite.
   reports a `mut` global whose type reaches a byte pointer between the brackets of a call of C,
   in a function that is no boundary function. It reports each `extern fn` with one of the 15
   names of D9.8 ("One thread", "Calls from C"). That check reads the text of each file and no
-  index, so it sees each branch of a `$if` and a module that is not trusted. The lint finds a
+  index, so it sees each branch of a `$if` and a module that is not trusted. It reports the
+  first byte of a file that is no UTF-8 text (D2.1), for each file that it checks; `fort
+  --check` accepts such a byte in a comment and in a string literal, and the lint is the one
+  check of it. The lint finds a
   boundary function by the parameter types that the index records spell, and `fort_lint_rows`
   holds that answer equal to the one of the compiler. A call row names the callee as the body
   spells it, with no white space (`libc.write`, `table[i+1]`). The rows count the calls in the
