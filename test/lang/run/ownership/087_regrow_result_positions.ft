@@ -1,0 +1,107 @@
+//! run
+//! stdout:
+//| return 3 9 0
+//| argument 507
+//| nested 6 9 0
+//| del ok
+//| both arms 49 8
+//| one arm 66 8
+//| literal 4 5 2 0
+//| member 6 5
+//| defer 4 6
+//| switch 701 802 603
+// The result of a `regrow` is an owner that the next reader takes (D12.2): a `return`, an
+// argument, the operand of a second `regrow`, a `del`, an arm of `?:`, a member of a struct
+// literal, the statement of a `defer`, and an arm of a `switch`.
+struct vec {
+    i32 mut@ own items;
+    u64 len;
+}
+
+fn wider(i32 mut@ own s, u64 n) i32 mut@ own {
+    return regrow(move(s), n);
+}
+
+fn total(i32 mut@ own x) i32 {
+    i32 mut t = 0;
+    for (u64 mut i = 0; i < x.len; i += 1) {
+        t += x[i];
+    }
+    t += cast(x.len, i32) * 100;
+    del(x);
+    return t;
+}
+
+fn pick(bool c) u64 {
+    i32 mut@ own mut s = new(i32, 2);
+    s[1] = 8;
+    s = c ? regrow(move(s), 4) : regrow(move(s), 6);
+    u64 mut n = s.len;
+    s = c ? regrow(move(s), 9) : move(s);
+    n = n * 10 + s.len;
+    print(c ? "both arms " : "one arm ", n, " ");
+    println(s[1]);
+    del(s);
+    return n;
+}
+
+fn arms(i32 k) u64 {
+    i32 mut@ own mut s = new(i32, 1);
+    s[0] = k;
+    switch (k) {
+        case 1: s = regrow(move(s), 2);
+        case 2: s = regrow(move(s), 3);
+        default: {}
+    }
+    for (u64 mut i = 0; i < 5; i += 1) {
+        u64 n = s.len + 1;
+        s = regrow(move(s), n);
+    }
+    u64 r = s.len * 100 + cast(s[0], u64);
+    del(s);
+    return r;
+}
+
+fn main() i32 {
+    i32 mut@ own t = new(i32, 1);
+    t[0] = 9;
+    i32 mut@ own u = wider(move(t), 3);
+    println("return ", u.len, " ", u[0], " ", u[2]);
+
+    i32 mut@ own a = new(i32, 2);
+    a[0] = 3;
+    a[1] = 4;
+    println("argument ", total(regrow(move(a), 5)));
+
+    i32 mut@ own v = regrow(regrow(move(u), 4), 6);
+    println("nested ", v.len, " ", v[0], " ", v[5]);
+    del(v);
+
+    i32 mut@ own d = new(i32, 2);
+    del(regrow(move(d), 5));
+    println("del ok");
+
+    pick(true);
+    pick(false);
+
+    vec mut first = vec{new(i32, 2), 2};
+    first.items[1] = 5;
+    vec second = vec{regrow(move(first.items), 4), first.len};
+    println("literal ", second.items.len, " ", second.items[1], " ", second.len, " ",
+            first.items.len);
+    vec mut third = vec{.items = regrow(move(second.items), 6), .len = 1};
+    println("member ", third.items.len, " ", third.items[1]);
+    del(third.items);
+
+    i32 mut@ own mut s = new(i32, 1);
+    defer del(s);
+    s[0] = 5;
+    {
+        defer s = regrow(move(s), 4);
+        s[0] = 6;
+    }
+    println("defer ", s.len, " ", s[0]);
+
+    println("switch ", arms(1), " ", arms(2), " ", arms(3));
+    return 0;
+}

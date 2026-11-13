@@ -1,0 +1,670 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| legal ok
+//| results ok
+//| uses ok
+//| calls ok
+//| cases 14 proved 6 refused 8 events 7
+/// Checks how owner.prover reads the rvalue `regrow` (D12.2): as a `move` of its operand and as a
+/// new allocation, and not as a call. Each case is one function of FIR text. The test holds the
+/// lines that the prover reports for it, and then the report of the interpreter with the events of
+/// the shadow, so that each line of the prover stands beside the event that the run gives.
+///
+/// The last line of the output counts the cases, those with 0 lines of the prover, those with an
+/// error, and those with an event. The one refused case with no event is `main.call`: the prover
+/// does not read the body of `touch`.
+import check_env;
+import fort.fir;
+import fort.owner.prover;
+import fort.owner.report;
+import run_env;
+import std.strbuf;
+
+// The struct, the globals and the function that the FIR text names. Each function allocates a span
+// of 2 elements at line 2, has its `regrow` to 4 elements at line 3 or 4, reads at line 5,
+// releases at line 6 and returns at line 7.
+string[8] PRELUDE = {
+    "struct vec {",
+    "    u8 mut@ own items;",
+    "    u64 len;",
+    "}",
+    "u8 mut@ own mut G = {};",
+    "u8 mut* own mut P = null;",
+    "fn touch() void {",
+    "}",
+};
+
+// The forms that the prover proves: 0 lines of the prover and 0 events of the run.
+string[136] LEGAL = {
+    // The catalogue form of a local, as the lowering writes it: the `move` empties `s`, so the
+    // store of the result over `s` is proved.
+    "fn main.local() -> u64 {",
+    "    let _1 (s): u8 mut@ own;",
+    "    let _2: u8 mut* own;",
+    "    let _3: u8 mut@ own;",
+    "    let _4: u8 mut@ own;",
+    "    let _5: u8 mut* own;",
+    "    let _6: u8 mut@ own;",
+    "    bb0: {",
+    "        _1 = const zero u8 mut@ own #1:1;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<u8>(const u64 2) #2:1;",
+    "        _3 = aggregate u8 mut@ own(move _2, const u64 2) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        _4 = move _1 #3:1;",
+    "        _5 = regrow<u8>(move _4, const u64 4) #3:2;",
+    "        _6 = aggregate u8 mut@ own(move _5, const u64 4) #3:2;",
+    "        check(overwrite: _1) -> bb2 #3:3;",
+    "    }",
+    "    bb2: {",
+    "        _1 = move _6 #3:3;",
+    "        _0 = copy _1.1 #5:1;",
+    "        del(move _1) #6:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // A `regrow` that reads `s` with no temporary is a `move` of `s` also: the store over `s` is
+    // proved.
+    "fn main.direct() -> u64 {",
+    "    let _1 (s): u8 mut@ own;",
+    "    let _2: u8 mut* own;",
+    "    let _3: u8 mut@ own;",
+    "    let _4: u8 mut* own;",
+    "    let _5: u8 mut@ own;",
+    "    bb0: {",
+    "        _1 = const zero u8 mut@ own #1:1;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<u8>(const u64 2) #2:1;",
+    "        _3 = aggregate u8 mut@ own(move _2, const u64 2) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        _4 = regrow<u8>(move _1, const u64 4) #3:2;",
+    "        _5 = aggregate u8 mut@ own(move _4, const u64 4) #3:2;",
+    "        check(overwrite: _1) -> bb2 #3:3;",
+    "    }",
+    "    bb2: {",
+    "        _1 = move _5 #3:3;",
+    "        _0 = copy _1.1 #5:1;",
+    "        del(move _1) #6:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // The catalogue form of a field through a pointer.
+    "fn main.field() -> u64 {",
+    "    let _1 (v): vec mut* own;",
+    "    let _2: u8 mut* own;",
+    "    let _3: u8 mut@ own;",
+    "    let _4: u8 mut@ own mut*;",
+    "    let _5: u8 mut@ own;",
+    "    let _6: u8 mut* own;",
+    "    let _7: u8 mut@ own;",
+    "    bb0: {",
+    "        _1 = const null vec mut* own #1:1;",
+    "        live(_1) #1:1;",
+    "        _1 = alloc<vec>(const u64 1) #1:3;",
+    "        _2 = alloc<u8>(const u64 2) #2:1;",
+    "        _3 = aggregate u8 mut@ own(move _2, const u64 2) #2:1;",
+    "        check(overwrite: (*_1).0) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _3 #2:2;",
+    "        _4 = addr mut((*_1).0) #3:1;",
+    "        _5 = move (*_1).0 #3:1;",
+    "        _6 = regrow<u8>(move _5, const u64 4) #3:2;",
+    "        _7 = aggregate u8 mut@ own(move _6, const u64 4) #3:2;",
+    "        check(overwrite: (*_4)) -> bb2 #3:3;",
+    "    }",
+    "    bb2: {",
+    "        (*_4) = move _7 #3:3;",
+    "        _0 = copy (*_1).0.1 #5:1;",
+    "        del(move (*_1).0) #6:1;",
+    "        del(move _1) #6:2;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // The catalogue form of a global.
+    "fn main.global() -> u64 {",
+    "    let _1: u8 mut@ own mut*;",
+    "    let _2: u8 mut@ own;",
+    "    let _3: u8 mut* own;",
+    "    let _4: u8 mut@ own;",
+    "    bb0: {",
+    "        _1 = addr mut(global main.G) #3:1;",
+    "        _2 = move global main.G #3:1;",
+    "        _3 = regrow<u8>(move _2, const u64 4) #3:2;",
+    "        _4 = aggregate u8 mut@ own(move _3, const u64 4) #3:2;",
+    "        check(overwrite: (*_1)) -> bb1 #3:3;",
+    "    }",
+    "    bb1: {",
+    "        (*_1) = move _4 #3:3;",
+    "        _0 = copy global main.G.1 #5:1;",
+    "        del(move global main.G) #6:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // A second `regrow` of the place that the first emptied takes the empty span, as a second
+    // `move` does.
+    "fn main.twice() -> u64 {",
+    "    let _1 (s): u8 mut@ own;",
+    "    let _2: u8 mut* own;",
+    "    let _3: u8 mut@ own;",
+    "    let _4: u8 mut* own;",
+    "    let _5: u8 mut@ own;",
+    "    let _6: u8 mut* own;",
+    "    let _7: u8 mut@ own;",
+    "    bb0: {",
+    "        _1 = const zero u8 mut@ own #1:1;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<u8>(const u64 2) #2:1;",
+    "        _3 = aggregate u8 mut@ own(move _2, const u64 2) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        _4 = regrow<u8>(move _1, const u64 4) #3:2;",
+    "        _5 = aggregate u8 mut@ own(move _4, const u64 4) #3:2;",
+    "        _6 = regrow<u8>(move _1, const u64 3) #4:2;",
+    "        _7 = aggregate u8 mut@ own(move _6, const u64 3) #4:2;",
+    "        _0 = add(copy _5.1, copy _7.1) #5:1;",
+    "        del(move _5) #6:1;",
+    "        del(move _7) #6:2;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+};
+
+// The result is the owner of a new allocation: a leak or an overwrite of it gives one error of the
+// prover and the same event in the run.
+string[149] RESULTS = {
+    // The result is a new allocation: the local `t` that holds it at its exit leaks.
+    "fn main.leak() -> u64 {",
+    "    let _1 (s): u8 mut@ own;",
+    "    let _2: u8 mut* own;",
+    "    let _3: u8 mut@ own;",
+    "    let _4 (t): u8 mut@ own;",
+    "    let _5: u8 mut* own;",
+    "    let _6: u8 mut@ own;",
+    "    bb0: {",
+    "        _4 = const zero u8 mut@ own #1:2;",
+    "        _1 = const zero u8 mut@ own #1:1;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<u8>(const u64 2) #2:1;",
+    "        _3 = aggregate u8 mut@ own(move _2, const u64 2) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        live(_4) #3:1;",
+    "        _5 = regrow<u8>(move _1, const u64 4) #3:2;",
+    "        _6 = aggregate u8 mut@ own(move _5, const u64 4) #3:2;",
+    "        check(overwrite: _4) -> bb2 #3:3;",
+    "    }",
+    "    bb2: {",
+    "        _4 = move _6 #3:3;",
+    "        _0 = copy _4.1 #5:1;",
+    "        dead(_4) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // A result that no place takes: the temporary leaks at the `return`.
+    "fn main.dropped() -> u64 {",
+    "    let _1 (s): u8 mut@ own;",
+    "    let _2: u8 mut* own;",
+    "    let _3: u8 mut@ own;",
+    "    let _4: u8 mut* own;",
+    "    let _5: u8 mut@ own;",
+    "    bb0: {",
+    "        _1 = const zero u8 mut@ own #1:1;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<u8>(const u64 2) #2:1;",
+    "        _3 = aggregate u8 mut@ own(move _2, const u64 2) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        _4 = regrow<u8>(move _1, const u64 4) #3:2;",
+    "        _5 = aggregate u8 mut@ own(move _4, const u64 4) #3:2;",
+    "        _0 = copy _5.1 #5:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // The storage that the `regrow` gives is an owner with no `aggregate`: the pointer local `p`
+    // that takes it leaks at its exit.
+    "fn main.bare() -> u64 {",
+    "    let _1 (s): u8 mut@ own;",
+    "    let _2: u8 mut* own;",
+    "    let _3: u8 mut@ own;",
+    "    let _4 (p): u8 mut* own;",
+    "    bb0: {",
+    "        _4 = const zero u8 mut* own #1:2;",
+    "        _1 = const zero u8 mut@ own #1:1;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<u8>(const u64 2) #2:1;",
+    "        _3 = aggregate u8 mut@ own(move _2, const u64 2) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        live(_4) #3:1;",
+    "        _4 = regrow<u8>(move _1, const u64 4) #3:2;",
+    "        _0 = const u64 4 #5:1;",
+    "        dead(_4) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // The result is an owner: a store of it over the local `t`, which holds an allocation, is an
+    // overwrite.
+    "fn main.over_full() -> u64 {",
+    "    let _1 (s): u8 mut@ own;",
+    "    let _2: u8 mut* own;",
+    "    let _3: u8 mut@ own;",
+    "    let _4 (t): u8 mut@ own;",
+    "    let _5: u8 mut* own;",
+    "    let _6: u8 mut@ own;",
+    "    let _7: u8 mut* own;",
+    "    let _8: u8 mut@ own;",
+    "    bb0: {",
+    "        _4 = const zero u8 mut@ own #1:2;",
+    "        _1 = const zero u8 mut@ own #1:1;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<u8>(const u64 2) #2:1;",
+    "        _3 = aggregate u8 mut@ own(move _2, const u64 2) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        live(_4) #3:1;",
+    "        _7 = alloc<u8>(const u64 1) #3:2;",
+    "        _8 = aggregate u8 mut@ own(move _7, const u64 1) #3:2;",
+    "        check(overwrite: _4) -> bb2 #3:3;",
+    "    }",
+    "    bb2: {",
+    "        _4 = move _8 #3:3;",
+    "        _5 = regrow<u8>(move _1, const u64 4) #4:2;",
+    "        _6 = aggregate u8 mut@ own(move _5, const u64 4) #4:2;",
+    "        check(overwrite: _4) -> bb3 #4:3;",
+    "    }",
+    "    bb3: {",
+    "        _4 = move _6 #4:3;",
+    "        _0 = copy _4.1 #5:1;",
+    "        del(move _4) #6:1;",
+    "        dead(_4) #7:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // The local that holds the result is full: a store of a `new` over it is an overwrite.
+    "fn main.result_full() -> u64 {",
+    "    let _1 (s): u8 mut@ own;",
+    "    let _2: u8 mut* own;",
+    "    let _3: u8 mut@ own;",
+    "    let _4: u8 mut* own;",
+    "    let _5: u8 mut@ own;",
+    "    let _6: u8 mut* own;",
+    "    let _7: u8 mut@ own;",
+    "    bb0: {",
+    "        _1 = const zero u8 mut@ own #1:1;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<u8>(const u64 2) #2:1;",
+    "        _3 = aggregate u8 mut@ own(move _2, const u64 2) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        _4 = regrow<u8>(move _1, const u64 4) #3:2;",
+    "        _5 = aggregate u8 mut@ own(move _4, const u64 4) #3:2;",
+    "        check(overwrite: _1) -> bb2 #3:3;",
+    "    }",
+    "    bb2: {",
+    "        _1 = move _5 #3:3;",
+    "        _6 = alloc<u8>(const u64 1) #4:2;",
+    "        _7 = aggregate u8 mut@ own(move _6, const u64 1) #4:2;",
+    "        check(overwrite: _1) -> bb3 #4:3;",
+    "    }",
+    "    bb3: {",
+    "        _1 = move _7 #4:3;",
+    "        _0 = copy _1.1 #5:1;",
+    "        del(move _1) #6:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+};
+
+// The operand is moved: a read of an element of the source after the `regrow` gives the error of
+// rule (b) and the event `use after move`.
+string[56] USES = {
+    // The operand is moved: an element of `s` that the function reads after the `regrow` is a use
+    // after a move.
+    "fn main.use_direct() -> u64 {",
+    "    let _1 (s): u8 mut@ own;",
+    "    let _2: u8 mut* own;",
+    "    let _3: u8 mut@ own;",
+    "    let _4: u8 mut* own;",
+    "    let _5: u8 mut@ own;",
+    "    let _6: u64;",
+    "    let _7: u8;",
+    "    bb0: {",
+    "        _1 = const zero u8 mut@ own #1:1;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<u8>(const u64 2) #2:1;",
+    "        _3 = aggregate u8 mut@ own(move _2, const u64 2) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        _6 = const u64 0 #2:3;",
+    "        _4 = regrow<u8>(move _1, const u64 4) #3:2;",
+    "        _5 = aggregate u8 mut@ own(move _4, const u64 4) #3:2;",
+    "        _7 = copy _1[_6] #4:1;",
+    "        _0 = cast<u64>(copy _7) #5:1;",
+    "        del(move _5) #6:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // The same read after the form of the lowering, which moves `s` into a temporary first.
+    "fn main.use_lowered() -> u64 {",
+    "    let _1 (s): u8 mut@ own;",
+    "    let _2: u8 mut* own;",
+    "    let _3: u8 mut@ own;",
+    "    let _4: u8 mut* own;",
+    "    let _5: u8 mut@ own;",
+    "    let _6: u64;",
+    "    let _7: u8;",
+    "    let _8: u8 mut@ own;",
+    "    bb0: {",
+    "        _1 = const zero u8 mut@ own #1:1;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<u8>(const u64 2) #2:1;",
+    "        _3 = aggregate u8 mut@ own(move _2, const u64 2) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        _6 = const u64 0 #2:3;",
+    "        _8 = move _1 #3:1;",
+    "        _4 = regrow<u8>(move _8, const u64 4) #3:2;",
+    "        _5 = aggregate u8 mut@ own(move _4, const u64 4) #3:2;",
+    "        _7 = copy _1[_6] #4:1;",
+    "        _0 = cast<u64>(copy _7) #5:1;",
+    "        del(move _5) #6:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+};
+
+// A `regrow` ends no fact about a global, and a call ends it. The two functions differ in the one
+// statement `call fn main.touch()`.
+string[64] CALLS = {
+    // A `regrow` is no call: the fact that the global `P` is empty holds after it, and the store
+    // into `P` is proved.
+    "fn main.no_call() -> u64 {",
+    "    let _1 (s): u8 mut@ own;",
+    "    let _2: u8 mut* own;",
+    "    let _3: u8 mut@ own;",
+    "    let _4: u8 mut* own;",
+    "    let _5: u8 mut@ own;",
+    "    let _6: u8 mut* own;",
+    "    bb0: {",
+    "        _1 = const zero u8 mut@ own #1:1;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<u8>(const u64 2) #2:1;",
+    "        _3 = aggregate u8 mut@ own(move _2, const u64 2) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        del(move global main.P) #3:1;",
+    "        _4 = regrow<u8>(move _1, const u64 4) #3:2;",
+    "        _5 = aggregate u8 mut@ own(move _4, const u64 4) #3:2;",
+    "        _6 = alloc<u8>(const u64 1) #4:1;",
+    "        check(overwrite: global main.P) -> bb2 #4:2;",
+    "    }",
+    "    bb2: {",
+    "        global main.P = move _6 #4:2;",
+    "        del(move global main.P) #4:3;",
+    "        _0 = copy _5.1 #5:1;",
+    "        del(move _5) #6:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    // The same function with a call after the `regrow`: the call ends the fact, and the store is
+    // not proved.
+    "fn main.call() -> u64 {",
+    "    let _1 (s): u8 mut@ own;",
+    "    let _2: u8 mut* own;",
+    "    let _3: u8 mut@ own;",
+    "    let _4: u8 mut* own;",
+    "    let _5: u8 mut@ own;",
+    "    let _6: u8 mut* own;",
+    "    let _7: void;",
+    "    bb0: {",
+    "        _1 = const zero u8 mut@ own #1:1;",
+    "        live(_1) #1:1;",
+    "        _2 = alloc<u8>(const u64 2) #2:1;",
+    "        _3 = aggregate u8 mut@ own(move _2, const u64 2) #2:1;",
+    "        check(overwrite: _1) -> bb1 #2:2;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3 #2:2;",
+    "        del(move global main.P) #3:1;",
+    "        _4 = regrow<u8>(move _1, const u64 4) #3:2;",
+    "        _5 = aggregate u8 mut@ own(move _4, const u64 4) #3:2;",
+    "        _7 = call fn main.touch() #3:4;",
+    "        _6 = alloc<u8>(const u64 1) #4:1;",
+    "        check(overwrite: global main.P) -> bb2 #4:2;",
+    "    }",
+    "    bb2: {",
+    "        global main.P = move _6 #4:2;",
+    "        del(move global main.P) #4:3;",
+    "        _0 = copy _5.1 #5:1;",
+    "        del(move _5) #6:1;",
+    "        dead(_1) #7:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+};
+
+// The counts of the last line of the output.
+struct tally {
+    u64 cases;
+    u64 proved;
+    u64 refused;
+    u64 events;
+}
+
+// The function `name` of `m`. run_env.function panics for a name that `m` lacks.
+fn function(run_env.env* e, fir.module* m, string name) fir.func* {
+    u64 mut k = 0;
+    while (k + 1 < fir.module_function_count(m)) {
+        if (fir.module_function_at(m, k)->sym == run_env.function(e, m, name)) {
+            return fir.module_function_at(m, k);
+        }
+        k += 1;
+    }
+    return fir.module_function_at(m, k);
+}
+
+// Proves the function `name` of `m`, writes each line of the three reports as `<severity>
+// <line>:<col>: <text>`, runs the function with the events of the shadow, and holds the lines of
+// the prover and then the report of the run against `want`.
+fn holds(run_env.env mut* e, fir.module* m, tally mut* t, string name, string@ want) void {
+    strbuf.str_buf mut got = strbuf.create();
+    defer del(got.data);
+    u64[1] none = {0};
+    fir.func* f = function(e, m, name);
+    prover.proof mut* own p = prover.prove_made(f);
+    defer prover.drop_made(move(p));
+    u64 before = check_env.reports(&e->c);
+    report.write(f, p, &e->c.m.s);
+    report.write_leaks(f, p, &e->c.m.s);
+    report.write_uses(f, p, &e->c.m.s);
+    u64 after = check_env.reports(&e->c);
+    u64 mut r = before;
+    while (r < after) {
+        strbuf.append(&got, check_env.report_severity(&e->c, r));
+        strbuf.push(&got, ' ');
+        strbuf.append(&got, check_env.report_text(&e->c, r));
+        strbuf.push(&got, '\n');
+        r += 1;
+    }
+    string run = run_env.run_in(e, m, name, none[..0]);
+    t->cases += 1;
+    if (after == before) {
+        t->proved += 1;
+    } else {
+        t->refused += 1;
+    }
+    if (run.len >= 6 && run[0..6] == "event ") {
+        t->events += 1;
+    }
+    strbuf.append(&got, run);
+    run_env.expect(strbuf.view(&got), want);
+}
+
+fn legal(run_env.env mut* e, tally mut* t) void {
+    // A new check drops the reports of the group before: a text parses against a check with no
+    // report only.
+    run_env.check(e, PRELUDE[..]);
+    e->events = true;
+    fir.module mut* own m = run_env.parse_made(e, LEGAL[..]);
+    defer fir.module_drop_made(move(m));
+    string[1] local = {
+        "return u64 4",
+    };
+    holds(e, m, t, "main.local", local[..]);
+    string[1] direct = {
+        "return u64 4",
+    };
+    holds(e, m, t, "main.direct", direct[..]);
+    string[1] field = {
+        "return u64 4",
+    };
+    holds(e, m, t, "main.field", field[..]);
+    string[1] global = {
+        "return u64 4",
+    };
+    holds(e, m, t, "main.global", global[..]);
+    string[1] twice = {
+        "return u64 7",
+    };
+    holds(e, m, t, "main.twice", twice[..]);
+}
+
+fn results(run_env.env mut* e, tally mut* t) void {
+    // A new check drops the reports of the group before: a text parses against a check with no
+    // report only.
+    run_env.check(e, PRELUDE[..]);
+    e->events = true;
+    fir.module mut* own m = run_env.parse_made(e, RESULTS[..]);
+    defer fir.module_drop_made(move(m));
+    string[4] leak = {
+        "error 7:1: leak: cannot prove 't' is empty at this exit",
+        "note 7:1: del or move 't' before this exit",
+        "event leak in main.leak at 7:1",
+        "return u64 4",
+    };
+    holds(e, m, t, "main.leak", leak[..]);
+    string[4] dropped = {
+        "error 7:1: leak: cannot prove '_5' is empty at this exit",
+        "note 7:1: del or move '_5' before this exit",
+        "event leak in main.dropped at 7:1",
+        "return u64 4",
+    };
+    holds(e, m, t, "main.dropped", dropped[..]);
+    string[4] bare = {
+        "error 7:1: leak: cannot prove 'p' is empty at this exit",
+        "note 7:1: del or move 'p' before this exit",
+        "event leak in main.bare at 7:1",
+        "return u64 4",
+    };
+    holds(e, m, t, "main.bare", bare[..]);
+    string[4] over_full = {
+        "error 4:3: overwriting owned value: cannot prove '_4' is empty here",
+        "note 4:3: del or move '_4' before this store",
+        "event overwrite in main.over_full at 4:3",
+        "return u64 4",
+    };
+    holds(e, m, t, "main.over_full", over_full[..]);
+    string[4] result_full = {
+        "error 4:3: overwriting owned value: cannot prove '_1' is empty here",
+        "note 4:3: del or move '_1' before this store",
+        "event overwrite in main.result_full at 4:3",
+        "return u64 1",
+    };
+    holds(e, m, t, "main.result_full", result_full[..]);
+}
+
+fn uses(run_env.env mut* e, tally mut* t) void {
+    // A new check drops the reports of the group before: a text parses against a check with no
+    // report only.
+    run_env.check(e, PRELUDE[..]);
+    e->events = true;
+    fir.module mut* own m = run_env.parse_made(e, USES[..]);
+    defer fir.module_drop_made(move(m));
+    string[4] use_direct = {
+        "error 4:1: use after move or del: 's' can be vacated here",
+        "note 3:2: 's' is moved here",
+        "event use after move in main.use_direct at 4:1 through moved main.use_direct _1",
+        "fault null dereference at 4:1",
+    };
+    holds(e, m, t, "main.use_direct", use_direct[..]);
+    string[4] use_lowered = {
+        "error 4:1: use after move or del: 's' can be vacated here",
+        "note 3:1: 's' is moved here",
+        "event use after move in main.use_lowered at 4:1 through moved main.use_lowered _1",
+        "fault null dereference at 4:1",
+    };
+    holds(e, m, t, "main.use_lowered", use_lowered[..]);
+}
+
+fn calls(run_env.env mut* e, tally mut* t) void {
+    // A new check drops the reports of the group before: a text parses against a check with no
+    // report only.
+    run_env.check(e, PRELUDE[..]);
+    e->events = true;
+    fir.module mut* own m = run_env.parse_made(e, CALLS[..]);
+    defer fir.module_drop_made(move(m));
+    string[1] no_call = {
+        "return u64 4",
+    };
+    holds(e, m, t, "main.no_call", no_call[..]);
+    string[3] call = {
+        "error 4:2: overwriting owned value: cannot prove 'global main.P' is empty here",
+        "note 4:2: del or move 'global main.P' before this store",
+        "return u64 4",
+    };
+    holds(e, m, t, "main.call", call[..]);
+}
+
+fn main() i32 {
+    run_env.env mut* own e = run_env.make();
+    defer run_env.drop_made(move(e));
+    tally mut t = {};
+    legal(e, &t);
+    println("legal ok");
+    results(e, &t);
+    println("results ok");
+    uses(e, &t);
+    println("uses ok");
+    calls(e, &t);
+    println("calls ok");
+    println("cases ", t.cases, " proved ", t.proved, " refused ", t.refused, " events ", t.events);
+    return 0;
+}

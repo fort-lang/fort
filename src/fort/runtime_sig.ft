@@ -9,6 +9,8 @@ import fort.types;
 enum rt_entry {
     rt_alloc,
     rt_free,
+    rt_regrow,
+    rt_regrow_move,
     rt_str_eq,
     rt_fail_bounds,
     rt_fail_span,
@@ -56,11 +58,11 @@ enum ir_form {
 }
 
 // The entry points, which is what rt_entry_of walks.
-u64 RT_ENTRY_COUNT = 27;
+u64 RT_ENTRY_COUNT = 29;
 
 // The widest parameter list, which is
-// `fail_span(i64, i64, i64, ptr, i32, i32)`.
-u64 RT_MAX_PARAMS = 6;
+// `regrow(ptr, i64, i64, i64, i1, ptr, i32, i32)`.
+u64 RT_MAX_PARAMS = 8;
 
 // One entry point: its mangled fort name, its result form, its `noreturn` state,
 // and its parameter forms in order, padded
@@ -77,13 +79,16 @@ struct rt_sig {
     ir_form p3;
     ir_form p4;
     ir_form p5;
+    ir_form p6;
+    ir_form p7;
 }
 
 // Creates a row with no parameters. Each row below starts from it. Unused parameter slots contain
 // ir_none, as in the C table.
 fn row(string name, ir_form result, bool is_noreturn) rt_sig {
     return rt_sig{name, result, is_noreturn, ir_form.ir_none, ir_form.ir_none, ir_form.ir_none,
-                  ir_form.ir_none, ir_form.ir_none, ir_form.ir_none};
+                  ir_form.ir_none, ir_form.ir_none, ir_form.ir_none, ir_form.ir_none,
+                  ir_form.ir_none};
 }
 
 fn row1(string name, ir_form result, bool is_noreturn, ir_form p0) rt_sig {
@@ -125,6 +130,20 @@ fn row6(string name, ir_form result, bool is_noreturn, ir_form p0, ir_form p1, i
     return r;
 }
 
+fn row7(string name, ir_form result, bool is_noreturn, ir_form p0, ir_form p1, ir_form p2,
+               ir_form p3, ir_form p4, ir_form p5, ir_form p6) rt_sig {
+    rt_sig mut r = row6(name, result, is_noreturn, p0, p1, p2, p3, p4, p5);
+    r.p6 = p6;
+    return r;
+}
+
+fn row8(string name, ir_form result, bool is_noreturn, ir_form p0, ir_form p1, ir_form p2,
+               ir_form p3, ir_form p4, ir_form p5, ir_form p6, ir_form p7) rt_sig {
+    rt_sig mut r = row7(name, result, is_noreturn, p0, p1, p2, p3, p4, p5, p6);
+    r.p7 = p7;
+    return r;
+}
+
 // Maps fort signatures to IR forms in table order. Both `u64` and `i64` use `i64`. `u32` uses
 // `i32`. `char` uses `i8 zeroext`, and `bool` uses `i1 zeroext`. Each pointer uses `ptr`, and so
 // does a `string` or a span parameter, the address of the caller-made copy: the message of `panic`,
@@ -133,7 +152,11 @@ fn row6(string name, ir_form result, bool is_noreturn, ir_form p0, ir_form p1, i
 // with a leading `ptr`. Each `fail_*` function, `panic`, `assert_fail`, and `exit` is `fn
 // noreturn`. Each row states this attribute. Thus, insertion order cannot add the attribute to
 // another entry point. The two float printers are rows of `std.rt` like every other one: the
-// separate float module is folded into the runtime.
+// separate float module is folded into the runtime. `regrow` takes the pointer and the
+// length of the old span, the size of an element, the count, whether the type of the count is
+// signed, and a `loc`.
+// `regrow_move` takes three spans and one size: the bytes of the new storage, the bytes of the
+// old elements, the size of an element, and the offsets of the owner words of an element.
 fn rt_sig_of(rt_entry rt) rt_sig {
     switch (rt) {
     case rt_entry.rt_alloc:
@@ -141,6 +164,13 @@ fn rt_sig_of(rt_entry rt) rt_sig {
                     ir_form.ir_ptr, ir_form.ir_i32, ir_form.ir_i32);
     case rt_entry.rt_free:
         return row1("std.rt.free", ir_form.ir_void, false, ir_form.ir_ptr);
+    case rt_entry.rt_regrow:
+        return row8("std.rt.regrow", ir_form.ir_ptr, false, ir_form.ir_ptr, ir_form.ir_i64,
+                    ir_form.ir_i64, ir_form.ir_i64, ir_form.ir_bool, ir_form.ir_ptr,
+                    ir_form.ir_i32, ir_form.ir_i32);
+    case rt_entry.rt_regrow_move:
+        return row4("std.rt.regrow_move", ir_form.ir_void, false, ir_form.ir_ptr, ir_form.ir_ptr,
+                    ir_form.ir_i64, ir_form.ir_ptr);
     case rt_entry.rt_str_eq:
         return row4("std.rt.str_eq", ir_form.ir_bool, false, ir_form.ir_ptr, ir_form.ir_i64,
                     ir_form.ir_ptr, ir_form.ir_i64);
@@ -267,6 +297,10 @@ fn rt_entry_param(rt_entry rt, u64 i) ir_form {
         return sig.p4;
     } else if (i == 5) {
         return sig.p5;
+    } else if (i == 6) {
+        return sig.p6;
+    } else if (i == 7) {
+        return sig.p7;
     }
     panic("runtime_sig.rt_entry_param: index out of range");
 }
@@ -434,8 +468,12 @@ fn rt_signature_of_type(string name, types.node* sig) rt_sig {
             r.p3 = form;
         } else if (at == 4) {
             r.p4 = form;
-        } else {
+        } else if (at == 5) {
             r.p5 = form;
+        } else if (at == 6) {
+            r.p6 = form;
+        } else {
+            r.p7 = form;
         }
         i += 1;
     }

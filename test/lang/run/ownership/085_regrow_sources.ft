@@ -1,0 +1,170 @@
+//! run
+//! stdout:
+//| local 7: 0 1 2 3 4
+//| field 7: 0 1 2 3 4
+//| global 7: 0 1 2 3 4
+//| element 3 0: 5 6 0
+//| inner 2 3: 8 0 0
+//| owners 5 of 7: 0 1 2 3 4 freed 5
+// The source of a `regrow` is a local, a field through a pointer, a global, an element of a
+// fixed array and a field of an element of a span (D12.2, D17.6). In each case the `move` empties
+// the place, so the store of the result needs no test of an owner that the place holds (D17.11).
+// A count that reads the span goes into a local before the call.
+struct vec {
+    i32 mut@ own items;
+    u64 len;
+}
+
+fn push(vec mut* v, i32 x) void {
+    if (v->len == v->items.len) {
+        u64 cap = v->items.len * 2 + 1;
+        v->items = regrow(move(v->items), cap);
+    }
+    v->items[v->len] = x;
+    v->len += 1;
+}
+
+i32 mut@ own mut POOL = {};
+u64 mut POOL_LEN = 0;
+
+fn push_pool(i32 x) void {
+    if (POOL_LEN == POOL.len) {
+        u64 cap = POOL.len * 2 + 1;
+        POOL = regrow(move(POOL), cap);
+    }
+    POOL[POOL_LEN] = x;
+    POOL_LEN += 1;
+}
+
+struct leaf {
+    i32 v;
+}
+
+struct leaves {
+    leaf mut* own mut@ own items;
+    u64 len;
+}
+
+fn push_leaf(leaves mut* v, leaf mut* own p) void {
+    if (v->len == v->items.len) {
+        u64 cap = v->items.len * 2 + 1;
+        v->items = regrow(move(v->items), cap);
+    }
+    u64 at = v->len;
+    del(v->items[at]);
+    v->items[at] = move(p);
+    v->len += 1;
+}
+
+u64 mut FREED = 0;
+
+fn leaf_drop(leaf mut* own p) void {
+    if (p != null) {
+        FREED += 1;
+    }
+    del(p);
+}
+
+struct row {
+    i32 mut@ own cells;
+}
+
+fn row_drop(row mut r) void {
+    del(r.cells);
+}
+
+fn show(string what, u64 cap, i32@ s) void {
+    print(what, " ", cap, ":");
+    for (u64 mut i = 0; i < s.len; i += 1) {
+        print(" ", s[i]);
+    }
+    println();
+}
+
+// A read of `v.items` in the caller after `push(&v, x)` is an error: the call can change the
+// field. A call after `del(v.items)` ends the proof that the field is empty, so the `del` is the
+// last statement of its function.
+fn show_vec(vec* v) void {
+    show("field", v->items.len, v->items[0..v->len]);
+}
+
+fn field_case() void {
+    vec mut v = {};
+    for (i32 mut x = 0; x < 5; x += 1) {
+        push(&v, x);
+    }
+    show_vec(&v);
+    del(v.items);
+}
+
+fn show_leaves(leaves* v) void {
+    print("owners ", v->len, " of ", v->items.len, ":");
+    for (u64 mut i = 0; i < v->len; i += 1) {
+        print(" ", v->items[i]->v);
+    }
+}
+
+// The span moves out of the object first, so the `del` of the object needs no proof after the
+// calls of the drop.
+fn leaves_drop(leaves mut* own v) void {
+    leaf mut* own mut@ own items = move(v->items);
+    del(v);
+    del(items, leaf_drop);
+}
+
+fn owner_case() void {
+    leaves mut* own grown = new(leaves);
+    for (i32 mut x = 0; x < 5; x += 1) {
+        leaf mut* own p = new(leaf);
+        p->v = x;
+        push_leaf(grown, move(p));
+    }
+    show_leaves(grown);
+    leaves_drop(move(grown));
+}
+
+fn main() i32 {
+    i32 mut@ own mut items = {};
+    u64 mut len = 0;
+    for (i32 mut x = 0; x < 5; x += 1) {
+        if (len == items.len) {
+            u64 cap = items.len * 2 + 1;
+            items = regrow(move(items), cap);
+        }
+        items[len] = x;
+        len += 1;
+    }
+    show("local", items.len, items[0..len]);
+    del(items);
+
+    field_case();
+
+    for (i32 mut x = 0; x < 5; x += 1) {
+        push_pool(x);
+    }
+    show("global", POOL.len, POOL[0..POOL_LEN]);
+    del(POOL);
+
+    i32 mut@ own[2] mut table = {};
+    table[0] = regrow(move(table[0]), 2);
+    table[0][0] = 5;
+    table[0][1] = 6;
+    table[0] = regrow(move(table[0]), 3);
+    print("element ", table[0].len, " ", table[1].len, ":");
+    println(" ", table[0][0], " ", table[0][1], " ", table[0][2]);
+    del(table[0]);
+    del(table[1]);
+
+    row mut@ own rows = new(row, 2);
+    u64 mut at = 1;
+    rows[at].cells = regrow(move(rows[at].cells), 1);
+    rows[at].cells[0] = 8;
+    rows[at].cells = regrow(move(rows[at].cells), 3);
+    print("inner ", rows.len, " ", rows[at].cells.len, ":");
+    println(" ", rows[at].cells[0], " ", rows[at].cells[1], " ", rows[at].cells[2]);
+    del(rows, row_drop);
+
+    owner_case();
+    println(" freed ", FREED);
+    return 0;
+}

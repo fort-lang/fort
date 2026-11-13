@@ -1,0 +1,437 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| ok
+/// Checks the lowering of the universe function `regrow` (spec/fir.md 9.4, D12.2): the `move` of
+/// the span before the count, the width of the count, the rvalue `regrow<T>` and the `aggregate`
+/// that makes the span. The sources are a parameter, a field through a pointer, a global, a field
+/// of an element and an owning rvalue. Each case lowers one function of a checked source, holds
+/// that the result keeps every rule of the verifier, and compares its text.
+import lower_env;
+
+// `regrow(move(s), n)` (spec/fir.md 9.4, D12.2): the `move` takes the span into a temporary, the
+// count goes into an `i64` for a signed type and into a `u64` for an unsigned type, and the
+// rvalue `regrow<T>` gives the storage. An `aggregate` with the count as a `u64` makes the span.
+// The lowering adds no `check`: the runtime makes each test (D19.6). Each statement stands at
+// the name `regrow`.
+fn a_regrow_widens_a_signed_count_and_an_unsigned_count() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string[4] source = {
+        "fn f(u8 mut@ own s, i32 n, u64 m) u8 mut@ own {",
+        "    u8 mut@ own t = regrow(move(s), n);",
+        "    return regrow(move(t), m);",
+        "}",
+    };
+    string[32] want = {
+        "fn main.f(_1 (s): u8 mut@ own, _2 (n): i32, _3 (m): u64) -> u8 mut@ own {",
+        "    let _0: u8 mut@ own;",
+        "    let _4 (t): u8 mut@ own #2:17;",
+        "    let _5: u8 mut@ own #2:27;",
+        "    let _6: u8 mut@ own #2:32;",
+        "    let _7: i64 #2:21;",
+        "    let _8: u8 mut* own #2:21;",
+        "    let _9: u64 #2:21;",
+        "    let _10: u8 mut@ own #3:23;",
+        "    let _11: u64 #3:12;",
+        "    let _12: u8 mut* own #3:12;",
+        "",
+        "    bb0: {",
+        "        _4 = const zero u8 mut@ own #2:17 s0;",
+        "        live(_4) #2:17 s1;",
+        "        _6 = move _1 #2:32 s1;",
+        "        _7 = cast<i64>(copy _2) #2:21 s1;",
+        "        _8 = regrow<u8>(move _6, copy _7) #2:21 s1;",
+        "        _9 = cast<u64>(copy _7) #2:21 s1;",
+        "        _5 = aggregate u8 mut@ own(move _8, copy _9) #2:21 s1;",
+        "        check(overwrite: _4) -> bb1 #2:17 s1;",
+        "    }",
+        "    bb1: {",
+        "        _4 = move _5 #2:17 s1;",
+        "        _10 = move _4 #3:23 s2;",
+        "        _11 = cast<u64>(copy _3) #3:12 s2;",
+        "        _12 = regrow<u8>(move _10, copy _11) #3:12 s2;",
+        "        _0 = aggregate u8 mut@ own(move _12, copy _11) #3:12 s2;",
+        "        dead(_4) #3:5 s2;",
+        "        return #3:5 s2;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
+}
+
+// A count of the type `i8` goes into an `i64` and a count of the type `u8` into a `u64`: the
+// sign of the source type selects the test that the runtime makes for a negative count.
+fn a_narrow_count_widens_by_its_sign() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string[4] source = {
+        "fn f(u8 mut@ own s, i8 n, u8 m) u8 mut@ own {",
+        "    u8 mut@ own t = regrow(move(s), n);",
+        "    return regrow(move(t), m);",
+        "}",
+    };
+    string[32] want = {
+        "fn main.f(_1 (s): u8 mut@ own, _2 (n): i8, _3 (m): u8) -> u8 mut@ own {",
+        "    let _0: u8 mut@ own;",
+        "    let _4 (t): u8 mut@ own #2:17;",
+        "    let _5: u8 mut@ own #2:27;",
+        "    let _6: u8 mut@ own #2:32;",
+        "    let _7: i64 #2:21;",
+        "    let _8: u8 mut* own #2:21;",
+        "    let _9: u64 #2:21;",
+        "    let _10: u8 mut@ own #3:23;",
+        "    let _11: u64 #3:12;",
+        "    let _12: u8 mut* own #3:12;",
+        "",
+        "    bb0: {",
+        "        _4 = const zero u8 mut@ own #2:17 s0;",
+        "        live(_4) #2:17 s1;",
+        "        _6 = move _1 #2:32 s1;",
+        "        _7 = cast<i64>(copy _2) #2:21 s1;",
+        "        _8 = regrow<u8>(move _6, copy _7) #2:21 s1;",
+        "        _9 = cast<u64>(copy _7) #2:21 s1;",
+        "        _5 = aggregate u8 mut@ own(move _8, copy _9) #2:21 s1;",
+        "        check(overwrite: _4) -> bb1 #2:17 s1;",
+        "    }",
+        "    bb1: {",
+        "        _4 = move _5 #2:17 s1;",
+        "        _10 = move _4 #3:23 s2;",
+        "        _11 = cast<u64>(copy _3) #3:12 s2;",
+        "        _12 = regrow<u8>(move _10, copy _11) #3:12 s2;",
+        "        _0 = aggregate u8 mut@ own(move _12, copy _11) #3:12 s2;",
+        "        dead(_4) #3:5 s2;",
+        "        return #3:5 s2;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
+}
+
+// The catalogue form for a field through a pointer: the store holds the address of its target
+// before the right side, the `move` empties the field, and the overwrite check of the store
+// reads the field that the `move` emptied (D17.11).
+fn a_regrow_into_a_field_through_a_pointer_holds_its_target() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string[7] source = {
+        "struct vec {",
+        "    u8 mut@ own items;",
+        "    u64 len;",
+        "}",
+        "fn f(vec mut* v, u64 cap) void {",
+        "    v->items = regrow(move(v->items), cap);",
+        "}",
+    };
+    string[21] want = {
+        "fn main.f(_1 (v): vec mut*, _2 (cap): u64) -> void {",
+        "    let _0: void;",
+        "    let _3: u8 mut@ own mut* #6:6;",
+        "    let _4: u8 mut@ own #6:22;",
+        "    let _5: u8 mut@ own #6:27;",
+        "    let _6: u64 #6:16;",
+        "    let _7: u8 mut* own #6:16;",
+        "",
+        "    bb0: {",
+        "        _3 = addr mut((*_1).0) #6:6 s1;",
+        "        _5 = move (*_1).0 #6:27 s1;",
+        "        _6 = cast<u64>(copy _2) #6:16 s1;",
+        "        _7 = regrow<u8>(move _5, copy _6) #6:16 s1;",
+        "        _4 = aggregate u8 mut@ own(move _7, copy _6) #6:16 s1;",
+        "        check(overwrite: (*_3)) -> bb1 #6:14 s1;",
+        "    }",
+        "    bb1: {",
+        "        (*_3) = move _4 #6:14 s1;",
+        "        return #7:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
+}
+
+// The catalogue form for a global.
+fn a_regrow_into_a_global_holds_its_target() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string[4] source = {
+        "u8 mut@ own mut POOL = {};",
+        "fn f(u64 cap) void {",
+        "    POOL = regrow(move(POOL), cap);",
+        "}",
+    };
+    string[21] want = {
+        "fn main.f(_1 (cap): u64) -> void {",
+        "    let _0: void;",
+        "    let _2: u8 mut@ own mut* #3:5;",
+        "    let _3: u8 mut@ own #3:18;",
+        "    let _4: u8 mut@ own #3:23;",
+        "    let _5: u64 #3:12;",
+        "    let _6: u8 mut* own #3:12;",
+        "",
+        "    bb0: {",
+        "        _2 = addr mut(global main.POOL) #3:5 s1;",
+        "        _4 = move global main.POOL #3:23 s1;",
+        "        _5 = cast<u64>(copy _1) #3:12 s1;",
+        "        _6 = regrow<u8>(move _4, copy _5) #3:12 s1;",
+        "        _3 = aggregate u8 mut@ own(move _6, copy _5) #3:12 s1;",
+        "        check(overwrite: (*_2)) -> bb1 #3:10 s1;",
+        "    }",
+        "    bb1: {",
+        "        (*_2) = move _3 #3:10 s1;",
+        "        return #4:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
+}
+
+// A source that is a field of an element: each of the two index expressions takes its bounds
+// check, and the `move` reads the element through the second index.
+fn a_regrow_of_an_element_checks_each_index() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string[7] source = {
+        "struct vec {",
+        "    u8 mut@ own items;",
+        "    u64 len;",
+        "}",
+        "fn f(vec[2] mut* a, u64 i, u64 n) void {",
+        "    (*a)[i].items = regrow(move((*a)[i].items), n);",
+        "}",
+    };
+    string[39] want = {
+        "fn main.f(_1 (a): vec[2] mut*, _2 (i): u64, _3 (n): u64) -> void {",
+        "    let _0: void;",
+        "    let _4: u64 #6:9;",
+        "    let _5: bool #6:9;",
+        "    let _6: i64 #6:9;",
+        "    let _7: u8 mut@ own mut* #6:12;",
+        "    let _8: u8 mut@ own #6:27;",
+        "    let _9: u8 mut@ own #6:32;",
+        "    let _10: u64 #6:37;",
+        "    let _11: bool #6:37;",
+        "    let _12: i64 #6:37;",
+        "    let _13: u64 #6:21;",
+        "    let _14: u8 mut* own #6:21;",
+        "",
+        "    bb0: {",
+        "        _4 = cast<u64>(copy _2) #6:9 s1;",
+        "        _5 = ge(copy _4, const u64 2) #6:9 s1;",
+        "        _6 = cast<i64>(copy _4) #6:9 s1;",
+        "        check(copy _5, bounds, copy _6, const u64 2) -> bb1 #6:9 s1;",
+        "    }",
+        "    bb1: {",
+        "        _7 = addr mut((*_1)[_4].0) #6:12 s1;",
+        "        _10 = cast<u64>(copy _2) #6:37 s1;",
+        "        _11 = ge(copy _10, const u64 2) #6:37 s1;",
+        "        _12 = cast<i64>(copy _10) #6:37 s1;",
+        "        check(copy _11, bounds, copy _12, const u64 2) -> bb2 #6:37 s1;",
+        "    }",
+        "    bb2: {",
+        "        _9 = move (*_1)[_10].0 #6:32 s1;",
+        "        _13 = cast<u64>(copy _3) #6:21 s1;",
+        "        _14 = regrow<u8>(move _9, copy _13) #6:21 s1;",
+        "        _8 = aggregate u8 mut@ own(move _14, copy _13) #6:21 s1;",
+        "        check(overwrite: (*_7)) -> bb3 #6:19 s1;",
+        "    }",
+        "    bb3: {",
+        "        (*_7) = move _8 #6:19 s1;",
+        "        return #7:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
+}
+
+// An owning rvalue takes no `move`: the temporary that its lowering made is the operand.
+fn a_regrow_of_an_rvalue_reads_its_temporary() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string[6] source = {
+        "fn make() u8 mut@ own {",
+        "    return new(u8, 2);",
+        "}",
+        "fn f() u8 mut@ own {",
+        "    return regrow(make(), 4);",
+        "}",
+    };
+    string[16] want = {
+        "fn main.f() -> u8 mut@ own {",
+        "    let _0: u8 mut@ own;",
+        "    let _1: u8 mut@ own #5:23;",
+        "    let _2: i64 #5:12;",
+        "    let _3: u8 mut* own #5:12;",
+        "    let _4: u64 #5:12;",
+        "",
+        "    bb0: {",
+        "        _1 = call fn main.make() #5:23 s1;",
+        "        _2 = cast<i64>(const i32 4) #5:12 s1;",
+        "        _3 = regrow<u8>(move _1, copy _2) #5:12 s1;",
+        "        _4 = cast<u64>(copy _2) #5:12 s1;",
+        "        _0 = aggregate u8 mut@ own(move _3, copy _4) #5:12 s1;",
+        "        return #5:5 s1;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
+}
+
+// The arguments run from left to right (D12.2): the `move` stands before the count, so
+// `s.len * 2` reads the length of the place that the `move` emptied.
+fn a_count_reads_the_place_that_the_move_emptied() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string[4] source = {
+        "fn f(u8 mut@ own mut s) u8 mut@ own {",
+        "    s = regrow(move(s), s.len * 2);",
+        "    return s;",
+        "}",
+    };
+    string[27] want = {
+        "fn main.f(_1 (s): u8 mut@ own) -> u8 mut@ own {",
+        "    let _0: u8 mut@ own;",
+        "    let _2: u8 mut@ own #2:15;",
+        "    let _3: u8 mut@ own #2:20;",
+        "    let _4: bool #2:31;",
+        "    let _5: u64 #2:31;",
+        "    let _6: u64 #2:9;",
+        "    let _7: u8 mut* own #2:9;",
+        "",
+        "    bb0: {",
+        "        _3 = move _1 #2:20 s1;",
+        "        _4 = mul_overflows(copy _1.1, const u64 2) #2:31 s1;",
+        "        check(copy _4, overflow) -> bb1 #2:31 s1;",
+        "    }",
+        "    bb1: {",
+        "        _5 = mul(copy _1.1, const u64 2) #2:31 s1;",
+        "        _6 = cast<u64>(copy _5) #2:9 s1;",
+        "        _7 = regrow<u8>(move _3, copy _6) #2:9 s1;",
+        "        _2 = aggregate u8 mut@ own(move _7, copy _6) #2:9 s1;",
+        "        check(overwrite: _1) -> bb2 #2:7 s1;",
+        "    }",
+        "    bb2: {",
+        "        _1 = move _2 #2:7 s1;",
+        "        _0 = move _1 #3:12 s2;",
+        "        return #3:5 s2;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
+}
+
+// An element type that owns stands in the rvalue with its `own`: the translation reads the
+// owner slots of the element from that type.
+fn a_regrow_keeps_an_owning_element_type() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string[14] source = {
+        "struct leaf {",
+        "    i32 v;",
+        "}",
+        "struct node {",
+        "    leaf mut* own a;",
+        "    i32[2] pad;",
+        "    leaf mut* own b;",
+        "}",
+        "fn f(leaf mut* own mut@ own s, node mut@ own t, u64 n) void {",
+        "    leaf mut* own mut@ own u = regrow(move(s), n);",
+        "    node mut@ own w = regrow(move(t), n);",
+        "    del(u);",
+        "    del(w);",
+        "}",
+    };
+    string[41] want = {
+        "fn main.f(_1 (s): leaf mut* own mut@ own, _2 (t): node mut@ own, _3 (n): u64) -> void {",
+        "    let _0: void;",
+        "    let _4 (u): leaf mut* own mut@ own #10:28;",
+        "    let _5 (w): node mut@ own #11:19;",
+        "    let _6: leaf mut* own mut@ own #10:38;",
+        "    let _7: leaf mut* own mut@ own #10:43;",
+        "    let _8: u64 #10:32;",
+        "    let _9: leaf mut* own mut* own #10:32;",
+        "    let _10: node mut@ own #11:29;",
+        "    let _11: node mut@ own #11:34;",
+        "    let _12: u64 #11:23;",
+        "    let _13: node mut* own #11:23;",
+        "",
+        "    bb0: {",
+        "        _4 = const zero leaf mut* own mut@ own #10:28 s0;",
+        "        _5 = const zero node mut@ own #11:19 s0;",
+        "        live(_4) #10:28 s1;",
+        "        _7 = move _1 #10:43 s1;",
+        "        _8 = cast<u64>(copy _3) #10:32 s1;",
+        "        _9 = regrow<leaf mut* own>(move _7, copy _8) #10:32 s1;",
+        "        _6 = aggregate leaf mut* own mut@ own(move _9, copy _8) #10:32 s1;",
+        "        check(overwrite: _4) -> bb1 #10:28 s1;",
+        "    }",
+        "    bb1: {",
+        "        _4 = move _6 #10:28 s1;",
+        "        live(_5) #11:19 s2;",
+        "        _11 = move _2 #11:34 s2;",
+        "        _12 = cast<u64>(copy _3) #11:23 s2;",
+        "        _13 = regrow<node>(move _11, copy _12) #11:23 s2;",
+        "        _10 = aggregate node mut@ own(move _13, copy _12) #11:23 s2;",
+        "        check(overwrite: _5) -> bb2 #11:19 s2;",
+        "    }",
+        "    bb2: {",
+        "        _5 = move _10 #11:19 s2;",
+        "        del(move _4) #12:5 s3;",
+        "        del(move _5) #13:5 s4;",
+        "        dead(_4) #14:1 s0;",
+        "        dead(_5) #14:1 s0;",
+        "        return #14:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
+}
+
+// A `regrow` that is the argument of a call stands in a temporary that the call moves.
+fn a_regrow_as_an_argument_stands_in_a_temporary() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string[6] source = {
+        "fn take(u8 mut@ own s) void {",
+        "    del(s);",
+        "}",
+        "fn f(u8 mut@ own s) void {",
+        "    take(regrow(move(s), 8));",
+        "}",
+    };
+    string[19] want = {
+        "fn main.f(_1 (s): u8 mut@ own) -> void {",
+        "    let _0: void;",
+        "    let _2: u8 mut@ own #5:16;",
+        "    let _3: u8 mut@ own #5:21;",
+        "    let _4: i64 #5:10;",
+        "    let _5: u8 mut* own #5:10;",
+        "    let _6: u64 #5:10;",
+        "    let _7: void #5:9;",
+        "",
+        "    bb0: {",
+        "        _3 = move _1 #5:21 s1;",
+        "        _4 = cast<i64>(const i32 8) #5:10 s1;",
+        "        _5 = regrow<u8>(move _3, copy _4) #5:10 s1;",
+        "        _6 = cast<u64>(copy _4) #5:10 s1;",
+        "        _2 = aggregate u8 mut@ own(move _5, copy _6) #5:10 s1;",
+        "        _7 = call fn main.take(move _2) #5:9 s1;",
+        "        return #6:1 s0;",
+        "    }",
+        "}",
+    };
+    lower_env.expect(lower_env.lower(e, source[..], "f"), want[..]);
+}
+
+fn main() i32 {
+    a_regrow_widens_a_signed_count_and_an_unsigned_count();
+    a_narrow_count_widens_by_its_sign();
+    a_regrow_into_a_field_through_a_pointer_holds_its_target();
+    a_regrow_into_a_global_holds_its_target();
+    a_regrow_of_an_element_checks_each_index();
+    a_regrow_of_an_rvalue_reads_its_temporary();
+    a_count_reads_the_place_that_the_move_emptied();
+    a_regrow_keeps_an_owning_element_type();
+    a_regrow_as_an_argument_stands_in_a_temporary();
+    println("ok");
+    return 0;
+}

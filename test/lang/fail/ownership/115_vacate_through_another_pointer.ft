@@ -1,0 +1,34 @@
+//! fail
+// Two pointer parameters can name one object, so a `move` through `w` can vacate the owner of the
+// storage that a place through `v` names (`spec/fir.md` 11, the kill at a vacate).
+struct row {
+    row mut@ own sub;
+    u64 tag;
+}
+
+struct holder {
+    row mut@ own rows;
+    u64 n;
+}
+
+fn row_drop(row mut r) void {
+    del(r.sub, row_drop);
+}
+
+fn grow(holder mut* v, holder mut* w) void {
+    row mut@ own first = move(v->rows[0].sub);
+    v->rows[0].sub = regrow(move(w->rows), 2); //! error: overwriting owned value
+    del(first, row_drop);
+}
+
+fn main() i32 {
+    holder mut* own h = new(holder);
+    h->rows = new(row, 1);
+    grow(h, h);
+    // The span moves out first. The calls of the drop then come after the `del` of `h`, so no
+    // call ends the fact of `h->rows` before that `del` (kill rule 5 of D17.11).
+    row mut@ own rows = move(h->rows);
+    del(h);
+    del(rows, row_drop);
+    return 0;
+}

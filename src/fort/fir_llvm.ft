@@ -914,6 +914,91 @@ fn alloc_value(translator mut* t, fir.statement* s) gen.gen_val {
     return gen.gen_call_rt_value(t->g, runtime_sig.rt_entry.rt_alloc, "ptr", args);
 }
 
+// A new `%tmp` slot that holds the span of `len` elements at `ptr`: the caller-made copy that a
+// span parameter of a runtime entry takes (toolchain.md 6 item 7).
+fn span_slot(translator mut* t, gen.gen_val ptr, gen.gen_val len) gen.gen_val {
+    gen.gen_val at = gen.gen_temp_place_raw(t->g, gen.SPAN_TYPE, gen.PTR_BYTES).addr;
+    gen.gen_span_init(t->g, at, ptr, len);
+    return at;
+}
+
+// A new `%tmp` slot that holds the span of the byte offsets of the owner words of a value of type
+// `elem` (fir.owner_word_at), and `words`, their count. The offsets are a private constant of the
+// module (`@.words.N`, toolchain.md 6 item 5), one for each call, so the function stores no
+// offset. A type with no owner word gives the span of null and 0, and no constant.
+fn owner_words_slot(translator mut* t, types.node* elem, u64 words) gen.gen_val {
+    gen.emitter mut* g = t->g;
+    gen.gen_val count = gen.gen_const_unsigned(g, "i64", words);
+    if (words == 0) {
+        return span_slot(t, gen.gen_literal(g, "ptr", "null"), count);
+    }
+    strbuf.str_buf mut table = strbuf.create();
+    defer del(table.data);
+    strbuf.append(&table, "[");
+    strbuf.append_u64(&table, words);
+    strbuf.append(&table, " x i64] [");
+    for (u64 mut k = 0; k < words; k++) {
+        if (k > 0) {
+            strbuf.append(&table, ", ");
+        }
+        strbuf.append(&table, "i64 ");
+        strbuf.append_u64(&table, fir.owner_word_at(elem, k));
+    }
+    strbuf.append(&table, "]");
+    string name = gen.gen_words_ref(g, strbuf.view(&table));
+    return span_slot(t, gen.gen_literal(g, "ptr", name), count);
+}
+
+// `regrow<T>(move s, n)` at the location of statement `s` (D12.2). `std.rt.regrow` makes the
+// tests on the pointer and the length of `s` and on `n` and gives the new storage.
+// `std.rt.regrow_move` moves the elements and stores zero into each owner word of each old
+// element. `std.rt.free` releases the old storage. The place of `s` then takes the zero value, as
+// a `move` gives it, unless it is a temporary (toolchain.md 6 item 18). No block starts here: the
+// entries make each test (D19.6).
+fn regrow_value(translator mut* t, fir.statement* s) gen.gen_val {
+    gen.emitter mut* g = t->g;
+    types.node* elem = s->value.ty;
+    fir.operand source = fir.rvalue_operand(t->f, s->value, 0);
+    fir.operand amount = fir.rvalue_operand(t->f, s->value, 1);
+    gen.gen_val at = place_addr(t, source.place);
+    gen.gen_val old = gen.gen_span_ptr(g, at);
+    gen.gen_val len_at = gen.gen_gep_field(g, gen.SPAN_TYPE, at, gen.SPAN_FIELD_LEN);
+    gen.gen_val len = gen.gen_load(g, "i64", len_at, gen.LEN_BYTES);
+    gen.gen_val count = operand_value(t, amount);
+    gen.gen_val size = gen.gen_const_unsigned(g, "i64", types.type_sizeof(elem));
+    string mut is_signed = "false";
+    if (prim.prim_is_signed(fir.operand_type(t->f, amount)->prim)) {
+        is_signed = "true";
+    }
+    gen.gen_args mut* own tests = gen.gen_args_make();
+    defer gen.gen_args_drop_made(move(tests));
+    gen.gen_args_add(tests, old);
+    gen.gen_args_add(tests, len);
+    gen.gen_args_add(tests, size);
+    gen.gen_args_add(tests, count);
+    gen.gen_args_add_ext(tests, gen.gen_literal(g, "i1", is_signed), "zeroext");
+    gen.gen_args_add_loc(g, tests, s->loc);
+    gen.gen_val fresh = gen.gen_call_rt_value(g, runtime_sig.rt_entry.rt_regrow, "ptr", tests);
+    // the two products fit: the entry made the size test on `n`, and the length is at most `n`
+    gen.gen_val old_bytes = gen.gen_binary(g, "mul", len, size);
+    gen.gen_val new_bytes = gen.gen_binary(g, "mul", count, size);
+    gen.gen_args mut* own moves = gen.gen_args_make();
+    defer gen.gen_args_drop_made(move(moves));
+    gen.gen_args_add(moves, span_slot(t, fresh, new_bytes));
+    gen.gen_args_add(moves, span_slot(t, old, old_bytes));
+    gen.gen_args_add(moves, size);
+    gen.gen_args_add(moves, owner_words_slot(t, elem, fir.owner_word_count(elem)));
+    gen.gen_call_rt(g, runtime_sig.rt_entry.rt_regrow_move, moves);
+    gen.gen_args mut* own frees = gen.gen_args_make();
+    defer gen.gen_args_drop_made(move(frees));
+    gen.gen_args_add(frees, old);
+    gen.gen_call_rt(g, runtime_sig.rt_entry.rt_free, frees);
+    if (!temporary_place(t, source.place)) {
+        memset_at(t, at, fir.operand_type(t->f, source));
+    }
+    return fresh;
+}
+
 // ---- calls -------------------------------------------------------------------------------------
 
 // The callee of the call `r`: the symbol of a fort function or of an extern, or the value of the
@@ -1006,6 +1091,8 @@ fn rvalue_value(translator mut* t, fir.statement* s) gen.gen_val {
         return place_addr(t, r.place);
     case fir.rvalue_kind.rv_alloc:
         return alloc_value(t, s);
+    case fir.rvalue_kind.rv_regrow:
+        return regrow_value(t, s);
     case fir.rvalue_kind.rv_call:
         return call_of(t, s);
     case fir.rvalue_kind.rv_slice, fir.rvalue_kind.rv_slice_ptr, fir.rvalue_kind.rv_aggregate:
