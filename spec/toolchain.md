@@ -11,15 +11,16 @@ the compiler has no option that removes a check (D10.6, D14.1). The compiler of 
 takes the option `--no-bounds-check`, which removes the index and span checks. The compiler removes
 the option in a later change. Bootstrap-0 is frozen, and it keeps its option (D10.6). Sections 5 and
 6 describe the runtime and the IR of that date. Later changes of the compiler and the runtime bring
-these points to them: the allocator of the runtime (D10.3, D10.9), the check of `null` (D10.6), the
-entry of `regrow` (D12.2), frame storage (D10.9, D19.4) and the release-only bit in `summaries/`
-(D9.11). Sections 2.2, 5.1 and 5.2, and item 10 of section 6, name each point where it applies.
-The compiler gives `llvm.memmove` for each copy of an aggregate (D6.3, D19.3): items 3 and 8 of
-section 6 state it. The compiler writes the zero bytes of a local on the stack (D10.1, item 10 of
-section 6); the same bytes in frame storage come with frame storage. D10.1 gives also the zero
-bytes of a global, of a place that a `move` or a `del` empties, and of an element of `regrow`.
-The run tests `run/structs/028_store_padding` to `030_store_padding_o2` hold a global and a place
-that a `move` empties. A later change measures each other lowering against that rule.
+these points to them: the allocator of the runtime (D10.3, D10.9), the check of `null` (D10.6),
+frame storage (D10.9, D19.4) and the release-only bit in `summaries/` (D9.11). The entry of
+`regrow` (D12.2) is in the runtime, and 5.1 names the one part of its operand test that the
+allocator adds. Sections 2.2, 5.1 and 5.2, and item 10 of section 6, name each point where it
+applies. The compiler gives `llvm.memmove` for each copy of an aggregate (D6.3, D19.3): items 3
+and 8 of section 6 state it. The compiler writes the zero bytes of a local on the stack (D10.1,
+item 10 of section 6); the same bytes in frame storage come with frame storage. D10.1 gives also
+the zero bytes of a global, of a place that a `move` or a `del` empties, and of an element of
+`regrow`. The run tests `run/structs/028_store_padding` to `030_store_padding_o2` hold a global
+and a place that a `move` empties. A later change measures each other lowering against that rule.
 
 Sections: 1 Command line; 2 Build pipeline; 3 Build modes; 4 Diagnostics; 5 The runtime;
 6 Code generation contract; 7 Testing; 8 Compiler architecture sketch; 9 Not in v1.
@@ -837,9 +838,10 @@ trapping for correctness (D11.1); the wrapping operators exist for code that nee
 both modes. `p[lo..hi]` on a raw pointer is never checked (D6.9): a range beyond the object is a
 case of the trusted premise (D10.7). An access to dead storage has the results of D10.9 in both
 modes, and a memory fault is no trap of this table: it writes no line (D11.4). The compiler and the
-runtime implement five rows in later changes: the two rows of `null` and the rows of `regrow`, of
-`del` and of frame storage. The row of `invalid release` covers a `del` and a `regrow` whose operand
-is not zero and starts no live allocation of the runtime (D10.9, D12.2).
+runtime implement four rows in later changes: the two rows of `null` and the rows of `del` and of
+frame storage. The rows of `regrow` are implemented, but for the part of `invalid release` that the
+allocator of the runtime adds (5.1). The row of `invalid release` covers a `del` and a `regrow`
+whose operand is not zero and starts no live allocation of the runtime (D10.9, D12.2).
 
 ## 4. Diagnostics
 
@@ -1081,9 +1083,11 @@ each entry point that it calls with the `declare` lines of `module-system.md` 10
 
 ### 5.1 Entry points
 
-**The state since 2026-11-11.** D10.3, D10.6, D10.9 and D12.2 change four points of this section,
-and the compiler and the runtime implement them in later changes. Until then, the text below
-describes the `std.rt` of that date. First, the runtime has its own allocator: `alloc` and `free` do
+**The state since 2026-11-11.** D10.3, D10.6, D10.9 and D12.2 change four points of this section.
+The compiler and the runtime implement the first three points, and the frame storage of the
+fourth, in later changes. Until then, the text below describes the `std.rt` of that date for those
+points. The entry of `regrow` of the fourth point is implemented, but for one part of one test,
+which this paragraph names. First, the runtime has its own allocator: `alloc` and `free` do
 not call `calloc` and `free` of C, and the runtime never gives dead storage to another object
 (D10.9). Second, `free` takes the position of its `del` and reports `invalid release` for a pointer
 that is not `null` and starts no live allocation of the runtime (D10.9, D11.4). Third, `std.rt` gets
@@ -1091,9 +1095,20 @@ the entry of the check kind `null`, `fn fail_null(bool call, char* file, u32 lin
 noreturn` (`spec/fir.md` 8). Fourth, `std.rt` gets an entry for `regrow`, which makes its five tests
 inside the runtime (D12.2, D19.6), and the runtime gives and releases the frame storage of a run
 (D10.9). `regrow` stores the zero value into each owner slot of each old element before it releases
-the old storage (D12.2). D12.2 does not say whether the entry or the compiled code makes these
-stores: the change that adds the entry says so here. The change that adds an entry adds its
-signature to the list below.
+the old storage (D12.2). The runtime makes these stores, in `regrow_move`, from the offsets that
+the compiled code gives: the byte offset of each word of each owner slot in one element. The
+compiled code calls `regrow`, then `regrow_move`, then `free` with the old pointer (`spec/fir.md`
+12.2). `regrow` makes four of the five tests in full: the negative count, the count below the
+length, the size and the storage. Of the test on the operand it makes one part: a null pointer with
+a length that is not 0 is `invalid release`. The part for a pointer that is not `null` and starts
+no live allocation needs the allocator of the runtime, and the change that adds the allocator adds
+that part to the body of `regrow`. Until then, such a pointer goes to the `free` of C. A program
+gets one from a view of dead storage (D10.9): after `s = regrow(move(s), 2)`, a view `q` of an old
+element names storage that the `free` of C can give to another object, and `regrow(move(q->data),
+3)` reads its operand there. So the sentence of D12.2 "a `move` through a view of an old element
+gives the zero value or a memory fault" holds only with the allocator of the runtime, as the
+results of D10.9 for a `del` do. The change that adds an entry adds its signature to the list
+below.
 
 The signatures are fort, and `std.rt` defines each one; fort has no prototype, so the bodies are
 simply left out here. Their IR follows from the type table of section 6
@@ -1133,6 +1148,15 @@ struct enum_member { i32 value; char* name; }
 // which is why `panic` below is `panic`.
 fn alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) void mut* own;
 fn free(void* own p) void;
+
+// `regrow` (D12.2). `regrow` makes the tests of a `regrow` in their order and gives the
+// new storage of `count` elements, each byte 0: `old` and `old_len` are the pointer and
+// the length of the operand span, and `is_signed` says that `count` holds the bits of an
+// `i64`. `regrow_move` copies the bytes of the old elements into `fresh` and then stores
+// zero into each word of `old` that `slots` names in each element of `elem_size` bytes.
+// It releases nothing: the compiled code calls `free` with the old pointer after it.
+fn regrow(void* old, u64 old_len, u64 elem_size, u64 count, bool is_signed, loc) void mut* own;
+fn regrow_move(u8 mut@ fresh, u8 mut@ old, u64 elem_size, u64@ slots) void;
 
 // Strings (D3.7). `str_eq` is true when the two strings have the same length and
 // the same bytes, which is what `==` and `!=` on strings compare, so the zero
@@ -1395,8 +1419,8 @@ emitter's text is a change here.
    functions, constants and globals are `dso_local` with the default external linkage (D9.6), so
    fort-to-fort calls are direct, a call into the runtime among them, and fort data is addressed
    PC-relative; `extern` symbols carry no `dso_local` and go through the procedure linkage and
-   global offset tables. Private data (`@.str.N`, `@.file.N`, `@.enum.<path.name>`) is
-   `private unnamed_addr`.
+   global offset tables. Private data (`@.str.N`, `@.file.N`, `@.enum.<path.name>`, `@.words.N`)
+   is `private unnamed_addr`.
 
    A name LLVM's unquoted identifiers (`[-a-zA-Z$._][-a-zA-Z$._0-9]*`) do not admit is quoted
    too, which only an entry module's can be, since every other module path is identifiers
@@ -1413,7 +1437,7 @@ emitter's text is a change here.
    module (`module-system.md` 10.4, D9.11). It still declares no name that it defines.
 
 5. **Data emission.** Private data follows the function definitions, `@.file.N` constants before
-   `@.str.N` before `@.enum.*` (D19.5):
+   `@.str.N` before `@.enum.*` before `@.words.N` (D19.5):
 
    ```llvm
    @.file.0 = private unnamed_addr constant [9 x i8] c"abort.ft\00", align 1
@@ -1437,6 +1461,12 @@ emitter's text is a change here.
    - Only referenced private data is emitted: a program with no check has no `@.file.N`
      (the example of 6.1), and an enum table exists only if some `print` of that enum type is
      compiled (item 21).
+   - `@.words.N` is the table of a `regrow` (`spec/fir.md` 12.2): `[K x i64]` with the byte offset
+     of each word of each owner slot in one element, `align 8`. `N` counts the `regrow` sites of the
+     unit that have a table, from 0 in the order of first use. The counter never joins two
+     constants by content, as for `@.str.N` (D19.5): two `regrow` sites whose tables have the
+     same text name two constants. An element type with no owner slot has no table: its site
+     passes a span of length 0 with a null pointer and takes no number.
 
 6. **Position independence** (D14.3, D16). Nothing in the IR expresses it: `dso_local` (item 4)
    and section 2's `-fPIE` and target PIE link flag give PC-relative data.

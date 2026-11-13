@@ -4570,6 +4570,57 @@ fn check_drop(checker mut* ck, ast.node mut* n, expr* e, expr* d) void {
     push_call(&ck->drains, n);
 }
 
+// `regrow(s, n)` (D12.2). `s` has a type `T mut@ own`, and an lvalue takes `move` as each owner
+// does (D17.6). `n` is a count, as the count of `new` (D10.2). The value is a `T mut@ own` of new
+// storage, an `own` rvalue. `T` is a type that `new(T, n)` accepts, so it is no span and no `own`
+// string: the zero span of such a type is the one value that could reach here, and `regrow`
+// gives the result of `new(T, n)` for it.
+fn check_regrow(checker mut* ck, ast.node mut* n, ast.sym* s, expr mut* out) void {
+    // a `void` result would add "'regrow' has no value"
+    out->ty = types.type_error(&ck->types);
+    if (!check_arity(ck, n, s->name, 2)) {
+        return;
+    }
+    ast.node mut* arg = ast_child_mut(n, 0);
+    expr mut e = expr{};
+    check_operand(ck, arg, &e);
+    consts.cval mut count = consts.cv_none();
+    bool counted = check_count(ck, ast_child_mut(n, 1), "count", &count);
+    if (check_poisoned(e.ty)) {
+        return;
+    }
+    if (e.untyped || e.ty->kind != types.type_kind.k_span || !e.ty->is_own || !e.ty->is_mut) {
+        check_msg_begin(ck);
+        msg_str(ck, "'regrow' needs a span of a type 'T mut@ own', not ");
+        if (e.untyped) {
+            msg_str(ck, "a value with no type");
+        } else {
+            check_msg_type(ck, e.ty);
+        }
+        check_msg_end(ck, arg->loc);
+        return;
+    }
+    types.node* elem = e.ty->elem;
+    if (elem->kind == types.type_kind.k_span
+        || (elem->kind == types.type_kind.k_string && elem->is_own)) {
+        check_msg_begin(ck);
+        msg_str(ck, "'regrow' makes no span of ");
+        check_msg_type(ck, elem);
+        msg_str(ck, ": 'new' accepts no such element type");
+        check_msg_end(ck, arg->loc);
+        return;
+    }
+    types.node* span = e.ty;
+    convert_ownership(ck, arg, &e, span, "'regrow'", false);
+    if (check_poisoned(e.ty) || !counted) {
+        return;
+    }
+    if (!check_layout(ck, elem) || !check_size_fits(ck, n->loc, elem)) {
+        return;
+    }
+    out->ty = span;
+}
+
 fn check_builtin_call(checker mut* ck, ast.node mut* n, ast.sym* s, expr mut* out) void {
     out->sym = s;
     out->ty = types.type_void(&ck->types);
@@ -4640,8 +4691,12 @@ fn check_builtin_call(checker mut* ck, ast.node mut* n, ast.sym* s, expr mut* ou
         if (!check_emptiable(ck, arg, s->name)) {
             return;
         }
-        // the one universe function with a value
+        // a universe function with a value, as `regrow` is
         out->ty = e.ty;
+        return;
+    }
+    if (is_builtin(s, "regrow")) {
+        check_regrow(ck, n, s, out);
         return;
     }
     panic("check.check_builtin_call: unknown builtin");

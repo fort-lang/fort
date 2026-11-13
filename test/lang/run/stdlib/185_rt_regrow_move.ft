@@ -1,0 +1,64 @@
+//! run
+//! stdout:
+//| fresh 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32
+//| room 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+//| old 1 2 3 4 5 6 7 8 0 0 0 0 0 0 0 0 17 18 19 20 21 22 23 24 0 0 0 0 0 0 0 0
+//| two 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+//| plain 1 2 3 4 5 6 7 8
+//| sized 1 2 3 4 5 6 7 8
+//| empty 0 0 0 0
+import std.rt;
+
+// The entry `regrow_move` of the runtime moves the bytes of the old elements into the new
+// storage and then stores zero into each word of each owner slot of each old element (D12.2,
+// D17.11). The other bytes of the old elements and the new bytes past them keep their value.
+fn show(string name, u8@ bytes) void {
+    print(name);
+    for (u64 mut i = 0; i < bytes.len; i++) {
+        print(" ", bytes[i]);
+    }
+    println();
+}
+
+fn fill(u8 mut@ bytes) void {
+    for (u64 mut i = 0; i < bytes.len; i++) {
+        bytes[i] = cast(i + 1, u8);
+    }
+}
+
+fn main() i32 {
+    // Two elements of 16 bytes with one owner word at offset 8.
+    u8[32] mut old = {};
+    u8[48] mut fresh = {};
+    u64[1] slot = {8};
+    fill(old[..]);
+    rt.regrow_move(fresh[..], old[..], 16, slot[..]);
+    show("fresh", fresh[0..32]);
+    show("room", fresh[32..48]);
+    show("old", old[..]);
+
+    // One element of 24 bytes whose three words are owner words.
+    u8[24] mut two = {};
+    u8[24] mut more = {};
+    u64[3] slots = {0, 8, 16};
+    fill(two[..]);
+    rt.regrow_move(more[..], two[..], 24, slots[..]);
+    show("two", two[..]);
+
+    // An element type with no owner: no byte of the old elements changes.
+    u8[8] mut plain = {};
+    u8[8] mut copy = {};
+    fill(plain[..]);
+    rt.regrow_move(copy[..], plain[..], 4, slot[0..0]);
+    show("plain", plain[..]);
+
+    // An element size of 0 has no owner word.
+    rt.regrow_move(copy[..], plain[..], 0, slot[..]);
+    show("sized", plain[..]);
+
+    // An empty old span moves nothing and changes no byte of the new storage.
+    u8[4] mut none = {};
+    rt.regrow_move(none[..], old[0..0], 16, slot[..]);
+    show("empty", none[..]);
+    return 0;
+}

@@ -91,8 +91,8 @@ Each term has one meaning in this document.
   (item 14). FIR has no block kind for it.
 - **Owning type**: an `own` reference (`T* own`, `void* own`, `T@ own`, `string own`; D17.1) or an
   owning aggregate (D17.7). A value of an owning type is an owning value.
-- **Writer**: a `call`, an `alloc`, a `move` operand, or a `del`. A writer can change memory that
-  a place designates.
+- **Writer**: a `call`, an `alloc`, a `regrow`, a `move` operand, or a `del`. A writer can change
+  memory that a place designates.
 - **Abort block**: a block whose terminator is `fail`, `trap` or `unreachable`. Control never
   leaves an abort block.
 - **Exit**: a `return` terminator. An abort block is not an exit.
@@ -308,6 +308,9 @@ place lends it (D17.4).
 - `slice_ptr(a, lo, hi)`: the span `a[lo..hi]` of the pointer `a`, with no check (D6.9).
 - `alloc<T>(n)`: `std.rt.alloc` of `n` elements of `T`, where `n` has type `u64`; `T mut* own`
   (item 17). `T` is neither `void` nor a span (D10.2).
+- `regrow<T>(s, n)`: new storage of `n` elements of `T` that takes the elements of the span `s`
+  (D12.2); `T mut* own`. `s` is a `move` operand of the type `T mut@ own`, and `n` has the type
+  `i64` or `u64`. `T` is a type that `alloc` takes.
 - `aggregate T(a, ...)`: a struct literal with every field in declaration order, an array
   literal with every element, or a span or `string` header with its pointer and its length; `T`
   (item 3). `aggregate zeroed T(a, ...)` is a designated struct literal, whose omitted fields are
@@ -332,6 +335,14 @@ Rules:
 - `alloc` gives a pointer. For `new(T, n)` into a span, the lowering builds the header with
   `aggregate` (section 9.4). `std.rt.alloc` takes a file, a line and a column after the count;
   the translator adds them from the location of the statement.
+- `regrow` gives a pointer, as `alloc` does, and the lowering builds the span with `aggregate`
+  (section 9.4). The statement makes the five tests of D12.2 in their order, and it runs no
+  `check`: the entry `std.rt.regrow` makes each test (D19.6). A count of the type `i64` is a signed
+  count, whose sign the entry tests. A count of the type `u64` is never negative. The statement
+  then moves the first `s.len` elements byte for byte into the new storage, stores the zero value
+  into each owner slot of each old element, releases the old storage, and leaves the zero value in
+  the place of `s`, as a `move` does. Its result is the new storage. The new span has `n`
+  elements, so the `aggregate` takes the count as its length.
 - The lowering writes `const zero` for a field that a designated literal leaves out (D6.5).
 - `call`: an operand of aggregate type is a place, and the translator makes the caller's copy of
   item 7. A `noreturn` callee has the result type `void`, and the block ends in `trap` right after
@@ -659,6 +670,12 @@ so `G` is read before `bump` runs.
 - **`new(T, n)`**: `_n = cast<i64>(n)` by its signedness; for a signed count `_f = lt(copy _n,
   const i64 0)` and `check(copy _f, alloc_count, copy _n)`; then `_u = cast<u64>(copy _n)`,
   `_p = alloc<T>(copy _u)` and `dst = aggregate T mut@ own(move _p, copy _u)`.
+- **`regrow(s, n)`** (D12.2): first the span, as `_s = move p` for `move(lv)` or as the temporary
+  of an owning rvalue. Then the count, so that a count that reads `lv` reads the emptied place:
+  `_c = cast<i64>(n)` for a count of a signed type, and `_c = cast<u64>(n)` for a count of an
+  unsigned type. Then `_p = regrow<T>(move _s, copy _c)`, `_u = cast<u64>(copy _c)` for a signed
+  count, and `dst = aggregate T mut@ own(move _p, copy _u)`. The lowering adds no `check`. Each
+  statement carries the location of the name `regrow`, which a runtime error reports (D11.4).
 - **A call**: the callee first when it is a value (D6.3), then each argument left to right into
   an operand under the materialization rule, then `call`. An owning value in a temporary enters
   an `own` parameter as `move _t`; an owning place enters a parameter that does not own as `copy
@@ -818,8 +835,8 @@ entry of such a check of a kind that the mode removes, and the pass removes thos
 the pass, the verifier excuses no kind. A `fail` always needs its entry. Only a stub `std.rt` of
 a test or an old `--std-dir` meets either error of a runtime entry. The compiler tests the entries
 of these errors alone: the print functions, `str_eq` and the entry of each check kind. It assumes
-the other `std.rt` functions that the translator calls, such as `alloc`, `free`, `args_init`,
-`args` and `flush_all`.
+the other `std.rt` functions that the translator calls, such as `alloc`, `free`, `regrow`,
+`regrow_move`, `args_init`, `args` and `flush_all`.
 
 ## 10. The verifier
 
@@ -844,18 +861,22 @@ statement index.
   requires. No two arms of one `switch` have one value, because an LLVM `switch` takes each case
   value once (12.4). A `check` of the kind `overwrite` has the place form `check(overwrite: p)`
   and not the operand form (section 8). `addr` takes a place whose type is not `void`, which has
-  no storage (5.3). `alloc` takes a type that is neither `void` nor a span (D10.2). An `aggregate`
-  with no `zeroed` whose type has padding does not go into the whole storage of a temporary or of
-  `_0`. That rvalue leaves each padding byte as it was (section 6). No instruction writes the
-  zero bytes of a temporary (section 7), so the first store into a temporary must write each
-  padding byte (D10.1). The storage of `_0` of an aggregate type is the destination of the caller
-  in the translation and new storage in the interpreter, so the two would differ. The rule reads
-  the one statement and no path: it also refuses the form after a store that wrote the whole
-  storage. The lowering never writes that sequence.
+  no storage (5.3). `alloc` takes a type that is neither `void` nor a span (D10.2). `regrow<T>`
+  takes such a type too, a first operand of the type `T mut@ own`, and a count of the type `i64`
+  or `u64` (D12.2). An `aggregate` with no `zeroed` whose type has padding does not go into the
+  whole storage of a temporary or of `_0`. That rvalue leaves each padding byte as it was
+  (section 6). No instruction writes the zero bytes of a temporary (section 7), so the first
+  store into a temporary must write each padding byte (D10.1). The storage of `_0` of an
+  aggregate type is the destination of the caller in the translation and new storage in the
+  interpreter, so the two would differ. The rule reads the one statement and no path: it also
+  refuses the form after a store that wrote the whole storage. The lowering never writes that
+  sequence.
 - **V5**: `move` applies only to a place of an owning type (5.6); `del` takes a `move` operand
   whose type is an `own` reference (D17.9).
-- **V6**: an assignment into a place of an owning type takes a `move` operand, `null T`, `zero T` or
-  an `alloc` (D17.5). It also takes an `aggregate`, `cast` or `call` rvalue whose type owns. An
+- **V6**: an assignment into a place of an owning type takes a `move` operand, `null T`, `zero T`,
+  an `alloc` or a `regrow` (D17.5, D12.2). The first operand of a `regrow` is a `move`: the
+  `regrow` releases the storage of its span, so no place keeps it. An assignment into a place of an
+  owning type also takes an `aggregate`, `cast` or `call` rvalue whose type owns. An
   argument for a parameter of an owning type takes a `move` operand, `null T` or `zero T`. So does a
   member of an `aggregate` for a field or element of an owning type. A `string` or `bytes` constant
   is a view and fills none of these (D17.3, D17.9). A `copy` of an owning place never flows into a
@@ -1126,7 +1147,46 @@ changes the function, and the verifier runs after it. The passes run in this ord
      operand that copies or moves `_n` ends the freshness of `_n` first. No pointer but `_n` names
      the object of a fresh `_n`, but a held address and the address of a whole store, temporaries
      that are no memory and that only their check and their stores read. So the callee reaches no
-     byte of the object (D10.7). `alloc` and `del` are no calls.
+     byte of the object (D10.7). `alloc`, `regrow` and `del` are no calls (D12.2).
+     The kill at a vacate: a `move p` operand and `del(move p)` vacate `p`, because the owner that
+     `p` held belongs to the destination or is released. Each kills before its gen rule. This kill
+     holds the sentence of D17.11 that a right-hand side that can change the storage that the
+     lvalue names makes the store an error. A fact holds only while each owner on the path of its
+     place owns the storage that the path goes through, and after the vacate `p` owns its storage
+     no more. The kill ends the fact of each tracked place `q` in which a `deref`, or an `index` on
+     a span or a `string`, stands right after a place `b` that the vacate can write. When `b` has
+     the base of `p`, the vacate can write `b` in each case but three. The first is that `b` and
+     `p` are separate. In the other two, `p` starts with each projection of `b`, and a `deref`, or
+     an `index` on a span or a `string`, follows them in `p`, so `p` lies in storage that the
+     reference in `b` names. When a `field` follows them in `p`, `p` is a field of the header of
+     the span or the `string` in `b`, and the vacate writes `b`. The second is that `b` is not
+     reached through memory: a vacate through a reference writes no byte of such a place. The
+     third is that `p` has no `deref` and no `index` on a span or a `string` after the one that
+     follows `b`: `p` then lies in the fixed storage of the object that `b` names. The kill reads
+     that object as other storage than the storage that holds `b`. So it proves that the vacate
+     does not write `b` when no owner owns the storage that holds it. A store through a view can
+     put an owner into the storage that it owns. The vacate of that owner can then write `b`, and
+     its `regrow` or its `del` releases the object. The kill keeps the fact, and the store into
+     `q` is then an access to dead storage through the view, whose result D10.9 gives. After a
+     second such projection `p` can name any storage, the storage of `b` also, so the vacate can
+     write `b`. When `b` has another base, the vacate can write `b` when `b` and `p` are both
+     reached through memory. Two `index` projections with two keys can name one element, so they
+     do not make two places separate here. A view has no owner on its path, so the kill keeps a
+     fact through it when the object that it names is released: that read is a read of dead
+     storage (D10.9). A `field` projection and an `index` on a fixed array stay in the storage
+     of `p`, so the kill keeps the facts of those places, and the gen rule of the `move` makes them
+     empty. Two stores are errors by this kill. For a `top` whose element holds an `own` reference
+     `sub`, `top[0].sub = regrow(move(top), 2)` is an error at `top[0].sub`, also after
+     `move(top[0].sub)`: D6.3 computes the address of the element before the `move`, and the
+     `regrow` can release that storage. `p->next = move(p)` is an error at `p->next` for the same
+     reason. `v->items = regrow(move(v->items), n)` passes, because its destination is the place
+     that the `move` vacates. In FIR, `_3 = addr mut((*_1)[_2].0)`, then
+     `_5 = regrow<T>(move _1, n)`, then `check(overwrite: (*_3))` leaves the check unproved: the
+     `move` of `_1` kills the fact of `_1[_2].0`, which the held address names (**Held address**).
+     The pass reads `p = regrow<T>(move s, n)` as the `move` of `s`, with this kill and the gen
+     rule that makes the place of `s` empty, and as a store of a value that is not zero into `p`.
+     It has no other rule for a `regrow`. A `regrow` writes no fresh `new`: the Values rule names
+     `alloc` alone.
    - **Alias.** The borrows of refinement R6 of `spec/ownership-design.md` 7 (D17.11, Borrows),
      which the module `owner.alias` holds. A borrow local is a local that is not memory. An origin
      is the frame of a memory local, but of `_0` of an aggregate type, or `exposed`. The state at a
@@ -1144,8 +1204,8 @@ changes the function, and the verifier runs after it. The passes run in this ord
        `slice(q, lo, hi)` of a span or a `string` borrows the origins of `copy q`. Each also borrows
        the origins of `copy _i` for each index local `_i` of `q`, and a `slice` the origins of `lo`
        and `hi`;
-     - `call`: `exposed`. `alloc` and a `const` operand: none. Each other rvalue: the origins of
-       each of its operands.
+     - `call`: `exposed`. `alloc` and a `const` operand: none. Each other rvalue, a `regrow`
+       included: the origins of each of its operands.
      A `call` exposes each memory local whose frame one of its operands borrows, the callee operand
      of a call through a value included. After its gen rule, the store gives the origins of its
      rvalue to `_v` when `p` is the whole borrow local `_v`, adds them to `_v` when `p` designates
@@ -1206,8 +1266,11 @@ changes the function, and the verifier runs after it. The passes run in this ord
      5. `del`, `move`, `live` and `dead` write only the zero value, which derives from no address,
         or free storage, and a terminator writes nothing. `alloc` and `del` call `std.rt.alloc` and
         `std.rt.free` (12.2), which keep no operand and write no storage of F, so they expose
-        nothing. A block starts with the union over its edges, and each edge holds (vi) on each run
-        that takes it.
+        nothing. A `regrow` calls `std.rt.regrow`, `std.rt.regrow_move` and `std.rt.free` (12.2),
+        which keep no operand and write the old and the new allocation only, and it writes the zero
+        value into the place of its span as a `move` does. So the calls of a `regrow` expose
+        nothing, and step 4 gives the borrows of its store. A block starts with the union over its
+        edges, and each edge holds (vi) on each run that takes it.
      So a store through a pointer writes the storage of `_x` only through a pointer that derives
      from an address of `_x` (D10.7): the pointer that the last load of its destination reads. By
      (vi) and step 2, that pointer is a borrow local whose origins hold the frame of `_x` or hold
@@ -1237,7 +1300,9 @@ changes the function, and the verifier runs after it. The passes run in this ord
      move(l->head); l->head = move(n);` passes: the held address of `n->next` ends no freshness, so
      the store into `n->next` keeps the fact of `(*_1).0` (`l->head`) that the `move` made.
    - **Order.** Within a statement, the pass applies the reads of its operands first, in operand
-     order, then the exposures and the kill of a `call`, then the test of a store that needs a proof
+     order, and each `move` operand and each `del` kills (**Kill**, the kill at a vacate) before
+     its gen rule. Then come the exposures and the kill of a `call`, then the test of a store
+     that needs a proof
      (**Proof**) or of a whole store (**Whole stores**), then the end of the freshness that a store
      through the address of a whole store gives (**Fresh**), then the kill rules of the store, then
      its gen rule, and last the borrows of the store (**Alias**). `live` and `dead` change no fact.
@@ -1577,9 +1642,10 @@ changes the function, and the verifier runs after it. The passes run in this ord
      the rvalue is an operand, an arithmetic, overflow, bitwise, shift, comparison or `cast`
      rvalue, or `addr`, the rvalue contains no `move` operand, and no statement or terminator
      reads `_t`. It repeats until nothing changes, so the `add_overflows` that fed a removed
-     check goes too. It never removes a `call`, an `alloc`, a `del`, an assignment into a named
-     local, or an assignment into a place with projections. It removes no `let`, so a temporary
-     whose assignments go keeps its number, and the translator gives it no storage (12.1).
+     check goes too. It never removes a `call`, an `alloc`, a `regrow`, a `del`, an assignment
+     into a named local, or an assignment into a place with projections. It removes no `let`, so
+     a temporary whose assignments go keeps its number, and the translator gives it no storage
+     (12.1).
    - Where a removed `check(overwrite: p)` stood between `_t = rvalue` and `p = move _t`, and
      nothing else reads `_t`, it rewrites the two statements to `p = rvalue`, which is the direct
      store that the direct path wrote in release mode. This fold applies in every mode.
@@ -1611,7 +1677,14 @@ writes it (section 12), and it starts a program as `toolchain.md` 6 item 22 star
   address of the destination comes after the right side (sections 6 and 7, 12.5).
 - A failed check calls the runtime entry of its kind with its reported operands and the file, the
   line and the column of the check (12.4). The message of `panic` goes as the address of its
-  place. `alloc` calls `std.rt.alloc` and `del` calls `std.rt.free` (12.2).
+  place. `alloc` calls `std.rt.alloc` and `del` calls `std.rt.free` (12.2). `regrow` calls
+  `std.rt.regrow`, which makes the tests on the count, the size and a null pointer with a length.
+  The interpreter tests that the pointer of the span is null or starts a live allocation, and
+  faults with `invalid release` if not. It makes this test in the order of D12.2, as test 4: it
+  repeats the first three tests of the entry itself, and when they pass it makes its test before
+  the call of the entry, which gets the storage. It then moves the elements and their owners
+  itself, stores the zero value into each owner slot of each old element and into the place of
+  the span, and calls `std.rt.free` with the old pointer. It does not run `std.rt.regrow_move`.
 - A call of an extern of the list of `spec/ownership-design.md` 3.2 runs, from `std.rt` or from
   the program: `exit`, `abort`, `write`, `calloc`, `free`, `isatty`, `strlen`, `memcpy`,
   `memmove`, `memcmp`, `__errno_location`, `__error`, `strtod` and `strtof` with a null end
@@ -1726,6 +1799,16 @@ does not read the tree and it does not read the build mode.
 - `slice` and `slice_ptr` write the two header fields of the destination (item 16).
 - `alloc<T>(n)` is a call of `std.rt.alloc` with the size of `T`, `n`, and the file, line and
   column of the statement (item 17).
+- `regrow<T>(move s, n)` is three calls (D12.2). `std.rt.regrow` takes the pointer and the length
+  of `s`, the size of `T`, `n` as an `i64`, an `i1` that says whether the type of `n` is signed,
+  and the file, line and column of the statement. It gives the new storage. `std.rt.regrow_move`
+  takes the bytes of the new storage, the bytes of the old elements, the size of `T`, and the
+  span of a constant table of `i64`: the byte offset of each word of each owner slot in one `T`.
+  The table is the private constant `@.words.N` of the module, one for each `regrow` statement
+  that the translator writes (`spec/toolchain.md` 6, item 5), so the site stores no offset.
+  Each span argument is the address of a `%fort.span` copy (item 7). `std.rt.free` takes the old
+  pointer. The translator then writes `llvm.memset` over the place of `s`, as for a `move`, unless
+  the place is a temporary (item 18). No block starts at a `regrow`.
 - `aggregate` writes each member into its field or element through a `getelementptr` (item 3).
   `aggregate zeroed` first writes `llvm.memset` of the whole destination and then each member
   that is no `const zero`. The word `zeroed` is the mark only when a type follows it, so a
@@ -1898,6 +1981,7 @@ rvalue      = operand
             | "slice" [ "mut" ] "(" place "," operand "," operand ")"
             | "slice_ptr" "(" operand "," operand "," operand ")"
             | "alloc" "<" type ">" "(" operand ")"
+            | "regrow" "<" type ">" "(" operand "," operand ")"
             | "aggregate" [ "zeroed" ] type "(" [ operand { "," operand } ] ")"
             | "call" callee "(" [ operand { "," operand } ] ")" ;
 callee      = "fn" name | "extern" name | operand ;
@@ -1995,9 +2079,10 @@ A flow analysis reads a verified function before the build-mode pass. It may ass
 - every deferred statement is on each path that runs it, and on no other path;
 - `own` is on the fort type of every local and place;
 - for a place that is not escaped (below), a value leaves it only through `move`, `del` or an
-  assignment over it, and a value enters it only through an assignment; `alloc`, `aggregate`,
-  `cast` and `call` are the rvalues that produce an owning value (D17.3), and a `call` transfers
-  an owning argument by the rule of D17.5 for its parameter type. A `cast` never adds `own`
+  assignment over it, and a value enters it only through an assignment; `alloc`, `regrow`,
+  `aggregate`, `cast` and `call` are the rvalues that produce an owning value (D17.3, D12.2), and
+  a `call` transfers an owning argument by the rule of D17.5 for its parameter type. A `cast`
+  never adds `own`
   (D3.14): a `cast` that produces an owning value takes it from its `move` operand, so the
   value leaves the place of that operand and enters the destination, as a `move` does;
 - `check(overwrite: p)` reads `p` only to test it, and counts as no use of `p`. It exists to
@@ -2177,7 +2262,7 @@ Each item of `toolchain.md` 6 that describes a function body, and the part of FI
   `shift`, `div_zero` and `div_overflow`.
 - **Item 16, bounds checks**: the kinds `bounds` and `span`; the index projection; `slice` and
   `slice_ptr`.
-- **Item 17, `new` and `del`**: `alloc`, `del`, and the kind `alloc_count`.
+- **Item 17, `new`, `regrow` and `del`**: `alloc`, `regrow`, `del`, and the kind `alloc_count`.
 - **Item 18, ownership**: `move`, the kind `overwrite`, and the zeroing of the entry block (9.2).
 - **Item 19, builtins**: the lowering of the print family, `assert` and `panic` (9.4).
 - **Item 20, `noreturn`**: `trap`, rule V8, and the end of a body (9.6).

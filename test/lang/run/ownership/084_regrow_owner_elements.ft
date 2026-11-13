@@ -1,0 +1,141 @@
+//! run
+//! stdout:
+//| leaves 4: 10 11 null null
+//| drops 4 freed 2
+//| boxes 3: 1 10 2 11 0 null
+//| drops 3 freed 2
+//| arrays 2: 10 11 null null
+//| drops 4 freed 2
+//| rows 2: 2 10 11 0
+//| drops 2 freed 2
+// `regrow` moves each element with the owners that it holds (D12.2): an `own` pointer, a struct
+// with an `own` pointer, a fixed array of `own` pointers, and a struct with an inner `own` span,
+// whose elements stay in their allocation. Each new element holds the zero value, so its owners
+// are `null` and its inner span is the zero span. `regrow` stores the zero value into each owner
+// slot of each old element before it releases the old storage, so each allocation has one owner:
+// the drops count each leaf one time.
+struct leaf {
+    i32 v;
+}
+
+u64 mut DROPS = 0;
+u64 mut FREED = 0;
+
+fn leaf_drop(leaf mut* own p) void {
+    DROPS += 1;
+    if (p != null) {
+        FREED += 1;
+    }
+    del(p);
+}
+
+struct box {
+    i32 id;
+    leaf mut* own p;
+}
+
+fn box_drop(box mut b) void {
+    leaf_drop(move(b.p));
+}
+
+fn pair_drop(leaf mut* own[2] pair) void {
+    leaf_drop(move(pair[0]));
+    leaf_drop(move(pair[1]));
+}
+
+struct row {
+    leaf mut* own mut@ own cells;
+}
+
+fn row_drop(row mut r) void {
+    del(r.cells, leaf_drop);
+}
+
+fn made(i32 v) leaf mut* own {
+    leaf mut* own p = new(leaf);
+    p->v = v;
+    return p;
+}
+
+fn show(leaf* p) void {
+    if (p == null) {
+        print(" null");
+    } else {
+        print(" ", p->v);
+    }
+}
+
+fn report() void {
+    println("drops ", DROPS, " freed ", FREED);
+    DROPS = 0;
+    FREED = 0;
+}
+
+fn main() i32 {
+    leaf mut* own mut@ own leaves = new(leaf mut* own, 2);
+    for (u64 mut i = 0; i < leaves.len; i += 1) {
+        leaf mut* own p = made(10 + cast(i, i32));
+        del(leaves[i]);
+        leaves[i] = move(p);
+    }
+    leaf mut* own mut@ own grown = regrow(move(leaves), 4);
+    print("leaves ", grown.len, ":");
+    for (u64 mut i = 0; i < grown.len; i += 1) {
+        show(grown[i]);
+    }
+    println();
+    del(grown, leaf_drop);
+    report();
+
+    box mut@ own boxes = new(box, 2);
+    for (u64 mut i = 0; i < boxes.len; i += 1) {
+        leaf mut* own p = made(10 + cast(i, i32));
+        boxes[i].id = 1 + cast(i, i32);
+        del(boxes[i].p);
+        boxes[i].p = move(p);
+    }
+    box mut@ own more = regrow(move(boxes), 3);
+    print("boxes ", more.len, ":");
+    for (u64 mut i = 0; i < more.len; i += 1) {
+        print(" ", more[i].id);
+        show(more[i].p);
+    }
+    println();
+    del(more, box_drop);
+    report();
+
+    leaf mut* own[2] mut@ own arrays = new(leaf mut* own[2], 1);
+    for (u64 mut k = 0; k < 2; k += 1) {
+        leaf mut* own p = made(10 + cast(k, i32));
+        del(arrays[0][k]);
+        arrays[0][k] = move(p);
+    }
+    leaf mut* own[2] mut@ own wider = regrow(move(arrays), 2);
+    print("arrays ", wider.len, ":");
+    for (u64 mut i = 0; i < wider.len; i += 1) {
+        show(wider[i][0]);
+        show(wider[i][1]);
+    }
+    println();
+    del(wider, pair_drop);
+    report();
+
+    row mut@ own rows = new(row, 1);
+    leaf mut* own mut@ own two = new(leaf mut* own, 2);
+    for (u64 mut i = 0; i < two.len; i += 1) {
+        leaf mut* own p = made(10 + cast(i, i32));
+        del(two[i]);
+        two[i] = move(p);
+    }
+    leaf mut* own mut@ own old = move(rows[0].cells);
+    rows[0].cells = move(two);
+    del(old, leaf_drop);
+    row mut@ own longer = regrow(move(rows), 2);
+    print("rows ", longer.len, ": ", longer[0].cells.len);
+    show(longer[0].cells[0]);
+    show(longer[0].cells[1]);
+    println(" ", longer[1].cells.len);
+    del(longer, row_drop);
+    report();
+    return 0;
+}

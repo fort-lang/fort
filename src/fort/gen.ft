@@ -186,6 +186,7 @@ struct emitter {
     record_vec files; // @.file.N, one per file
     record_vec strs;  // @.str.N, never deduplicated by content
     record_vec enums; // @.enum.<path.name>, one per enum some print reaches
+    record_vec words; // @.words.N, one per regrow site, never deduplicated by content
     sym_vec externs;  // the extern C functions, in first-use order
     sym_vec declared; // the bodiless functions of the interface modules, in module order
     bool[IN_COUNT] intrinsics;
@@ -423,6 +424,7 @@ fn drop(emitter mut g) void {
     del(g.files.items);
     del(g.strs.items);
     del(g.enums.items);
+    del(g.words.items);
     del(g.externs.items);
     del(g.declared.items);
     containers.pool_drop(move(g.pool));
@@ -1256,6 +1258,15 @@ fn gen_str_ref(emitter mut* g, string s) string {
     // assigned on first use, never deduplicated by content
     records_push(&g->strs, record_new(containers.pool_intern(&g->pool, s)));
     return data_name(g, "str", g->strs.len - 1);
+}
+
+// `@.words.N` for the constant array of `i64` that `table` gives as an LLVM type and its
+// initializer. Each call gives a new name, as gen_str_ref does: a module-level counter counts in
+// the order of first use and never joins two constants by content (D19.5). So two `regrow` sites
+// with equal offsets name two constants.
+fn gen_words_ref(emitter mut* g, string table) string {
+    records_push(&g->words, record_new(containers.pool_intern(&g->pool, table)));
+    return data_name(g, "words", g->words.len - 1);
 }
 
 // The number of members in an enum's table.
