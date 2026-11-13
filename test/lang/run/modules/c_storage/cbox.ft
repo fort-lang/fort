@@ -1,0 +1,92 @@
+import extern;
+
+// A trusted module that holds two blocks of C (D9.8, "Storage of C"). `reset` gives the block of
+// `slot` to free, so no row can say that nothing releases that block. So `get` gives a copy of
+// its record. No function gives the block of `fixed` to free, so `kept` gives a view of it. The
+// row of `kept` says why the view stands. No function here is a boundary function: no
+// parameter type reaches a pointer to `char`, `u8` or `void`.
+//
+// This program holds no rule of the compiler. The compiler reads no row: it accepts this module
+// with each `// gives:` line and with none. The rows test, test/fort_lint_rows_test.py, holds
+// the lines. Its test_the_program_for_storage_of_c_holds_its_gives_lines removes each line and
+// expects the report of the lint. The run shows only that the copy and the view keep their
+// values over a call of `reset`.
+
+struct rec {
+    i64 a;
+    i64 b;
+}
+
+// C: aligned_alloc, ISO C11 7.22.3.1, aligned_alloc(3).
+// gives: null, or a new allocation of `size` bytes at an address aligned to `align`. Each call
+// gives sizeof(rec) bytes aligned to 8, so the whole pointee fits. writes: no storage of fort code.
+// keeps: no pointer. calls: no fort function. frees: nothing.
+extern fn aligned_alloc(u64 align, u64 size) rec mut* own;
+
+// C: free, ISO C11 7.22.3.3, free(3).
+// gives: no result. writes: no storage of fort code. keeps: no pointer. calls: no fort
+// function. frees: the allocation that the `own` parameter gives, or nothing for null.
+extern fn free(void* own p) void;
+
+rec mut* own mut slot = null;
+rec mut* own mut fixed = null;
+
+// A new block of C that holds the record {a, 0}, or null.
+// gives: null, or an owner of a new block of aligned_alloc. The owner goes to a global of this
+// module, and no function gives it to a caller outside the module.
+// C call aligned_alloc: no pointer argument; the size is sizeof(rec), a multiple of 8.
+fn block_of(i64 a) rec mut* own {
+    rec mut* own fresh = aligned_alloc(8, sizeof(rec));
+    if (fresh != null) {
+        fresh->a = a;
+        fresh->b = 0;
+    }
+    return fresh;
+}
+
+/// Puts a new record in `slot` and releases the record before it. Gives a copy of the new record,
+/// or the zero record when C gave no block.
+// The record is storage of C, and reset releases it. So no view of it goes to the caller: the
+// result holds two i64 and no pointer, and it needs no `gives:` line.
+// C call free: `old`, the block that aligned_alloc gave to `slot` before, with `move`, or null,
+// which free accepts. The load of *slot stands after this call. The call released the block of
+// `old`, and `slot` owns another block, the one that block_of gave in this call.
+fn get() rec {
+    rec mut* own mut fresh = block_of(41);
+    rec mut* own old = move(slot);
+    slot = move(fresh);
+    free(cast(move(old), void* own));
+    if (slot == null) {
+        rec zero = {};
+        return zero;
+    }
+    return *slot;
+}
+
+/// Releases the record of `slot`.
+// C call free: the block that aligned_alloc gave to `slot`, with `move`, or null, which free
+// accepts.
+fn reset() void {
+    free(cast(move(slot), void* own));
+}
+
+/// Gives a view of the record of `fixed`, which the first call makes, or null when C gave no
+/// block.
+// gives: null, or a view of the block that `fixed` owns, which is storage of C. No function of
+// this module gives that block to free, and aligned_alloc keeps no pointer to it. So no call of
+// C releases or changes it. It is private storage of the process, so no other process changes
+// it. The view stands until the process ends (D9.8, "Storage of C").
+// C call free: `fresh`, a block that block_of gave in this call and that the function stored
+// in no global, with `move`. No view of that block exists, and it is not the block of `fixed`.
+fn kept() rec* {
+    if (fixed != null) {
+        return fixed;
+    }
+    rec mut* own mut fresh = block_of(42);
+    if (fixed == null) {
+        fixed = move(fresh);
+    } else {
+        free(cast(move(fresh), void* own));
+    }
+    return fixed;
+}

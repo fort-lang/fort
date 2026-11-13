@@ -94,6 +94,15 @@ extern fn read(i32 fd, u8 mut* buf, u64 n) i64;
 // C: write, write(2) of POSIX.1-2017.
 // writes: nothing in fort storage; C reads at most n bytes at buf. gives: the count of bytes, or
 // -1. keeps: no pointer. calls: no fort function. frees: nothing.
+// Audit: the row of write in the Linux module names a class of descriptor that breaks the
+// point for the writes of this row. The class is a file of the kernel that maps the storage of
+// this process, as /proc/self/mem. Darwin has no /proc file system: `ls /proc` gives "No such
+// file or directory". So no path of the Linux row is here. The audit of this row found no file
+// of Darwin that gives a process with no privilege a write into its own storage. That is a
+// reading and no proof. It covers no descriptor that the parent process gave, as descriptor 1:
+// std did not open it. A reader who finds a file of this class writes it here. The row does
+// not cover a write to a descriptor of this class. It is a limit of this row that a reader
+// must know.
 extern fn write(i32 fd, u8* buf, u64 n) i64;
 // C: close, close(2) of POSIX.1-2017.
 // gives: 0 or -1. writes: no fort storage. keeps: no pointer. calls: no fort function.
@@ -115,10 +124,21 @@ extern fn isatty(i32 fd) i32;
 // calls: no fort function. frees: nothing.
 extern fn __error() i32 mut*;
 
-// Returns the errno slot for internal standard-library calls.
-// C call __error: no pointer argument.
-fn errno_slot() i32 mut* {
-    return __error();
+// Returns the errno of the calling thread, as a value. No function of this module gives the
+// address of errno to its caller. The int errno is storage of C, and each later call of C can
+// change it (D9.8, "Storage of C").
+// C call __error: no pointer argument. The load through the result stands before each
+// other call of C. The errno of a thread lives as long as the thread. So no call released or
+// changed the int that the load reads.
+fn errno() i32 {
+    return *__error();
+}
+
+// Sets the errno of the calling thread to `code`.
+// C call __error: no pointer argument. The store through the result stands before each
+// other call of C, as the load of errno does. It writes one int, which C reads as an int.
+fn set_errno(i32 code) void {
+    *__error() = code;
 }
 
 // The float formatting arguments pass through a variadic call.

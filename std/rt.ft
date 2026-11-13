@@ -73,10 +73,9 @@ string mut@ own mut args_store = {};
 // Preserve errno because isatty changes it for non-terminal descriptors.
 // C call libc.isatty: no pointer argument.
 fn is_interactive(i32 fd) bool {
-    i32 mut* slot = libc.errno_slot();
-    i32 saved = *slot;
+    i32 saved = libc.errno();
     bool interactive = libc.isatty(fd) == 1;
-    *slot = saved;
+    libc.set_errno(saved);
     return interactive;
 }
 
@@ -105,7 +104,7 @@ fn write_all(i32 fd, u8@ bytes) void {
         u8@ rest = bytes[done..];
         i64 n = libc.write(fd, rest.ptr, rest.len);
         if (n < 0) {
-            if (*libc.errno_slot() == libc.EINTR) {
+            if (libc.errno() == libc.EINTR) {
                 continue;
             }
             return;
@@ -163,6 +162,8 @@ fn buffer_append(buffer mut* b, u8@ bytes) void {
 }
 
 // Assign a buffer to fd. Return null for stderr or a negative descriptor.
+// gives: null, or the address of an element of the global `buffers` of this module. That is
+// storage of fort code, which lives until the process ends, and no storage of C.
 fn buffer_for(i32 fd) buffer mut* {
     if (fd == STDERR_FD || fd < 0) {
         return null;
@@ -960,6 +961,8 @@ fn assert_fail(char* text, char* file, u32 line, u32 col) noreturn {
 // C call fail_runtime x2: file and its NUL are parameter sources (D9.8 rule 1), so alloc is a
 // boundary function, and each caller gives a file name with its NUL: the code that the compiler
 // emits (A8), or a trusted module by its row.
+// The runtime holds the block as an allocation (D10.9), so it is no storage of C, and only
+// rt.free releases it, which takes the owner.
 // C call libc.calloc: no pointer argument; C gives a new allocation of size bytes or null.
 fn alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) void mut* own {
     if (elem_size != 0 && count > U64_MAX / elem_size) {
@@ -1012,6 +1015,10 @@ fn str_eq(char* a, u64 a_len, char* b, u64 b_len) bool {
 // C call str.from_cstr: view[i], an element of argv, so the pointer and its NUL are parameter
 // sources (D9.8 rule 1), and args_init is a boundary function: C gives main argc strings, each
 // with its NUL (ISO C11 5.1.2.2.1).
+// gives: in the global args_store a span of `new` whose elements are views of the argument strings,
+// with no copy. The strings are storage of C. They keep their bytes from the start of the program
+// to its end (ISO C11 5.1.2.2.1). No function that std declares writes or releases them. A `string`
+// gives fort code no store, and no other process holds them (D9.8, "Storage of C").
 fn args_init(i32 argc, char* mut* argv) void {
     del(args_store);
     if (argc <= 0) {
@@ -1031,6 +1038,8 @@ fn args_init(i32 argc, char* mut* argv) void {
 // Return the process argument span.
 // gives: the span that args_init stored, which lives until the process ends; each element is an
 // argument that C gave to main, whose .len bytes end in its NUL (ISO C11 5.1.2.2.1, D9.8 rule 4).
+// Each element is a view of storage of C. Nothing releases or changes that storage before the
+// process ends, as the row of args_init states ("Storage of C").
 fn args() string@ {
     return args_store;
 }

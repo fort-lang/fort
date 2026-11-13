@@ -13,7 +13,9 @@ fn exit(i32 code) noreturn {
 /// Returns the arguments that main received.
 /// Element 0 is the program name. Each element is NUL-terminated.
 // gives: the span of rt.args, which lives until the process ends; each element ends in a NUL after
-// its .len bytes, as the gives: of rt.args states (stdlib.md 2.1, D9.8 rule 4).
+// its .len bytes, as the gives: of rt.args states (stdlib.md 2.1, D9.8 rule 4). Each element is a
+// view of storage of C. Nothing releases or changes that storage before the process ends, as the
+// row of rt.args_init states ("Storage of C").
 fn args() string@ {
     return rt.args();
 }
@@ -21,7 +23,7 @@ fn args() string@ {
 /// Returns C errno for the calling thread.
 /// The value is meaningful only after a library call reports failure.
 fn errno() i32 {
-    return *libc.errno_slot();
+    return libc.errno();
 }
 
 /// Looks up name in the process environment.
@@ -36,6 +38,12 @@ fn errno() i32 {
 // (D9.8 rule 2), and its last byte is the NUL (rule 4).
 // C call str.from_cstr: value, storage that getenv gave in this function (rule 3), not null
 // here, with the NUL that the row of getenv states.
+// gives: in *out a copy of the value in storage of `new`, and no view of the storage of getenv.
+// That storage is storage of C, which setenv, unsetenv and putenv can release or change. The view
+// of it goes to str.from_cstr and to strbuf.append only, and it ends with the call of
+// strbuf.append. Between getenv and that end, the calls of C are strlen, calloc, memmove and free
+// of a buffer of `new`. A panic calls C also, and it ends the process. None of these calls changes
+// the environment (D9.8, "Storage of C").
 fn env(string name, strbuf.str_buf mut* out) bool {
     for (char ch : name) {
         if (ch == '\0') {
@@ -57,7 +65,7 @@ fn env(string name, strbuf.str_buf mut* out) bool {
 
 /// Sets C errno for the calling thread to `code`.
 fn set_errno(i32 code) void {
-    *libc.errno_slot() = code;
+    libc.set_errno(code);
 }
 
 /// Returns the process id of the calling process. getpid(2) does not fail.
@@ -133,6 +141,8 @@ struct c_strings {
 // The C form of `list`. The caller frees both fields. items[i] is &bytes[at], the address of
 // the first byte of string i of `list`; a NUL follows each string in `bytes`, and null is the
 // last item. Each store uses a checked index, so each lies inside its span (D9.8 rule 4).
+// gives: two allocations of `new`: bytes, and items, whose pointers name bytes of bytes. Each
+// holds a copy, and no pointer names storage of C.
 fn c_strings_of(string@ list) c_strings {
     u64 mut total = 0;
     for (string s : list) {

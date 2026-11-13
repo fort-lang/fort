@@ -1672,7 +1672,19 @@ bullet at a time and without a rewrite.
   index, so it sees each branch of a `$if` and a module that is not trusted. It reports the
   first byte of a file that is no UTF-8 text (D2.1), for each file that it checks; `fort
   --check` accepts such a byte in a comment and in a string literal, and the lint is the one
-  check of it. The lint finds a
+  check of it. A function of a trusted module whose result type reaches a pointer, a span or a
+  string needs a row line `// gives: <text>`. The lint reports the function without that line
+  (`gives_row_problems`). The reach reads the type and each struct that the type names, at any
+  depth. The form `// gives:` is a convention of the lint: D9.8 does not state it. The lint checks
+  that the line is there and that it holds text. It does not check rule 1 or rule 2 of "Storage of
+  C" (D9.8). A reviewer reads the reason of the line against these 2 rules. That check reads the
+  result type only. It does not see an out parameter, a store into a global or a value that goes to
+  another function as an argument. The row of a function is the `//` lines directly above the line
+  of its `fn`. A function that stands after another item on its line has no row for this check. The
+  rows `D9.8-gives-*` of `tools/mutations/rows_lint.json` hold the check. A row can hold a line that
+  starts `// Audit:`. It states a limit of the row that an audit found, as the row of `write` in
+  `std/linux/libc.ft` does. The lint does not read that line.
+  The lint finds a
   boundary function by the parameter types that the index records spell, and `fort_lint_rows`
   holds that answer equal to the one of the compiler. A call row names the callee as the body
   spells it, with no white space (`libc.write`, `table[i+1]`). The rows count the calls in the
