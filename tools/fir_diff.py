@@ -86,8 +86,10 @@ SLOT = re.compile(r"^%tmp\d+$")
 
 STORE = re.compile(r"^store (\S+) (\S+), ptr (\S+), align (\d+)$")
 LOAD = re.compile(r"^load (\S+), ptr (\S+), align (\d+)$")
+# The copy of an aggregate: `llvm.memmove` in a module of this compiler, and `llvm.memcpy` in a
+# module of a compiler that wrote that intrinsic. The tool reads both as one copy.
 MEMCPY = re.compile(
-    r"^call void @llvm\.memcpy\.p0\.p0\.i64\(ptr align (\d+) (\S+), "
+    r"^call void @llvm\.mem(?:cpy|move)\.p0\.p0\.i64\(ptr align (\d+) (\S+), "
     r"ptr align (\d+) (\S+), i64 (\d+), i1 false\)$"
 )
 MEMSET = re.compile(
@@ -1097,7 +1099,7 @@ class Function:
                 if parts and parts[1] == r:
                     continue
                 m = re.match(
-                    r"^call void @llvm\.mem(?:cpy|set)\.p0\.(?:p0\.)?i64\(ptr align \d+ "
+                    r"^call void @llvm\.mem(?:cpy|move|set)\.p0\.(?:p0\.)?i64\(ptr align \d+ "
                     r"(\S+), ",
                     i,
                 )

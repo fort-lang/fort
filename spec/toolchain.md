@@ -11,11 +11,12 @@ the compiler has no option that removes a check (D10.6, D14.1). The compiler of 
 takes the option `--no-bounds-check`, which removes the index and span checks. The compiler removes
 the option in a later change. Bootstrap-0 is frozen, and it keeps its option (D10.6). Sections 5 and
 6 describe the runtime and the IR of that date. Later changes of the compiler and the runtime bring
-seven points to them: the allocator of the runtime (D10.3, D10.9), the check of `null` (D10.6), the
+these points to them: the allocator of the runtime (D10.3, D10.9), the check of `null` (D10.6), the
 entry of `regrow` (D12.2), frame storage (D10.9, D19.4), the release-only bit in `summaries/`
-(D9.11), the zero bytes of a local (D10.1) and `llvm.memmove` for a copy of an aggregate (D6.3,
-D19.3). Sections 2.2, 5.1 and 5.2, and items 3, 8 and 10 of section 6, name each point where it
-applies. D10.1 gives also the zero bytes of a global, of a place that a `move` or a `del` empties,
+(D9.11) and the zero bytes of a local (D10.1). Sections 2.2, 5.1 and 5.2, and item 10 of section
+6, name each point where it applies. The compiler gives `llvm.memmove` for each copy of an
+aggregate (D6.3, D19.3): items 3 and 8 of section 6 state it.
+D10.1 gives also the zero bytes of a global, of a place that a `move` or a `del` empties,
 and of an element of `regrow`. A later change measures each lowering against that rule.
 
 Sections: 1 Command line; 2 Build pipeline; 3 Build modes; 4 Diagnostics; 5 The runtime;
@@ -521,7 +522,8 @@ D17.21).
   `-fPIE` and the target's PIE link flag make a position-independent executable (D14.3, D16).
 - Every emitted module passes `opt -passes=verify` (D19.1): the language-test harness verifies
   the module of every test that compiles (`run_tests.py --verify-ir`, section 7.3), and the
-  emitter suites verify each module they emit. `llvm.trap` raises SIGILL on x86-64 and SIGTRAP
+  emitter suites verify each module they emit. The harness also fails a module that calls or
+  declares `llvm.memcpy` (item 3 of section 6). `llvm.trap` raises SIGILL on x86-64 and SIGTRAP
   on arm64 (`test/lang/run/ffi/009`).
 - An object from `-c` contains the whole program, the runtime included, so linking it needs no
   input the compiler produced beyond the object itself (D9.10, D13.1). In a library build, an
@@ -1366,13 +1368,13 @@ emitter's text is a change here.
    rather than as `%struct.std.rt.enum_member`, one named type for one layout.
 
 3. **Aggregates live in memory** (D19.3). Only scalars are SSA values: a struct, fixed array,
-   span or `string` always occupies a place, is copied with `llvm.memcpy.p0.p0.i64`, zeroed
+   span or `string` always occupies a place, is copied with `llvm.memmove.p0.p0.i64`, zeroed
    (`{}`, `del`, `move`) with `llvm.memset.p0.i64`, and reached field by field or element by
-   element with `getelementptr`. In the end state a copy is `llvm.memmove.p0.p0.i64`, which reads
-   the whole source before it changes the destination (D6.3). It is `llvm.memcpy.p0.p0.i64` only
-   where the compiler proves that the source and the destination are equal or do not overlap, as
-   for the copies of items 7 and 18 into a slot that the compiler made (D19.3). The compiler
-   implements this in a later change.
+   element with `getelementptr`. `llvm.memmove` reads the whole source before it changes the
+   destination, so the two ranges of a copy can overlap in part (D6.3). Each copy of an
+   aggregate is `llvm.memmove`, and a module holds no `llvm.memcpy` (D19.3, `fir.md` 12.1). The
+   copies of items 7 and 18 into a `%tmpK` slot and out of it are `llvm.memmove` too.
+   Bootstrap-0 is frozen, and it keeps `llvm.memcpy` for each copy.
    The emitter never loads or stores an aggregate as one value and
    never writes `insertvalue` or `extractvalue` on one; its only `extractvalue` takes apart the
    `{iN, i1}` of an overflow intrinsic (item 15). Exactly three `getelementptr` shapes exist,
@@ -1445,7 +1447,7 @@ emitter's text is a change here.
    pointers, function pointers, floats) are ordinary parameters and results.
    LLVM applies System V on Linux and Apple arm64 on Mac.
    A struct, fixed array, span or `string` argument is a plain `ptr` parameter: the
-   caller allocates a copy in its entry block, `llvm.memcpy`s into it and passes its address,
+   caller allocates a copy in its entry block, `llvm.memmove`s into it and passes its address,
    and `byval` is never used, since it would mean a callee-visible copy on the stack rather than
    the pointer in the integer slot D9.9 requires. An aggregate result is a leading
    `ptr sret(%T) %ret.sret` parameter on a function whose result type is `void`; the pointer
@@ -1515,23 +1517,22 @@ emitter's text is a change here.
    type actually used and none otherwise:
 
    ```llvm
-   declare void @llvm.memcpy.p0.p0.i64(ptr noalias nocapture writeonly,
-       ptr noalias nocapture readonly, i64, i1 immarg) #5
+   declare void @llvm.memmove.p0.p0.i64(ptr nocapture writeonly,
+       ptr nocapture readonly, i64, i1 immarg) #5
    declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg) #6
    declare { i8, i1 } @llvm.sadd.with.overflow.i8(i8, i8) #4
    declare i32 @llvm.fptosi.sat.i32.f64(double) #4
    declare void @llvm.trap() #7
    ```
 
-   The `llvm.memcpy` declaration is one line in the module and is wrapped here only to fit the
-   page. The order is: `llvm.memcpy.p0.p0.i64`, then `llvm.memset.p0.i64`, then the overflow
+   The `llvm.memmove` declaration is one line in the module and is wrapped here only to fit the
+   page. It has no `noalias`: its two ranges can overlap (D6.3). No module declares
+   `llvm.memcpy` (item 3). The order is: `llvm.memmove.p0.p0.i64`, then `llvm.memset.p0.i64`,
+   then the overflow
    family in the order `sadd ssub smul uadd usub umul` and, within each, the widths
    `i8 i16 i32 i64` (item 15), then `llvm.fptosi.sat.i<N>.f32`, `llvm.fptosi.sat.i<N>.f64`,
    `llvm.fptoui.sat.i<N>.f32` and `llvm.fptoui.sat.i<N>.f64` by ascending target width (item
    12), then `llvm.trap` (item 20). The parameter attributes shown are part of the spelling.
-   In the end state of item 3 the module also declares `llvm.memmove.p0.p0.i64`. The change that
-   implements D19.3 gives the line of that declaration, its attribute group and its position in
-   this order.
 
    Only referenced declarations are emitted, in a fixed order (D19.5): `extern` C functions in
    first-use order, which is the order of the first call of each in the text of the function
@@ -1696,7 +1697,7 @@ emitter's text is a change here.
 18. **Ownership** (D17). `own` is erased: same types, same ABI, same normalization, and neither the
     module nor the runtime carries ownership information. `move(lv)` reads the operand's value into
     an intermediate of the emitter's own -- the register a `load` names for a pointer or a `void*`,
-    a `%tmpK` slot an `llvm.memcpy` fills for a span, a `string` or an owning aggregate -- zeroes
+    a `%tmpK` slot an `llvm.memmove` fills for a span, a `string` or an owning aggregate -- zeroes
     the operand (`store ptr null` or `llvm.memset`) and only then copies the value on to the
     destination, in both build modes (D17.6). The intermediate is not optional: the destination may
     be the operand itself (`s = move(s)`, `*p = move(*q)` after `del(*p)`, `v[i] = move(v[j])` after
@@ -1760,7 +1761,7 @@ emitter's text is a change here.
     ```
 
     The table is one line in the module and is wrapped here only to fit the page, as the
-    `llvm.memcpy` declaration of item 8 is. One entry per member in declaration order;
+    `llvm.memmove` declaration of item 8 is. One entry per member in declaration order;
     `%fort.enum_member = type { i32, ptr }` has C's 16-byte layout with its 4 bytes of padding, so
     it matches `std.rt`'s `struct enum_member` (section 5.1), which is emitted under this name
     and not as a `%struct.` of its own (item 2). A table is emitted only for an enum
@@ -1827,8 +1828,8 @@ numbering are normal (D19.5):
 - `#3 = { nobuiltin }` on every extern call site (item 8).
 - `#4 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }` on the
   overflow intrinsics (item 15) and on `llvm.fptosi.sat` and `llvm.fptoui.sat` (item 12).
-- `#5 = { nocallback nofree nounwind willreturn memory(argmem: readwrite) }` on `llvm.memcpy`
-  and `#6 = { nocallback nofree nounwind willreturn memory(argmem: write) }` on `llvm.memset`.
+- `#5 = { nocallback nofree nounwind willreturn memory(argmem: readwrite) }` on `llvm.memmove`.
+- `#6 = { nocallback nofree nounwind willreturn memory(argmem: write) }` on `llvm.memset`.
 - `#7 = { cold noreturn nounwind memory(inaccessiblemem: write) }` on `llvm.trap` (item 20).
 - `#8 = { cold noreturn nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }`, `#1` plus
   `cold`, on the definitions of the `noreturn` entry points of section 5.1 (item 14).
@@ -2055,7 +2056,7 @@ attributes #8 = { cold noreturn nounwind "frame-pointer"="all" "probe-stack"="in
 ```
 
 The `@.str.1` constant is one line in the module and is wrapped here only to fit the page, as the
-`llvm.memcpy` declaration of item 8 is. The locals are entry-block allocas, the array is zeroed
+`llvm.memmove` declaration of item 8 is. The locals are entry-block allocas, the array is zeroed
 with `llvm.memset`, the bounds check of item 16 branches to a failure block at the end of the
 function, the message of `print_str` is the `string` of the temporary `%tmp0`, which the call
 passes by its address (item 7), and `%fort.enum_member` is emitted although nothing uses it
@@ -2156,7 +2157,9 @@ compiler) and `--cc` from `--cc` (default `clang`, which must be a clang as `--c
 <test>` for every test whose compilation succeeds and verifies the module with `<opt> -passes=verify
 -disable-output` (D19.1); `--opt` names that program (default `opt-18`). A module the verifier
 rejects is a FAIL; an `opt` that cannot be launched, times out or dies by a signal is an ERROR, like
-a compiler exit 2 (D14.1). `--runner` names a command that runs the programs when binfmt does not,
+a compiler exit 2 (D14.1). A module that the verifier accepts and that calls or declares
+`llvm.memcpy` is a FAIL too: each copy of an aggregate is `llvm.memmove` (D19.3).
+`--runner` names a command that runs the programs when binfmt does not,
 `-j` the number of parallel tests, `--timeout` the seconds per step, `-v` prints the commands and
 outputs of failures and `--keep` keeps the temporary directories. The
 compiler runs with `test/lang` as its working directory (D14.4). Each test uses a fresh

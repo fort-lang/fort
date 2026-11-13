@@ -452,7 +452,8 @@ if(FORT_LANG_JOBS EQUAL 0)
     set(FORT_LANG_JOBS 1)
 endif()
 # --verify-ir runs opt -passes=verify over the `-S` output of every test that
-# compiles. Thus, it verifies each module that the emitter writes.
+# compiles. Thus, it verifies each module that the emitter writes. It also fails
+# a module that calls or declares llvm.memcpy: each copy is llvm.memmove (D19.3).
 #
 # The compiler's own modules: each test/fort/**/<x>_test.ft outside support/ is a
 # run test in the directive format. Each test imports a src/fort module with `-I` and asserts
@@ -778,7 +779,8 @@ set_tests_properties(fort_lint_rows PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
-# Hold the library options `--use` and `--cache-dir` of test/lang/run_tests.py (D9.11).
+# Hold the library options `--use` and `--cache-dir` of test/lang/run_tests.py (D9.11), and the
+# count of llvm.memcpy that `--verify-ir` makes (D19.3).
 add_test(NAME lang_harness_selftest
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/lang_harness_test.py"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")

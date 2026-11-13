@@ -1417,6 +1417,26 @@ came here.
   or of the place of `check(overwrite)`. The review of T-249 probed those reads apart and found
   none out of dominance. Under `--release`, 1251 temporaries of `main.ft` have no storage, which
   is the count of T-247.
+- **Each copy of an aggregate is `llvm.memmove`, and the translator writes no `llvm.memcpy`**
+  (D6.3, D19.3). `llvm.memcpy` of two ranges that overlap in part has no defined result, and a
+  view cast gives a program two such places (D3.14). `fir_llvm.copy_to` writes each copy. It has
+  2 callers: `fir_llvm.hold`, which fills a `%tmp` slot for an aggregate operand that is a
+  place, and `fir_llvm.write_held`, which writes a held operand into its destination.
+  `gen.gen_memmove` writes the call. The call and the declaration take the name from one
+  constant, `gen.COPY_INTRINSIC`. The rule has no premise: the translator does not prove that
+  two ranges are apart, and the copy into a `%tmp` slot and the copy out of it are
+  `llvm.memmove` too. A proof for that slot does not hold today. A pointer of the program can
+  name a range that overlaps a slot in part. One such pointer is the address of a parameter,
+  which is an argument slot of the caller, after the frame of that caller ends. A second is an
+  element that an index out of range names under `--no-bounds-check`. A probe of each gave a
+  wrong `llvm.memcpy` copy into a slot at `-Xcc -O0`. `run_tests.py --verify-ir` fails a module
+  that calls or declares `llvm.memcpy`, so each module of the language corpus and of the module
+  tests holds the count 0 (`notes/testing.md` 6). `test/fort/fir_llvm_copy_test.ft` and
+  `test/fort/gen_data_test.ft` hold the text of each case. `test/lang/run/casts/021` to `024`
+  hold the result of a store through two views at `-O0`, `-O1`, `-O2` and under `--release`.
+  They link `test/lang/ffi/memcpy_overlap.c`, which stops the run when the C `memcpy` gets two
+  ranges that overlap. The interpreter gave that result before the translator did. The frozen
+  C compiler in `bootstrap0/` keeps `llvm.memcpy` for each copy.
 - **One signature map writes every definition, extern declaration and call** (T-251).
   `gen.signature_of` maps a fort function type to the result type and its extension attribute,
   the `sret` type, each parameter with its attribute, and the variadic flag of an `extern fn`.

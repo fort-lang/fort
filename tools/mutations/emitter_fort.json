@@ -12,9 +12,12 @@
     "Rows whose name ends in a letter are further facets; D10.8 stands",
     "outside the cited universe. b0606efa replaced the direct emitter by the",
     "FIR path, so each row names the current line that decides the rule.",
-    "The stages are targeted: the FIR corpus, the gen_ and fir_ module",
-    "suites, the driver_ module suites and four areas of the language",
-    "corpus. The table runs on a darwin host with --runner 'bash -c';",
+    "The stages are targeted: the FIR corpus, the area run/casts/ of the",
+    "language corpus, the gen_ and fir_ module suites, the driver_ module",
+    "suites and four more areas of the language corpus. run/casts/ stands",
+    "before the module suites, so a row that changes the bytes of a copy is",
+    "caught by a program that runs (D6.3) and not only by the text of a",
+    "module. The table runs on a darwin host with --runner 'bash -c';",
     "ZERO_AR_DATE=1 keeps the md5 guard.",
     "The md5 guard reads the product compiler that the build links."
   ],
@@ -32,6 +35,10 @@
     {
       "name": "the FIR corpus",
       "command": "python3 test/fir/run_tests.py --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std"
+    },
+    {
+      "name": "the aggregate copies that run",
+      "command": "python3 test/lang/run_tests.py --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std --cc /opt/homebrew/bin/clang --target arm64-apple-macosx11.0.0 --opt /opt/homebrew/bin/opt --verify-ir -j 10 --xfail test/lang/xfail.txt run/casts/"
     },
     {
       "name": "the emitter suites",
@@ -148,8 +155,8 @@
     {
       "decision": "D3.15",
       "file": "src/fort/fir_llvm.ft",
-      "old": "    gen.gen_memcpy(t->g, to, align, from, align, types.type_sizeof(ty));",
-      "new": "    gen.gen_memcpy(t->g, to, align, from, align, types.type_sizeof(ty) - 1);",
+      "old": "    gen.gen_memmove(t->g, to, align, from, align, types.type_sizeof(ty));",
+      "new": "    gen.gen_memmove(t->g, to, align, from, align, types.type_sizeof(ty) - 1);",
       "what": "an aggregate copy moves one byte less than `sizeof` of its type; the checker folds `sizeof` itself, and this copy is one place where the emitter uses the D3.15 size"
     },
     {
@@ -186,6 +193,13 @@
       "old": "    u64 mut i = first;\n    while (i < ast.ast_len(n)) {\n        if (!lower_print_arg(lw, ast.ast_child(n, i), fd)) {\n            return false;\n        }\n        i += 1;\n    }",
       "new": "    u64 mut i = ast.ast_len(n);\n    while (i > first) {\n        i -= 1;\n        if (!lower_print_arg(lw, ast.ast_child(n, i), fd)) {\n            return false;\n        }\n    }",
       "what": "the print family evaluates its arguments right to left"
+    },
+    {
+      "decision": "D6.3b",
+      "file": "src/fort/gen.ft",
+      "old": "string COPY_INTRINSIC = \"@llvm.memmove.p0.p0.i64\";",
+      "new": "string COPY_INTRINSIC = \"@llvm.memcpy.p0.p0.i64\";",
+      "what": "each copy of an aggregate is `llvm.memcpy`, which gives no result when the two ranges overlap in part"
     },
     {
       "decision": "D6.5",
@@ -760,6 +774,34 @@
       "old": "    strbuf.append(out, \"declare \");\n    if (sig.ret_attr.len > 0) {",
       "new": "    strbuf.append(out, \"declare \");\n    if (false) {",
       "what": "an extern declaration loses the extension attribute of its result"
+    },
+    {
+      "decision": "item8b",
+      "file": "src/fort/gen_data.ft",
+      "old": "        strbuf.append(out, \"(ptr nocapture writeonly, ptr nocapture readonly, i64, i1 immarg)\");\n        strbuf.append(out, \" #5\\n\");",
+      "new": "        strbuf.append(out, \"(ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg)\");\n        strbuf.append(out, \" #5\\n\");",
+      "what": "the declaration of `llvm.memmove` says `noalias` for both pointers, which tells LLVM that the two ranges do not overlap"
+    },
+    {
+      "decision": "item8c",
+      "file": "src/fort/gen_data.ft",
+      "old": "        strbuf.append(out, \"(ptr nocapture writeonly, ptr nocapture readonly, i64, i1 immarg)\");\n        strbuf.append(out, \" #5\\n\");",
+      "new": "        strbuf.append(out, \"(ptr nocapture writeonly, ptr nocapture readonly, i64, i1 immarg)\");\n        strbuf.append(out, \" #6\\n\");",
+      "what": "the declaration of `llvm.memmove` names the attribute group `#6` of `llvm.memset`, which says that the function reads no memory"
+    },
+    {
+      "decision": "item8d",
+      "file": "src/fort/gen.ft",
+      "old": "    gen_use_intrinsic(g, IN_MEMMOVE);\n    gen_use_attr(g, ATTR_MEMMOVE);",
+      "new": "    gen_use_intrinsic(g, IN_MEMMOVE);",
+      "what": "a call of `llvm.memmove` does not record the attribute group `#5` of its declaration"
+    },
+    {
+      "decision": "item8e",
+      "file": "src/fort/gen.ft",
+      "old": "u64 IN_MEMMOVE = 0;\nu64 IN_MEMSET = 1;",
+      "new": "u64 IN_MEMMOVE = 1;\nu64 IN_MEMSET = 0;",
+      "what": "the module declares `llvm.memset` before `llvm.memmove`"
     },
     {
       "decision": "item9",

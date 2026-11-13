@@ -99,7 +99,7 @@ fn a_pointer_move_zeroes_before_the_store() void {
     }
 }
 
-// `move s` of a span: `llvm.memcpy` into a new `%tmp`, `llvm.memset` of `s`, then `llvm.memcpy`
+// `move s` of a span: `llvm.memmove` into a new `%tmp`, `llvm.memset` of `s`, then `llvm.memmove`
 // out (toolchain.md 6 item 18). The fold of every mode writes `t = move s`: into `%tmp0`, the
 // memset, then out into `t`. The implicit move of `return t` goes through an intermediate of its
 // own.
@@ -112,15 +112,15 @@ fn a_span_move_goes_through_an_intermediate() void {
         "  %tmp0 = alloca %fort.span, align 8",
         "  %tmp1 = alloca %fort.span, align 8",
         "  call void @llvm.memset.p0.i64(ptr align 8 %t.1, i8 0, i64 16, i1 false)",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %s.in, \\",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %s.in, \\",
         "i64 16, i1 false)",
         "  call void @llvm.memset.p0.i64(ptr align 8 %s.in, i8 0, i64 16, i1 false)",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t.1, ptr align 8 %tmp0, \\",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %t.1, ptr align 8 %tmp0, \\",
         "i64 16, i1 false)",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %t.1, \\",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %t.1, \\",
         "i64 16, i1 false)",
         "  call void @llvm.memset.p0.i64(ptr align 8 %t.1, i8 0, i64 16, i1 false)",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %tmp1, \\",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %tmp1, \\",
         "i64 16, i1 false)",
     };
     for (pass_env.mode m : OWN_MODES) {
@@ -142,15 +142,15 @@ fn a_move_into_its_own_place_keeps_the_value() void {
         "entry:",
         "  %tmp0 = alloca %fort.span, align 8",
         "  %tmp1 = alloca %fort.span, align 8",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %s.in, \\",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %s.in, \\",
         "i64 16, i1 false)",
         "  call void @llvm.memset.p0.i64(ptr align 8 %s.in, i8 0, i64 16, i1 false)",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %s.in, ptr align 8 %tmp0, \\",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %s.in, ptr align 8 %tmp0, \\",
         "i64 16, i1 false)",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %s.in, \\",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %s.in, \\",
         "i64 16, i1 false)",
         "  call void @llvm.memset.p0.i64(ptr align 8 %s.in, i8 0, i64 16, i1 false)",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %tmp1, \\",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %tmp1, \\",
         "i64 16, i1 false)",
     };
     for (pass_env.mode m : OWN_MODES) {
@@ -172,10 +172,10 @@ fn a_move_through_two_pointers() void {
         "  store ptr %g.in, ptr %g.1, align 8",
         "  %t0 = load ptr, ptr %h.0, align 8",
         "  %t1 = load ptr, ptr %g.1, align 8",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %t1, \\",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %t1, \\",
         "i64 16, i1 false)",
         "  call void @llvm.memset.p0.i64(ptr align 8 %t1, i8 0, i64 16, i1 false)",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t0, ptr align 8 %tmp0, \\",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %t0, ptr align 8 %tmp0, \\",
         "i64 16, i1 false)",
     };
     llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "mh", pass_env.CHECKED), want[..]);
@@ -198,9 +198,9 @@ fn a_cast_of_a_move() void {
     llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "cp", pass_env.CHECKED), want[..]);
 }
 
-// `return *p` of an aggregate copies `*p` into `%ret.sret` with one `llvm.memcpy`, as the direct
+// `return *p` of an aggregate copies `*p` into `%ret.sret` with one `llvm.memmove`, as the direct
 // path does. When the caller writes `t = swap(&t)`, the two operands are one address, which
-// `llvm.memcpy` allows (Q1 of T-249).
+// `llvm.memmove` allows: the copy is defined for each overlap of its two ranges (D6.3).
 fn a_copy_through_a_pointer_into_the_result() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
@@ -209,7 +209,7 @@ fn a_copy_through_a_pointer_into_the_result() void {
         "  %p.0 = alloca ptr, align 8",
         "  store ptr %p.in, ptr %p.0, align 8",
         "  %t0 = load ptr, ptr %p.0, align 8",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %t0, \\",
+        "  call void @llvm.memmove.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %t0, \\",
         "i64 16, i1 false)",
     };
     llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "swap", pass_env.CHECKED), want[..]);
