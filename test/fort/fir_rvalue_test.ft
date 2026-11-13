@@ -1,7 +1,7 @@
 //! run
 //! flags: -I ../../src -I support
 //! stdout:
-//| 33 kinds
+//| 34 kinds
 //| ok
 /// Checks FIR rvalues: the result type of each form, which forms produce an owning value, and
 /// which produce an aggregate.
@@ -113,6 +113,11 @@ fn sample(fir_env.env mut* e, fixture mut* x, fir.rvalue_kind kind, fir.rvalue m
     case fir.rvalue_kind.rv_alloc:
         *out = fir.rvalue_alloc(f, fir_env.ty(e, "pair"), copy(x->n));
         return "pair mut* own";
+    case fir.rvalue_kind.rv_regrow:
+        // The result is the pointer to the new storage, and not the span that the operand has.
+        fir.operand span = fir.operand_move(fir.place_local(x->span_local));
+        *out = fir.rvalue_regrow(f, fir_env.i32_ty(e), span, copy(x->n));
+        return "i32 mut* own";
     case fir.rvalue_kind.rv_aggregate:
         u32 first = fir.operand_push(f, a);
         fir.operand_push(f, copy(x->n));
@@ -229,13 +234,16 @@ fn a_call_gives_the_result_of_its_callee() void {
 
 // ---- rvalue_owns ------------------------------------------------------------------------
 
-fn five_forms_produce_an_owning_value() void {
+fn six_forms_produce_an_owning_value() void {
     fir_env.env mut* own e = fir_env.make();
     defer fir_env.drop_made(move(e));
     fixture mut* own x = make(e);
     defer drop_made(move(x));
     fir.func mut* f = &x->f;
     assert(fir.rvalue_owns(f, fir.rvalue_alloc(f, fir_env.ty(e, "pair"), copy(x->n))));
+    // A regrow gives new storage for each element type, a type with no owner included.
+    fir.operand span = fir.operand_move(fir.place_local(x->span_local));
+    assert(fir.rvalue_owns(f, fir.rvalue_regrow(f, fir_env.i32_ty(e), span, copy(x->n))));
     // An aggregate of an owning struct.
     u32 first = fir.operand_push(f, fir.operand_move(fir.place_local(x->own_local)));
     fir.operand_push(f, copy(x->n));
@@ -320,6 +328,14 @@ fn each_constructor_fills_the_fields_of_its_form() void {
     fir.rvalue alloc = fir.rvalue_alloc(f, pair, copy(x->n));
     assert(alloc.kind == fir.rvalue_kind.rv_alloc && alloc.ty == pair);
     assert(fir.rvalue_operand(f, alloc, 0).place.local == x->n);
+    fir.operand span = fir.operand_move(fir.place_local(x->span_local));
+    fir.rvalue grown = fir.rvalue_regrow(f, fir_env.i32_ty(e), span, copy(x->n));
+    assert(grown.kind == fir.rvalue_kind.rv_regrow && grown.ty == fir_env.i32_ty(e));
+    assert(grown.ops_len == 2);
+    assert(fir.rvalue_operand(f, grown, 0).kind == fir.operand_kind.ok_move);
+    assert(fir.rvalue_operand(f, grown, 0).place.local == x->span_local);
+    assert(fir.rvalue_operand(f, grown, 1).kind == fir.operand_kind.ok_copy);
+    assert(fir.rvalue_operand(f, grown, 1).place.local == x->n);
     u32 first = fir.operand_push(f, copy(1));
     fir.operand_push(f, copy(x->n));
     fir.rvalue agg = fir.rvalue_aggregate_new(pair, first, 2);
@@ -386,7 +402,7 @@ fn main() i32 {
     addr_gives_a_pointer_to_the_type_of_the_place();
     a_slice_gives_the_span_of_its_place();
     a_call_gives_the_result_of_its_callee();
-    five_forms_produce_an_owning_value();
+    six_forms_produce_an_owning_value();
     other_forms_do_not_own();
     aggregate_results_are_the_ones_of_the_rule();
     each_constructor_fills_the_fields_of_its_form();

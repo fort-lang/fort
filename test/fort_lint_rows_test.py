@@ -1944,7 +1944,7 @@ class Rules(unittest.TestCase):
         for (relative, _), _ in found.items():
             by_module[relative] = by_module.get(relative, 0) + 1
         self.assertEqual(by_module, {
-            "std/rt.ft": 3, "std/str.ft": 5, "std/strbuf.ft": 5, "std/strmap.ft": 1,
+            "std/rt.ft": 4, "std/str.ft": 5, "std/strbuf.ft": 5, "std/strmap.ft": 1,
             "std/sys.ft": 2, "std/vec.ft": 2})
         self.assertEqual(sorted(key for key, has in found.items() if not has), [])
 

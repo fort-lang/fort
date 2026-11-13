@@ -1,0 +1,31 @@
+//! fail
+// A view in an element leads back to the object that owns the span of that element. After a
+// second dereference a place can name any storage, so the `move` can vacate the span `n->kids`
+// itself (`spec/fir.md` 11, the kill at a vacate).
+struct node {
+    node mut* back;
+    node mut@ own kids;
+}
+
+fn node_drop(node mut n) void {
+    del(n.kids, node_drop);
+}
+
+fn grow(node mut* n) void {
+    node mut@ own old = move(n->kids[0].kids);
+    n->kids[0].kids = regrow(move(n->kids[0].back->kids), 2); //! error: overwriting owned value
+    del(old, node_drop);
+}
+
+fn main() i32 {
+    node mut* own n = new(node);
+    n->kids = new(node, 1);
+    n->kids[0].back = n;
+    grow(n);
+    // The span moves out first. The calls of the drop then come after the `del` of `n`, so no
+    // call ends the fact of `n->kids` before that `del` (kill rule 5 of D17.11).
+    node mut@ own kids = move(n->kids);
+    del(n);
+    del(kids, node_drop);
+    return 0;
+}

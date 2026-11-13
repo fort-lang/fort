@@ -1,0 +1,110 @@
+//! run
+//! stdout:
+//| grown 5: 1 2 3 0 0
+//| same 3: 1 2 3 new storage true
+//| none 4: 0 0 0 0
+//| empty 0 then 2: 0 0
+//| pairs 3: 7 70 8 80 0 0
+//| flags 2: true false
+//| reals 2: 1.5 0.0
+//| counts 1 2 3 4
+//| rvalue 4: 9 9 0 0
+// `regrow(move(s), n)` gives a new span of `n` elements (D12.2). The first `s.len` elements keep
+// their values and each other element holds the zero value. The result is in new storage also
+// when `n` equals `s.len`. The zero span gives the result of `new(T, n)`, and a span of length 0
+// with storage is released as each other span. The count is of any integer type. The elements
+// here hold no owner.
+struct pair {
+    u8 tag;
+    i64 wide;
+}
+
+fn nines() i32 mut@ own {
+    i32 mut@ own s = new(i32, 2);
+    s[0] = 9;
+    s[1] = 9;
+    return s;
+}
+
+fn show(string what, i32@ s) void {
+    print(what, " ", s.len, ":");
+    for (u64 mut i = 0; i < s.len; i += 1) {
+        print(" ", s[i]);
+    }
+    println();
+}
+
+fn main() i32 {
+    i32 mut@ own s = new(i32, 3);
+    s[0] = 1;
+    s[1] = 2;
+    s[2] = 3;
+    i32 mut@ own grown = regrow(move(s), 5);
+    show("grown", grown);
+    del(grown);
+
+    i32 mut@ own three = new(i32, 3);
+    three[0] = 1;
+    three[1] = 2;
+    three[2] = 3;
+    i32 mut* before = &three[0];
+    i32 mut@ own same = regrow(move(three), 3);
+    print("same ", same.len, ": ", same[0], " ", same[1], " ", same[2]);
+    println(" new storage ", &same[0] != before);
+    del(same);
+
+    i32 mut@ own mut none = {};
+    none = regrow(move(none), 4);
+    show("none", none);
+    del(none);
+
+    i32 mut@ own empty = new(i32, 0);
+    i32 mut@ own still = regrow(move(empty), 0);
+    print("empty ", still.len);
+    i32 mut@ own two = regrow(move(still), 2);
+    show(" then", two);
+    del(two);
+
+    pair mut@ own pairs = new(pair, 2);
+    pairs[0] = pair{7, 70};
+    pairs[1] = pair{8, 80};
+    pair mut@ own more = regrow(move(pairs), 3);
+    print("pairs ", more.len, ":");
+    for (u64 mut i = 0; i < more.len; i += 1) {
+        print(" ", more[i].tag, " ", more[i].wide);
+    }
+    println();
+    del(more);
+
+    bool mut@ own flags = new(bool, 1);
+    flags[0] = true;
+    bool mut@ own flags2 = regrow(move(flags), 2);
+    println("flags ", flags2.len, ": ", flags2[0], " ", flags2[1]);
+    del(flags2);
+
+    f64 mut@ own reals = new(f64, 1);
+    reals[0] = 1.5;
+    f64 mut@ own reals2 = regrow(move(reals), 2);
+    println("reals ", reals2.len, ": ", reals2[0], " ", reals2[1]);
+    del(reals2);
+
+    u8 small = 1;
+    i16 middle = 2;
+    i64 wide = 3;
+    u64 widest = 4;
+    u8 mut@ own bytes = new(u8, 0);
+    u8 mut@ own b1 = regrow(move(bytes), small);
+    print("counts ", b1.len);
+    u8 mut@ own b2 = regrow(move(b1), middle);
+    print(" ", b2.len);
+    u8 mut@ own b3 = regrow(move(b2), wide);
+    print(" ", b3.len);
+    u8 mut@ own b4 = regrow(move(b3), widest);
+    println(" ", b4.len);
+    del(b4);
+
+    i32 mut@ own from_call = regrow(nines(), 4);
+    show("rvalue", from_call);
+    del(from_call);
+    return 0;
+}

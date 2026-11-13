@@ -11,6 +11,7 @@
 /// removal of the dead temporaries. Each case runs the verifier before and after the pass.
 import fort.consts;
 import fort.fir;
+import fort.fir_passes;
 import fir_env;
 import lower_env;
 import pass_env;
@@ -74,6 +75,11 @@ string[8] KIND_LINES = {
 // (D17.21).
 fn assigned_local(fir.func* f, u32 b, u32 i) u32 {
     return fir.block_statement(f, b, i)->place.local;
+}
+
+// The kind of the rvalue that statement `i` of block `b` of `f` assigns, for the same reason.
+fn assigned_kind(fir.func* f, u32 b, u32 i) fir.rvalue_kind {
+    return fir.block_statement(f, b, i)->value.kind;
 }
 
 // Each of the four modes removes exactly the kinds of its column, for 13 terminators. A removed
@@ -672,13 +678,16 @@ fn a_count_that_is_no_local_replaces_nothing() void {
 
 // ---- the dead temporaries -----------------------------------------------------------------------
 
-// The rvalues of spec/fir.md 6, each assigned to the temporary `_7`, which nothing reads, and the
-// type of `_7`. The first RVALUE_PURE are the pure rvalues that the pass removes: the operand, the
+// The rvalues of spec/fir.md 6, each assigned to the temporary `_8`, which nothing reads, and the
+// type of `_8`. The first RVALUE_PURE are the pure rvalues that the pass removes: the operand, the
 // arithmetic, overflow, bitwise, shift, float and comparison rvalues, `cast` and `addr`. The pass
-// keeps the others: an operand or a `cast` that moves, `slice`, `slice_ptr`, `alloc`, `aggregate`
-// and `call`.
-u64 RVALUE_COUNT = 35;
+// keeps the others. The next RVALUE_MOVED are an operand and a `cast` that move: their kind is
+// pure, and the `move` keeps them. The kind of each later one is not pure: `slice`, `slice_ptr`,
+// `alloc`, `aggregate`, `call` and `regrow`. A `regrow` always holds a `move` (rule V6), so only
+// the test of its kind shows that the pass does not read it as pure.
+u64 RVALUE_COUNT = 36;
 u64 RVALUE_PURE = 28;
+u64 RVALUE_MOVED = 2;
 
 string[RVALUE_COUNT] RVALUES = {
     "copy _1",
@@ -716,13 +725,14 @@ string[RVALUE_COUNT] RVALUES = {
     "alloc<u8>(const u64 1)",
     "aggregate pair(const i32 1, const i32 2)",
     "call fn main.five()",
+    "regrow<u8>(move _7, const u64 1)",
 };
 
 string[RVALUE_COUNT] RVALUE_TYPES = {
     "i32", "i32", "i32", "i32", "bool", "bool", "bool", "i32", "i32", "i32", "i32", "i32", "i32",
     "i32", "i32", "f64", "f64", "f64", "f64", "f64", "bool", "bool", "bool", "bool", "bool",
     "bool", "i64", "i32*", "u8 mut* own", "u8 mut* own", "u8@", "u8@", "u8 mut* own", "pair",
-    "i32",
+    "i32", "u8 mut* own",
 };
 
 string[9] RVALUE_PRELUDE = {
@@ -733,12 +743,13 @@ string[9] RVALUE_PRELUDE = {
     "fn five() i32 {",
     "    return 5;",
     "}",
-    "fn d(i32 a, i32 b, f64 x, u8@ s, u8* p, u8 mut* own o) void {",
+    "fn d(i32 a, i32 b, f64 x, u8@ s, u8* p, u8 mut* own o, u8 mut@ own g) void {",
     "}",
 };
 
 // Each pure rvalue goes with its assignment, and each other rvalue stays, in the default mode,
-// which removes no check. The text of each case is `_7 = <rvalue>;` and `return;`.
+// which removes no check. The text of each case is `_8 = <rvalue>;` and `return;`. The test also
+// holds fir_passes.pure against the kind of each rvalue.
 fn a_pure_rvalue_goes_and_the_others_stay() void {
     strbuf.str_buf mut assign = strbuf.create();
     defer del(assign.data);
@@ -746,8 +757,9 @@ fn a_pure_rvalue_goes_and_the_others_stay() void {
     defer del(let7.data);
     lower_env.env mut* own e = lower_env.make();
     defer lower_env.drop_made(move(e));
-    string[7] mut lines = {
-        "fn main.d(_1: i32, _2: i32, _3: f64, _4: u8@, _5: u8*, _6: u8 mut* own) -> void {",
+    string[8] mut lines = {
+        "fn main.d(_1: i32, _2: i32, _3: f64, _4: u8@, _5: u8*, _6: u8 mut* own,",
+        "          _7: u8 mut@ own) -> void {",
         "",
         "    bb0: {",
         "",
@@ -758,24 +770,25 @@ fn a_pure_rvalue_goes_and_the_others_stay() void {
     u64 mut k = 0;
     while (k < RVALUE_COUNT) {
         strbuf.clear(&let7);
-        strbuf.append(&let7, "    let _7: ");
+        strbuf.append(&let7, "    let _8: ");
         strbuf.append(&let7, RVALUE_TYPES[k]);
         strbuf.push(&let7, ';');
         strbuf.clear(&assign);
-        strbuf.append(&assign, "        _7 = ");
+        strbuf.append(&assign, "        _8 = ");
         strbuf.append(&assign, RVALUES[k]);
         strbuf.push(&assign, ';');
-        lines[1] = strbuf.view(&let7);
-        lines[3] = strbuf.view(&assign);
+        lines[2] = strbuf.view(&let7);
+        lines[4] = strbuf.view(&assign);
         fir.module mut* own fm = fir.module_make();
         *fm = pass_env.parse(e, RVALUE_PRELUDE[..], lines[..]);
         fir.func mut* f = &fm->funcs.items[0];
+        assert(fir_passes.pure(assigned_kind(f, 0, 0)) == (k < RVALUE_PURE + RVALUE_MOVED));
         pass_env.build(e, f, pass_env.CHECKED);
         if (k < RVALUE_PURE) {
             assert(fir.block_statement_count(f, 0) == 0);
         } else {
             assert(fir.block_statement_count(f, 0) == 1);
-            assert(assigned_local(f, 0, 0) == 7);
+            assert(assigned_local(f, 0, 0) == 8);
         }
         fir.module_drop_made(move(fm));
         k += 1;

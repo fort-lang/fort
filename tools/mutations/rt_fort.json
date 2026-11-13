@@ -1,12 +1,15 @@
 {
   "comment": [
-    "The table of std.rt for the calls of C that its rows hold. One row gives the copy of",
-    "rt.buffer_append back to memcpy, whose ranges must not overlap (ISO C11 7.24.2.1), where a",
-    "module can give the bytes of the buffer itself. A std module is not part of the compiler",
-    "binary, so the md5 guard reads the copy of the module in the standard root of the debug",
-    "preset, and the build copies it there itself. The stage runs run/stdlib/179, which links a",
-    "memcpy that stops the run for overlapping ranges. The table runs in the VM with the default",
-    "runner after `tools/vm configure` and `tools/vm build`."
+    "The table of std.rt. One row gives the copy of rt.buffer_append back to memcpy, whose ranges",
+    "must not overlap (ISO C11 7.24.2.1), where a module can give the bytes of the buffer itself. The",
+    "rows D12.2-rt-* hold the entries `regrow` and `regrow_move`: each test of `regrow`, the order of",
+    "its tests, the copy of the elements and the zero stores into the owner words of the old",
+    "elements. A std module is not part of the compiler binary, so the md5 guard reads the copy of",
+    "the module in the standard root of the debug preset, and the build copies it there itself. The",
+    "first stage runs run/stdlib/179, which links a memcpy that stops the run for overlapping ranges.",
+    "The second stage runs each program of test/lang whose name holds `regrow`: run/stdlib/181 to 185",
+    "call the two entries directly. The table runs in the VM with the default runner after `tools/vm",
+    "configure` and `tools/vm build`."
   ],
   "sources": [
     "std/rt.ft"
@@ -17,6 +20,10 @@
     {
       "name": "the overlap test",
       "command": "python3 test/lang/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --cc /usr/bin/clang --target x86_64-linux-gnu run/stdlib/179"
+    },
+    {
+      "name": "the regrow programs",
+      "command": "python3 test/lang/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --cc /usr/bin/clang --target x86_64-linux-gnu -j 4 regrow"
     }
   ],
   "mutations": [
@@ -26,6 +33,104 @@
       "what": "buffer_append copies with memcpy, which takes no overlapping ranges",
       "old": "    libc.memmove(room.ptr, bytes.ptr, n);",
       "new": "    libc.memcpy(room.ptr, bytes.ptr, n);"
+    },
+    {
+      "decision": "D12.2-rt-negative",
+      "file": "std/rt.ft",
+      "what": "a negative count is no error of its own",
+      "old": "    if (is_signed && count > I64_MAX) {",
+      "new": "    if (false) {"
+    },
+    {
+      "decision": "D12.2-rt-signed",
+      "file": "std/rt.ft",
+      "what": "an unsigned count above the largest `i64` reads as negative",
+      "old": "    if (is_signed && count > I64_MAX) {",
+      "new": "    if (count > I64_MAX) {"
+    },
+    {
+      "decision": "D12.2-rt-below",
+      "file": "std/rt.ft",
+      "what": "a count below the length passes",
+      "old": "    if (count < old_len) {",
+      "new": "    if (false) {"
+    },
+    {
+      "decision": "D12.2-rt-equal",
+      "file": "std/rt.ft",
+      "what": "a count that equals the length is an error",
+      "old": "    if (count < old_len) {",
+      "new": "    if (count <= old_len) {"
+    },
+    {
+      "decision": "D12.2-rt-operand",
+      "file": "std/rt.ft",
+      "what": "a null pointer with a length that is not 0 passes",
+      "old": "    if (old == null && old_len != 0) {",
+      "new": "    if (false) {"
+    },
+    {
+      "decision": "D12.2-rt-order-length",
+      "file": "std/rt.ft",
+      "what": "the size test comes before the length test",
+      "old": "    if (count < old_len) {\n        fail_begin(file, line, col, \"runtime error\");\n        message_str(\"regrow count \");\n        message_u64(count);\n        message_str(\" below length \");\n        message_u64(old_len);\n        fail_end();\n    }\n    if (elem_size != 0 && count > U64_MAX / elem_size) {\n        fail_runtime(file, line, col, \"allocation size overflow\");\n    }\n    if (old == null && old_len != 0) {\n        fail_runtime(file, line, col, \"invalid release\");\n    }\n",
+      "new": "    if (elem_size != 0 && count > U64_MAX / elem_size) {\n        fail_runtime(file, line, col, \"allocation size overflow\");\n    }\n    if (count < old_len) {\n        fail_begin(file, line, col, \"runtime error\");\n        message_str(\"regrow count \");\n        message_u64(count);\n        message_str(\" below length \");\n        message_u64(old_len);\n        fail_end();\n    }\n    if (old == null && old_len != 0) {\n        fail_runtime(file, line, col, \"invalid release\");\n    }\n"
+    },
+    {
+      "decision": "D12.2-rt-order-size",
+      "file": "std/rt.ft",
+      "what": "the operand test comes before the size test",
+      "old": "    if (elem_size != 0 && count > U64_MAX / elem_size) {\n        fail_runtime(file, line, col, \"allocation size overflow\");\n    }\n    if (old == null && old_len != 0) {\n        fail_runtime(file, line, col, \"invalid release\");\n    }\n    return alloc(elem_size, count, file, line, col);",
+      "new": "    if (old == null && old_len != 0) {\n        fail_runtime(file, line, col, \"invalid release\");\n    }\n    if (elem_size != 0 && count > U64_MAX / elem_size) {\n        fail_runtime(file, line, col, \"allocation size overflow\");\n    }\n    return alloc(elem_size, count, file, line, col);"
+    },
+    {
+      "decision": "D12.2-rt-order-operand",
+      "file": "std/rt.ft",
+      "what": "the operand test comes after the storage",
+      "old": "    if (old == null && old_len != 0) {\n        fail_runtime(file, line, col, \"invalid release\");\n    }\n    return alloc(elem_size, count, file, line, col);\n",
+      "new": "    void mut* own fresh = alloc(elem_size, count, file, line, col);\n    if (old == null && old_len != 0) {\n        fail_runtime(file, line, col, \"invalid release\");\n    }\n    return fresh;\n"
+    },
+    {
+      "decision": "D12.2-rt-copy",
+      "file": "std/rt.ft",
+      "what": "the new storage takes no element",
+      "old": "    libc.memcpy(room.ptr, old.ptr, old.len);\n    if (slots.len == 0 || elem_size == 0) {",
+      "new": "    if (slots.len == 0 || elem_size == 0) {"
+    },
+    {
+      "decision": "D12.2-rt-zero",
+      "file": "std/rt.ft",
+      "what": "an owner slot of an old element keeps its value",
+      "old": "                old[word + b] = 0;",
+      "new": "                old[word + b] = old[word + b];"
+    },
+    {
+      "decision": "D12.2-rt-zero-slots",
+      "file": "std/rt.ft",
+      "what": "only the first owner slot of an element takes the zero value",
+      "old": "            u64 word = start + slots[k];",
+      "new": "            u64 word = start + slots[0];"
+    },
+    {
+      "decision": "D12.2-rt-zero-elements",
+      "file": "std/rt.ft",
+      "what": "only the first old element takes the zero stores",
+      "old": "    for (u64 mut start = 0; start < old.len; start += elem_size) {",
+      "new": "    for (u64 mut start = 0; start < elem_size; start += elem_size) {"
+    },
+    {
+      "decision": "D12.2-rt-zero-word",
+      "file": "std/rt.ft",
+      "what": "a zero store covers one byte of an owner word",
+      "old": "            for (u64 mut b = 0; b < WORD_BYTES; b++) {",
+      "new": "            for (u64 mut b = 0; b < 1; b++) {"
+    },
+    {
+      "decision": "D12.2-rt-size-greatest",
+      "file": "std/rt.ft",
+      "what": "the greatest count that has a size is a size overflow",
+      "old": "    if (elem_size != 0 && count > U64_MAX / elem_size) {\n        fail_runtime(file, line, col, \"allocation size overflow\");\n    }\n    if (old == null && old_len != 0) {",
+      "new": "    if (elem_size != 0 && count >= U64_MAX / elem_size) {\n        fail_runtime(file, line, col, \"allocation size overflow\");\n    }\n    if (old == null && old_len != 0) {"
     }
   ]
 }

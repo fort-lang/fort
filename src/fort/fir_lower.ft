@@ -1801,6 +1801,9 @@ fn lower_into(lowerer mut* lw, ast.node* n, fir.place dst) bool {
             assign(lw, dst, fir.rvalue_use(lw->f, moved), n->loc);
             return true;
         }
+        if (regrow_call(n)) {
+            return lower_regrow(lw, n, dst);
+        }
         fir.rvalue mut r = fir.rvalue{};
         if (!call_rvalue(lw, n, &r)) {
             return false;
@@ -1864,6 +1867,49 @@ fn lower_new_span(lowerer mut* lw, ast.node* n, fir.place dst) bool {
     u32 first = fir.operand_push(lw->f, p);
     fir.operand_push(lw->f, size);
     assign(lw, dst, fir.rvalue_aggregate_new(n->ty, first, 2), n->loc);
+    return true;
+}
+
+// Whether `n` calls the universe function `regrow`, the one builtin whose value is an aggregate.
+fn regrow_call(ast.node* n) bool {
+    return builtin_call(n) && n->a->sym->name == "regrow";
+}
+
+// `regrow(s, n)` into `dst` (spec/fir.md 9.4, D12.2): `_s = move p` of the place of `move(lv)`,
+// or `_s = e` for an rvalue, before the count, so the count reads the place that the `move`
+// emptied. Then `_c = cast<i64>(n)` for a signed count or `_c = cast<u64>(n)` for an unsigned
+// count, `_p = regrow<T>(move _s, copy _c)`, `_u = cast<u64>(copy _c)` for a signed count, and
+// `dst = aggregate T mut@ own(move _p, copy _u)`. The runtime makes each test (D19.6), so the
+// lowering adds no `check`. Each statement stands at the name `regrow`, whose location a report
+// carries (D11.4).
+fn lower_regrow(lowerer mut* lw, ast.node* n, fir.place dst) bool {
+    diag.loc at = n->a->loc;
+    u32 mut held = 0;
+    if (!owning_temp(lw, ast.ast_child(n, 0), &held)) {
+        return false;
+    }
+    ast.node* amount = ast.ast_child(n, 1);
+    fir.operand mut raw = fir.operand{};
+    if (!lower_operand(lw, amount, &raw)) {
+        return false;
+    }
+    bool is_signed = prim.prim_is_signed(amount->ty->prim);
+    types.node* bits = u64_ty(lw);
+    types.node* mut wide = bits;
+    if (is_signed) {
+        wide = i64_ty(lw);
+    }
+    fir.operand count = into_temp(lw, wide, fir.rvalue_cast(lw->f, wide, raw), at);
+    fir.operand source = fir.operand_move(fir.place_local(held));
+    fir.rvalue storage = fir.rvalue_regrow(lw->f, n->ty->elem, source, count);
+    fir.operand p = into_temp(lw, fir.rvalue_type(lw->f, storage), storage, at);
+    fir.operand mut size = count;
+    if (is_signed) {
+        size = into_temp(lw, bits, fir.rvalue_cast(lw->f, bits, count), at);
+    }
+    u32 first = fir.operand_push(lw->f, p);
+    fir.operand_push(lw->f, size);
+    assign(lw, dst, fir.rvalue_aggregate_new(n->ty, first, 2), at);
     return true;
 }
 
@@ -2097,8 +2143,9 @@ fn lower_call_stmt(lowerer mut* lw, ast.node* n) bool {
 // ---- builtins ---------------------------------------------------------------------------------
 
 // The builtin call `n` as a statement: the print family, `assert`, `panic` and `del` (spec/fir.md
-// 9.4). `move` is the one other builtin. The checker refuses a `move` whose value no one reads
-// (D17.8), so a `move` statement here breaks the precondition.
+// 9.4). `move` and `regrow` are the other builtins. The checker refuses a `move` whose value no
+// one reads (D17.8) and a `regrow` whose value lands nowhere (D12.2), so either as a statement
+// here breaks the precondition.
 fn lower_builtin(lowerer mut* lw, ast.node* n) bool {
     string name = n->a->sym->name;
     bool out = name == "print" || name == "println";
