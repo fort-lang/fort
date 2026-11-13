@@ -1,0 +1,759 @@
+/// Implements the allocator of the runtime. `take` gives storage that no allocation held before,
+/// and `drop` releases one allocation. Released storage is dead: no later `take` gives it again,
+/// and its address range stays reserved (D10.9).
+// One thread uses the allocator, so it has no lock.
+//
+// The allocator reserves address ranges, and each of them is a segment: one mapping of 4 GiB
+// that nothing can access at first. A segment has exactly the bytes of libc.map_range, so the
+// bounds check of each index keeps each access of this module inside the mapping (D10.6). A
+// chunk is 2 MiB of a segment, a unit is 16 KiB and a granule is 16 bytes. The first unit of a
+// segment holds its top table: one word for each chunk. The frontier of a segment is its first
+// chunk that no allocation used. Only the current segment, the newest, gives new chunks. A small
+// allocation takes granules of the open chunk at the bump pointer, which only moves up. A large
+// allocation takes whole chunks at the frontier. A huge allocation needs more chunks than a
+// segment gives, and it takes a mapping of its own.
+//
+// The state of the allocator stands in the globals below, in the top table of each segment and
+// in the first 3 units of each small chunk. No state stands in the storage of an allocation, so
+// none stands in dead storage (D10.9 rule 1). `drop` reads the state of a chunk only when the
+// top table says that the chunk is a small chunk.
+//
+// A give-back takes the access to dead units away (`mprotect`) and then tells the system to
+// drop their pages (`madvise`). The order is fixed: a page that the system drops while a read
+// can still reach it reads as zero bytes, which is no result of D10.9 rule 2. The allocator
+// never maps over a range, and it unmaps a mapping only in the call that mapped it, before an
+// allocation takes storage of it. So no other object takes the address of an allocation.
+import std.libc;
+
+// ---- sizes --------------------------------------------------------------------------------
+
+// The bytes of a segment, 2^32, which are the bytes that libc.map_range holds, with its chunks
+// and its units.
+u64 SEGMENT_BYTES = 4294967296;
+u64 SEGMENT_CHUNKS = 2048;
+u64 SEGMENT_UNITS = 262144;
+
+// No request above 2^47 bytes gets storage: the address space of each target is no larger.
+u64 LIMIT_BYTES = 140737488355328;
+
+// What mmap gives when it fails.
+u64 MAP_FAILED = 18446744073709551615;
+
+// The count of the records. Each mapping has SEGMENT_BYTES or more, so an address space of 2^47
+// bytes holds no more mappings than records.
+u64 SEGMENTS = 32768;
+
+// Shift counts between the sizes. A word is 8 bytes and a granule is 2 words.
+u64 GRANULE_BYTES_SHIFT = 4;
+u64 GRANULE_WORDS_SHIFT = 1;
+u64 UNIT_GRANULES_SHIFT = 10;
+u64 UNIT_WORDS_SHIFT = 11;
+u64 UNIT_BYTES_SHIFT = 14;
+u64 CHUNK_UNITS_SHIFT = 7;
+u64 CHUNK_GRANULES_SHIFT = 17;
+u64 CHUNK_WORDS_SHIFT = 18;
+u64 CHUNK_BYTES_SHIFT = 21;
+
+u64 GRANULE_BYTES_MASK = 15;
+u64 CHUNK_BYTES_MASK = 2097151;
+u64 CHUNK_UNITS = 128;
+u64 CHUNK_UNITS_MASK = 127;
+u64 CHUNK_GRANULES = 131072;
+
+// A bitmap word holds 64 bits. ONE is the lowest of them, with the type of a word.
+u64 BITS_SHIFT = 6;
+u64 BITS_MASK = 63;
+u64 ONE = 1;
+
+// The state of a small chunk takes its first 3 units, so the first granule of an allocation is
+// granule 3072, and the largest small allocation is the rest of a chunk.
+u64 STATE_UNITS = 3;
+u64 FIRST_GRANULE = 3072;
+u64 SMALL_GRANULES = 128000;
+
+// ---- the top table --------------------------------------------------------------------------
+
+// The word of a chunk in the top table. TABLE_NONE: nothing can access the chunk, because no
+// allocation used it or because the allocator gave it back. TABLE_SMALL: a small chunk.
+// TABLE_LATER: a chunk after the first of a live large allocation. TABLE_KEPT: a chunk of a dead
+// large allocation whose give-back did not succeed, so its storage stays as it is. A word of
+// TABLE_FIRST + n - 1: the first chunk of a live large allocation of n chunks.
+u64 TABLE_NONE = 0;
+u64 TABLE_SMALL = 1;
+u64 TABLE_LATER = 2;
+u64 TABLE_KEPT = 3;
+u64 TABLE_FIRST = 4;
+
+// ---- the state of a small chunk ---------------------------------------------------------------
+
+// Word offsets from the start of the chunk. LIVE_BITS: one bit for each granule, set where a
+// live allocation starts. END_BITS: one bit for each granule, set at the last granule of a live
+// allocation. UNIT_COUNTS: one word for each unit, the live allocations that lie in the unit or
+// in a part of it. GIVEN_BITS: one bit for each unit, set after its give-back. CHUNK_LIVE: the
+// live allocations of the chunk. CHUNK_PENDING: the units below the bump pointer with a count of
+// 0 and no give-back. CHUNK_TRY: the count of pending units at which the next give-back runs.
+u64 LIVE_BITS = 0;
+u64 END_BITS = 2048;
+u64 UNIT_COUNTS = 4096;
+u64 GIVEN_BITS = 4224;
+u64 CHUNK_LIVE = 4226;
+u64 CHUNK_PENDING = 4227;
+u64 CHUNK_TRY = 4228;
+
+// A chunk gives its dead units back when 8 more are pending than the last give-back left.
+u64 GIVE_BATCH = 8;
+
+// A hole is a run of units that nothing can access between two units that the program can
+// access. The system keeps a map entry for each side of a hole and limits the entries of one
+// process (65530 on Linux by default), so a give-back that makes one more hole than this limit
+// does not run, and its storage stays as it is.
+u64 HOLE_LIMIT = 8192;
+
+// ---- the state --------------------------------------------------------------------------------
+
+// One mapping of `bytes` bytes at `base`. A segment has SEGMENT_BYTES bytes: its `frontier` is
+// its first chunk that no allocation used, from 1 up, and `open` is the open small chunk when it
+// is a chunk of this segment, and 0 when it is not. The mapping of a live huge allocation has
+// the bytes of that allocation and a frontier of 0. A record with 0 bytes is the record of a
+// dead huge allocation, which names no mapping.
+struct segment {
+    libc.map_range mut* base;
+    u64 bytes;
+    u64 frontier;
+    u64 open;
+}
+
+// The records in the order of their mapping. `current` is 1 more than the index of the current
+// segment, and 0 when the allocator has no segment.
+segment[SEGMENTS] mut segments = {};
+u64 mut segment_count = 0;
+u64 mut current = 0;
+
+// The index of the segment of the open small chunk, and the first granule of that chunk that no
+// allocation used. No small chunk is open when the `open` of that segment is 0.
+u64 mut open_segment = 0;
+u64 mut bump = 0;
+
+// The bytes of the live allocations, as the allocator rounds them, and the holes.
+u64 mut live = 0;
+u64 mut holes = 0;
+
+// ---- the mappings ---------------------------------------------------------------------------
+
+// Maps `bytes` bytes with the access `prot` and returns them, or null when `bytes` is below
+// SEGMENT_BYTES or the system has no address range or no storage for them.
+// C call libc.mmap: the address is null and fd is -1, so C reads no storage of fort code. The
+// len is `bytes`, which the test above keeps at the 2^32 bytes of the result type or more, so
+// the whole pointee lies inside the mapping. The function tests the result against MAP_FAILED
+// before each other use. The flags have no MAP_FIXED, so C takes a range that no mapping holds,
+// and it changes no dead storage (D10.9 rule 6).
+fn map_bytes(u64 bytes, i32 prot) libc.map_range mut* {
+    if (bytes < SEGMENT_BYTES) {
+        return null;
+    }
+    libc.map_range mut* r = libc.mmap(null, bytes, prot, libc.MAP_PRIVATE | libc.MAP_ANON, -1, 0);
+    if (cast(r, u64) == MAP_FAILED) {
+        return null;
+    }
+    return r;
+}
+
+// Maps a new segment and makes it the current one: the program can read and write its top
+// table, and nothing can access the rest. Returns false, and changes nothing, when each record
+// is in use or the system refuses the mapping or the storage of the top table.
+// C call libc.mprotect: the address is the start of the mapping of SEGMENT_BYTES bytes that
+// map_bytes gave in this call, and the len is its first unit. No allocation took storage of the
+// mapping, so the range holds no dead storage (D10.9 rule 6).
+// C call libc.munmap: the range is the whole mapping that map_bytes gave in this call. No
+// allocation took storage of it, so it holds no dead storage and no live object (D10.9 rule 6).
+fn add_segment() bool {
+    if (segment_count == SEGMENTS) {
+        return false;
+    }
+    libc.map_range mut* r = map_bytes(SEGMENT_BYTES, libc.PROT_NONE);
+    if (r == null) {
+        return false;
+    }
+    if (libc.mprotect(cast(r, void*), ONE << UNIT_BYTES_SHIFT,
+                      libc.PROT_READ | libc.PROT_WRITE) != 0) {
+        libc.munmap(cast(r, void*), SEGMENT_BYTES);
+        return false;
+    }
+    segment mut* g = &segments[segment_count];
+    g->base = r;
+    g->bytes = SEGMENT_BYTES;
+    g->frontier = 1;
+    g->open = 0;
+    segment_count += 1;
+    current = segment_count;
+    return true;
+}
+
+// Returns the current segment when it has `count` chunks at its frontier, and a new segment
+// when it has not: the rest of the old segment then takes no later large allocation. Returns
+// null when a segment cannot hold `count` chunks or the allocator can add no segment.
+fn room(u64 count) segment mut* {
+    if (count >= SEGMENT_CHUNKS) {
+        return null;
+    }
+    if (current != 0) {
+        segment mut* g = &segments[current - 1];
+        if (count <= SEGMENT_CHUNKS - g->frontier) {
+            return g;
+        }
+    }
+    if (!add_segment()) {
+        return null;
+    }
+    return &segments[current - 1];
+}
+
+// Moves the frontier of the current segment up by `count` chunks, which the program can then
+// read and write, and returns the first of them. The function maps a new segment when the
+// current one has fewer chunks left. Returns 0, and moves no frontier, when the allocator has no
+// address range or the system refuses the storage.
+// C call libc.mprotect: the address is &h->words[i] for the first word of the frontier chunk,
+// which keeps the words from i to the end of the array of h (D9.8 rule 2), and the len is
+// `count` chunks: room tests frontier + count against SEGMENT_CHUNKS, the chunks of that array.
+// The range lies at and above the frontier, where the allocator gave no storage yet, so it
+// holds no dead storage (D10.9 rule 6).
+fn claim(u64 count) u64 {
+    segment mut* g = room(count);
+    if (g == null) {
+        return 0;
+    }
+    libc.map_range mut* h = g->base;
+    u64 first = g->frontier;
+    if (libc.mprotect(cast(&h->words[first << CHUNK_WORDS_SHIFT], void*),
+                      count << CHUNK_BYTES_SHIFT, libc.PROT_READ | libc.PROT_WRITE) != 0) {
+        return 0;
+    }
+    g->frontier = first + count;
+    return first;
+}
+
+// Whether the system gives the storage of `count` chunks now, at the frontier of the current
+// segment or of a new segment. No frontier moves, and nothing can access the range after the
+// call.
+// C call libc.mprotect x2: the address is &h->words[i] for the first word of the frontier chunk,
+// which keeps the words from i to the end of the array of h (D9.8 rule 2), and the len is
+// `count` chunks: room tests frontier + count against SEGMENT_CHUNKS, the chunks of that array.
+// The range lies at and above the frontier, where the allocator gave no storage yet, so it
+// holds no dead storage (D10.9 rule 6).
+fn can_claim(u64 count) bool {
+    segment mut* g = room(count);
+    if (g == null) {
+        return false;
+    }
+    libc.map_range mut* h = g->base;
+    u64 at = g->frontier << CHUNK_WORDS_SHIFT;
+    u64 len = count << CHUNK_BYTES_SHIFT;
+    if (libc.mprotect(cast(&h->words[at], void*), len, libc.PROT_READ | libc.PROT_WRITE) != 0) {
+        return false;
+    }
+    libc.mprotect(cast(&h->words[at], void*), len, libc.PROT_NONE);
+    return true;
+}
+
+// ---- give-back --------------------------------------------------------------------------------
+
+// Whether the program can access unit `unit` of the segment at `h`, a unit of a chunk from
+// chunk 1 up to the frontier. The units are numbered from the start of the segment.
+fn accessible(libc.map_range mut* h, u64 unit) bool {
+    u64 chunk = unit >> CHUNK_UNITS_SHIFT;
+    u64 word = h->words[chunk];
+    if (word == TABLE_NONE) {
+        return false;
+    }
+    if (word != TABLE_SMALL) {
+        return true;
+    }
+    u64 in_chunk = unit & CHUNK_UNITS_MASK;
+    u64 given = h->words[(chunk << CHUNK_WORDS_SHIFT) + GIVEN_BITS + (in_chunk >> BITS_SHIFT)];
+    return ((given >> (in_chunk & BITS_MASK)) & 1) == 0;
+}
+
+// Whether the unit before `first` is one that nothing can access. The unit before chunk 1
+// counts as one that the program can access, so the count of the holes is 1 too high for a
+// segment whose first allocation unit went back.
+fn hole_before(segment mut* g, u64 first) bool {
+    return first > CHUNK_UNITS && !accessible(g->base, first - 1);
+}
+
+// Whether unit `end` is one that nothing can access. The first unit of the frontier counts as
+// one that the program can access: in the current segment it is so after the next claim.
+fn hole_after(segment mut* g, u64 end) bool {
+    return end < (g->frontier << CHUNK_UNITS_SHIFT) && !accessible(g->base, end);
+}
+
+// Takes the access to the units of the segment at `h` from `first` to before `end` away and
+// tells the system to drop their pages. Returns false, and changes nothing, when the units are
+// no units of a segment or the system refuses.
+// C call libc.mprotect: the address is &h->words[i] for the first word of unit `first`, which
+// keeps the words from i to the end of the array of h (D9.8 rule 2), and the test above keeps
+// `end` at or below the units of that array. Each caller gives units that hold dead storage,
+// state of a chunk with no live allocation, or storage that no allocation used: the runtime
+// gives dead storage back and keeps the address range (D10.9 rule 6).
+// C call libc.madvise: the same range. Nothing can access it after the mprotect above, so no
+// later read of it gives a changed byte: each read stops with a memory fault (D10.9 rule 2).
+fn seal(libc.map_range mut* h, u64 first, u64 end) bool {
+    if (first >= end || end > SEGMENT_UNITS) {
+        return false;
+    }
+    u64 at = first << UNIT_WORDS_SHIFT;
+    u64 len = (end - first) << UNIT_BYTES_SHIFT;
+    if (libc.mprotect(cast(&h->words[at], void*), len, libc.PROT_NONE) != 0) {
+        return false;
+    }
+    libc.madvise(cast(&h->words[at], void*), len, libc.MADV_DISCARD);
+    return true;
+}
+
+// Gives the units of segment `g` from `first` to before `end` back, each of which the program
+// can access. Returns false, and changes nothing, when the give-back makes a hole above
+// HOLE_LIMIT or the system refuses it. The caller then records that nothing can access the
+// units.
+fn give_units(segment mut* g, u64 first, u64 end) bool {
+    bool before = hole_before(g, first);
+    bool after = hole_after(g, end);
+    bool makes_hole = !before && !after;
+    if (makes_hole && holes >= HOLE_LIMIT) {
+        return false;
+    }
+    if (!seal(g->base, first, end)) {
+        return false;
+    }
+    if (makes_hole) {
+        holes += 1;
+    } else if (before && after && holes > 0) {
+        // The run joins the hole before it and the hole after it.
+        holes -= 1;
+    }
+    return true;
+}
+
+// Whether unit `unit` of the small chunk at word `chunk_word` is dead and not given back.
+fn pending_unit(libc.map_range mut* h, u64 chunk_word, u64 unit) bool {
+    if (h->words[chunk_word + UNIT_COUNTS + unit] != 0) {
+        return false;
+    }
+    u64 given = h->words[chunk_word + GIVEN_BITS + (unit >> BITS_SHIFT)];
+    return ((given >> (unit & BITS_MASK)) & 1) == 0;
+}
+
+// Gives back each run of pending units of small chunk `chunk` of segment `g` below unit
+// `limit`, and sets the count of pending units at which the next give-back of the chunk runs.
+fn give_runs(segment mut* g, u64 chunk, u64 limit) void {
+    libc.map_range mut* h = g->base;
+    u64 chunk_word = chunk << CHUNK_WORDS_SHIFT;
+    u64 chunk_unit = chunk << CHUNK_UNITS_SHIFT;
+    u64 mut kept = 0;
+    u64 mut unit = STATE_UNITS;
+    while (unit < limit) {
+        if (!pending_unit(h, chunk_word, unit)) {
+            unit += 1;
+            continue;
+        }
+        u64 first = unit;
+        while (unit < limit && pending_unit(h, chunk_word, unit)) {
+            unit += 1;
+        }
+        if (!give_units(g, chunk_unit + first, chunk_unit + unit)) {
+            kept += unit - first;
+            continue;
+        }
+        u64 mut given = first;
+        while (given < unit) {
+            h->words[chunk_word + GIVEN_BITS + (given >> BITS_SHIFT)] |= ONE << (given & BITS_MASK);
+            given += 1;
+        }
+    }
+    h->words[chunk_word + CHUNK_PENDING] = kept;
+    h->words[chunk_word + CHUNK_TRY] = kept + GIVE_BATCH;
+}
+
+// Gives small chunk `chunk` of segment `g` back with its state: a closed chunk with no live
+// allocation. When the give-back does not run, the chunk stays a small chunk with no start of a
+// live allocation.
+fn give_chunk(segment mut* g, u64 chunk) void {
+    libc.map_range mut* h = g->base;
+    u64 chunk_word = chunk << CHUNK_WORDS_SHIFT;
+    u64 first = chunk << CHUNK_UNITS_SHIFT;
+    u64 end = first + CHUNK_UNITS;
+    bool before = hole_before(g, first);
+    bool after = hole_after(g, end);
+    // The holes that start in the chunk now, and the hole after the chunk when the last unit of
+    // the chunk is no part of it: the give-back joins each of them into one run.
+    u64 mut joined = 0;
+    bool mut in_hole = before;
+    u64 mut unit = 0;
+    while (unit < CHUNK_UNITS) {
+        u64 given = h->words[chunk_word + GIVEN_BITS + (unit >> BITS_SHIFT)];
+        bool is_given = ((given >> (unit & BITS_MASK)) & 1) != 0;
+        if (is_given && !in_hole) {
+            joined += 1;
+        }
+        in_hole = is_given;
+        unit += 1;
+    }
+    if (after && !in_hole) {
+        joined += 1;
+    }
+    u64 made = before ? 0 : 1;
+    if (made > joined && holes >= HOLE_LIMIT) {
+        return;
+    }
+    if (!seal(h, first, end)) {
+        return;
+    }
+    h->words[chunk] = TABLE_NONE;
+    if (holes + made >= joined) {
+        holes = holes + made - joined;
+    } else {
+        holes = 0;
+    }
+}
+
+// ---- small allocations --------------------------------------------------------------------------
+
+// Closes small chunk `chunk` of segment `g`, the open chunk: no later allocation takes storage
+// of it. Its units from the bump pointer up that hold no live allocation become pending.
+fn close_chunk(segment mut* g, u64 chunk) void {
+    libc.map_range mut* h = g->base;
+    u64 chunk_word = chunk << CHUNK_WORDS_SHIFT;
+    if (h->words[chunk_word + CHUNK_LIVE] == 0) {
+        give_chunk(g, chunk);
+        return;
+    }
+    u64 mut pending = h->words[chunk_word + CHUNK_PENDING];
+    u64 mut unit = bump >> UNIT_GRANULES_SHIFT;
+    while (unit < CHUNK_UNITS) {
+        if (h->words[chunk_word + UNIT_COUNTS + unit] == 0) {
+            pending += 1;
+        }
+        unit += 1;
+    }
+    h->words[chunk_word + CHUNK_PENDING] = pending;
+    if (pending >= h->words[chunk_word + CHUNK_TRY]) {
+        give_runs(g, chunk, CHUNK_UNITS);
+    }
+}
+
+// Opens a new small chunk at the frontier of the current segment and closes the open one.
+// Returns false, and keeps the open chunk, when the allocator has no address range or the
+// system refuses the storage.
+fn open_chunk() bool {
+    u64 chunk = claim(1);
+    if (chunk == 0) {
+        return false;
+    }
+    segment mut* g = &segments[current - 1];
+    // The table word comes first: the close of the old chunk reads it for the unit after that
+    // chunk.
+    g->base->words[chunk] = TABLE_SMALL;
+    g->base->words[(chunk << CHUNK_WORDS_SHIFT) + CHUNK_TRY] = GIVE_BATCH;
+    segment mut* old = &segments[open_segment];
+    if (old->open != 0) {
+        close_chunk(old, old->open);
+        old->open = 0;
+    }
+    open_segment = current - 1;
+    g->open = chunk;
+    bump = FIRST_GRANULE;
+    return true;
+}
+
+// Takes `granules` granules of the open chunk, at most SMALL_GRANULES, and returns the storage.
+fn take_small(u64 granules) void mut* {
+    if (segments[open_segment].open == 0 || granules > CHUNK_GRANULES - bump) {
+        if (!open_chunk()) {
+            return null;
+        }
+    }
+    segment mut* g = &segments[open_segment];
+    libc.map_range mut* h = g->base;
+    u64 chunk_word = g->open << CHUNK_WORDS_SHIFT;
+    u64 first = bump;
+    u64 last = first + granules - 1;
+    h->words[chunk_word + LIVE_BITS + (first >> BITS_SHIFT)] |= ONE << (first & BITS_MASK);
+    h->words[chunk_word + END_BITS + (last >> BITS_SHIFT)] |= ONE << (last & BITS_MASK);
+    u64 last_unit = last >> UNIT_GRANULES_SHIFT;
+    u64 mut unit = first >> UNIT_GRANULES_SHIFT;
+    while (unit <= last_unit) {
+        h->words[chunk_word + UNIT_COUNTS + unit] += 1;
+        unit += 1;
+    }
+    h->words[chunk_word + CHUNK_LIVE] += 1;
+    bump = last + 1;
+    live += granules << GRANULE_BYTES_SHIFT;
+    return cast(&h->words[chunk_word + (first << GRANULE_WORDS_SHIFT)], void mut*);
+}
+
+// Releases the allocation that starts at granule `first` of small chunk `chunk` of segment `g`.
+// Returns false when no live allocation starts there.
+fn drop_small(segment mut* g, u64 chunk, u64 first) bool {
+    libc.map_range mut* h = g->base;
+    u64 chunk_word = chunk << CHUNK_WORDS_SHIFT;
+    u64 start_at = chunk_word + LIVE_BITS + (first >> BITS_SHIFT);
+    u64 start_bit = ONE << (first & BITS_MASK);
+    if ((h->words[start_at] & start_bit) == 0) {
+        return false;
+    }
+    h->words[start_at] &= ~start_bit;
+    // The end bit of the allocation is the first end bit at or after its start: each allocation
+    // before it ends before it, and each allocation after it starts after it.
+    u64 mut end_at = chunk_word + END_BITS + (first >> BITS_SHIFT);
+    u64 mut ends = h->words[end_at] & ~(start_bit - 1);
+    while (ends == 0) {
+        end_at += 1;
+        ends = h->words[end_at];
+    }
+    u64 mut end_bit = 0;
+    while (((ends >> end_bit) & 1) == 0) {
+        end_bit += 1;
+    }
+    h->words[end_at] &= ~(ONE << end_bit);
+    u64 last = ((end_at - chunk_word - END_BITS) << BITS_SHIFT) + end_bit;
+    live -= (last - first + 1) << GRANULE_BYTES_SHIFT;
+    // A unit below the limit takes no later allocation, so it is dead when its count is 0.
+    bool is_open = chunk == g->open;
+    u64 limit = is_open ? bump >> UNIT_GRANULES_SHIFT : CHUNK_UNITS;
+    u64 last_unit = last >> UNIT_GRANULES_SHIFT;
+    u64 mut pending = h->words[chunk_word + CHUNK_PENDING];
+    u64 mut unit = first >> UNIT_GRANULES_SHIFT;
+    while (unit <= last_unit) {
+        u64 count = h->words[chunk_word + UNIT_COUNTS + unit] - 1;
+        h->words[chunk_word + UNIT_COUNTS + unit] = count;
+        if (count == 0 && unit < limit) {
+            pending += 1;
+        }
+        unit += 1;
+    }
+    h->words[chunk_word + CHUNK_PENDING] = pending;
+    u64 left = h->words[chunk_word + CHUNK_LIVE] - 1;
+    h->words[chunk_word + CHUNK_LIVE] = left;
+    if (left == 0 && !is_open) {
+        give_chunk(g, chunk);
+    } else if (pending >= h->words[chunk_word + CHUNK_TRY]) {
+        give_runs(g, chunk, limit);
+    }
+    return true;
+}
+
+// ---- large allocations --------------------------------------------------------------------------
+
+// Takes `count` whole chunks at the frontier of the current segment, fewer than a segment has,
+// and returns the storage.
+fn take_large(u64 count) void mut* {
+    u64 first = claim(count);
+    if (first == 0) {
+        return null;
+    }
+    libc.map_range mut* h = segments[current - 1].base;
+    h->words[first] = TABLE_FIRST + count - 1;
+    u64 mut chunk = first + 1;
+    while (chunk < first + count) {
+        h->words[chunk] = TABLE_LATER;
+        chunk += 1;
+    }
+    live += count << CHUNK_BYTES_SHIFT;
+    return cast(&h->words[first << CHUNK_WORDS_SHIFT], void mut*);
+}
+
+// Releases the large allocation of `count` chunks that starts at chunk `first` of segment `g`,
+// and gives its storage back. When the give-back does not run, the storage stays as it is.
+fn drop_large(segment mut* g, u64 first, u64 count) void {
+    live -= count << CHUNK_BYTES_SHIFT;
+    u64 mut word = TABLE_KEPT;
+    if (give_units(g, first << CHUNK_UNITS_SHIFT, (first + count) << CHUNK_UNITS_SHIFT)) {
+        word = TABLE_NONE;
+    }
+    u64 mut chunk = first;
+    while (chunk < first + count) {
+        g->base->words[chunk] = word;
+        chunk += 1;
+    }
+}
+
+// Releases the allocation that starts `offset` bytes after the start of segment `g`. Returns
+// false, and changes nothing, when no live allocation starts there.
+fn drop_at(segment mut* g, u64 offset) bool {
+    u64 chunk = offset >> CHUNK_BYTES_SHIFT;
+    if (chunk == 0 || chunk >= g->frontier) {
+        return false;
+    }
+    u64 word = g->base->words[chunk];
+    u64 in_chunk = offset & CHUNK_BYTES_MASK;
+    if (word >= TABLE_FIRST) {
+        if (in_chunk != 0) {
+            return false;
+        }
+        drop_large(g, chunk, word - TABLE_FIRST + 1);
+        return true;
+    }
+    if (word != TABLE_SMALL || (in_chunk & GRANULE_BYTES_MASK) != 0) {
+        return false;
+    }
+    return drop_small(g, chunk, in_chunk >> GRANULE_BYTES_SHIFT);
+}
+
+// ---- huge allocations ---------------------------------------------------------------------------
+
+// Maps `count` chunks, SEGMENT_CHUNKS or more, that the program can read and write, makes their
+// record and returns the storage. Returns null when each record is in use or the system refuses
+// the mapping.
+fn take_huge(u64 count) void mut* {
+    if (segment_count == SEGMENTS) {
+        return null;
+    }
+    u64 bytes = count << CHUNK_BYTES_SHIFT;
+    libc.map_range mut* r = map_bytes(bytes, libc.PROT_READ | libc.PROT_WRITE);
+    if (r == null) {
+        return null;
+    }
+    segment mut* g = &segments[segment_count];
+    g->base = r;
+    g->bytes = bytes;
+    g->frontier = 0;
+    g->open = 0;
+    segment_count += 1;
+    live += bytes;
+    return cast(r, void mut*);
+}
+
+// Releases the huge allocation of record `s` and gives its storage back. When the system
+// refuses the give-back, the storage stays as it is. The mapping stays in each case, so no
+// later mapping takes its address range. The record names no mapping after the call, and the
+// last records that name none leave the list.
+// C call libc.mprotect: the range is the whole mapping of the record, the `bytes` bytes at
+// `base` that map_bytes gave to take_huge. Its one allocation is dead: the runtime gives dead
+// storage back and keeps the address range (D10.9 rule 6).
+// C call libc.madvise: the same range. Nothing can access it after the mprotect above, so no
+// later read of it gives a changed byte: each read stops with a memory fault (D10.9 rule 2).
+fn drop_huge(u64 s) void {
+    segment mut* g = &segments[s];
+    live -= g->bytes;
+    if (libc.mprotect(cast(g->base, void*), g->bytes, libc.PROT_NONE) == 0) {
+        libc.madvise(cast(g->base, void*), g->bytes, libc.MADV_DISCARD);
+    }
+    g->base = null;
+    g->bytes = 0;
+    while (segment_count > 0 && segments[segment_count - 1].bytes == 0) {
+        segment_count -= 1;
+    }
+}
+
+// Whether the system gives a mapping of `count` chunks, SEGMENT_CHUNKS or more, now. The call
+// leaves no mapping.
+// C call libc.munmap: the range is the whole mapping that map_bytes gave in this call. No
+// allocation took storage of it, so it holds no dead storage and no live object (D10.9 rule 6).
+fn can_map(u64 count) bool {
+    if (segment_count == SEGMENTS) {
+        return false;
+    }
+    u64 bytes = count << CHUNK_BYTES_SHIFT;
+    libc.map_range mut* r = map_bytes(bytes, libc.PROT_READ | libc.PROT_WRITE);
+    if (r == null) {
+        return false;
+    }
+    libc.munmap(cast(r, void*), bytes);
+    return true;
+}
+
+// ---- the interface --------------------------------------------------------------------------
+
+// The granules of an allocation of `size` bytes: `size` rounded up to 16 bytes, and 1 granule
+// for a size of 0.
+fn granules_of(u64 size) u64 {
+    u64 granules = (size + GRANULE_BYTES_MASK) >> GRANULE_BYTES_SHIFT;
+    return granules == 0 ? 1 : granules;
+}
+
+// The chunks of a large or a huge allocation of `granules` granules.
+fn chunks_of(u64 granules) u64 {
+    return (granules + CHUNK_GRANULES - 1) >> CHUNK_GRANULES_SHIFT;
+}
+
+/// Gives the storage of a new allocation of `size` bytes, or of 1 byte when `size` is 0. The
+/// storage holds zero bytes, starts at a multiple of 16 and is no storage of an earlier
+/// allocation. Returns null when `size` is above LIMIT_BYTES, when the allocator has no address
+/// range left or when the system refuses the storage.
+fn take(u64 size) void mut* {
+    if (size > LIMIT_BYTES) {
+        return null;
+    }
+    u64 granules = granules_of(size);
+    if (granules <= SMALL_GRANULES) {
+        return take_small(granules);
+    }
+    u64 count = chunks_of(granules);
+    if (count < SEGMENT_CHUNKS) {
+        return take_large(count);
+    }
+    return take_huge(count);
+}
+
+/// Releases the allocation that starts at `p`, and returns true. Returns false, and changes
+/// nothing, when no live allocation of `take` starts at `p`: `p` is null, an address inside an
+/// allocation, an address of dead storage, or an address that `take` did not give (D10.9 rule 4).
+/// The storage is dead after the release: a later read of it gives the bytes that it held last
+/// or stops the program with a memory fault.
+fn drop(void* p) bool {
+    u64 address = cast(p, u64);
+    // The newest record comes first: a program releases a new allocation more often.
+    u64 mut s = segment_count;
+    while (s > 0) {
+        s -= 1;
+        segment mut* g = &segments[s];
+        u64 offset = address -% cast(g->base, u64);
+        if (offset >= g->bytes) {
+            continue;
+        }
+        if (g->frontier != 0) {
+            return drop_at(g, offset);
+        }
+        // The mapping of a huge allocation: the allocation starts at its first byte.
+        if (offset != 0) {
+            return false;
+        }
+        drop_huge(s);
+        return true;
+    }
+    return false;
+}
+
+/// Reports whether `take(size)` gives storage now. It takes no storage.
+fn can_take(u64 size) bool {
+    if (size > LIMIT_BYTES) {
+        return false;
+    }
+    u64 granules = granules_of(size);
+    if (granules <= SMALL_GRANULES) {
+        if (segments[open_segment].open != 0 && granules <= CHUNK_GRANULES - bump) {
+            return true;
+        }
+        return can_claim(1);
+    }
+    u64 count = chunks_of(granules);
+    if (count < SEGMENT_CHUNKS) {
+        return can_claim(count);
+    }
+    return can_map(count);
+}
+
+/// Returns the bytes of the live allocations. An allocation counts with the bytes that the
+/// allocator keeps for it (kept_bytes).
+fn live_bytes() u64 {
+    return live;
+}
+
+/// Returns the bytes that the allocator keeps for an allocation of `size` bytes: `size` rounded
+/// up to 16 bytes and at least 16 bytes, or rounded up to 2 MiB when it is above 2048000 bytes.
+/// `size` is at most LIMIT_BYTES.
+fn kept_bytes(u64 size) u64 {
+    u64 granules = granules_of(size);
+    if (granules > SMALL_GRANULES) {
+        return chunks_of(granules) << CHUNK_BYTES_SHIFT;
+    }
+    return granules << GRANULE_BYTES_SHIFT;
+}

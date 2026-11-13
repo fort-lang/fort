@@ -16,8 +16,8 @@ import fort.fir;
 import run_env;
 
 // The cases of the group heap: `new` and `del`, `calloc` and `free`.
-string[92] HEAP = {
-    "import extern; import std.libc;",
+string[116] HEAP = {
+    "import extern; import std.libc; import std.heap;",
     "struct node {",
     "    i64 value;",
     "    node mut* own next;",
@@ -41,6 +41,7 @@ string[92] HEAP = {
     "}",
     "fn read_after_del() i32 {",
     "    i32 mut* own p = new(i32);",
+    "    *p = 7;",
     "    i32* q = p;",
     "    del(p);",
     "    return *q; // after del",
@@ -108,6 +109,29 @@ string[92] HEAP = {
     "        head = move(rest);",
     "    }",
     "    return sum;",
+    "}",
+    "fn store_after_del() i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    del(p);",
+    "    *q = 9;",
+    "    return *q;",
+    "}",
+    "fn live_steps(i64 count) u64 {",
+    "    u64 before = heap.live_bytes();",
+    "    u8 mut@ own s = new(u8, count);",
+    "    u64 held = heap.live_bytes() - before;",
+    "    del(s);",
+    "    if (heap.live_bytes() != before) {",
+    "        return 1;",
+    "    }",
+    "    return held;",
+    "}",
+    "fn can_take(u64 size) bool {",
+    "    return heap.can_take(size);",
+    "}",
+    "fn drop_null() bool {",
+    "    return heap.drop(null);",
     "}",
 };
 
@@ -626,9 +650,11 @@ string[4] FAILS = {
     "}",
 };
 
-// `new` reaches `std.rt.alloc` and the extern `calloc`, and `del` reaches `std.rt.free` and
-// `free`. An allocation is a new range that no later allocation takes. A release of an
-// address that starts no live allocation and a load after a release end the run.
+// `new` reaches `std.rt.alloc` and `std.heap.take`, and `del` reaches `std.rt.release` and
+// `std.heap.drop`. An allocation is a new range that no later allocation takes. A load after a
+// release gives the value that the storage held last (D10.9 rule 2). A release of an address
+// that starts no live allocation is the runtime error `invalid release` at the `del` (D10.9
+// rule 4).
 fn heap(run_env.env mut* e) void {
     run_env.check(e, HEAP[..]);
     fir.module mut* own m = run_env.parse_made(e, HEAP_LOWERED[..]);
@@ -637,12 +663,11 @@ fn heap(run_env.env mut* e) void {
     run_env.expect_line(run_env.run_in(e, m, "new_and_del", a1[..0]), "return i32 5");
     run_env.expect_line(run_env.run_in(e, m, "del_empties", a1[..0]), "return true");
     run_env.expect_line(run_env.run_in(e, m, "del_null", a1[..0]), "return true");
-    run_env.expect_line(run_env.run_in(e, m, "read_after_del", a1[..0]),
-                        "fault invalid access at 27:12");
+    run_env.expect_line(run_env.run_in(e, m, "read_after_del", a1[..0]), "return i32 7");
     run_env.expect_line(run_env.run_in(e, m, "zero_count", a1[..0]), "return u64 0");
-    // the compiler has no storage for 2^62 bytes, so `calloc` gives null
+    // 2^62 bytes are above the address range of `std.heap`, so `take` gives null
     string[2] w2 = {
-        "stderr \"39:21: out of memory\\x0A\"",
+        "stderr \"40:21: out of memory\\x0A\"",
         "abort",
     };
     run_env.expect(run_env.run_in(e, m, "out_of_memory", a1[..0]), w2[..]);
@@ -653,11 +678,42 @@ fn heap(run_env.env mut* e) void {
     run_env.expect_line(run_env.run_in(e, m, "never_reused", a1[..0]), "return true");
     // the frame of a second call takes a new range, also after the first frame ended
     run_env.expect_line(run_env.run_in(e, m, "two_frames", a1[..0]), "return true");
-    // the second `del` frees the released allocation, in the `free` of std.rt
-    run_env.expect_line(run_env.run_in(e, m, "main.twin", a1[..0]),
-                        "fault invalid release at 116:14");
-    run_env.expect_line(run_env.run_in(e, m, "main.interior", a1[..0]),
-                        "fault invalid release at 116:14");
+    // the second `del` releases the released allocation: the error names that `del`
+    string[2] w2a = {
+        "stderr \"84:5: invalid release\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, m, "main.twin", a1[..0]), w2a[..]);
+    // the address after the first byte of an allocation starts no allocation
+    string[2] w2b = {
+        "stderr \"91:5: invalid release\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, m, "main.interior", a1[..0]), w2b[..]);
+    // a store into dead storage changes the value that the storage held last
+    run_env.expect_line(run_env.run_in(e, m, "store_after_del", a1[..0]), "return i32 9");
+    // `live_bytes` counts the bytes that the allocator keeps for each live allocation: 16 for
+    // an allocation of 0 or of 16 bytes, 32 for 17 bytes, and 2 MiB for each started 2 MiB above
+    // 2048000 bytes. A `del` takes them from the count.
+    u64[1] l0 = {0};
+    run_env.expect_line(run_env.run_in(e, m, "live_steps", l0[..1]), "return u64 16");
+    u64[1] l1 = {16};
+    run_env.expect_line(run_env.run_in(e, m, "live_steps", l1[..1]), "return u64 16");
+    u64[1] l2 = {17};
+    run_env.expect_line(run_env.run_in(e, m, "live_steps", l2[..1]), "return u64 32");
+    u64[1] l3 = {2048000};
+    run_env.expect_line(run_env.run_in(e, m, "live_steps", l3[..1]), "return u64 2048000");
+    u64[1] l4 = {2048001};
+    run_env.expect_line(run_env.run_in(e, m, "live_steps", l4[..1]), "return u64 2097152");
+    // no allocation is above 2^47 bytes, the limit of the allocator
+    u64[1] c0 = {0};
+    run_env.expect_line(run_env.run_in(e, m, "can_take", c0[..1]), "return true");
+    u64[1] c1 = {4096};
+    run_env.expect_line(run_env.run_in(e, m, "can_take", c1[..1]), "return true");
+    u64[1] c2 = {140737488355329};
+    run_env.expect_line(run_env.run_in(e, m, "can_take", c2[..1]), "return false");
+    // null starts no allocation
+    run_env.expect_line(run_env.run_in(e, m, "drop_null", a1[..0]), "return false");
     u64[1] a3 = {0};
     run_env.expect_line(run_env.run_in(e, m, "list_sum", a3[..1]), "return i64 0");
     u64[1] a4 = {1};

@@ -371,11 +371,13 @@ fn del_of_an_lvalue_frees_the_pointer_and_empties_the_storage() void {
     assert(open_own(e));
     // The emptying is not an assignment and carries no overwrite check, which
     // is what makes `del(v); v = new(...)` pass one.
-    gen_env.expect_in(gen_env.main_text(e),
-                      gen_env.join4(e, "  %t6 = load ptr, ptr %p.0, align 8\n",
-                                    "  call void @\"std.rt.free\"(ptr %t6)\n",
-                                    "  store ptr null, ptr %p.0, align 8\n",
-                                    "  %t7 = getelementptr inbounds %fort.span, ptr %s.1, "));
+    string[4] want = {
+        "  %t6 = load ptr, ptr %p.0, align 8\n",
+        "  call void @\"std.rt.release\"(ptr %t6, ptr @.file.0, i32 5, i32 5)\n",
+        "  store ptr null, ptr %p.0, align 8\n",
+        "  %t7 = getelementptr inbounds %fort.span, ptr %s.1, ",
+    };
+    gen_env.expect_in(gen_env.main_text(e), gen_env.join_lines(e, want[..]));
 }
 
 fn move_of_an_aggregate_goes_through_an_intermediate() void {
@@ -479,7 +481,7 @@ fn del_of_a_span_frees_its_pointer_and_zeroes_its_header() void {
     string[4] want = {
         "  %t7 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n",
         "  %t8 = load ptr, ptr %t7, align 8\n",
-        "  call void @\"std.rt.free\"(ptr %t8)\n",
+        "  call void @\"std.rt.release\"(ptr %t8, ptr @.file.0, i32 6, i32 5)\n",
         "  call void @llvm.memset.p0.i64(ptr align 8 %s.1, i8 0, i64 16, i1 false)\n",
     };
     gen_env.expect_in(gen_env.main_text(e), gen_env.join_lines(e, want[..]));
@@ -491,12 +493,12 @@ fn del_of_an_rvalue_stores_nothing() void {
     assert(open_own(e));
     // `del` empties storage, and an `own` rvalue -- here the result of `new`
     // -- designates none, so it is freed and nothing is stored.
-    gen_env.expect_in(
-        gen_env.main_text(e),
-        gen_env.join3(e,
-                      "  %t9 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, ",
-                      "i32 7, i32 9)\n",
-                      "  call void @\"std.rt.free\"(ptr %t9)\n  %t10 = load ptr"));
+    string[3] want = {
+        "  %t9 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, i32 7, i32 9)\n",
+        "  call void @\"std.rt.release\"(ptr %t9, ptr @.file.0, i32 7, i32 5)\n",
+        "  %t10 = load ptr",
+    };
+    gen_env.expect_in(gen_env.main_text(e), gen_env.join_lines(e, want[..]));
 }
 
 fn move_of_a_scalar_reads_the_value_before_it_empties_the_operand() void {

@@ -161,10 +161,17 @@ so each import has one reading (`notes/style.md` 3.1 rule 1).
   a call of a listed extern in another form, ends the run as `outside`, which is no oracle case.
   When the oracle keeps the output of a run, a `write` to a descriptor other than 1 and 2 also
   ends the run as `outside`.
+- A model of the allocator of the runtime, and not the allocator. The run models the functions
+  `take`, `drop`, `can_take` and `live_bytes` of `std.heap` (`fir.md` 11, `stdlib.md` 2.16), so
+  the `std.rt.alloc` of an `alloc` and the `std.rt.release` of a `del` run as in a build. A `del`
+  of an address that starts no live allocation of `take` ends the run with the runtime error
+  `invalid release` (D10.9 rule 4).
 - A call of `exit` ends the run at once, with no `leak at exit` test. That test runs only when the
   entry `main` returns.
 - The memory: a 64-bit address space that the interpreter never reuses. Each global, frame local
   and allocation gets a new range. A pointer is an address, so a `cast` to `u64` works (D3.14).
+  A released allocation of the runtime keeps its bytes, so a load or a store in it reads or
+  changes the value that the storage held last (D10.9 rule 2).
 
 ### 3.3 The shadow state and the tags
 

@@ -11,11 +11,19 @@ is no case of the oracle. For each other program the script builds the program i
 mode with the same flags, and runs it with the same arguments and stdin. The two must give the
 same stdout, the same stderr and the same status.
 
-With `--events` the interpreter also reports the ownership events of each run (`--fir-events`,
-spec/ownership-design.md 3.4). The comparison of stderr leaves the event lines out, and the script
-prints the count of the programs that run with no event and each program with its events. A
-correct program makes no event, so each program with events must stand in EXPECTED_EVENTS with
-its defect and the exact lines of its events, and each program there must make them when it runs.
+One difference is no difference (spec/ownership-design.md 17, row 5; D10.9 rule 2). An access to
+dead storage gives the value that the storage held last, or the program stops with a memory
+fault. The interpreter keeps the bytes of dead storage and reports the access as the event `use
+after release`. So when the checked build stops with SIGSEGV or SIGBUS, and the interpreter
+reports that event, the stdout and the stderr of the checked build must each be a start of those
+of the interpreter: a memory fault flushes no buffered output.
+
+The interpreter always reports the ownership events of each run (`--fir-events`,
+spec/ownership-design.md 3.4), and the comparison of stderr leaves the event lines out. With
+`--events` the script prints the count of the programs that run with no event and each program
+with its events. A correct program makes no event, so each program with events must stand in
+EXPECTED_EVENTS with its defect and the exact lines of its events, and each program there must
+make them when it runs.
 
 The script prints each program that differs, the count of the programs that run, of those that
 are outside and of those that differ, the count of the outside programs for each function, and
@@ -30,6 +38,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import sys
 import tempfile
 import time
@@ -47,11 +56,139 @@ OUTSIDE_RE = re.compile(
 )
 # A line of `fort --fir-run --fir-events` for an ownership event of the run.
 EVENT_RE = re.compile(rb"^fort: event [^\n]*\n?", re.MULTILINE)
+# The start of the event line of an access to dead storage, and the two signals of a memory fault
+# (D10.9).
+DEAD_ACCESS = "fort: event use after release "
+MEMORY_FAULTS = (-signal.SIGSEGV, -signal.SIGBUS)
 # The programs of the corpus that make an event: each with its ownership defect and the lines of
 # its events, in the order of the run, as
-# `"programs/<name>.ft": ("<defect>", ["fort: event leak in <function> at <line>:<col>"])`.
-# No program of the corpus makes one.
-EXPECTED_EVENTS = {}
+# `"programs/<name>.ft": ("<defect>", ["leak in @.<function> at <line>:<col>"])`. A line stands
+# without its start `fort: event `, and `@` stands for the module of the program, the name of its
+# file without `.ft`. The programs that hold the release rules of D10.9 stand here: each one
+# releases storage that is no live allocation of the runtime, or reaches dead storage, and that is
+# its defect.
+EVENT_TABLE = {
+    "run/errors/040_invalid_release_inner_pointer.ft": (
+        "a del of an address inside an allocation",
+        [
+            "invalid release in @.main at 27:5",
+        ],
+    ),
+    "run/errors/041_invalid_release_inner_border.ft": (
+        "a del of the address after the last byte",
+        [
+            "invalid release in @.main at 25:5",
+        ],
+    ),
+    "run/errors/042_invalid_release_second.ft": (
+        "a second del of one allocation",
+        [
+            "duplicate owner in @.main at 23:35",
+            "double release in @.main at 30:5 through owner @.main _2",
+        ],
+    ),
+    "run/errors/043_invalid_release_stack_address.ft": (
+        "a del of the address of a local",
+        [
+            "invalid release in @.main at 23:5",
+        ],
+    ),
+    "run/errors/044_invalid_release_storage_of_c.ft": (
+        "a del of an allocation of C",
+        [
+            "invalid release in @.main at 19:5 through owner @.main _1",
+        ],
+    ),
+    "run/errors/045_invalid_release_large_inner.ft": (
+        "a del of an address inside a large allocation",
+        [
+            "invalid release in @.main at 25:5",
+        ],
+    ),
+    "run/errors/047_invalid_release_huge_inner.ft": (
+        "a del of an address inside an allocation with a mapping of its own",
+        [
+            "invalid release in @.main at 26:5",
+        ],
+    ),
+    "run/errors/048_invalid_release_storage_went_back.ft": (
+        "a second del of an allocation whose storage went back to the system",
+        [
+            "duplicate owner in @.main at 38:35",
+            "double release in @.main at 43:5 through owner @.main _3",
+        ],
+    ),
+    "run/errors/049_invalid_release_chunk_went_back.ft": (
+        "a second del of an allocation whose chunk went back to the system",
+        [
+            "duplicate owner in @.main at 28:35",
+            "double release in @.main at 34:5 through owner @.main _3",
+        ],
+    ),
+    "run/pointers/015_dead_view_keeps_its_bytes.ft": (
+        "reads through a view of a dead allocation",
+        [
+            "use after release in @.main at 38:29 through owner @.main _2",
+            "use after release in @.main at 38:43 through owner @.main _2",
+            "use after release in @.main at 54:29 through owner @.main _2",
+            "use after release in @.main at 54:43 through owner @.main _2",
+        ],
+    ),
+    "run/pointers/016_dead_owner_slot_through_a_call.ft": (
+        "a callee stores an owner into a dead allocation",
+        [
+            "use after release in @.fill_ptr at 18:5 through owner @.main _2",
+            "use after release in @.fill_ptr at 18:5",
+            "use after release in @.fill_ptr at 19:13 through owner @.main _2",
+            "leak at exit in @.main at 47:5",
+        ],
+    ),
+    "run/pointers/017_dead_owner_slot_store.ft": (
+        "a store of an owner into a dead allocation",
+        [
+            "use after release in @.main at 19:5 through owner @.main _2",
+            "use after release in @.main at 19:5",
+            "use after release in @.main at 20:13 through owner @.main _2",
+            "leak at exit in @.main at 30:5",
+        ],
+    ),
+    "run/pointers/018_dead_large_read_faults.ft": (
+        "a read of a dead large allocation",
+        [
+            "use after release in @.main at 18:19 through owner @.main _1",
+        ],
+    ),
+    "run/pointers/019_dead_large_write_faults.ft": (
+        "a write into a dead large allocation",
+        [
+            "use after release in @.main at 16:19 through owner @.main _1",
+        ],
+    ),
+    "run/pointers/020_dead_small_read_faults.ft": (
+        "a read of a dead allocation whose storage went back to the system",
+        [
+            "use after release in @.main at 34:19",
+        ],
+    ),
+    "run/pointers/022_dead_huge_read_faults.ft": (
+        "a read of a dead allocation with a mapping of its own",
+        [
+            "use after release in @.main at 19:19 through owner @.main _1",
+        ],
+    ),
+}
+
+
+def event_lines(path, lines):
+    """Return `lines` of EVENT_TABLE for the program `path` as the interpreter writes them."""
+    module = pathlib.PurePath(path).stem
+    return ["fort: event " + line.replace("@", module) for line in lines]
+
+
+# EVENT_TABLE with each line as the interpreter writes it.
+EXPECTED_EVENTS = {
+    path: (defect, event_lines(path, lines)) for path, (defect, lines) in EVENT_TABLE.items()
+}
 # The longest run of a program under the interpreter in a debug build in the Linux VM was 70 s
 # (run/stdlib/095_rt_round_trip_floats.ft), so a program gets more time than the corpus gives.
 TIMEOUT = 300.0
@@ -66,7 +203,7 @@ def parse_args(argv):
     parser.add_argument("--target", required=True, help="the target triple")
     parser.add_argument("--timeout", type=float, default=TIMEOUT)
     parser.add_argument("-j", type=int, default=os.cpu_count() or 1, help="programs in parallel")
-    parser.add_argument("--events", action="store_true", help="run with --fir-events")
+    parser.add_argument("--events", action="store_true", help="hold the events of the runs")
     return parser.parse_args(argv)
 
 
@@ -79,8 +216,7 @@ def interpret(args, test, workdir):
     """Run `test` under `fort --fir-run`; return the process."""
     env = run_tests.child_env(workdir, args.target)
     argv = [args.fort, "--std-dir", args.std_dir, "--target", args.target, "--fir-run"]
-    if args.events:
-        argv.append("--fir-events")
+    argv.append("--fir-events")
     argv += checked_flags(test.flags) + [test.entry, "--"] + test.args
     return run_tests.run_process(argv, LANG, env, args.timeout, test.stdin)
 
@@ -115,6 +251,17 @@ def describe(proc):
     )
 
 
+def stops_at_dead_storage(want, events, got_stdout, got_stderr, want_stderr):
+    """Whether the checked build `want` stops with a memory fault at an access that the
+    interpreter marks as an access to dead storage. Its output is then a start of the output of
+    the interpreter."""
+    if want.returncode not in MEMORY_FAULTS:
+        return False
+    if not any(event.startswith(DEAD_ACCESS) for event in events):
+        return False
+    return got_stdout.startswith(want.stdout) and got_stderr.startswith(want_stderr)
+
+
 def compare(args, test):
     """Return (verdict, detail, events) for `test`: `run`, `outside` with the function, or
     `differ`, and the event lines of the run, which the comparison of stderr leaves out."""
@@ -133,6 +280,8 @@ def compare(args, test):
             return "differ", "%s: %s" % (test.path, problem), events
         want_stderr = run_tests.drop_qemu_notice(want.stderr)
         got_stderr = EVENT_RE.sub(b"", run_tests.drop_qemu_notice(got.stderr))
+        if stops_at_dead_storage(want, events, got.stdout, got_stderr, want_stderr):
+            return "run", "", events
         if (got.returncode, got.stdout, got_stderr) != (want.returncode, want.stdout, want_stderr):
             return "differ", "%s: interpreter %s; checked build %s" % (
                 test.path,

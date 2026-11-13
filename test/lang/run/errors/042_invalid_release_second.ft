@@ -1,0 +1,34 @@
+//! run
+//! abort
+//! link: ffi/oracle.c
+//! stderr: ft:30:5: runtime error: invalid release
+//! stdout:
+//| before
+// A second `del` of one allocation, through a copy of its owner, is the runtime error `invalid
+// release` (D10.9 rule 4). An allocation of the same size stands between the two: its storage is
+// not the dead storage (rule 1), so the second `del` does not release it.
+// D10.3, D10.6, D10.9
+import extern;
+
+// C: oracle_pass, test/lang/ffi/oracle.c.
+// gives: p itself, which is no new allocation; this declaration says `own` to make a second
+// owner of one allocation. writes: nothing. keeps: no pointer. calls: no fort function.
+// frees: nothing.
+extern fn oracle_pass(u8* p) u8 mut* own;
+
+// C call oracle_pass: first, the owner that new gave in this function, one u8 (D9.8 rule 3); C
+// reads no byte.
+fn main() i32 {
+    u8 mut* own first = new(u8);
+    u8 mut* own copy = oracle_pass(first);
+    del(first);
+    u8 mut* own later = new(u8);
+    *later = 9;
+    println("before");
+    // The copy holds the address of dead storage. The allocator knows that no live allocation
+    // starts there.
+    del(copy);
+    println("after ", *later);
+    del(later);
+    return 0;
+}

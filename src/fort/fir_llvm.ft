@@ -1106,10 +1106,11 @@ fn rvalue_into(translator mut* t, fir.statement* s) void {
 
 // ---- statements --------------------------------------------------------------------------------
 
-// `del(move p)`: the pointer word, field 0 of a span or a `string`, the call of `std.rt.free`,
-// then the zero value into `p`, unless `p` is a temporary (toolchain.md 6 item 17, spec/fir.md
-// 12.1).
-fn del_place(translator mut* t, fir.place p) void {
+// `del(move p)` at the location `at_del` of the name `del`: the pointer word, field 0 of a span or
+// a `string`, the call of `std.rt.release` with that word and the file, the line and the column
+// (D11.4), then the zero value into `p`, unless `p` is a temporary (toolchain.md 6 item 17,
+// spec/fir.md 12.1).
+fn del_place(translator mut* t, fir.place p, diag.loc at_del) void {
     types.node* ty = fir.place_type(t->f, p);
     gen.gen_val mut ptr = gen.gen_val{};
     gen.gen_val mut at = gen.gen_val{};
@@ -1127,7 +1128,8 @@ fn del_place(translator mut* t, fir.place p) void {
     gen.gen_args mut* own args = gen.gen_args_make();
     defer gen.gen_args_drop_made(move(args));
     gen.gen_args_add(args, ptr);
-    gen.gen_call_rt(t->g, runtime_sig.rt_entry.rt_free, args);
+    gen.gen_args_add_loc(t->g, args, at_del);
+    gen.gen_call_rt(t->g, runtime_sig.rt_entry.rt_release, args);
     if (reg || temporary_place(t, p)) {
         return;
     }
@@ -1151,7 +1153,7 @@ fn translate_statement(translator mut* t, fir.statement* s) void {
             place_store(t, s->place, rvalue_value(t, s));
         }
     case fir.stmt_kind.st_del:
-        del_place(t, s->place);
+        del_place(t, s->place, s->loc);
     case fir.stmt_kind.st_live, fir.stmt_kind.st_dead:
         return;
     }

@@ -1,0 +1,217 @@
+//! run
+//! stdout:
+//| ok
+/// A walk of the allocator of the runtime (std.heap) against a model. The walk holds at most
+/// SLOTS blocks at once. Each step takes one slot: it makes a block of a pseudo-random size in
+/// an empty slot, and it releases the block of a full slot. The sizes mix the three kinds of
+/// allocation: a block that shares a small chunk, a block that fills a small chunk and a block
+/// of whole chunks. The model holds three rules:
+/// - No two blocks of the whole run share a byte, also when one of them is dead or both are
+///   (D10.9 rule 1).
+/// - A live block keeps its bytes while blocks beside it die and their storage goes back to the
+///   system (D10.9 rule 6).
+/// - `live_bytes` is the sum of the bytes that the allocator keeps for the live blocks.
+/// The generator starts at a fixed value, so each run makes the same blocks.
+import std.heap;
+import std.sort;
+
+// The sizes of the allocator: a granule, a unit, the largest block of a small chunk, a chunk
+// and a segment.
+u64 GRANULE = 16;
+u64 UNIT = 16384;
+u64 SMALL_MOST = 2048000;
+u64 CHUNK = 2097152;
+u64 SEGMENT = 4294967296;
+
+// The count of the slots and of the steps. About half of the steps make a block, and a block
+// takes about 240 KiB of address space on average, so the walk needs more than one segment.
+u64 SLOTS = 512;
+u64 STEPS = 60000;
+
+// The walk reads the marks of each live block after each SWEEP steps.
+u64 SWEEP = 997;
+
+// A record of the history holds the start of a block in granules, times PACK, plus the bytes
+// that the allocator keeps for the block in granules. The largest block of the walk keeps 4
+// chunks, which are 524288 granules, and a start is below 2^47. So a record is below 2^63,
+// and the order of two records is the order of their starts.
+u64 PACK = 1048576;
+
+// The two tables of the walk are blocks too, so the history holds them.
+u64 TABLES = 2;
+
+struct block {
+    u8 mut@ own bytes;
+    u64 size;
+    u8 mark;
+    bool live;
+}
+
+// What the model knows: the bytes that the allocator keeps for the live blocks of the walk,
+// the count of the blocks that the walk made, and the count of each kind.
+struct model {
+    u64 held;
+    u64 made;
+    u64 shared;
+    u64 alone;
+    u64 chunks;
+}
+
+// A generator of pseudo-random numbers, so that the blocks are the same on every run.
+struct lcg {
+    u64 state;
+}
+
+fn next(lcg mut* g, u64 below) u64 {
+    g->state = g->state *% 6364136223846793005 +% 1442695040888963407;
+    return (g->state >> 33) % below;
+}
+
+// The size of the next block. 60 of 100 blocks have at most 256 bytes, 25 have at most one
+// unit, 10 have at most 13 units, 2 fill a small chunk and 3 take 1 to 4 whole chunks.
+fn pick_size(lcg mut* g) u64 {
+    u64 kind = next(g, 100);
+    if (kind < 60) {
+        return 1 + next(g, 256);
+    }
+    if (kind < 85) {
+        return 257 + next(g, UNIT - 256);
+    }
+    if (kind < 95) {
+        return UNIT + 1 + next(g, 12 * UNIT);
+    }
+    if (kind < 97) {
+        return SMALL_MOST - next(g, 3);
+    }
+    return SMALL_MOST + 1 + next(g, 3 * CHUNK);
+}
+
+// The record of the history for a block of `size` bytes that starts at `start`.
+fn record(u64 start, u64 size) u64 {
+    assert(start % GRANULE == 0);
+    return start / GRANULE * PACK + heap.kept_bytes(size) / GRANULE;
+}
+
+fn record_start(u64 r) u64 {
+    return r / PACK * GRANULE;
+}
+
+fn record_end(u64 r) u64 {
+    return record_start(r) + r % PACK * GRANULE;
+}
+
+// Whether the block of `slot` holds its mark in its first byte, in its middle byte and in its
+// last byte.
+fn holds_its_mark(block@ blocks, u64 slot) bool {
+    u8@ bytes = blocks[slot].bytes;
+    u64 size = blocks[slot].size;
+    u8 mark = blocks[slot].mark;
+    return bytes[0] == mark && bytes[size / 2] == mark && bytes[size - 1] == mark;
+}
+
+fn each_live_block_holds_its_mark(block@ blocks) bool {
+    for (u64 mut slot = 0; slot < SLOTS; slot += 1) {
+        if (blocks[slot].live && !holds_its_mark(blocks, slot)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Makes a block of `size` bytes in the empty slot `slot`, stores its mark into three of its
+// bytes, and writes its record into the history.
+fn make(block mut@ blocks, u64 slot, u64 size, model mut* m, u64 mut@ history) void {
+    del(blocks[slot].bytes);
+    blocks[slot].bytes = new(u8, size);
+    u8 mark = cast(m->made % 251 + 1, u8);
+    blocks[slot].bytes[0] = mark;
+    blocks[slot].bytes[size / 2] = mark;
+    blocks[slot].bytes[size - 1] = mark;
+    blocks[slot].size = size;
+    blocks[slot].mark = mark;
+    blocks[slot].live = true;
+    history[TABLES + m->made] = record(cast(&blocks[slot].bytes[0], u64), size);
+    m->made += 1;
+    m->held += heap.kept_bytes(size);
+    if (size > SMALL_MOST) {
+        m->chunks += 1;
+    } else if (heap.kept_bytes(size) == SMALL_MOST) {
+        m->alone += 1;
+    } else {
+        m->shared += 1;
+    }
+}
+
+// Releases the block of the full slot `slot`. The block holds its mark until its release.
+fn release(block mut@ blocks, u64 slot, model mut* m) void {
+    assert(holds_its_mark(blocks, slot));
+    m->held -= heap.kept_bytes(blocks[slot].size);
+    del(blocks[slot].bytes);
+    blocks[slot].live = false;
+}
+
+// The steps of the walk. After each step the live bytes of the allocator stand above `base` by
+// the bytes of the model.
+fn walk(block mut@ blocks, model mut* m, u64 mut@ history, u64 base) void {
+    lcg mut g = lcg{20261113};
+    for (u64 mut step = 0; step < STEPS; step += 1) {
+        u64 slot = next(&g, SLOTS);
+        if (blocks[slot].live) {
+            release(blocks, slot, m);
+        } else {
+            make(blocks, slot, pick_size(&g), m, history);
+        }
+        assert(heap.live_bytes() - base == m->held);
+        if (step % SWEEP == 0) {
+            assert(each_live_block_holds_its_mark(blocks));
+        }
+    }
+}
+
+// Releases each block that the walk left, and takes the live bytes back to `base`.
+fn release_the_rest(block mut@ blocks, model mut* m, u64 base) void {
+    assert(each_live_block_holds_its_mark(blocks));
+    for (u64 mut slot = 0; slot < SLOTS; slot += 1) {
+        if (blocks[slot].live) {
+            release(blocks, slot, m);
+            assert(heap.live_bytes() - base == m->held);
+        }
+    }
+    assert(m->held == 0);
+}
+
+// Sorts the records and reads them in the order of their starts: each block ends at or before
+// the start of the next one. So no two blocks of the run share a byte. Returns the count of
+// the segments that hold a block.
+fn no_two_blocks_share_a_byte(u64 mut@ records) u64 {
+    sort.sort_u64(records, sort.cmp_u64);
+    u64 mut segments = 1;
+    for (u64 mut i = 1; i < records.len; i += 1) {
+        assert(record_end(records[i - 1]) <= record_start(records[i]));
+        if (record_start(records[i - 1]) / SEGMENT != record_start(records[i]) / SEGMENT) {
+            segments += 1;
+        }
+    }
+    return segments;
+}
+
+fn main() i32 {
+    block mut@ own blocks = new(block, SLOTS);
+    u64 mut@ own history = new(u64, TABLES + STEPS);
+    history[0] = record(cast(&blocks[0], u64), SLOTS * sizeof(block));
+    history[1] = record(cast(&history[0], u64), (TABLES + STEPS) * sizeof(u64));
+    u64 base = heap.live_bytes();
+    model mut m = {};
+    walk(blocks, &m, history, base);
+    release_the_rest(blocks, &m, base);
+    assert(heap.live_bytes() == base);
+
+    // the walk made each kind of block, and it left the first segment
+    assert(m.made == m.shared + m.alone + m.chunks);
+    assert(m.shared > 0 && m.alone > 0 && m.chunks > 0);
+    assert(no_two_blocks_share_a_byte(history[0..TABLES + m.made]) >= 2);
+    del(blocks);
+    del(history);
+    println("ok");
+    return 0;
+}

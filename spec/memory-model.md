@@ -13,7 +13,9 @@ This document states the end state of that ruling: dead storage and frame storag
 zero bytes of a local, of a global, of an emptied place and of an element of `regrow` (D10.1), the
 runtime errors `null dereference`, `null call` and `invalid
 release` (D10.6), the allocator of the runtime (D10.3), `regrow` (D12.2), and no option that removes
-a check (D10.6). The compiler and the runtime implement these rules in later changes.
+a check (D10.6). The runtime implements its allocator, the dead storage of an allocation and the
+`invalid release` of a `del`. The compiler and the runtime implement the other rules in later
+changes.
 
 ## 1. Memory regions
 

@@ -1,0 +1,48 @@
+//! run
+//! stdout:
+//| 0
+// A copy of a released pointer stays in a global. A later `new` of the same size does not get the
+// dead storage (D10.9 rule 1), so the call that stores an owner through the copy changes only
+// dead storage (rule 2): the `data` of the new object stays null. The allocation `anchor` stands
+// beside the dead object, so the runtime keeps that storage. The global can reach `p->data`, so
+// the program moves that owner into a local before the `del` of `p`: the leak rule then proves
+// that the object holds no owner (D17.20).
+// D10.3, D10.9
+struct box {
+    u8 mut* own data;
+}
+
+box mut* mut G = null;
+
+fn fill_ptr(box mut* q) void {
+    del(q->data);
+    q->data = new(u8);
+}
+
+fn fill_g() void {
+    if (G != null) {
+        fill_ptr(G);
+    }
+}
+
+fn main() i32 {
+    u8 mut* own anchor = new(u8);
+    box mut* own mut p = new(box);
+    G = p;
+    u8 mut* own first = move(p->data);
+    del(first);
+    del(p);
+    p = new(box);
+    fill_g();
+    if (p->data != null) {
+        println(1);
+    } else {
+        println(0);
+    }
+    p->data = new(u8);
+    G = null;
+    del(p->data);
+    del(p);
+    del(anchor);
+    return 0;
+}

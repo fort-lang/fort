@@ -1,0 +1,83 @@
+//! run
+//! stdout:
+//| ok
+/// The allocator of the runtime (std.heap) at the end of the address space.
+/// The test fills the address space with blocks of 4 GiB, each with a mapping
+/// of its own, and releases each one at once: dead storage keeps its address
+/// range (D10.9 rule 1). Then no new segment has a range. The current segment
+/// still gives its chunks, and a block that needs a new segment gets no
+/// storage (rule 5). The test touches no byte of a large block, so the run
+/// needs little storage.
+import extern;
+import std.heap;
+
+u64 CHUNK = 2097152;
+u64 SEGMENT = 4294967296;
+
+// 1025 chunks. A segment holds 2047 chunks for its blocks, so it holds one
+// block of this size and never two.
+u64 MORE_THAN_HALF = 2149580800;
+
+// Takes and releases blocks of 4 GiB until the allocator gives none, and
+// returns the count of the blocks.
+// C call heap.drop: p, the address that heap.take gave in the same round of
+// the loop, which is not null. drop reads no byte at it.
+fn fill() u64 {
+    u64 mut count = 0;
+    while (true) {
+        void mut* p = heap.take(SEGMENT);
+        if (p == null) {
+            return count;
+        }
+        assert(heap.drop(p));
+        count += 1;
+    }
+    return count;
+}
+
+// C call heap.drop x2: block, the address that heap.take gave in this
+// function, which is not null. drop reads no byte at it.
+fn no_block_needs_a_new_segment_when_the_address_space_is_full() void {
+    u64 start = heap.live_bytes();
+    // The process runs the test alone, so its current segment holds the open
+    // small chunk and little more.
+    assert(heap.can_take(SEGMENT));
+    u64 blocks = fill();
+    assert(blocks >= 16);
+    assert(heap.live_bytes() == start);
+    assert(!heap.can_take(SEGMENT));
+    assert(heap.take(SEGMENT) == null);
+
+    // the current segment has the chunks of the first block, and no segment
+    // has the chunks of the second one
+    assert(heap.can_take(MORE_THAN_HALF));
+    void mut* block = heap.take(MORE_THAN_HALF);
+    assert(block != null);
+    assert(heap.live_bytes() - start == MORE_THAN_HALF);
+    assert(!heap.can_take(MORE_THAN_HALF));
+    assert(heap.take(MORE_THAN_HALF) == null);
+    assert(heap.live_bytes() - start == MORE_THAN_HALF);
+
+    // a small block and a block of 2 chunks still come from the current segment
+    u8 mut@ own small = new(u8, 64);
+    small[63] = 1;
+    u8 mut@ own large = new(u8, CHUNK + 1);
+    large[CHUNK] = 2;
+    assert(small[63] == 1 && large[CHUNK] == 2);
+    del(large);
+    del(small);
+
+    // the release makes dead storage, which no later block takes
+    assert(heap.drop(block));
+    assert(!heap.drop(block));
+    assert(heap.live_bytes() == start);
+    assert(!heap.can_take(MORE_THAN_HALF));
+    assert(heap.take(MORE_THAN_HALF) == null);
+    assert(heap.live_bytes() == start);
+}
+
+fn main() i32 {
+    no_block_needs_a_new_segment_when_the_address_space_is_full();
+    println("ok");
+    return 0;
+}

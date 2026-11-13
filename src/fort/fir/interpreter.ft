@@ -11,9 +11,14 @@
 //
 // The run calls `std.rt` where a checked build calls it (spec/fir.md 12.2, 12.4). A failed check
 // calls the runtime entry of its kind, so the run writes the message of D11.4 and then calls
-// `abort`. `alloc` calls `std.rt.alloc` and `del` calls `std.rt.free`. The externs that `std.rt`
-// reaches run here (run_extern), and so do three model externs for the tests. A call of any
-// other extern, or of a function with no body, ends the run as `outside`.
+// `abort`. `alloc` calls `std.rt.alloc` and `del` calls `std.rt.release`. The externs that
+// `std.rt` reaches run here (run_extern), and so do three model externs for the tests. A call of
+// any other extern, or of a function with no body, ends the run as `outside`.
+//
+// The run does not run the allocator of `std.heap`. It models the functions `take`, `drop`,
+// `can_take` and `live_bytes` (run_heap): `take` makes a region, and `drop` makes it dead. A dead
+// region keeps its bytes, so a load or a store in dead storage reads or changes the value that
+// the storage held last (D10.9 rule 2).
 //
 // The shadow state of fir.shadow observes each run (spec/ownership-design.md 3.3). The module
 // uses switches and no function-pointer dispatch table. It holds no module-level mutable state:
@@ -30,6 +35,7 @@ import fort.fir_verify;
 import fort.gen;
 import fort.lexer;
 import fort.prim;
+import std.heap;
 import std.io;
 import std.mem;
 import std.str;
@@ -47,9 +53,19 @@ u64 FIRST_ADDRESS = 65536;
 u64 REGION_ALIGN = 16;
 u64 REGION_GAP = 16;
 
-// The least region, in bytes, that asks calloc of the C library before `new` makes its storage:
-// 1 MiB (make_region).
+// The least region, in bytes, that asks mem.can_allocate before `new` makes its storage: 1 MiB
+// (make_region).
 u64 REGION_PROBE = 1048576;
+
+// The module of the allocator, and the functions of it that the run models, in the order of
+// `heap_entry` of a machine (spec/ownership-design.md 3.2).
+string HEAP_MODULE = "std.heap";
+u64 HEAP_ENTRIES = 4;
+u64 HEAP_TAKE = 0;
+u64 HEAP_DROP = 1;
+u64 HEAP_CAN_TAKE = 2;
+u64 HEAP_LIVE_BYTES = 3;
+string[HEAP_ENTRIES] HEAP_NAMES = {"take", "drop", "can_take", "live_bytes"};
 
 // The size of a pointer, and the offset of the length in a span header.
 u64 WORD = 8;
@@ -129,7 +145,9 @@ enum region_kind {
     rk_global, // a module-level constant or global
     rk_data, // the bytes of a string, a `bytes` constant, a file name or an enum table
     rk_frame, // the locals of one call
-    rk_heap, // an allocation of `calloc`
+    rk_heap, // a live allocation of `std.heap.take`
+    rk_dead, // a released allocation of `std.heap.take`: dead storage, which keeps its bytes
+    rk_c, // an allocation of `calloc` of C
     rk_code, // a function as a value, which holds no byte
     rk_slot, // storage of the run: errno, the slot of `oracle_keep`, the arguments of `main`
 }
@@ -183,7 +201,7 @@ struct routine_vec {
 enum wait_kind {
     wk_none,
     wk_assign, // the current statement stores the result of the callee
-    wk_del, // the current `del` zeroes `size` bytes at `addr` after `std.rt.free`
+    wk_del, // the current `del` zeroes `size` bytes at `addr` after `std.rt.release`
     wk_noreturn, // the callee is the runtime entry of a failed check, which never returns
 }
 
@@ -215,7 +233,9 @@ struct frame_vec {
 // and `stack_bytes` the FRAME_BYTES of each frame that stands. `next` is the next free address.
 // `hit` is the region that find_region found last. `ended` counts the regions that are no longer
 // live. `dest` and `ret` serve the frame at the bottom of the stack: `ret` takes the bits of its
-// scalar result, and `dest`, when it is not 0, a copy of its result.
+// scalar result, and `dest`, when it is not 0, a copy of its result. `heap_entry` holds the
+// functions of `std.heap` that the run models, in the order of HEAP_NAMES, and `heap_live` the
+// bytes that `std.heap.live_bytes` gives.
 struct machine {
     check.checker mut* ck;
     fir.module* m;
@@ -238,7 +258,9 @@ struct machine {
     u64 dest;
     u64 ret;
     ast.sym* alloc_entry;
-    ast.sym* free_entry;
+    ast.sym* release_entry;
+    ast.sym*[HEAP_ENTRIES] heap_entry;
+    u64 heap_live;
     ast.sym* args_init_entry;
     ast.sym* args_entry;
     ast.sym* flush_entry;
@@ -251,7 +273,7 @@ struct machine {
 
 /// Fills `it` for a run of the functions of `m`, and of each function with a body of the closure
 /// that `ck` checked: the run lowers such a function when it meets it first. The closure must hold
-/// `std.rt`, whose `alloc`, `free`, `args_init`, `args` and `flush_all` the run calls.
+/// `std.rt`, whose `alloc`, `release`, `args_init`, `args` and `flush_all` the run calls.
 fn init(machine mut* it, check.checker mut* ck, fir.module* m, bool capture) void {
     it->ck = ck;
     it->m = m;
@@ -261,23 +283,25 @@ fn init(machine mut* it, check.checker mut* ck, fir.module* m, bool capture) voi
     it->hit = NONE;
     it->stack_limit = STACK_LIMIT;
     it->end = outcome{};
-    it->alloc_entry = runtime_function(ck, "alloc");
-    it->free_entry = runtime_function(ck, "free");
-    it->sh.quiet = it->free_entry;
-    it->args_init_entry = runtime_function(ck, "args_init");
-    it->args_entry = runtime_function(ck, "args");
-    it->flush_entry = runtime_function(ck, "flush_all");
+    it->alloc_entry = module_entry(ck, fir_verify.RUNTIME_MODULE, "alloc");
+    it->release_entry = module_entry(ck, fir_verify.RUNTIME_MODULE, "release");
+    it->sh.quiet = it->release_entry;
+    it->args_init_entry = module_entry(ck, fir_verify.RUNTIME_MODULE, "args_init");
+    it->args_entry = module_entry(ck, fir_verify.RUNTIME_MODULE, "args");
+    it->flush_entry = module_entry(ck, fir_verify.RUNTIME_MODULE, "flush_all");
+    for (u64 mut i = 0; i < HEAP_ENTRIES; i++) {
+        it->heap_entry[i] = module_entry(ck, HEAP_MODULE, HEAP_NAMES[i]);
+    }
     it->errno_slot = make_storage(it, region_kind.rk_slot, I32_SIZE);
     it->kept = make_storage(it, region_kind.rk_slot, WORD);
 }
 
-// The function `name` of the module `std.rt`, or null when the closure holds none.
-fn runtime_function(check.checker* ck, string name) ast.sym* {
+// The function `name` of the module `owner`, or null when the closure holds none.
+fn module_entry(check.checker* ck, string owner, string name) ast.sym* {
     for (u64 mut i = 0; i < check.check_sym_count(ck); i++) {
         ast.sym* s = check.check_sym_at(ck, i);
         if (s->kind == ast.sym_kind.s_fn && s->name == name && s->owner != null
-            && s->owner->kind == ast.sym_kind.s_module
-            && s->owner->name == fir_verify.RUNTIME_MODULE) {
+            && s->owner->kind == ast.sym_kind.s_module && s->owner->name == owner) {
             return s;
         }
     }
@@ -459,11 +483,11 @@ fn align_up(u64 v, u64 align) u64 {
 }
 
 // Makes a region of `size` zero bytes at the next free address and returns its base. The return
-// is 0 when the compiler has no storage for the bytes: calloc of the C library refuses them. A
-// span holds the bytes, and `new` aborts where calloc gives null. So a region of REGION_PROBE
-// bytes or more asks mem.can_allocate first, whose block of calloc goes at once; a program asks a
-// size that large to see the refusal. A smaller region takes `new` alone: a host with no storage
-// for it stops the compiler at each other `new` as well.
+// is 0 when the compiler has no storage for the bytes: the allocator of the runtime refuses
+// them. A span holds the bytes, and `new` stops the compiler where the allocator gives no
+// storage. So a region of REGION_PROBE bytes or more asks mem.can_allocate first, which takes no
+// storage; a program asks a size that large to see the refusal. A smaller region takes `new`
+// alone: a host with no storage for it stops the compiler at each other `new` as well.
 fn make_region(machine mut* it, region_kind kind, u64 size, bool readonly) u64 {
     u64 base = align_up(it->next, REGION_ALIGN);
     u64 mut room = size;
@@ -511,7 +535,8 @@ fn region_at(machine* it, u64 addr) u64 {
     return lo - 1;
 }
 
-// Whether the live region `r` holds the `len` bytes at `addr`.
+// Whether the region `r` holds the `len` bytes at `addr`, with its bytes. A region that ended
+// holds no byte, and a dead region holds each of its bytes.
 fn has_range(region* r, u64 addr, u64 len) bool {
     if (!r->live || r->bytes.len == 0 || addr < r->base) {
         return false;
@@ -520,7 +545,7 @@ fn has_range(region* r, u64 addr, u64 len) bool {
     return at <= r->size && len <= r->size - at;
 }
 
-// The index of the live region that holds the `len` bytes at `addr`, or NONE.
+// The index of the region that holds the `len` bytes at `addr` with its bytes, or NONE.
 fn find_region(machine mut* it, u64 addr, u64 len) u64 {
     if (it->hit < it->regions.len && has_range(&it->regions.items[it->hit], addr, len)) {
         return it->hit;
@@ -533,11 +558,18 @@ fn find_region(machine mut* it, u64 addr, u64 len) u64 {
     return i;
 }
 
+// Whether region `i` is no dead storage: NONE is no region.
+fn is_alive(machine* it, u64 i) bool {
+    return i != NONE && it->regions.items[i].kind != region_kind.rk_dead;
+}
+
 // The index of the region that holds the `len` bytes at `addr`. Without one, the run ends as a
-// fault and the result is NONE. With `write`, a read-only region is a fault too.
+// fault and the result is NONE. With `write`, a read-only region is a fault too. A dead region
+// holds its bytes as each other region does: the shadow state reports the access, and the run
+// reads or changes the value that the storage held last (D10.9 rule 2).
 fn reach(machine mut* it, u64 addr, u64 len, bool write) u64 {
     u64 i = find_region(it, addr, len);
-    shadow.access(&it->sh, addr, len, i != NONE, addr < FIRST_ADDRESS);
+    shadow.access(&it->sh, addr, len, is_alive(it, i), addr < FIRST_ADDRESS);
     if (i == NONE) {
         if (addr < FIRST_ADDRESS) {
             fault(it, "null dereference");
@@ -1885,7 +1917,8 @@ fn enter(machine mut* it, u64 k, u64 r, fir.rvalue c, u32 first) void {
 }
 
 // A `call` of frame `k`: a fort function or a function value enters a frame; an extern runs in
-// run_extern. The callee operand of a value is read first (D6.3).
+// run_extern, and a function of `std.heap` that the run models in run_heap. The callee operand
+// of a value is read first (D6.3).
 fn call_from(machine mut* it, u64 k, fir.statement* s) void {
     fir.rvalue r = s->value;
     if (r.callee == fir.callee_kind.cl_extern) {
@@ -1893,6 +1926,11 @@ fn call_from(machine mut* it, u64 k, fir.statement* s) void {
         return;
     }
     if (r.callee == fir.callee_kind.cl_fn) {
+        u64 entry = heap_entry_of(it, r.callee_sym);
+        if (entry != NONE) {
+            run_heap(it, k, s, entry);
+            return;
+        }
         enter(it, k, find_routine(it, r.callee_sym), r, 0);
         return;
     }
@@ -1938,9 +1976,10 @@ fn alloc_from(machine mut* it, u64 k, fir.statement* s) void {
 }
 
 // `del(move p)`: the pointer of `p`, the pointer field of a span or a `string`, then
-// `std.rt.free`, then the zero value into `p` (spec/fir.md 12.2). The `del` writes each byte of
-// `p`, so the shadow tests the access of the whole place before the call when a live region holds
-// it; the run faults where it faulted before, so the shadow changes no outcome.
+// `std.rt.release` with that pointer and the file, the line and the column of the statement,
+// then the zero value into `p` (spec/fir.md 12.2). The `del` writes each byte of `p`, so the
+// shadow tests the access of the whole place before the call when a region holds it; the run
+// faults where it faulted before, so the shadow changes no outcome.
 fn del_from(machine mut* it, u64 k, fir.statement* s) void {
     types.node* mut t = null;
     u64 addr = place_address(it, k, s->place, &t);
@@ -1950,13 +1989,20 @@ fn del_from(machine mut* it, u64 k, fir.statement* s) void {
     if (has_ended(it)) {
         return;
     }
-    if (find_region(it, addr, types.type_sizeof(t)) != NONE) {
-        shadow.access(&it->sh, addr, types.type_sizeof(t), true, false);
+    u64 i = find_region(it, addr, types.type_sizeof(t));
+    if (i != NONE) {
+        shadow.access(&it->sh, addr, types.type_sizeof(t), is_alive(it, i), false);
     }
-    shadow.free_through(&it->sh, addr, ptr);
-    u64[1] mut values = {};
+    shadow.free_through(&it->sh, addr, ptr, is_start(it, ptr, region_kind.rk_c));
+    u64[4] mut values = {};
     values[0] = ptr;
-    call_values(it, k, it->free_entry, values[..], from[..], wait_kind.wk_del);
+    values[1] = data_address(it, s->loc.file);
+    values[2] = cast(s->loc.line, u64);
+    values[3] = cast(s->loc.col, u64);
+    if (has_ended(it)) {
+        return;
+    }
+    call_values(it, k, it->release_entry, values[..], from[..], wait_kind.wk_del);
     it->frames.items[k].addr = addr;
     it->frames.items[k].size = types.type_sizeof(t);
 }
@@ -2247,7 +2293,7 @@ fn call_model(machine mut* it, string name, u64@ a, types.node*@ t) u64 {
         if (a[0] != 0 && a[1] > ALL_BITS / a[0]) {
             return 0;
         }
-        u64 base = make_region(it, region_kind.rk_heap, a[0] * a[1], false);
+        u64 base = make_region(it, region_kind.rk_c, a[0] * a[1], false);
         shadow.allocate(&it->sh, base, a[0] * a[1]);
         return base;
     }
@@ -2321,19 +2367,105 @@ fn write_out(machine mut* it, i32 fd, u64 buf, u64 n) i64 {
     return written;
 }
 
-// `free(p)`: the end of the allocation that starts at `p`. A null `p` does nothing.
+// Whether a region of the kind `kind` that did not end starts at `p`.
+fn is_start(machine* it, u64 p, region_kind kind) bool {
+    u64 i = region_at(it, p);
+    return i != NONE && it->regions.items[i].base == p && it->regions.items[i].live
+        && it->regions.items[i].kind == kind;
+}
+
+// `free(p)` of C: the end of the allocation of `calloc` that starts at `p`. A null `p` does
+// nothing. C defines no result for another address, so the run ends as a fault: the allocator of
+// C does not hold the allocations of `std.heap`.
 fn release(machine mut* it, u64 p) void {
     if (p == 0) {
         return;
     }
-    u64 i = region_at(it, p);
-    if (i == NONE || it->regions.items[i].base != p
-        || it->regions.items[i].kind != region_kind.rk_heap || !it->regions.items[i].live) {
-        fault(it, "invalid release");
+    if (!is_start(it, p, region_kind.rk_c)) {
+        fault(it, "a free of storage that calloc did not give");
         return;
     }
     shadow.release(&it->sh, p);
-    kill_region(it, i);
+    kill_region(it, region_at(it, p));
+}
+
+// ---- the model of std.heap ---------------------------------------------------------------------
+
+// The position in HEAP_NAMES of the function `s` of `std.heap` that the run models, or NONE.
+fn heap_entry_of(machine* it, ast.sym* s) u64 {
+    for (u64 mut i = 0; i < HEAP_ENTRIES; i++) {
+        if (it->heap_entry[i] == s) {
+            return i;
+        }
+    }
+    return NONE;
+}
+
+// The call `s` of frame `k` of the function `entry` of `std.heap`: the run reads the argument,
+// models the function and stores its result in the place of `s`. The result derives from the
+// argument, as the result of an extern does (D10.7).
+fn run_heap(machine mut* it, u64 k, fir.statement* s, u64 entry) void {
+    fir.rvalue r = s->value;
+    fir.func* f = it->frames.items[k].f;
+    u64 mut a = 0;
+    shadow.tag mut tg = shadow.tag{};
+    if (r.ops_len > 0) {
+        types.node* mut t = null;
+        a = read_scalar(it, k, fir.rvalue_operand(f, r, 0), &t);
+        tg.d = it->sh.value.d;
+    }
+    if (has_ended(it)) {
+        return;
+    }
+    u64 mut v = it->heap_live;
+    if (entry == HEAP_TAKE) {
+        v = heap_take(it, a);
+    } else if (entry == HEAP_DROP) {
+        v = bool_bits(heap_drop(it, a));
+    } else if (entry == HEAP_CAN_TAKE) {
+        v = bool_bits(a <= heap.LIMIT_BYTES && (a < REGION_PROBE || mem.can_allocate(a)));
+    }
+    types.node* ty = fir.place_type(f, s->place);
+    types.node* mut dt = null;
+    u64 dest = place_address(it, k, s->place, &dt);
+    store(it, dest, size_of(ty), v);
+    settle(it, dest, ty, tg);
+    advance(it, k);
+}
+
+// `std.heap.take(size)`: a new region of `size` zero bytes, or of 1 byte when `size` is 0, which
+// is a live allocation. The result is null when `size` is above the address range of the
+// allocator or the compiler has no storage for the bytes. The run gives no address twice, so no
+// allocation takes the storage of another one (D10.9 rule 1).
+fn heap_take(machine mut* it, u64 size) u64 {
+    if (size > heap.LIMIT_BYTES) {
+        return 0;
+    }
+    u64 mut room = size;
+    if (room == 0) {
+        room = 1;
+    }
+    u64 base = make_region(it, region_kind.rk_heap, room, false);
+    if (base != 0) {
+        shadow.allocate(&it->sh, base, room);
+        it->heap_live += heap.kept_bytes(room);
+    }
+    return base;
+}
+
+// `std.heap.drop(p)`: true when a live allocation of `take` starts at `p`, which becomes dead
+// storage and keeps its bytes. False, with no change, for each other address: null, an address
+// inside an allocation, the start of a dead allocation, an address of a frame, of a global or of
+// storage of C (D10.9 rule 4).
+fn heap_drop(machine mut* it, u64 p) bool {
+    if (!is_start(it, p, region_kind.rk_heap)) {
+        return false;
+    }
+    region mut* r = &it->regions.items[region_at(it, p)];
+    r->kind = region_kind.rk_dead;
+    it->heap_live -= heap.kept_bytes(r->size);
+    shadow.release(&it->sh, p);
+    return true;
 }
 
 // `memcmp(a, b, n)`: the difference of the first two bytes that differ, as unsigned bytes.
