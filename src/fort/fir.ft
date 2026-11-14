@@ -190,7 +190,7 @@ fn func_drop(func mut f) void {
     del(f.arms.items);
     u64 mut i = 0;
     while (i < f.blocks.len) {
-        del(f.blocks.items[i].statements.items);
+        block_drop(move(f.blocks.items[i]));
         i += 1;
     }
     del(f.blocks.items);
@@ -199,6 +199,14 @@ fn func_drop(func mut f) void {
 // An empty function in an allocation of its own, for a function that lends the function to calls.
 fn func_make() func mut* own {
     return new(func);
+}
+
+// The function of func_new in an allocation of its own, which the caller ends through
+// func_drop_made. The store fills a fresh `new`, so the pass proves it (D17.11).
+fn func_new_made(types.table mut* tt, ast.sym* s, types.node* ty) func mut* own {
+    func mut* own p = new(func);
+    *p = func_new(tt, s, ty);
+    return p;
 }
 
 // Ends a function of func_make that the caller moves in.
@@ -1850,6 +1858,11 @@ struct block {
     bool terminated;
 }
 
+// Frees a block that the caller moves in: its statements.
+fn block_drop(block mut b) void {
+    del(b.statements.items);
+}
+
 // `items[..len]` holds the blocks of one function in number order.
 struct block_vec {
     block mut@ own items;
@@ -1863,14 +1876,7 @@ fn blocks_reserve(block_vec mut* v) void {
         return;
     }
     u64 cap = grown_capacity(v->items.len, "fir.blocks_reserve: capacity overflow");
-    block mut@ own bigger = new(block, cap);
-    u64 mut i = 0;
-    while (i < v->len) {
-        bigger[i] = move(v->items[i]);
-        i += 1;
-    }
-    del(v->items);
-    v->items = move(bigger);
+    v->items = regrow(move(v->items), cap);
 }
 
 /// Adds an empty block and returns its number. Blocks are numbered from 0 in creation order.
@@ -2045,12 +2051,16 @@ fn pred_table_drop(pred_table mut pt) void {
     del(pt.preds);
 }
 
-// An empty table in an allocation of its own, for a function that lends the table to calls.
-fn pred_table_make() pred_table mut* own {
-    return new(pred_table);
+// The table of func_predecessors in an allocation of its own, which the caller ends through
+// pred_table_drop_made.
+fn func_predecessors_made(func* f) pred_table mut* own {
+    pred_table mut* own pt = new(pred_table);
+    pt->first = new(u32, f->blocks.len + 1);
+    fill_predecessors(f, pt);
+    return pt;
 }
 
-// Ends a table of pred_table_make that the caller moves in.
+// Ends a table of func_predecessors_made that the caller moves in.
 fn pred_table_drop_made(pred_table mut* own p) void {
     pred_table kept = move(*p);
     del(p);
@@ -2105,16 +2115,12 @@ fn module_add_function(module mut* m, func f) void {
     func_vec mut* v = &m->funcs;
     if (v->len >= v->items.len) {
         u64 cap = grown_capacity(v->items.len, "fir.module_add_function: capacity overflow");
-        func mut@ own bigger = new(func, cap);
-        u64 mut i = 0;
-        while (i < v->len) {
-            bigger[i] = move(v->items[i]);
-            i += 1;
-        }
-        del(v->items);
-        v->items = move(bigger);
+        v->items = regrow(move(v->items), cap);
     }
-    v->items[v->len] = move(f);
+    func mut* q = &v->items[v->len];
+    func old = move(*q);
+    *q = move(f);
+    func_drop(move(old));
     v->len += 1;
 }
 

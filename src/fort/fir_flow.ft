@@ -41,12 +41,15 @@ fn bits_drop(bits mut s) void {
     del(s.words);
 }
 
-// An empty set of count 0 in an allocation of its own, for a function that lends the set to calls.
-fn bits_make() bits mut* own {
-    return new(bits);
+// The set of bits_new in an allocation of its own, which the caller ends through bits_drop_made.
+fn bits_new_made(u32 count) bits mut* own {
+    bits mut* own p = new(bits);
+    p->count = count;
+    p->words = new(u64, (cast(count, u64) + WORD_BITS - 1) / WORD_BITS);
+    return p;
 }
 
-// Ends a set of bits_make that the caller moves in.
+// Ends a set of bits_new_made that the caller moves in.
 fn bits_drop_made(bits mut* own p) void {
     bits kept = move(*p);
     del(p);
@@ -446,8 +449,16 @@ fn forward(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits@ gens, bits@ k
     wl->listed = bits_new(n);
     u32 mut b = 0;
     while (b < n) {
-        d->ins[cast(b, u64)] = bits_new(d->count);
-        d->outs[cast(b, u64)] = bits_new(d->count);
+        bits new_in = bits_new(d->count);
+        bits mut* at_in = &d->ins[cast(b, u64)];
+        bits old_in = move(*at_in);
+        *at_in = move(new_in);
+        bits_drop(move(old_in));
+        bits new_out = bits_new(d->count);
+        bits mut* at_out = &d->outs[cast(b, u64)];
+        bits old_out = move(*at_out);
+        *at_out = move(new_out);
+        bits_drop(move(old_out));
         bits_copy(&d->outs[cast(b, u64)], &d->init);
         work_push(wl, b);
         b += 1;

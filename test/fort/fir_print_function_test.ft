@@ -120,6 +120,14 @@ fn build_example(fir_env.env mut* e, ast.sym* p) fir.func {
     return f;
 }
 
+// The function of build_example in an allocation of its own, which the caller ends through
+// fir.func_drop_made.
+fn build_example_made(fir_env.env mut* e, ast.sym* p) fir.func mut* own {
+    fir.func mut* own f = new(fir.func);
+    *f = build_example(e, p);
+    return f;
+}
+
 fn the_worked_example_prints_byte_for_byte() void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
@@ -129,8 +137,7 @@ fn the_worked_example_prints_byte_for_byte() void {
     p.name = "p";
     // `f` lives in an allocation, so that the leak rule proves its end: no call changes the
     // pointer, and drop_made holds each release once.
-    fir.func mut* own f = fir.func_make();
-    *f = build_example(e, &p);
+    fir.func mut* own f = build_example_made(e, &p);
     defer fir.func_drop_made(move(f));
     fir_print.print_function(f, &b);
     expect_lines(&b, EXAMPLE[..]);
@@ -177,8 +184,7 @@ fn a_statement_prints_its_location_and_index() void {
     defer del(b.data);
     fir_env.env mut* own e = fir_env.make();
     defer fir_env.drop_made(move(e));
-    fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(e, "add");
+    fir.func mut* own f = fir_env.func_made(e, "add");
     defer fir.func_drop_made(move(f));
     fir.statement mut s = fir.stmt_live(1, at(3, 4), 2);
     fir_print.print_statement(f, &s, &b);
@@ -209,8 +215,7 @@ fn the_empty_location_prints_nothing() void {
     defer del(b.data);
     fir_env.env mut* own e = fir_env.make();
     defer fir_env.drop_made(move(e));
-    fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(e, "add");
+    fir.func mut* own f = fir_env.func_made(e, "add");
     defer fir.func_drop_made(move(f));
     diag.loc none = diag.loc{};
     fir.statement mut s = fir.stmt_live(1, none, 7);
@@ -240,8 +245,7 @@ fn each_terminator_prints_its_spelling() void {
     defer del(b.data);
     fir_env.env mut* own e = fir_env.make();
     defer fir_env.drop_made(move(e));
-    fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(e, "add");
+    fir.func mut* own f = fir_env.func_made(e, "add");
     defer fir.func_drop_made(move(f));
     fir.terminator mut t = fir.term_goto(12, at(1, 2), 3);
     fir_print.print_terminator(f, &t, &b);
@@ -278,8 +282,7 @@ fn a_fail_prints_its_kind_and_operands() void {
     defer del(b.data);
     fir_env.env mut* own e = fir_env.make();
     defer fir_env.drop_made(move(e));
-    fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(e, "add");
+    fir.func mut* own f = fir_env.func_made(e, "add");
     defer fir.func_drop_made(move(f));
     u32 first = fir.operand_push(f, copy(2));
     fir.operand_push(f, fir.operand_const(fir.const_bytes("color")));
@@ -326,8 +329,7 @@ fn every_check_kind_prints_its_name() void {
     defer del(b.data);
     fir_env.env mut* own e = fir_env.make();
     defer fir_env.drop_made(move(e));
-    fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(e, "add");
+    fir.func mut* own f = fir_env.func_made(e, "add");
     defer fir.func_drop_made(move(f));
     u32 none = cast(f->ops.len, u32);
     u32 last = cast(fir.check_kind.chk_panic, u32);
@@ -349,8 +351,7 @@ fn a_switch_prints_its_arms_in_order() void {
     defer del(b.data);
     fir_env.env mut* own e = fir_env.make();
     defer fir_env.drop_made(move(e));
-    fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(e, "add");
+    fir.func mut* own f = fir_env.func_made(e, "add");
     defer fir.func_drop_made(move(f));
     // Three arms over the `i32` parameter, one of them negative.
     u32 first = fir.arm_push(f, consts.cv_from_i64(1), 1);
@@ -395,8 +396,7 @@ fn a_block_indents_its_lines() void {
     defer del(b.data);
     fir_env.env mut* own e = fir_env.make();
     defer fir_env.drop_made(move(e));
-    fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(e, "add");
+    fir.func mut* own f = fir_env.func_made(e, "add");
     defer fir.func_drop_made(move(f));
     // A block with no terminator yet prints no terminator line.
     fir_print.print_block(f, 0, &b);
@@ -418,8 +418,7 @@ fn a_let_prints_what_the_local_has() void {
     defer del(b.data);
     fir_env.env mut* own e = fir_env.make();
     defer fir_env.drop_made(move(e));
-    fir.func mut* own f = fir.func_make();
-    *f = fir_env.func_of(e, "add");
+    fir.func mut* own f = fir_env.func_made(e, "add");
     defer fir.func_drop_made(move(f));
     ast.sym mut named = ast.sym{};
     named.name = "total";
@@ -451,14 +450,12 @@ fn a_header_prints_the_function_type() void {
     defer del(b.data);
     fir_env.env mut* own e = fir_env.make();
     defer fir_env.drop_made(move(e));
-    fir.func mut* own nothing = fir.func_make();
-    *nothing = fir_env.func_of(e, "nothing");
+    fir.func mut* own nothing = fir_env.func_made(e, "nothing");
     defer fir.func_drop_made(move(nothing));
     fir.block_set_terminator(nothing, 0, fir.term_return(at(1, 1), 0));
     fir_print.print_function(nothing, &b);
     expect_lines(&b, NOTHING[..]);
-    fir.func mut* own stop = fir.func_make();
-    *stop = fir_env.func_of(e, "stop");
+    fir.func mut* own stop = fir_env.func_made(e, "stop");
     defer fir.func_drop_made(move(stop));
     fir.block_set_terminator(stop, 0, fir.term_trap(at(2, 5), 1));
     fir_print.print_function(stop, &b);
@@ -473,8 +470,7 @@ fn a_header_prints_the_function_type() void {
     };
     expect_lines(&b, want_stop[..]);
     // An aggregate parameter and result.
-    fir.func mut* own keep = fir.func_make();
-    *keep = fir_env.func_of(e, "keep");
+    fir.func mut* own keep = fir_env.func_made(e, "keep");
     defer fir.func_drop_made(move(keep));
     fir_print.print_function(keep, &b);
     string[6] want_keep = {
@@ -502,8 +498,7 @@ fn a_module_separates_its_functions_by_a_blank_line() void {
     // A module with no function prints nothing.
     fir_print.print_module(m, &b);
     fir_env.expect_text(&b, "");
-    fir.func mut* own first = fir.func_make();
-    *first = fir_env.func_of(e, "nothing");
+    fir.func mut* own first = fir_env.func_made(e, "nothing");
     defer fir.func_drop_made(move(first));
     fir.block_set_terminator(first, 0, fir.term_return(at(1, 1), 0));
     fir.module_add_function(m, move(*first));

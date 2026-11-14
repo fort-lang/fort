@@ -1,0 +1,124 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| region ok
+//| routine ok
+//| release ok
+/// Checks the value drops of fir.interpreter: region_drop frees the bytes of a region, and
+/// routine_drop frees the lowered function and the offsets of a routine. Each takes the zero value
+/// too, and a round of each leaves the heap where it was (notes/testing.md 4).
+import fort.fir;
+import fort.fir.interpreter;
+import fir_env;
+import heap;
+
+// A live data region of `size` bytes at `base`, each byte `fill`.
+fn data_region(u64 base, u64 size, u8 fill) interpreter.region {
+    u8 mut@ own bytes = new(u8, size);
+    for (u64 mut i = 0; i < size; i++) {
+        bytes[i] = fill;
+    }
+    return interpreter.region{base, size, move(bytes), interpreter.region_kind.rk_data, true,
+                              false, 0};
+}
+
+// Holds that `r` has `size` bytes, each `fill`.
+fn expect_bytes(interpreter.region* r, u64 size, u8 fill) void {
+    assert(r->bytes.len == size);
+    for (u64 mut i = 0; i < size; i++) {
+        assert(r->bytes[i] == fill);
+    }
+}
+
+fn a_region_drop_takes_a_region_with_bytes_and_one_without() void {
+    interpreter.region mut* own r = new(interpreter.region);
+    *r = data_region(4096, 64, 7);
+    expect_bytes(r, 64, 7);
+    assert(r->live && !r->readonly);
+    interpreter.region kept = move(*r);
+    // the move leaves the zero region
+    assert(r->bytes.len == 0 && r->base == 0);
+    del(r);
+    interpreter.region_drop(move(kept));
+    // a function region and an ended region hold no byte
+    interpreter.region_drop(interpreter.region{8192, 0, {}, interpreter.region_kind.rk_code,
+                                               true, true, 3});
+    interpreter.region_drop(interpreter.region{});
+}
+
+// A routine of the fixture function `name` whose lowered function is in an allocation of its own,
+// with `count` offsets.
+fn lowered_routine(fir_env.env mut* e, string name, u64 count) interpreter.routine {
+    u64 mut@ own offsets = new(u64, count);
+    for (u64 mut i = 0; i < count; i++) {
+        offsets[i] = i * 8;
+    }
+    fir.func mut* own lowered = new(fir.func);
+    *lowered = fir_env.func_of(e, name);
+    return interpreter.routine{.sym = fir_env.sym(e, name), .lowered = move(lowered),
+                               .offsets = move(offsets), .size = count * 8};
+}
+
+// Holds that `r` has the lowered function of `name` and `count` offsets.
+fn expect_routine(fir_env.env* e, interpreter.routine* r, string name, u64 count) void {
+    assert(r->sym == fir_env.sym(e, name));
+    assert(r->lowered != null);
+    assert(r->lowered->sym == r->sym);
+    assert(r->offsets.len == count);
+    assert(r->size == count * 8);
+    for (u64 mut i = 0; i < count; i++) {
+        assert(r->offsets[i] == i * 8);
+    }
+}
+
+fn a_routine_drop_takes_a_lowered_routine_and_one_of_the_module() void {
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    interpreter.routine mut* own r = new(interpreter.routine);
+    *r = lowered_routine(e, "add", 3);
+    expect_routine(e, r, "add", 3);
+    interpreter.routine kept = move(*r);
+    assert(r->lowered == null && r->offsets.len == 0);
+    del(r);
+    interpreter.routine_drop(move(kept));
+    // a routine of a function of the module has no lowered function
+    u64 mut@ own offsets = new(u64, 2);
+    interpreter.routine_drop(interpreter.routine{.sym = fir_env.sym(e, "nothing"),
+                                                 .offsets = move(offsets)});
+    // a routine that the lowering refused has neither
+    interpreter.routine_drop(interpreter.routine{.refused = true});
+}
+
+// One round: a region and a routine of each kind, each ended through its drop.
+fn round_of_each(fir_env.env mut* e) void {
+    interpreter.region_drop(data_region(64, 256, 1));
+    interpreter.region_drop(interpreter.region{});
+    interpreter.routine_drop(lowered_routine(e, "f", 6));
+    interpreter.routine_drop(lowered_routine(e, "add", 0));
+}
+
+fn the_drops_leave_the_heap_where_they_were() void {
+    fir_env.env mut* own e = fir_env.make();
+    defer fir_env.drop_made(move(e));
+    u64[3] mut live_at = {};
+    u64 mut round = 0;
+    while (round < fir_env.LEAK_ROUNDS) {
+        round_of_each(e);
+        u64 slot = fir_env.leak_slot(round);
+        if (slot < 3) {
+            live_at[slot] = heap.live_view();
+        }
+        round += 1;
+    }
+    assert(fir_env.moved(live_at) < fir_env.LEAK_BOUND);
+}
+
+fn main() i32 {
+    a_region_drop_takes_a_region_with_bytes_and_one_without();
+    println("region ok");
+    a_routine_drop_takes_a_lowered_routine_and_one_of_the_module();
+    println("routine ok");
+    the_drops_leave_the_heap_where_they_were();
+    println("release ok");
+    return 0;
+}

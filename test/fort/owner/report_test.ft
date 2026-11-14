@@ -158,8 +158,7 @@ fn the_report_names_each_place_at_its_position() void {
     while (k < REPORTED_NAMES.len) {
         fir.func mut* own f = fir.func_make();
         lower(e, REPORTED_NAMES[k], f);
-        prover.proof mut* own p = prover.make();
-        *p = prover.prove(f);
+        prover.proof mut* own p = prover.prove_made(f);
         // `loop_leak` also leaks `p` at the end of its loop body, and report.write writes no error
         // of the leak rule (report.write_leaks writes it)
         assert((p->leaks == 1) == (REPORTED_NAMES[k] == "loop_leak"));
@@ -230,12 +229,10 @@ string[6] TEXT_REPORTS = {
 fn the_report_of_a_fir_text_names_the_fir_place() void {
     lower_env.env mut* own e = lower_env.make();
     defer lower_env.drop_made(move(e));
-    fir.module mut* own m = fir.module_make();
-    *m = pass_env.parse(e, PRELUDE[..], TEXT_REPORTED[..]);
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], TEXT_REPORTED[..]);
     defer fir.module_drop_made(move(m));
     fir.func* f = fir.module_function_at(m, 0);
-    prover.proof mut* own p = prover.make();
-    *p = prover.prove(f);
+    prover.proof mut* own p = prover.prove_made(f);
     defer prover.drop_made(move(p));
     assert(p->checks == 3 && p->stores.len == 2 && p->unproved == 4 && p->stores[0].proved);
     u64 before = check_env.reports(&e->c);
@@ -269,12 +266,10 @@ string[7] LIMIT_REPORTS = {
 fn the_first_error_past_the_work_limit_names_the_limit() void {
     lower_env.env mut* own e = lower_env.make();
     defer lower_env.drop_made(move(e));
-    fir.module mut* own m = fir.module_make();
-    *m = pass_env.parse(e, PRELUDE[..], TEXT_REPORTED[..]);
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], TEXT_REPORTED[..]);
     defer fir.module_drop_made(move(m));
     fir.func* f = fir.module_function_at(m, 0);
-    prover.proof mut* own p = prover.make();
-    *p = prover.prove_within(f, 0);
+    prover.proof mut* own p = prover.prove_all_made(f, 0, prover.USE_LIMIT);
     defer prover.drop_made(move(p));
     assert(p->over && p->checks == 3 && p->unproved == 4 && p->stores[0].proved);
     u64 before = check_env.reports(&e->c);
@@ -366,19 +361,16 @@ fn expect_reports(lower_env.env mut* e, fir.func* f, prover.proof* p, string@ wa
 fn the_report_names_each_store_that_no_check_guards() void {
     lower_env.env mut* own e = lower_env.make();
     defer lower_env.drop_made(move(e));
-    fir.module mut* own m = fir.module_make();
-    *m = pass_env.parse(e, PRELUDE[..], STORE_REPORTED[..]);
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], STORE_REPORTED[..]);
     defer fir.module_drop_made(move(m));
     fir.func* f = fir.module_function_at(m, 0);
-    prover.proof mut* own p = prover.make();
-    *p = prover.prove(f);
+    prover.proof mut* own p = prover.prove_made(f);
     defer prover.drop_made(move(p));
     assert(p->checks == 0 && p->stores.len == 5 && p->unproved == 3 && !p->over);
     assert(p->stores[0].proved && !p->stores[1].proved && p->stores[2].proved);
     assert(!p->stores[3].proved && !p->stores[4].proved);
     expect_reports(e, f, p, STORE_REPORTS[..]);
-    prover.proof mut* own over = prover.make();
-    *over = prover.prove_within(f, 0);
+    prover.proof mut* own over = prover.prove_all_made(f, 0, prover.USE_LIMIT);
     defer prover.drop_made(move(over));
     assert(over->over && over->unproved == 4 && over->stores[0].proved);
     expect_reports(e, f, over, STORE_LIMIT_REPORTS[..]);
@@ -443,19 +435,16 @@ string[4] SPLIT_REPORTS = {
 fn the_report_merges_the_errors_at_one_location() void {
     lower_env.env mut* own e = lower_env.make();
     defer lower_env.drop_made(move(e));
-    fir.module mut* own m = fir.module_make();
-    *m = pass_env.parse(e, PRELUDE[..], MERGED_REPORTED[..]);
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], MERGED_REPORTED[..]);
     defer fir.module_drop_made(move(m));
     fir.func* f = fir.module_function_at(m, 0);
-    prover.proof mut* own p = prover.make();
-    *p = prover.prove(f);
+    prover.proof mut* own p = prover.prove_made(f);
     defer prover.drop_made(move(p));
     assert(p->checks == 1 && p->stores.len == 6 && p->unproved == 4);
     assert(!prover.is_proved(p, 0));
     expect_reports(e, f, p, MERGED_REPORTS[..]);
     fir.func* g = fir.module_function_at(m, 1);
-    prover.proof mut* own q = prover.make();
-    *q = prover.prove(g);
+    prover.proof mut* own q = prover.prove_made(g);
     defer prover.drop_made(move(q));
     assert(q->checks == 1 && q->stores.len == 1 && q->unproved == 2);
     expect_reports(e, g, q, SPLIT_REPORTS[..]);
@@ -630,8 +619,7 @@ fn the_leak_errors_name_each_owner_at_its_exit() void {
     while (k < LEAK_NAMES.len) {
         fir.func mut* own f = fir.func_make();
         lower(e, LEAK_NAMES[k], f);
-        prover.proof mut* own p = prover.make();
-        *p = prover.prove(f);
+        prover.proof mut* own p = prover.prove_made(f);
         u64 mark = check_env.reports(&e->c);
         report.write_leaks(f, p, &e->c.m.s);
         // an error of the leak rule is an error of the proof, with or without one of D17.11
@@ -646,8 +634,7 @@ fn the_leak_errors_name_each_owner_at_its_exit() void {
     defer fir.func_drop_made(move(t));
     lower(e, "temp", t);
     drop_call(t);
-    prover.proof mut* own dropped = prover.make();
-    *dropped = prover.prove(t);
+    prover.proof mut* own dropped = prover.prove_made(t);
     defer prover.drop_made(move(dropped));
     assert(dropped->leaks == 1 && dropped->unproved == 0 && prover.has_error(dropped));
     before = check_env.reports(&e->c);
@@ -656,8 +643,7 @@ fn the_leak_errors_name_each_owner_at_its_exit() void {
     fir.func mut* own early = fir.func_make();
     defer fir.func_drop_made(move(early));
     lower(e, "early", early);
-    prover.proof mut* own over = prover.make();
-    *over = prover.prove_within(early, 0);
+    prover.proof mut* own over = prover.prove_all_made(early, 0, prover.USE_LIMIT);
     defer prover.drop_made(move(over));
     assert(over->leak_over && over->leaks == 4);
     before = check_env.reports(&e->c);
@@ -729,20 +715,17 @@ string[3] LEAK_LIMIT_OVER = {
 fn the_leak_limit_takes_its_own_note() void {
     lower_env.env mut* own e = lower_env.make();
     defer lower_env.drop_made(move(e));
-    fir.module mut* own m = fir.module_make();
-    *m = pass_env.parse(e, PRELUDE[..], LEAK_LIMIT[..]);
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], LEAK_LIMIT[..]);
     defer fir.module_drop_made(move(m));
     fir.func* f = fir.module_function_at(m, 0);
-    prover.proof mut* own under = prover.make();
-    *under = prover.prove(f);
+    prover.proof mut* own under = prover.prove_made(f);
     defer prover.drop_made(move(under));
     assert(under->work == 0 && under->leak_work == 5 && !under->leak_over && under->leaks == 1);
     assert(under->unproved == 0 && prover.has_error(under));
     u64 mut before = check_env.reports(&e->c);
     report.write_leaks(f, under, &e->c.m.s);
     expect_leaks(e, before, "t.fir", LEAK_LIMIT_UNDER[..]);
-    prover.proof mut* own over = prover.make();
-    *over = prover.prove_within(f, 4);
+    prover.proof mut* own over = prover.prove_all_made(f, 4, prover.USE_LIMIT);
     defer prover.drop_made(move(over));
     assert(over->work == 0 && !over->over && over->leak_over && over->unproved == 0);
     before = check_env.reports(&e->c);
@@ -756,12 +739,10 @@ fn the_leak_limit_takes_its_own_note() void {
 fn the_leak_errors_of_a_fir_text_name_the_fir_place() void {
     lower_env.env mut* own e = lower_env.make();
     defer lower_env.drop_made(move(e));
-    fir.module mut* own m = fir.module_make();
-    *m = pass_env.parse(e, PRELUDE[..], TEXT_LEAKED[..]);
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], TEXT_LEAKED[..]);
     defer fir.module_drop_made(move(m));
     fir.func* f = fir.module_function_at(m, 0);
-    prover.proof mut* own p = prover.make();
-    *p = prover.prove(f);
+    prover.proof mut* own p = prover.prove_made(f);
     defer prover.drop_made(move(p));
     assert(p->unproved == 0 && p->exits.len == 3 && p->leaks == 3);
     u64 before = check_env.reports(&e->c);
@@ -778,8 +759,7 @@ fn a_proof_with_no_leak_has_no_error() void {
     fir.func mut* own f = fir.func_make();
     defer fir.func_drop_made(move(f));
     lower(e, "clean", f);
-    prover.proof mut* own p = prover.make();
-    *p = prover.prove(f);
+    prover.proof mut* own p = prover.prove_made(f);
     defer prover.drop_made(move(p));
     assert(p->exits.len > 0 && p->leaks == 0 && p->unproved == 0 && !prover.has_error(p));
     u64 before = check_env.reports(&e->c);
@@ -998,8 +978,7 @@ fn the_report_of_part_2_names_the_first_inner_owner_of_each_site() void {
     while (k < RELEASED_NAMES.len) {
         fir.func mut* own f = fir.func_make();
         lower(e, RELEASED_NAMES[k], f);
-        prover.proof mut* own p = prover.make();
-        *p = prover.prove(f);
+        prover.proof mut* own p = prover.prove_made(f);
         report.write_inners(f, p, &e->c.m.s, &got);
         prover.drop_made(move(p));
         fir.func_drop_made(move(f));
@@ -1010,8 +989,7 @@ fn the_report_of_part_2_names_the_first_inner_owner_of_each_site() void {
     fir.func mut* own later = fir.func_make();
     defer fir.func_drop_made(move(later));
     lower(e, "later", later);
-    prover.proof mut* own over = prover.make();
-    *over = prover.prove_within(later, 0);
+    prover.proof mut* own over = prover.prove_all_made(later, 0, prover.USE_LIMIT);
     defer prover.drop_made(move(over));
     assert(over->inner_over && over->inner_leaks == 1);
     strbuf.clear(&got);
@@ -1020,8 +998,7 @@ fn the_report_of_part_2_names_the_first_inner_owner_of_each_site() void {
     fir.func mut* own two = fir.func_make();
     defer fir.func_drop_made(move(two));
     lower(e, "two_sites", two);
-    prover.proof mut* own both = prover.make();
-    *both = prover.prove_within(two, 0);
+    prover.proof mut* own both = prover.prove_all_made(two, 0, prover.USE_LIMIT);
     defer prover.drop_made(move(both));
     assert(both->inner_over && both->inner_leaks == 2);
     strbuf.clear(&got);
@@ -1076,13 +1053,11 @@ fn the_report_of_part_2_in_a_fir_text_names_the_fir_place() void {
     defer del(want.data);
     lower_env.env mut* own e = lower_env.make();
     defer lower_env.drop_made(move(e));
-    fir.module mut* own m = fir.module_make();
-    *m = pass_env.parse(e, TEXT_PRELUDE[..], TEXT_RELEASED[..]);
+    fir.module mut* own m = pass_env.parse_made(e, TEXT_PRELUDE[..], TEXT_RELEASED[..]);
     defer fir.module_drop_made(move(m));
     u64 mut f = 0;
     while (f < m->funcs.len) {
-        prover.proof mut* own p = prover.make();
-        *p = prover.prove(fir.module_function_at(m, f));
+        prover.proof mut* own p = prover.prove_made(fir.module_function_at(m, f));
         report.write_inners(fir.module_function_at(m, f), p, &e->c.m.s, &got);
         prover.drop_made(move(p));
         f += 1;

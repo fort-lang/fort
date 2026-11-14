@@ -920,8 +920,8 @@ came here.
   `check(overwrite: p)` names no runtime entry, so the empty runtime of a test needs none for it.
   `std/rt.ft` keeps `fail_overwrite` with no row in `runtime_sig.ft`. bootstrap-1 (`0fe521c`) emits
   a call of it for each store into an `own` reference. It builds bootstrap-2 with the `std` of
-  bootstrap-2, which keeps the function. The last pin of `tools/bootstrap.ref`, bootstrap-2, builds
-  HEAD with HEAD's `std` and emits no such call. So the build no longer needs the function in HEAD's
+  bootstrap-2, which keeps the function. The later pins of `tools/bootstrap.ref` emit no such call,
+  and the last pin builds HEAD with HEAD's `std`. So the build no longer needs the function in HEAD's
   `std`, and `run/stdlib/082` and `run/modes/022` still call it.
 - **The emptiness pass proves part 1 of the leak rule, and each exit that it cannot prove is an
   error** (D17.20, `spec/fir.md` 11, Exits). `owner.prover.prove` lists in `proof.exits` each `dead`
@@ -1276,7 +1276,7 @@ came here.
   `own` pointer no call changes, and `drop_made` moves the value out, dels the allocation and
   drops the value (`scope.make` and `scope.drop_made` in `check_stmt.check_block`,
   `containers.pool_make` and `pool_drop_made` in `driver.run_cc`, `driver.compile_entry`). A `make`
-  that fills the value stores into its fresh `new` (`prover.context_make`, `fir_parse.parser_make`):
+  that fills the value stores into its fresh `new` (`prover.context_make`, `fir_parse.parser_create_made`):
   the pass knows the owners of the allocation empty after a `new`, and a store after the call of
   a `make` is the overwrite error of D17.11, because the pass reads no callee.
   Order: the deferred statements run from the last, so write the `del`s first and the drops last
@@ -1922,9 +1922,11 @@ library (T-160).
   parenthesized type yet. `tools/bootstrap.ref` pins bootstrap-1 at `0fe521c`, which predates
   groups: it reports `expected a type, found '('` at a group, so a tree that bootstrap-1 builds
   uses the struct wrapper. Since D6.9 moved `std.rt.print_str`, `std.rt.panic` and
-  `std.rt.print_enum` to a `string` and a span, bootstrap-2 builds working-tree HEAD: a commit
+  `std.rt.print_enum` to a `string` and a span, the chain holds bootstrap-2: a commit
   whose lowering takes both forms of those entries, which bootstrap-1 builds over its own
-  pointer-and-length runtime. Each pin after the first gets an empty `rt_float.ft` in its standard
+  pointer-and-length runtime. bootstrap-3 (`2e56fa63`) is the first pin that compiles `regrow`
+  (D12.2), so `src/fort` and `std` call `regrow` only after it, and bootstrap-3 builds working-tree
+  HEAD. Each pin after the first gets an empty `rt_float.ft` in its standard
   root, because bootstrap-1 loads that file for a closure that holds a float. A tree that the last
   pin builds may use a group. T-153 puts an
   explicit C variable tail inside the subset when its types use no other unsupported form. These
@@ -2166,7 +2168,7 @@ library (T-160).
   `fort_lsp`, the lint, the VS Code extension and the `//! flags:` of `test/fort` and `test/lsp`
   pass `-I src`. Each pin edge passes `-I <pin>/src` too, so a pin after this spelling builds;
   the pin `0fe521c` finds its short imports beside its entry file and never reads that root.
-  The last pin, bootstrap-2, builds HEAD with this spelling. `tools/long_imports.py` writes a short
+  The pins after bootstrap-1 build with this spelling. `tools/long_imports.py` writes a short
   import of a compiler module in the long spelling, and the ctest `long-imports` fails on one.
   A branch that adds a short import runs the tool after its rebase. A branch that edits an
   import header which the tool rewrote gets a conflict in that header: keep the branch side of

@@ -131,7 +131,6 @@ fn drop_made(env mut* own p) void {
 // Parses the fixture's `f`, which takes `_1 (c): bool` and returns `i32`, with the `let` lines
 // `lets` and the blocks `blocks`. The function stays valid until the next call.
 fn parse(env mut* e, string lets, string@ blocks) fir.func* {
-    fir.module_free(&e->m);
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
     strbuf.append(&b, "fn main.f(_1 (c): bool) -> i32 {\n");
@@ -145,7 +144,11 @@ fn parse(env mut* e, string lets, string@ blocks) fir.func* {
     }
     strbuf.append(&b, "}\n");
     u64 before = fir_env.errors(&e->fx);
-    e->m = fir_parse.parse_module(&e->fx.c.m.s, "t.fir", strbuf.view(&b), fir_env.prelude(&e->fx));
+    fir.module nv =
+        fir_parse.parse_module(&e->fx.c.m.s, "t.fir", strbuf.view(&b), fir_env.prelude(&e->fx));
+    fir.module old = move(e->m);
+    e->m = move(nv);
+    fir.module_drop(move(old));
     if (fir_env.errors(&e->fx) != before) {
         eprintln(strbuf.view(&b));
         panic("fir_flow_sets_test.parse: a text does not parse");
@@ -165,8 +168,7 @@ fn same_sets(fir_flow.dataflow* a, fir_flow.dataflow* b, u64 at) void {
 fn agree(fir.func* f, u32 count, fir_flow.join_kind join, bool full_entry) u64 {
     // `pt` lives in an allocation, so that the leak rule proves its end: no call changes the
     // pointer, and drop_made holds each release once.
-    fir.pred_table mut* own pt = fir.pred_table_make();
-    *pt = fir.func_predecessors(f);
+    fir.pred_table mut* own pt = fir.func_predecessors_made(f);
     defer fir.pred_table_drop_made(move(pt));
     fir_flow.dataflow mut* own by_fn = fir_flow.dataflow_make(count, join, scope_marks);
     defer fir_flow.dataflow_drop_made(move(by_fn));
@@ -185,8 +187,16 @@ fn agree(fir.func* f, u32 count, fir_flow.join_kind join, bool full_entry) u64 {
     fir_flow.bits mut@ own kills = new(fir_flow.bits, cast(n, u64));
     u32 mut b = 0;
     while (b < n) {
-        gens[cast(b, u64)] = fir_flow.bits_new(count);
-        kills[cast(b, u64)] = fir_flow.bits_new(count);
+        fir_flow.bits new_gen = fir_flow.bits_new(count);
+        fir_flow.bits mut* at_gen = &gens[cast(b, u64)];
+        fir_flow.bits old_gen = move(*at_gen);
+        *at_gen = move(new_gen);
+        fir_flow.bits_drop(move(old_gen));
+        fir_flow.bits new_kill = fir_flow.bits_new(count);
+        fir_flow.bits mut* at_kill = &kills[cast(b, u64)];
+        fir_flow.bits old_kill = move(*at_kill);
+        *at_kill = move(new_kill);
+        fir_flow.bits_drop(move(old_kill));
         scope_sets(f, b, &gens[cast(b, u64)], &kills[cast(b, u64)]);
         b += 1;
     }
@@ -271,8 +281,7 @@ fn a_second_run_with_sets_replaces_the_result() void {
     defer drop_made(move(e));
     string[2] blocks = {"bb0: { live(_2); goto bb1; }", "bb1: { unreachable; }"};
     fir.func* f = parse(e, LETS, blocks[..]);
-    fir.pred_table mut* own pt = fir.pred_table_make();
-    *pt = fir.func_predecessors(f);
+    fir.pred_table mut* own pt = fir.func_predecessors_made(f);
     defer fir.pred_table_drop_made(move(pt));
     fir_flow.dataflow mut* own d = fir_flow.dataflow_make(5, fir_flow.join_kind.join_union,
                                                          refused);
@@ -297,8 +306,16 @@ fn a_second_run_with_sets_replaces_the_result() void {
 fn sets_of(fir.func* f, u32 count, fir_flow.bits mut@ gens, fir_flow.bits mut@ kills) void {
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
-        gens[cast(b, u64)] = fir_flow.bits_new(count);
-        kills[cast(b, u64)] = fir_flow.bits_new(count);
+        fir_flow.bits new_gen = fir_flow.bits_new(count);
+        fir_flow.bits mut* at_gen = &gens[cast(b, u64)];
+        fir_flow.bits old_gen = move(*at_gen);
+        *at_gen = move(new_gen);
+        fir_flow.bits_drop(move(old_gen));
+        fir_flow.bits new_kill = fir_flow.bits_new(count);
+        fir_flow.bits mut* at_kill = &kills[cast(b, u64)];
+        fir_flow.bits old_kill = move(*at_kill);
+        *at_kill = move(new_kill);
+        fir_flow.bits_drop(move(old_kill));
         scope_sets(f, b, &gens[cast(b, u64)], &kills[cast(b, u64)]);
         b += 1;
     }
@@ -328,11 +345,9 @@ fn agree_edges(fir.func* f, fir.func* split, u32 count, edge@ es, fir_flow.join_
     u32 n = fir.block_count(f);
     u32 m = fir.block_count(split);
     assert(cast(m, u64) == cast(n, u64) + es.len);
-    fir.pred_table mut* own pt = fir.pred_table_make();
-    *pt = fir.func_predecessors(f);
+    fir.pred_table mut* own pt = fir.func_predecessors_made(f);
     defer fir.pred_table_drop_made(move(pt));
-    fir.pred_table mut* own spt = fir.pred_table_make();
-    *spt = fir.func_predecessors(split);
+    fir.pred_table mut* own spt = fir.func_predecessors_made(split);
     defer fir.pred_table_drop_made(move(spt));
     fir_flow.dataflow mut* own by_edges = fir_flow.dataflow_make(count, join, refused);
     defer fir_flow.dataflow_drop_made(move(by_edges));
@@ -365,7 +380,11 @@ fn agree_edges(fir.func* f, fir.func* split, u32 count, edge@ es, fir_flow.join_
     sets_of(split, count, split_gens, split_kills);
     u32 mut b = 0;
     while (b < n) {
-        edge_gens[cast(b, u64)] = fir_flow.bits_new(count);
+        fir_flow.bits new_edge = fir_flow.bits_new(count);
+        fir_flow.bits mut* at_edge = &edge_gens[cast(b, u64)];
+        fir_flow.bits old_edge = move(*at_edge);
+        *at_edge = move(new_edge);
+        fir_flow.bits_drop(move(old_edge));
         edge_to[cast(b, u64)] = fir_flow.NO_EDGE;
         b += 1;
     }
@@ -408,7 +427,6 @@ fn agree_edges_all(fir.func* f, fir.func* split, u32 count, edge@ es) void {
 // Parses two texts of `f` into the two functions of one module, `f` and `g`. The function stays
 // valid until the next call.
 fn parse_pair(env mut* e, string@ blocks, string@ split) void {
-    fir.module_free(&e->m);
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
     string[2] names = {"f", "g"};
@@ -433,7 +451,11 @@ fn parse_pair(env mut* e, string@ blocks, string@ split) void {
         n += 1;
     }
     u64 before = fir_env.errors(&e->fx);
-    e->m = fir_parse.parse_module(&e->fx.c.m.s, "t.fir", strbuf.view(&b), fir_env.prelude(&e->fx));
+    fir.module nv =
+        fir_parse.parse_module(&e->fx.c.m.s, "t.fir", strbuf.view(&b), fir_env.prelude(&e->fx));
+    fir.module old = move(e->m);
+    e->m = move(nv);
+    fir.module_drop(move(old));
     if (fir_env.errors(&e->fx) != before) {
         eprintln(strbuf.view(&b));
         panic("fir_flow_sets_test.parse_pair: a text does not parse");
@@ -485,8 +507,7 @@ fn an_edge_set_holds_on_its_edge_as_a_block_on_that_edge_does() void {
     agree_edges_all(f, g, 5, into_else[..]);
     // the in-sets by hand: the number holds in bb2 and not in bb1, and the intersection at bb3
     // drops it, because the edge from bb1 lacks it
-    fir.pred_table mut* own pt = fir.pred_table_make();
-    *pt = fir.func_predecessors(f);
+    fir.pred_table mut* own pt = fir.func_predecessors_made(f);
     defer fir.pred_table_drop_made(move(pt));
     fir_flow.dataflow mut* own d =
         fir_flow.dataflow_make(5, fir_flow.join_kind.join_intersect, refused);
@@ -499,7 +520,11 @@ fn an_edge_set_holds_on_its_edge_as_a_block_on_that_edge_does() void {
     sets_of(f, 5, gens, kills);
     u64 mut k = 0;
     while (k < 4) {
-        edge_gens[k] = fir_flow.bits_new(5);
+        fir_flow.bits new_edge = fir_flow.bits_new(5);
+        fir_flow.bits mut* at_edge = &edge_gens[k];
+        fir_flow.bits old_edge = move(*at_edge);
+        *at_edge = move(new_edge);
+        fir_flow.bits_drop(move(old_edge));
         k += 1;
     }
     edge_to[0] = 2;

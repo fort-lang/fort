@@ -6674,8 +6674,10 @@ fn parse_batch(check_env.env mut* c, batch mut* bt) void {
     defer del(b.data);
     generator.write_lines(&b, bt->lines);
     fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(c, "main"), &c->ck};
-    fir.module_free(&bt->m);
-    bt->m = fir_parse.parse_module(&c->m.s, FIR_FILE, strbuf.view(&b), pre);
+    fir.module nv = fir_parse.parse_module(&c->m.s, FIR_FILE, strbuf.view(&b), pre);
+    fir.module old = move(bt->m);
+    bt->m = move(nv);
+    fir.module_drop(move(old));
     if (check_env.errors(c) != 0) {
         eprintln(check_env.report_text(c, 0));
         panic("oracle_test.parse_batch: the FIR text does not parse");
@@ -6705,8 +6707,10 @@ fn prepare(check_env.env mut* c, batch mut* bt) void {
         return;
     }
     for (u64 mut round = 0; round < ROUNDS; round++) {
-        fir.module_free(&bt->m);
-        bt->m = fir.module_new();
+        fir.module nv = fir.module_new();
+        fir.module old = move(bt->m);
+        bt->m = move(nv);
+        fir.module_drop(move(old));
         write_batch(bt);
         if (check_batch(c, bt) && lower_batch(c, bt)) {
             return;
@@ -6771,8 +6775,7 @@ fn prove_batch(check_env.env mut* c, batch mut* bt) void {
         fir.func* f = &bt->m.funcs.items[i];
         release.scan(drops, f);
         u64 owner = item_of(bt, f->sym);
-        prover.proof mut* own p = prover.make();
-        *p = prover.prove(f);
+        prover.proof mut* own p = prover.prove_made(f);
         add_proof(bt, f, owner, p);
         item mut lines = item{};
         take_lines(&lines, p, judgement.name_reports(c, &bt->named, f, p));

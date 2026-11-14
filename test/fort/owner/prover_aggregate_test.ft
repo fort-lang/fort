@@ -576,8 +576,7 @@ fn write_verdicts(fir.func* f, prover.proof* p, strbuf.str_buf mut* out) void {
 fn expect_function(fir.func* f, string want, string name) bool {
     strbuf.str_buf mut got = strbuf.create();
     defer del(got.data);
-    prover.proof mut* own p = prover.make();
-    *p = prover.prove(f);
+    prover.proof mut* own p = prover.prove_made(f);
     defer prover.drop_made(move(p));
     write_verdicts(f, p, &got);
     if (strbuf.view(&got) != want) {
@@ -594,8 +593,7 @@ fn expect_function(fir.func* f, string want, string name) bool {
 fn each_exit_holds_the_owners_below_its_local() void {
     lower_env.env mut* own e = lower_env.make();
     defer lower_env.drop_made(move(e));
-    fir.module mut* own m = fir.module_make();
-    *m = pass_env.parse(e, PRELUDE[..], CASES[..]);
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], CASES[..]);
     defer fir.module_drop_made(move(m));
     // each case with an exit that the pass does not prove has no other error
     assert(expect_module(e, m, VERDICTS[..]) == 21);
@@ -1124,8 +1122,7 @@ fn each_form_ends_its_local() void {
         if (expect_function(f, FORM_VERDICTS[k], FORM_NAMES[k])) {
             only += 1;
         }
-        prover.proof mut* own p = prover.make();
-        *p = prover.prove(f);
+        prover.proof mut* own p = prover.prove_made(f);
         bool other = p->unproved > 0 || p->leaks > 0 || p->use_unproved > 0;
         if (p->inner_leaks != FORM_INNER[k] || other) {
             eprintln(FORM_NAMES[k], " gives another count of sites of part 2, or another error");
@@ -1161,8 +1158,7 @@ string[13] WORK = {
 // Proves `f` within `limit` and holds its work, that the exit of `n` gets `exit`, and that the
 // exit of `w` gets `aggregate`.
 fn expect_limit(fir.func* f, u64 limit, string exit, string aggregate) void {
-    prover.proof mut* own p = prover.make();
-    *p = prover.prove_within(f, limit);
+    prover.proof mut* own p = prover.prove_all_made(f, limit, prover.USE_LIMIT);
     defer prover.drop_made(move(p));
     assert(p->leak_work == 10 && p->inner_work == 10 && p->aggregate_work == 52);
     assert(p->aggregate_over == (52 > limit) && p->leak_over == (10 > limit));
@@ -1191,8 +1187,7 @@ fn expect_proof(fir.func* f, prover.proof* p, string exit, string aggregate) voi
 fn the_aggregate_work_has_a_limit_of_its_own() void {
     lower_env.env mut* own e = lower_env.make();
     defer lower_env.drop_made(move(e));
-    fir.module mut* own m = fir.module_make();
-    *m = pass_env.parse(e, PRELUDE[..], WORK[..]);
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], WORK[..]);
     defer fir.module_drop_made(move(m));
     expect_limits(e, m);
 }
@@ -1298,13 +1293,12 @@ fn report_function(lower_env.env mut* e, string name, bool limit, bool dropped) 
     if (dropped) {
         drop_call(f);
     }
-    prover.proof mut* own p = prover.make();
-    defer prover.drop_made(move(p));
+    u64 mut work = prover.WORK_LIMIT;
     if (limit) {
-        *p = prover.prove_within(f, 0);
-    } else {
-        *p = prover.prove(f);
+        work = 0;
     }
+    prover.proof mut* own p = prover.prove_all_made(f, work, prover.USE_LIMIT);
+    defer prover.drop_made(move(p));
     assert(prover.has_error(p) == (p->aggregate_leaks > 0 || p->leaks > 0));
     report.write_leaks(f, p, &e->c.m.s);
 }
@@ -1367,13 +1361,11 @@ string[4] TEXT_REPORTED = {
 fn the_error_of_a_fir_text_names_the_fir_place() void {
     lower_env.env mut* own e = lower_env.make();
     defer lower_env.drop_made(move(e));
-    fir.module mut* own m = fir.module_make();
-    *m = pass_env.parse(e, PRELUDE[..], TEXT[..]);
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], TEXT[..]);
     defer fir.module_drop_made(move(m));
     fir.func* f = fir.module_function_at(m, 0);
     pass_env.verified(e, f, "prover_aggregate_test: the verifier refuses the input");
-    prover.proof mut* own p = prover.make();
-    *p = prover.prove(f);
+    prover.proof mut* own p = prover.prove_made(f);
     defer prover.drop_made(move(p));
     assert(p->aggregate_leaks == 2 && p->leaks == 0 && prover.has_error(p));
     u64 before = check_env.reports(&e->c);
