@@ -1687,15 +1687,19 @@ bullet at a time and without a rewrite.
   (`test/fort/lexer_utf8_test.ft`, `test/lang/fail/lexical/019` to `027`). The lexer gives one
   error for each line and 20 diagnostics for a file at most (D14.2). So it gives no line for
   that byte when an earlier lexical error stands in its line or the file is past that limit.
-  A function of a trusted module whose result type reaches a pointer, a span or a
-  string needs a row line `// gives: <text>`. The lint reports the function without that line
-  (`gives_row_problems`). The reach reads the type and each struct that the type names, at any
-  depth. The form `// gives:` is a convention of the lint: D9.8 does not state it. The lint checks
-  that the line is there and that it holds text. It does not check rule 1 or rule 2 of "Storage of
-  C" (D9.8). A reviewer reads the reason of the line against these 2 rules. That check reads the
-  result type only. It does not see an out parameter, a store into a global or a value that goes to
-  another function as an argument. The row of a function is the `//` lines directly above the line
-  of its `fn`. A function that stands after another item on its line has no row for this check. The
+  A function of a trusted module whose result type reaches a pointer, a span or a string needs a row
+  line `// gives: <text>`. The lint reports the function without that line (`gives_row_problems`).
+  The reach reads the type and each struct that the type names, at any depth. The form `// gives:`
+  is a convention of the lint: D9.8 does not state it. The lint checks that the line is there and
+  that it holds text. The text is UTF-8, and a space, a separator, a control character, a format
+  character, a mark with no base and a blank letter of Unicode are no text: a line with only U+00A0,
+  U+3000, U+0085, U+200B or U+3164 after the word holds none. The lint does not check rule 1 or rule
+  2 of "Storage of C" (D9.8). A reviewer reads the reason of the line against these 2 rules. That
+  check reads the result type only. It does not see an out parameter, a store into a global or a
+  value that goes to another function as an argument. The row of a function is the `//` lines
+  directly above the line of its `fn`. A function that stands after another item on its line has no
+  row for this check or for a citation, and the message of a citation says so. A call row still
+  stands for each function of its line. A citation holds its callee on one line, in a group too. The
   rows `D9.8-gives-*` of `tools/mutations/rows_lint.json` hold the check. A row can hold a line that
   starts `// Audit:`. It states a limit of the row that an audit found, as the row of `write` in
   `std/linux/libc.ft` does. The lint does not read that line.
