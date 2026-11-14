@@ -684,6 +684,23 @@ bullet at a time and without a rewrite.
   `green` and `green_func` accept a flow violation, and `flow_green` accepts none. A green `.fir`
   file keeps every rule, because the pass `verify` runs them all. `//! panic:` matches a
   substring, so a red file whose text passes 100 columns drops the prefix `fir.verify: ` (T-233).
+  **The premise rules V14, V15 and V16 run last, and a hand-written text of an ownership suite
+  may break them.** `flow_green` and a green `.fir` file keep them, and so do the FIR corpus, the
+  pass suites and the interpreter suite. The subject of many cases of the ownership suites is a
+  state that the lowering never writes: a `return` with a live owner, a second store into `_0`.
+  A text whose functions keep the 16 rules goes through a strict helper: `pass_env.verified`,
+  `pass_env.verified_each` or `run_env.parse_made`. A text with such a state goes through a
+  loose helper: `pass_env.breaks_premise`, `pass_env.breaks_premises` or
+  `run_env.parse_breaks_made`. A loose helper holds V1 to V13 for each function, and it holds
+  the count of the functions that break V14, V15 or V16, which the test function of the text
+  states. It stops the test when the count is 0 and when the count differs. So a change that
+  adds a premise violation to a text, or that removes one, fails the suite. `parse_batch` of
+  `owner/oracle_test.ft` holds the count `FIR_BREAKS` of its one FIR batch in the same way.
+  Write no count of these functions into a shared file: the test functions hold them.
+  `test/fort/fir_lower_premise_test.ft` holds the rules on functions that the lowering writes: it
+  removes or repeats one statement at a time and holds the rule that the verifier reports, so a
+  case fails when the lowering changes the count of its `dead` statements.
+  `tools/mutations/verify_fort.json` holds the mutants of the three rules.
   **The pass `run` writes a report in place of the module** (`test/fir/run/`, `spec/fir.md`
   16.3): what the run wrote to the descriptors 1 and 2, then one line for its end. The tests run
   with the real `--std-dir`, so a failed check writes the message of `std.rt`. `run_tests.py

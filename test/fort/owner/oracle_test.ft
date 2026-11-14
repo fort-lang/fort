@@ -4029,6 +4029,10 @@ string[FIR_PRELUDE_LINES] FIR_PRELUDE = {
 
 u64 FIR_LINES = 1756;
 
+// The count of the functions of FIR_CASES that break a premise rule V14 to V16 of the verifier
+// (spec/fir.md 10), which parse_batch holds. Each other function of the text keeps the 16 rules.
+u64 FIR_BREAKS = 42;
+
 string[FIR_LINES] FIR_CASES = {
     "fn main.key_fresh() -> i32 {",
     "    let _1 (arr): i32 mut* own[2];",
@@ -6187,7 +6191,11 @@ fn lower_one(check_env.env mut* c, batch mut* bt, ast.sym* s, fir_verify.runtime
 }
 
 // Parses the FIR text of `bt` against its checked declarations into `bt->m`, and holds that each
-// function keeps every rule of the verifier.
+// function keeps each rule V1 to V13 of the verifier and that FIR_BREAKS functions break a premise
+// rule V14 to V16 (spec/fir.md 10). A case can break a premise of the lowering: the oracle holds
+// what the pass says of it. The premise rules run last, so a violation of one says that the
+// function keeps each rule V1 to V13. Another count of such functions stops the test, so a case
+// that gets a premise violation by error, or that loses one, fails.
 fn parse_batch(check_env.env mut* c, batch mut* bt) void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
@@ -6200,14 +6208,23 @@ fn parse_batch(check_env.env mut* c, batch mut* bt) void {
         panic("oracle_test.parse_batch: the FIR text does not parse");
     }
     fir_verify.runtime rt = fir_verify.runtime_of(&c->ck);
+    u64 mut broken = 0;
     for (u64 mut k = 0; k < bt->m.funcs.len; k++) {
         fir_verify.violation mut v = fir_verify.violation{};
         if (fir_verify.find_violation(&bt->m.funcs.items[k], &rt, &v)) {
             strbuf.clear(&b);
             fir_verify.violation_text(&bt->m.funcs.items[k], &v, &b);
-            eprintln(strbuf.view(&b));
-            panic("oracle_test.parse_batch: the verifier refuses a FIR case");
+            if (v.rule < fir_verify.RULE_V14) {
+                eprintln(strbuf.view(&b));
+                panic("oracle_test.parse_batch: the verifier refuses a FIR case");
+            }
+            broken += 1;
         }
+    }
+    if (broken != FIR_BREAKS) {
+        eprintln(broken, " FIR cases break a premise rule, and not ", FIR_BREAKS, ": ",
+                 strbuf.view(&b));
+        panic("oracle_test.parse_batch: another count of FIR cases breaks a premise rule");
     }
     if (bt->m.funcs.len != bt->items.len) {
         panic("oracle_test.parse_batch: the FIR text holds another count of functions");

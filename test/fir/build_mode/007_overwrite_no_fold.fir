@@ -13,6 +13,7 @@
 //|         _2 = alloc<i32>(const u64 1);
 //|         _3 = move _2;
 //|         del(move _3);
+//|         dead(_3);
 //|         return;
 //|     }
 //| }
@@ -32,12 +33,14 @@
 //|         _3 = alloc<i32>(const u64 1);
 //|         _2 = move _3;
 //|         del(move _2);
+//|         dead(_2);
 //|         return;
 //|     }
 //|     bb2: {
 //|         _3 = alloc<i32>(const u64 1);
 //|         _4 = move _3;
 //|         del(move _4);
+//|         dead(_4);
 //|         return;
 //|     }
 //| }
@@ -62,6 +65,7 @@
 //|     bb3: {
 //|         _2 = move _3;
 //|         del(move _2);
+//|         dead(_2);
 //|         return;
 //|     }
 //| }
@@ -83,6 +87,7 @@ fn main.other() -> void {
     bb1: {
         _3 = move _2;
         del(move _3);
+        dead(_3);
         return;
     }
 }
@@ -104,6 +109,7 @@ fn main.twice(_1 (c): bool) -> void {
     bb2: {
         _2 = move _3;
         del(move _2);
+        dead(_2);
         return;
     }
     bb3: {
@@ -113,6 +119,7 @@ fn main.twice(_1 (c): bool) -> void {
     bb4: {
         _4 = move _3;
         del(move _4);
+        dead(_4);
         return;
     }
 }
@@ -139,6 +146,7 @@ fn main.join(_1 (c): bool) -> void {
     bb4: {
         _2 = move _3;
         del(move _2);
+        dead(_2);
         return;
     }
 }

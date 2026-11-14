@@ -1,4 +1,4 @@
-/// Tests the rules V1 to V13 of spec/fir.md 10 on one FIR function. A violation is an internal
+/// Tests the rules V1 to V16 of spec/fir.md 10 on one FIR function. A violation is an internal
 /// error of the pass that made the function, so `verify` ends the program with a panic that names
 /// the rule, the function, the block and the statement. `verify_report` writes the violation and
 /// returns.
@@ -8,11 +8,13 @@
 // the items on the temporaries gives. The module holds no module-level mutable state.
 // The local rules V1 to V8 and V10 run first, in number order, and each walks the whole function:
 // the blocks in order, and in each block the statements in order and then the terminator. The
-// flow rules V9, V11, V12 and V13 run after them, in number order, over one predecessor table.
+// flow rules V9 and V11 to V16 run after them, in number order, over one predecessor table.
 // The first violation stops the walk. So a rule reads what the rules before it guarantee: V2
 // reads the terminator that V1 found, V4 reads the place types that V3 found well formed, and V6
 // and V7 read the rvalue types and the callee types that V4 found well formed. The flow rules
 // read the targets that V2 found, the places that V3 found and the switch types that V4 found.
+// V14, V15 and V16 hold three premises that owner.prover takes from the lowering. One dataflow
+// serves the three, because each local has one of their roles at most.
 import fort.ast;
 import fort.check;
 import fort.consts;
@@ -37,6 +39,9 @@ u32 RULE_V10 = 10;
 u32 RULE_V11 = 11;
 u32 RULE_V12 = 12;
 u32 RULE_V13 = 13;
+u32 RULE_V14 = 14;
+u32 RULE_V15 = 15;
+u32 RULE_V16 = 16;
 
 // The count of the check kinds, chk_overflow to chk_panic.
 u64 CHECK_KINDS = 11;
@@ -112,6 +117,12 @@ string V10_LOCAL = "live or dead of a local that is not named";
 string V11_PREDECESSORS = "the continuation of a check has another predecessor";
 string V12_MOVED = "a read of a temporary after a move of it";
 string V13_UNASSIGNED = "a read of a temporary before an assignment of it";
+string V14_OPEN = "a return in the scope of a named owner local";
+string V15_TWICE = "a second store into an aggregate result";
+string V15_NONE = "a return with no store of the aggregate result";
+string V15_ADDRESS = "an addr or a slice of an aggregate result";
+string V16_LIVE = "a store over a live scratch local";
+string V16_RETURN = "a return with a live scratch temporary";
 
 // ---- the runtime entries ---------------------------------------------------------------------
 
@@ -1424,6 +1435,405 @@ fn v13_assignments(walk mut* w, fir.pred_table* pt, effects* e) bool {
     return test_flow(w, pt, e, RULE_V13, d, V13_UNASSIGNED);
 }
 
+// ---- V14, V15 and V16 ----------------------------------------------------------------------
+
+// What V14 to V16 read of one function. Each local has one role at most: a named owner local (V14),
+// the aggregate `_0` (V15) or a scratch local (V16). So one set with a bit for each local, and
+// one bit more, holds the state of the three rules at a point:
+// - the bit of a named owner local says that a path reaches the point with its scope open;
+// - bit 0 of a function with an aggregate `_0` says that a path reaches the point after a store
+//   into fixed storage of `_0`, and the bit `unstored` says that a path reaches it with no store
+//   of the whole `_0`;
+// - the bit of a scratch local says that a path reaches the point while the local can hold a
+//   value that is not the zero value.
+struct premises {
+    fir.func* f;
+    // The scratch locals, as place.is_scratch of owner.place gives them: a temporary, or a `_0`
+    // of no aggregate type, of an `own` reference type, whose address no statement takes.
+    fir_flow.bits* scratch;
+    // Whether `_0` has an aggregate type (fir.type_aggregate).
+    bool result;
+    // The number of the bit past the bits of the locals: the count of the locals.
+    u32 unstored;
+}
+
+// The first violation of the lowest rule that the walk of V14 to V16 found. Rule 0 is none.
+struct finding {
+    u32 rule;
+    string what;
+    u32 block;
+    u32 position;
+}
+
+// Keeps the violation of `rule` in *found when it holds none, or one of a higher rule. The walk
+// goes in block order, so the first violation of a rule stays.
+fn note(finding mut* found, u32 rule, string what, u32 b, u32 position) void {
+    if (found->rule == 0 || rule < found->rule) {
+        *found = finding{rule, what, b, position};
+    }
+}
+
+// Whether local `n` of `f` is a named local that can hold an allocation: its type is an `own`
+// reference or an owning aggregate. These are the named locals that owner.prover gives an exit
+// (is_exit_local there), so V14 reads them and no other named local.
+fn is_named_owner(fir.func* f, u32 n) bool {
+    fir.local* l = fir.local_at(f, n);
+    return l->kind == fir.local_kind.lk_named
+        && (own_reference(l->ty) || types.type_is_owning_aggregate(l->ty));
+}
+
+// Whether an rvalue of kind `k` names a place and gives a reference into its storage: `addr`
+// gives a pointer and `slice` gives a span. These are 2 of the 33 kinds. Each other kind reads
+// operands and gives a value; `slice_ptr` takes its pointer as an operand. The `switch` has no
+// `default`, so a new kind does not compile before it has an arm here (D7.7).
+fn gives_reference(fir.rvalue_kind k) bool {
+    switch (k) {
+    case fir.rvalue_kind.rv_addr, fir.rvalue_kind.rv_slice:
+        return true;
+    case fir.rvalue_kind.rv_use, fir.rvalue_kind.rv_add, fir.rvalue_kind.rv_sub,
+        fir.rvalue_kind.rv_mul, fir.rvalue_kind.rv_add_overflows,
+        fir.rvalue_kind.rv_sub_overflows, fir.rvalue_kind.rv_mul_overflows,
+        fir.rvalue_kind.rv_div, fir.rvalue_kind.rv_rem, fir.rvalue_kind.rv_and,
+        fir.rvalue_kind.rv_or, fir.rvalue_kind.rv_xor, fir.rvalue_kind.rv_not,
+        fir.rvalue_kind.rv_shl, fir.rvalue_kind.rv_shr, fir.rvalue_kind.rv_fadd,
+        fir.rvalue_kind.rv_fsub, fir.rvalue_kind.rv_fmul, fir.rvalue_kind.rv_fdiv,
+        fir.rvalue_kind.rv_fneg, fir.rvalue_kind.rv_eq, fir.rvalue_kind.rv_ne,
+        fir.rvalue_kind.rv_lt, fir.rvalue_kind.rv_le, fir.rvalue_kind.rv_gt,
+        fir.rvalue_kind.rv_ge, fir.rvalue_kind.rv_cast, fir.rvalue_kind.rv_slice_ptr,
+        fir.rvalue_kind.rv_alloc, fir.rvalue_kind.rv_aggregate, fir.rvalue_kind.rv_call:
+        return false;
+    }
+}
+
+// Whether the statement `s` names fixed storage of a local in an `addr` or a `slice`, and which
+// local in *out. Of the 4 statement kinds only an assignment holds an rvalue: a `del` holds one
+// `move` operand, and `live` and `dead` name a local. A terminator holds operands and the place
+// of an overwrite check, and no rvalue.
+fn names_storage(fir.func* f, fir.statement* s, u32 mut* out) bool {
+    switch (s->kind) {
+    case fir.stmt_kind.st_assign:
+        if (!gives_reference(s->value.kind) || !fir.place_fixed(f, s->value.place)) {
+            return false;
+        }
+        *out = s->value.place.local;
+        return true;
+    case fir.stmt_kind.st_del, fir.stmt_kind.st_live, fir.stmt_kind.st_dead:
+        return false;
+    }
+}
+
+// Whether the statement `s` takes the address of the storage of a local, and which one in *out:
+// an `addr`, or a `slice` of a fixed array, whose place is fixed storage of a local. A `slice` of
+// a span or of a `string` reads the place and names the storage that the value names. This is
+// the test of place.find_taken of owner.place, which gives owner.prover its memory locals and
+// the second start of a scope.
+fn takes_address(fir.func* f, fir.statement* s, u32 mut* out) bool {
+    if (!names_storage(f, s, out)) {
+        return false;
+    }
+    fir.rvalue r = s->value;
+    return r.kind == fir.rvalue_kind.rv_addr
+        || fir.place_type(f, r.place)->kind == types.type_kind.k_array;
+}
+
+// Whether the rvalue `r` is a zero rvalue: a `use` or an `aggregate` whose operands are all the
+// constants `zero` and `null`. place.is_zero_rvalue of owner.place takes these forms and one more,
+// the `move` of a temporary that holds a zero value. So each store that owner.prover calls a store
+// of a value is one for this test too.
+fn zero_rvalue(fir.func* f, fir.rvalue r) bool {
+    if (r.kind != fir.rvalue_kind.rv_use && r.kind != fir.rvalue_kind.rv_aggregate) {
+        return false;
+    }
+    u32 mut i = 0;
+    while (i < r.ops_len) {
+        fir.operand o = fir.rvalue_operand(f, r, i);
+        bool zero = o.kind == fir.operand_kind.ok_const
+            && (o.value.kind == fir.const_kind.ck_zero || o.value.kind == fir.const_kind.ck_null);
+        if (!zero) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// Writes into `scratch` the scratch locals of `f`, whose `_0` is an aggregate when `result`.
+// Returns whether `f` has a named owner local, an aggregate `_0` or a scratch local: without one
+// no rule of V14 to V16 can find a violation. A local whose address a statement takes is no scratch
+// local, so the walk of the statements runs only when a local can be one.
+fn find_roles(fir.func* f, bool result, fir_flow.bits mut* scratch) bool {
+    bool mut any = result;
+    bool mut found = false;
+    u32 mut n = 0;
+    while (n < fir.local_count(f)) {
+        fir.local* l = fir.local_at(f, n);
+        bool kind = l->kind == fir.local_kind.lk_temp
+            || (l->kind == fir.local_kind.lk_return && !result);
+        if (kind && own_reference(l->ty)) {
+            fir_flow.bits_set(scratch, n);
+            found = true;
+        }
+        any = any || found || is_named_owner(f, n);
+        n += 1;
+    }
+    if (found) {
+        clear_taken(f, scratch);
+    }
+    return any;
+}
+
+// Removes from `scratch` each local whose address a statement of `f` takes.
+fn clear_taken(fir.func* f, fir_flow.bits mut* scratch) void {
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            u32 mut taken = 0;
+            if (takes_address(f, fir.block_statement(f, b, i), &taken)) {
+                fir_flow.bits_clear(scratch, taken);
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+}
+
+// Puts `n` into `set` when `holds`, and else removes it. A `decided` that is not null takes `n`:
+// it holds each number that an item of the block decides, the kill set of the block.
+fn decide(fir_flow.bits mut* set, fir_flow.bits mut* decided, u32 n, bool holds) void {
+    if (holds) {
+        fir_flow.bits_set(set, n);
+    } else {
+        fir_flow.bits_clear(set, n);
+    }
+    if (decided != null) {
+        fir_flow.bits_set(decided, n);
+    }
+}
+
+// The effects of the statement `s` that come before its store. `live(_n)` opens the scope of the
+// named owner local `_n` and `dead(_n)` closes it. A `move` of a whole scratch local, the `move`
+// of a `del` included, leaves the zero value in it.
+fn apply_before(premises* p, fir.statement* s, fir_flow.bits mut* set,
+                fir_flow.bits mut* decided) void {
+    if (s->kind == fir.stmt_kind.st_live || s->kind == fir.stmt_kind.st_dead) {
+        if (is_named_owner(p->f, s->local)) {
+            decide(set, decided, s->local, s->kind == fir.stmt_kind.st_live);
+        }
+        return;
+    }
+    fir.operand mut o = fir.operand{};
+    u32 mut i = 0;
+    while (fir.stmt_reads(p->f, s, i, &o)) {
+        bool whole = o.place.base == fir.base_kind.bk_local && o.place.proj_len == 0;
+        if (o.kind == fir.operand_kind.ok_move && whole
+            && fir_flow.bits_get(p->scratch, o.place.local)) {
+            decide(set, decided, o.place.local, false);
+        }
+        i += 1;
+    }
+}
+
+// The effects of the store of the assignment `s`, and of the address that it takes.
+// - An address of fixed storage of a named owner local opens its scope, and so does a store of a
+//   value that is no zero rvalue into its fixed storage.
+// - A store into fixed storage of a scratch local fills it, but a store of a zero rvalue into the
+//   whole local leaves it empty.
+// - A store into fixed storage of an aggregate `_0` sets bit 0, and a store into the whole `_0`
+//   clears the bit `unstored`.
+fn apply_store(premises* p, fir.statement* s, fir_flow.bits mut* set,
+               fir_flow.bits mut* decided) void {
+    if (s->kind != fir.stmt_kind.st_assign) {
+        return;
+    }
+    fir.func* f = p->f;
+    u32 mut taken = 0;
+    if (takes_address(f, s, &taken) && is_named_owner(f, taken)) {
+        decide(set, decided, taken, true);
+    }
+    if (!fir.place_fixed(f, s->place)) {
+        return;
+    }
+    u32 n = s->place.local;
+    bool whole = s->place.proj_len == 0;
+    if (is_named_owner(f, n)) {
+        if (!zero_rvalue(f, s->value)) {
+            decide(set, decided, n, true);
+        }
+    } else if (fir_flow.bits_get(p->scratch, n)) {
+        decide(set, decided, n, !(whole && zero_rvalue(f, s->value)));
+    } else if (n == 0 && p->result) {
+        decide(set, decided, 0, true);
+        if (whole) {
+            decide(set, decided, p->unstored, false);
+        }
+    }
+}
+
+// The transfer of each block for the dataflow of V14 to V16, as two sets (transfer_sets): the
+// last effect of a block on a number decides it for the block.
+fn premise_sets(premises* p, u32 n, u32 count, fir_flow.bits mut@ gens,
+                fir_flow.bits mut@ kills) void {
+    u32 mut b = 0;
+    while (b < n) {
+        fir_flow.bits mut* gen = &gens[cast(b, u64)];
+        fir_flow.bits mut* kill = &kills[cast(b, u64)];
+        *gen = fir_flow.bits_new(count);
+        *kill = fir_flow.bits_new(count);
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(p->f, b)) {
+            fir.statement* s = fir.block_statement(p->f, b, i);
+            apply_before(p, s, gen, kill);
+            apply_store(p, s, gen, kill);
+            i += 1;
+        }
+        b += 1;
+    }
+}
+
+// V15 and V16 on statement `i` of block `b`, with `at` as the set right before its store: after
+// the effects of the reads of the statement, as owner.prover tests a store (judge_stores).
+//
+// V15: no store into fixed storage of an aggregate `_0` comes after another one on a path.
+// owner.prover gives such a store no proof and no report: needs_proof and is_whole_store leave
+// it out, because the storage is the destination of the caller, which no lvalue names. That
+// holds only when the store writes over no value that the call put there before. The call can
+// put a value there in two ways. One is a store into `_0`, and the first clause counts those.
+// The other is a write through a reference into `_0`. No count of the statements of one
+// function holds that write: a callee can make it. So no `addr` and no `slice` names fixed
+// storage of an aggregate `_0`, at any projection and in any block. A `move` out of `_0` leaves
+// the zero value there (spec/fir.md 5.6), so it puts no value that a later store can lose.
+//
+// V16: no store into a whole scratch local comes while the local can hold a value. Past its work
+// limit, judge of owner.prover counts each such store as proved (is_scratch_store): no lvalue
+// names the local, and D17.8 keeps the lowering from a store over a live one.
+fn test_store(premises* p, fir.statement* s, fir_flow.bits* at, u32 b, u32 i,
+              finding mut* found) void {
+    u32 mut named = 0;
+    if (p->result && names_storage(p->f, s, &named) && named == 0) {
+        note(found, RULE_V15, V15_ADDRESS, b, i);
+    }
+    if (s->kind != fir.stmt_kind.st_assign || !fir.place_fixed(p->f, s->place)) {
+        return;
+    }
+    u32 n = s->place.local;
+    if (n == 0 && p->result && fir_flow.bits_get(at, 0)) {
+        note(found, RULE_V15, V15_TWICE, b, i);
+    }
+    if (s->place.proj_len == 0 && fir_flow.bits_get(p->scratch, n) && fir_flow.bits_get(at, n)) {
+        note(found, RULE_V16, V16_LIVE, b, i);
+    }
+}
+
+// V14, V15 and V16 on the `return` that ends block `b` at `position`, with `at` as the set
+// before it.
+//
+// V14: no `return` stands in the open scope of a named owner local. With no `ended` dataflow,
+// has_return_obligation of owner.prover gives a named local no obligation at a `return`: the
+// lowering writes the `dead` of each named local of each scope that a `return` leaves. The scope
+// of this rule is open wherever the `ended` dataflow of owner.prover (apply_ended) does not
+// prove the scope ended, and after each `live` too.
+//
+// V15: each path to a `return` holds a store into the whole aggregate `_0`. A `return` with no
+// store gives the caller a value that the call did not write.
+//
+// V16: no `return` comes while a scratch temporary can hold a value. Past its work limit,
+// pass_exits of owner.prover counts the exit of each scratch local as proved: D17.8 keeps the
+// lowering from a `return` while one holds an allocation. `_0` passes its value to the caller.
+fn test_return(premises* p, fir_flow.bits* at, u32 b, u32 position, finding mut* found) void {
+    u32 mut n = 0;
+    while (n < p->unstored) {
+        if (fir_flow.bits_get(at, n)) {
+            fir.local_kind kind = fir.local_at(p->f, n)->kind;
+            if (kind == fir.local_kind.lk_named) {
+                note(found, RULE_V14, V14_OPEN, b, position);
+            } else if (kind == fir.local_kind.lk_temp) {
+                note(found, RULE_V16, V16_RETURN, b, position);
+            }
+        }
+        n += 1;
+    }
+    if (p->result && fir_flow.bits_get(at, p->unstored)) {
+        note(found, RULE_V15, V15_NONE, b, position);
+    }
+}
+
+// Tests V14 to V16 on block `b` from `at`, the set at its entry, which the walk moves to its end.
+// The caller keeps `at`, so it is no local owner here.
+fn test_block(premises* p, u32 b, fir_flow.bits mut* at, finding mut* found) void {
+    fir.func* f = p->f;
+    u32 count = fir.block_statement_count(f, b);
+    u32 mut i = 0;
+    while (i < count) {
+        fir.statement* s = fir.block_statement(f, b, i);
+        apply_before(p, s, at, null);
+        test_store(p, s, at, b, i, found);
+        apply_store(p, s, at, null);
+        i += 1;
+    }
+    if (fir.block_at(f, b)->term.kind == fir.term_kind.tk_return) {
+        test_return(p, at, b, count, found);
+    }
+}
+
+// Runs the dataflow `d` of V14 to V16 over `p` and then tests each block from its in-set, in
+// block order. The violation is the first one of the lowest rule that a block breaks, so the
+// three rules report in number order as each other rule does.
+fn test_premises(walk mut* w, fir.pred_table* pt, premises* p, fir_flow.dataflow mut* d) bool {
+    u32 n = fir.block_count(w->f);
+    // `at` comes first, so that its `del` runs after the calls of the next deferred block
+    fir_flow.bits mut at = fir_flow.bits_new(d->count);
+    defer del(at.words);
+    fir_flow.bits mut@ own gens = new(fir_flow.bits, cast(n, u64));
+    fir_flow.bits mut@ own kills = new(fir_flow.bits, cast(n, u64));
+    defer {
+        u64 mut i = 0;
+        while (i < gens.len) {
+            fir_flow.bits_free(&gens[i]);
+            fir_flow.bits_free(&kills[i]);
+            i += 1;
+        }
+        del(gens);
+        del(kills);
+    }
+    premise_sets(p, n, d->count, gens, kills);
+    fir_flow.dataflow_forward_sets(w->f, pt, d, gens, kills);
+    finding mut found = finding{};
+    u32 mut b = 0;
+    while (b < n) {
+        fir_flow.bits_copy(&at, &d->ins[cast(b, u64)]);
+        test_block(p, b, &at, &found);
+        b += 1;
+    }
+    if (found.rule == 0) {
+        return true;
+    }
+    return fail(w, found.rule, found.what, found.block, found.position);
+}
+
+// V14, V15 and V16: the open scopes, the stores into the aggregate `_0` and the live scratch
+// locals, joined by union from empty sets, because each rule holds on any path. `bb0` starts
+// with the bit `unstored` of an aggregate `_0`: no store wrote it yet. The dataflow follows every
+// edge, the edge that V9 prunes on a constant switch included.
+fn v14_premises(walk mut* w, fir.pred_table* pt) bool {
+    u32 count = fir.local_count(w->f);
+    fir_flow.bits mut scratch = fir_flow.bits_new(count);
+    defer del(scratch.words);
+    bool result = fir.type_aggregate(fir.local_at(w->f, 0)->ty);
+    if (!find_roles(w->f, result, &scratch)) {
+        return true;
+    }
+    premises p = premises{w->f, &scratch, result, count};
+    fir_flow.dataflow mut* own d = fir_flow.dataflow_make(count + 1,
+                                                          fir_flow.join_kind.join_union,
+                                                          no_transfer);
+    defer fir_flow.dataflow_drop_made(move(d));
+    if (result) {
+        fir_flow.bits_set(&d->entry, count);
+    }
+    return test_premises(w, pt, &p, d);
+}
+
 // ---- the rules in order --------------------------------------------------------------------
 
 // Tests `rule` on statement `i` of block `b`.
@@ -1491,10 +1901,10 @@ fn test_rule(walk mut* w, u32 rule) bool {
     return true;
 }
 
-/// Tests the rules V1 to V13 on `f` and returns true with the first violation in *out when `f`
+/// Tests the rules V1 to V16 on `f` and returns true with the first violation in *out when `f`
 /// breaks one. `rt` gives the runtime entries that V7 reads.
-// The local rules run first, then the flow rules V9, V11, V12 and V13, each group in number
-// order. So a flow rule reads a function that keeps every local rule.
+// The local rules run first, then the flow rules V9 and V11 to V16, each group in number order.
+// So a flow rule reads a function that keeps every local rule.
 fn find_violation(fir.func* f, runtime* rt, violation mut* out) bool {
     walk mut w = walk{.f = f, .rt = rt};
     bool mut ok = test_rule(&w, RULE_V1) && test_rule(&w, RULE_V2) && test_rule(&w, RULE_V3)
@@ -1511,6 +1921,7 @@ fn find_violation(fir.func* f, runtime* rt, violation mut* out) bool {
             del(e.items);
             del(e.first);
         }
+        ok = ok && v14_premises(&w, &pt);
         del(pt.first);
         del(pt.preds);
     }
