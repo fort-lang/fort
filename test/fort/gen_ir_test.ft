@@ -211,14 +211,18 @@ fn a_failure_block_no_branch_reaches_is_written_the_same_way(gen_env.env mut* e)
     u64 label = 0;
     gen.gen_args mut* own args = gen.gen_args_make();
     defer gen.gen_args_drop_made(move(args));
-    gen.gen_args_add(args, operand("i32", "%v"));
+    // The arguments are those of the row of `fail_enum`: the value and the type name, then the
+    // location that gen_fail_block adds.
+    gen.gen_args_add(args, operand("i64", "%v"));
+    gen.gen_args_add(args, ptr_to("%name"));
     gen.gen_fail_block(&e->g, label, runtime_sig.rt_entry.rt_fail_enum, args, where_at());
     gen_env.expect_text(gen_env.body(e), "");
     gen_env.expect_text(
         gen_env.fail(e),
-        gen_env.join3(e, "\nL0:\n",
-                      "  call void @\"std.rt.fail_enum\"(i32 %v, ptr @.file.0, i32 7, i32 3)\n",
-                      "  unreachable\n"));
+        gen_env.join3(
+            e, "\nL0:\n",
+            "  call void @\"std.rt.fail_enum\"(i64 %v, ptr %name, ptr @.file.0, i32 7, i32 3)\n",
+            "  unreachable\n"));
     // no attribute is put on a failure call site.
     assert(str.index_of(gen_env.fail(e), '#') < 0);
 }
@@ -326,6 +330,43 @@ fn an_argument_carries_its_extension_attribute_between_type_and_value() void {
     gen.gen_args_add_ext(args, operand("i8", "%c"), "");
     gen_env.expect_text(gen.gen_args_text(args), "i32 1, i8 zeroext 10, i8 %c");
     assert(args->count == 3);
+    // One form line for each argument: the type and its extension attribute, not the value.
+    gen_env.expect_text(strbuf.view(&args->forms), "i32\ni8 zeroext\ni8\n");
+}
+
+fn an_sret_argument_carries_its_type_in_its_form() void {
+    gen.gen_args mut* own args = gen.gen_args_make();
+    defer gen.gen_args_drop_made(move(args));
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    // The row of `std.rt.args` gives its hidden result pointer the type `%fort.span`, and the form
+    // of the argument holds the whole `sret` attribute, so rt_call_check compares the two.
+    gen.gen_args_add_ext(args, ptr_to("%args"), "sret(%fort.span)");
+    gen_env.expect_text(strbuf.view(&args->forms), "ptr sret(%fort.span)\n");
+    gen.gen_call_rt(&e->g, runtime_sig.rt_entry.rt_args, args);
+    gen_env.expect_text(gen_env.body(e),
+                        "  call void @\"std.rt.args\"(ptr sret(%fort.span) %args)\n");
+}
+
+fn a_runtime_call_with_an_extension_attribute_fits_its_row() void {
+    strbuf.str_buf mut want = strbuf.create();
+    defer del(want.data);
+    strbuf.append(&want, "  %t0 = call ptr @\"std.rt.regrow\"(ptr %old, i64 %len, i64 4, i64 %n, ");
+    strbuf.append(&want, "i1 zeroext true, ptr @.file.0, i32 7, i32 3)\n");
+    gen.gen_args mut* own args = gen.gen_args_make();
+    defer gen.gen_args_drop_made(move(args));
+    gen_env.env mut* own e = gen_env.make();
+    defer gen_env.drop_made(move(e));
+    // `regrow` takes a `bool`, which its row writes as `i1 zeroext`, then the location.
+    gen.gen_args_add(args, ptr_to("%old"));
+    gen.gen_args_add(args, operand("i64", "%len"));
+    gen.gen_args_add(args, operand("i64", "4"));
+    gen.gen_args_add(args, operand("i64", "%n"));
+    gen.gen_args_add_ext(args, operand("i1", "true"), "zeroext");
+    gen.gen_args_add_loc(&e->g, args, where_at());
+    gen.gen_val r = gen.gen_call_rt_value(&e->g, runtime_sig.rt_entry.rt_regrow, "ptr", args);
+    gen_env.expect_text(r.val, "%t0");
+    gen_env.expect_text(gen_env.body(e), strbuf.view(&want));
 }
 
 // ---- slots and compiler temporaries ---------------------------------------------
@@ -384,6 +425,8 @@ fn main() i32 {
     a_runtime_call_names_the_result_of_its_row();
     a_runtime_call_with_a_value_names_a_temporary();
     an_argument_carries_its_extension_attribute_between_type_and_value();
+    an_sret_argument_carries_its_type_in_its_form();
+    a_runtime_call_with_an_extension_attribute_fits_its_row();
     println("data ok");
     a_compiler_temporary_is_an_alloca_in_the_entry_block();
     an_unlowered_construct_is_a_diagnostic_and_never_wrong_code();

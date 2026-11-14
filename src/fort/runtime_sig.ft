@@ -81,6 +81,7 @@ struct rt_sig {
     ir_form p5;
     ir_form p6;
     ir_form p7;
+    string sret; // the type of `sret(...)` on the leading `ptr` of an aggregate result, or empty
 }
 
 // Creates a row with no parameters. Each row below starts from it. Unused parameter slots contain
@@ -88,7 +89,15 @@ struct rt_sig {
 fn row(string name, ir_form result, bool is_noreturn) rt_sig {
     return rt_sig{name, result, is_noreturn, ir_form.ir_none, ir_form.ir_none, ir_form.ir_none,
                   ir_form.ir_none, ir_form.ir_none, ir_form.ir_none, ir_form.ir_none,
-                  ir_form.ir_none};
+                  ir_form.ir_none, ""};
+}
+
+// Gives the row `r` a hidden result pointer whose `sret(...)` names the aggregate type `ty`. Its
+// p0 is the `ptr` of that pointer.
+fn with_sret(rt_sig r, string ty) rt_sig {
+    rt_sig mut out = r;
+    out.sret = ty;
+    return out;
 }
 
 fn row1(string name, ir_form result, bool is_noreturn, ir_form p0) rt_sig {
@@ -149,7 +158,8 @@ fn row8(string name, ir_form result, bool is_noreturn, ir_form p0, ir_form p1, i
 // does a `string` or a span parameter, the address of the caller-made copy: the message of `panic`,
 // the `string` of `print_str` and the table of `print_enum` (D6.9). A `loc`
 // expands to `ptr, i32, i32`. `args` returns a `string@`, an aggregate, so it is a `void` function
-// with a leading `ptr`. Each `fail_*` function, `panic`, `assert_fail`, and `exit` is `fn
+// with a leading `ptr` that carries `sret(%fort.span)`. Each `fail_*` function, `panic`,
+// `assert_fail`, and `exit` is `fn
 // noreturn`. Each row states this attribute. Thus, insertion order cannot add the attribute to
 // another entry point. The two float printers are rows of `std.rt` like every other one: the
 // separate float module is folded into the runtime. `regrow` takes the pointer and the
@@ -232,7 +242,7 @@ fn rt_sig_of(rt_entry rt) rt_sig {
     case rt_entry.rt_args_init:
         return row2("std.rt.args_init", ir_form.ir_void, false, ir_form.ir_i32, ir_form.ir_ptr);
     case rt_entry.rt_args:
-        return row1("std.rt.args", ir_form.ir_void, false, ir_form.ir_ptr);
+        return with_sret(row1("std.rt.args", ir_form.ir_void, false, ir_form.ir_ptr), "%fort.span");
     case rt_entry.rt_exit:
         return row1("std.rt.exit", ir_form.ir_void, true, ir_form.ir_i32);
     case rt_entry.rt_none:
@@ -276,9 +286,24 @@ fn rt_entry_noreturn(rt_entry rt) bool {
     return rt_sig_of(rt).is_noreturn;
 }
 
+// Whether the mangled name `name` is a `noreturn` entry point. gen_define reads it to give the
+// definition attribute group `#8`; it is the one use of the field `is_noreturn`. Only this module
+// turns a name into an entry point, so an emitter names each entry that it calls as
+// `rt_entry.rt_<x>`, which test/runtime_table_test.py finds.
+fn rt_name_noreturn(string name) bool {
+    rt_entry rt = rt_entry_of(name);
+    return rt != rt_entry.rt_none && rt_entry_noreturn(rt);
+}
+
 // Its result form.
 fn rt_entry_result(rt_entry rt) ir_form {
     return rt_sig_of(rt).result;
+}
+
+// The aggregate type of its hidden result pointer, as `sret(...)` names it, or empty when it has
+// none. `args` returns a `string@`, so its call and its definition carry `sret(%fort.span)`.
+fn rt_entry_sret(rt_entry rt) string {
+    return rt_sig_of(rt).sret;
 }
 
 // The form of the `i`-th parameter, ir_none at or past the arity. An index
