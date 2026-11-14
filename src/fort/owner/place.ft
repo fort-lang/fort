@@ -6,10 +6,10 @@
 // A path is a place with the key of each index in place of its index local. owner.prover keeps
 // one fact for each path that it proves. Two forward dataflows of fir_flow read the transfer of
 // the locals here: the stale index temporaries and held addresses, joined by union, and the fresh
-// pointer locals, joined by intersection. A temporary `_t = copy _k` is stale at a point when a
-// store into `_k` can stand between the assignment of `_t` and that point. A held address is
-// stale when a store into a local that its place reads, a call or a store into memory can stand
-// there.
+// pointer locals with the unaddressed locals, joined by intersection. A temporary `_t = copy _k`
+// is stale at a point when a store into `_k` can stand between the assignment of `_t` and that
+// point. A held address is stale when a store into a local that its place reads, a call or a store
+// into memory can stand there.
 // The module uses switches and no function-pointer dispatch table. It holds no module-level
 // mutable state: each vector belongs to one survey, which one call of owner.prover.prove makes.
 import fort.ast;
@@ -791,6 +791,34 @@ fn member_of(step s, u64 mut* out) bool {
 
 // ---- the fresh pointer locals ------------------------------------------------------------------
 
+// The fresh set holds two bits for each local `_n` of `f`. Bit `n` says that `_n` is a fresh
+// pointer local (is_fresh). Bit `count + n`, for the count of the locals, says that `_n` is
+// unaddressed. That is, no path to the point holds a statement that takes the address of `_n`
+// (find_taken). So no value derives from an address of `_n` that the run took (D10.7). No
+// statement gives that bit back, and `dead` ends no address. bb0 starts with the bit of each local
+// but an aggregate `_0`, the storage of the caller (spec/fir.md 11, Fresh).
+fn fresh_count(fir.func* f) u32 {
+    return 2 * fir.local_count(f);
+}
+
+// Sets in `entry`, the fresh set at the entry of `f`, the unaddressed bit of each local but an
+// aggregate `_0`.
+fn set_unaddressed(fir.func* f, fir_flow.bits mut* entry) void {
+    u32 count = fir.local_count(f);
+    for (u32 mut n = 0; n < count; n++) {
+        if (!is_aggregate_result(f, n)) {
+            fir_flow.bits_set(entry, count + n);
+        }
+    }
+}
+
+// Whether `q` is a place in fixed storage of an unaddressed local of `fresh`. No callee reaches a
+// byte of that storage, because no value derives from an address of it (kill rule 5 of D17.11).
+fn is_unaddressed(survey* c, path q, fir_flow.bits* fresh) bool {
+    bool fixed = q.base == fir.base_kind.bk_local && !is_indirect(c, q);
+    return fixed && fir_flow.bits_get(fresh, fir.local_count(c->f) + q.local);
+}
+
 // Whether the rvalue `r` writes a fresh `new`: `alloc`, or the `move` of a temporary that one
 // store writes with an `alloc` and that only this `move` reads.
 fn is_fresh_new(survey* c, fir.rvalue r) bool {
@@ -830,13 +858,18 @@ fn end_fresh(fir.operand o, fir_flow.bits mut* fresh) void {
 // or moves a local as a whole, and each `addr` or `slice` that names a place of a local, other
 // than the store of a held address or of the address of a whole store, ends the freshness of that
 // local. Only its check and its stores read such an address, and it is no memory, so no call, no
-// other store and no operand gets its value.
+// other store and no operand gets its value. An `addr` or a `slice` that names fixed storage of a
+// local ends its unaddressed bit.
 fn apply_fresh_reads(survey* c, fir.statement* s, fir_flow.bits mut* fresh) void {
     fir.operand mut o = fir.operand{};
     u32 mut i = 0;
     while (fir.stmt_reads(c->f, s, i, &o)) {
         end_fresh(o, fresh);
         i += 1;
+    }
+    u32 mut taken = 0;
+    if (find_taken(c, s, &taken)) {
+        fir_flow.bits_clear(fresh, fir.local_count(c->f) + taken);
     }
     if (s->kind != fir.stmt_kind.st_assign) {
         return;

@@ -422,9 +422,14 @@ fn gen_exact(context* c, place.path p, probes mut* pr) void {
 // that are no memory and that only their checks and stores read. The local is no memory, and an
 // operand that copies or moves it ended its freshness before the kill. A callee reaches storage of
 // the caller only through a value that derives from its operands, the globals and memory (D10.7),
-// so it writes no byte of the object. Each other exception joins this test.
+// so it writes no byte of the object. A fact about fixed storage of an unaddressed local
+// survives too. No path to the call took an address of that storage. So no value that the callee
+// reads derives from one (place.is_unaddressed). Each other exception joins this test.
 fn survives_call(context* c, place.path q, fir_flow.bits* fresh) bool {
     if (!place.is_through_memory(&c->places, q)) {
+        return true;
+    }
+    if (place.is_unaddressed(&c->places, q, fresh)) {
         return true;
     }
     return place.is_through_fresh(&c->places, q, fresh);
@@ -704,11 +709,12 @@ fn reset_probes(probes mut* pr) void {
 }
 
 // Runs the stale dataflow, a union from an entry where every temporary is stale, or with
-// `fresh` the fresh dataflow, an intersection from an entry where no local is fresh.
+// `fresh` the fresh dataflow, an intersection from an entry where no local is fresh and each
+// local but an aggregate `_0` is unaddressed (place.fresh_count).
 fn run_locals(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d, bool fresh) void {
     fir.func* f = c->places.f;
     u32 n = fir.block_count(f);
-    u32 count = fir.local_count(f);
+    u32 count = d->count;
     probes mut* own pr = new(probes);
     defer probes_drop_made(move(pr));
     *pr = make_probes(count);
@@ -749,6 +755,7 @@ fn run_locals(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d, bool
     }
     if (fresh) {
         fir_flow.bits_fill(&d->init);
+        place.set_unaddressed(f, &d->entry);
     } else {
         fir_flow.bits_fill(&d->entry);
     }
@@ -833,7 +840,7 @@ fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
     u32 locals = fir.local_count(f);
     fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
     defer del(at_stale.words);
-    fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
+    fir_flow.bits mut at_fresh = fir_flow.bits_new(place.fresh_count(f));
     defer del(at_fresh.words);
     fir_flow.bits mut at_alias = alias_state(c);
     defer del(at_alias.words);
@@ -1278,7 +1285,7 @@ fn run_dataflows(context mut* c, proof mut* out) void {
                                                               transfer_none);
     defer fir_flow.dataflow_drop_made(move(stale));
     run_locals(c, &pt, stale, false);
-    fir_flow.dataflow mut* own fresh = fir_flow.dataflow_make(locals,
+    fir_flow.dataflow mut* own fresh = fir_flow.dataflow_make(place.fresh_count(f),
                                                               fir_flow.join_kind.join_intersect,
                                                               transfer_none);
     defer fir_flow.dataflow_drop_made(move(fresh));
@@ -1433,7 +1440,7 @@ fn judge_stores(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
     u32 locals = fir.local_count(f);
     fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
     defer del(at_stale.words);
-    fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
+    fir_flow.bits mut at_fresh = fir_flow.bits_new(place.fresh_count(f));
     defer del(at_fresh.words);
     fir_flow.bits mut at_scratch = fir_flow.bits_new(locals);
     defer del(at_scratch.words);
@@ -1858,7 +1865,7 @@ fn judge_exits(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fres
     u32 locals = fir.local_count(f);
     fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
     defer del(at_stale.words);
-    fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
+    fir_flow.bits mut at_fresh = fir_flow.bits_new(place.fresh_count(f));
     defer del(at_fresh.words);
     fir_flow.bits mut at_scratch = fir_flow.bits_new(locals);
     defer del(at_scratch.words);
@@ -1988,7 +1995,7 @@ fn walk_aggregates(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* 
     u32 locals = fir.local_count(f);
     fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
     defer del(at_stale.words);
-    fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
+    fir_flow.bits mut at_fresh = fir_flow.bits_new(place.fresh_count(f));
     defer del(at_fresh.words);
     fir_flow.bits mut at_alias = alias_state(c);
     defer del(at_alias.words);
@@ -2258,7 +2265,7 @@ fn judge_wholes(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
     u32 locals = fir.local_count(f);
     fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
     defer del(at_stale.words);
-    fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
+    fir_flow.bits mut at_fresh = fir_flow.bits_new(place.fresh_count(f));
     defer del(at_fresh.words);
     fir_flow.bits mut at_alias = alias_state(c);
     defer del(at_alias.words);
@@ -2627,7 +2634,7 @@ fn judge_inners(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
     u32 locals = fir.local_count(f);
     fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
     defer del(at_stale.words);
-    fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
+    fir_flow.bits mut at_fresh = fir_flow.bits_new(place.fresh_count(f));
     defer del(at_fresh.words);
     fir_flow.bits mut at_scratch = fir_flow.bits_new(locals);
     defer del(at_scratch.words);

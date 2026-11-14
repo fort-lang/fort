@@ -48,7 +48,6 @@ EXPECTED = {
     ("test/lang/programs/binary_tree.ft", "heir->right->left"): 1,
     ("test/lang/programs/binary_tree.ft", "node->left->left"): 3,
     ("test/lang/programs/binary_tree.ft", "node->right->left"): 2,
-    ("test/lang/programs/binary_tree.ft", "successor->left"): 1,
     ("test/lang/programs/binary_tree.ft", "t->root->left"): 2,
     ("test/lang/programs/binary_tree.ft", "t.root->left"): 1,
     ("test/lang/programs/json.ft", "tail->next->first"): 2,

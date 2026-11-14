@@ -997,9 +997,9 @@ bullet at a time and without a rewrite.
   A step that no run can show, such as a comparison that carries an address or the frame of an
   aggregate `_0`, stands in `test/fort/owner/alias_test.ft` over FIR text, and the rows
   `D17.11-alias` of `tools/mutations/emptiness.json` hold it there. A case of `alias_test.ft` frees
-  its memory local before any call that follows its check: a call kills each fact of a memory
-  local, so a call between the `del` and the exit makes the exit unproved for a reason that is not
-  R6.
+  its memory local before any call that follows its check: a call after the address of a memory
+  local kills each fact of it, so a call between the `del` and the exit makes the exit unproved for
+  a reason that is not R6.
   **The oracle reports an access through a forged pointer as `forged`**, a break of A8
   (`spec/ownership-design.md` 3.4). D10.7 states A8 as a guarantee of the compile-time rules of
   D3.5, D3.14, D6.9 and D17.13, so a program that compiles makes no such access unless C breaks
@@ -1065,22 +1065,23 @@ bullet at a time and without a rewrite.
   `CLASSES` and `SHAPES` are data, and the test writes one program for each cell of their product.
   `reason_of` gives the reason for which a cell has no program, and `REASONS` holds each reason.
   Each program goes through the steps of `driver.overwrite_entry`: the checker, the lowering, the
-  verifier, the three errors of the owner rules and the three reports. Each program then runs
-  under `fir.interpreter`, and each event goes through `disposition.is_error`. `KNOWN` lists each
-  cell that an owner rule rejects, with its diagnostic and the letter of its class of defect
-  (`DEFECTS`). The change that repairs a defect removes its rows and lowers `KNOWN_COUNT`. A cell
+  verifier, the three errors of the owner rules, the error of a drop that is not release-only
+  (D17.9) and the three reports. Each program then runs under `fir.interpreter`, and each event
+  goes through `disposition.is_error`. `KNOWN` lists each cell that an owner rule rejects, with its
+  diagnostic and the letter of its class of defect (`DEFECTS`). The change that repairs a defect
+  removes its rows and lowers `KNOWN_COUNT`. A cell
   that had a program before a change gets no new row in it. A cell that gets its first program can
   enter `KNOWN` with its class of defect, and the ticket Notes name the owner of the class. The test
   stops when a cell outside `KNOWN` fails, when a cell of `KNOWN` passes and when a cell of `KNOWN`
-  fails with another text. The test also runs a program that an owner rule rejects. A run with an
-  event of an error kind, or with an exit status that is not 0, stops the test, and no row of
+  fails with another text. The test also runs a program that an owner rule rejects. A run can give
+  an event of an error kind, or an exit status that is not 0. Either stops the test, and no row of
   `KNOWN` excuses it. A cell that had a program and fails is a defect of the change that makes it
   fail. Do not add a row for it. The expected stdout of the test holds each count: the cells, the
   programs, each reason, each form and each class of defect. Read the counts there. The test binary
-  takes 2 arguments for a person. `list` prints each rejected cell as a row of `KNOWN`.
-  `dump <form> <class> <type>` prints the program of one cell, with each position from 0. Give the
-  dump to `fort --check --whole-store-report --leak-report --span-del-report` to see the diagnostic
-  of the driver.
+  takes 2 commands for a person. `list` prints each rejected cell as a row of `KNOWN`.
+  `dump <form> <class> <type>` takes 3 positions, each from 0, and prints the program of that cell.
+  Give the dump to `fort --check --whole-store-report --leak-report --span-del-report` to see the
+  diagnostic of the driver.
 - **The typed family judges each function that the compiler takes with exit 0 against the runs of
   the oracle** (`test/fort/owner/typed/`, `test/fort/support/judgement.ft`).
   `test/fort/support/generator.ft` builds the family from three tables: `TYPES`, `STORAGES` and

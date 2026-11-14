@@ -1,0 +1,68 @@
+//! run
+//! stdout:
+//| pointer 7
+//| moved 9
+//| string 3
+//| span 2
+// A call before the declaration of a memory local keeps the fact that the local is empty. No path
+// to the call takes the address of the local. So no value that the callee reads derives from one
+// (kill rule 5 of D17.11, `spec/fir.md` 11, Fresh). So form 2 of the catalogue, return the value,
+// compiles for a memory local. Each function ends its local with a `del`, which is no
+// call, so the exit proves the local empty after the address.
+fn make_ptr(u8 v) u8 mut* own {
+    u8 mut* own p = new(u8);
+    *p = v;
+    return p;
+}
+
+fn make_str() string own {
+    u8 mut@ own buf = new(u8, 3);
+    return cast(move(buf), string own);
+}
+
+fn make_span() u64 mut@ own {
+    return new(u64, 2);
+}
+
+// The declaration takes the result of a call.
+fn pointer() u8 {
+    u8 mut* own mut x = make_ptr(7);
+    u8 mut* own* at = &x;
+    u8 v = **at;
+    del(x);
+    return v;
+}
+
+// The call comes before the declaration, which moves its result in.
+fn moved() u8 {
+    u8 mut* own b = make_ptr(9);
+    u8 mut* own mut x = move(b);
+    u8 mut* own* at = &x;
+    u8 v = **at;
+    del(x);
+    return v;
+}
+
+fn text() u64 {
+    string own mut x = make_str();
+    string own* at = &x;
+    u64 n = (*at).len;
+    del(x);
+    return n;
+}
+
+fn span() u64 {
+    u64 mut@ own mut x = make_span();
+    (u64 mut@ own)* at = &x;
+    u64 n = (*at).len;
+    del(x);
+    return n;
+}
+
+fn main() i32 {
+    println("pointer ", pointer());
+    println("moved ", moved());
+    println("string ", text());
+    println("span ", span());
+    return 0;
+}
