@@ -21,9 +21,9 @@
 /// storage class and for each type that the form can name. FORMS, CLASSES and SHAPES hold the three
 /// lists. The test writes one program for each cell of their product. A cell passes when its
 /// program compiles with no error and with no report line of an owner rule. Its run under
-/// fir.interpreter must give no event of an error kind (disposition.is_error) and end with status
-/// 0. A cell that fails is a defect of the compiler (spec/ownership-design.md 17 row 3). KNOWN
-/// lists each cell that an owner rule rejects, with its diagnostic and its class of defect. The
+/// fir.interpreter must give no error event (judgement.ruling_of) and end with status 0. A cell
+/// that fails is a defect of the compiler (spec/ownership-design.md 17 row 3). KNOWN lists each
+/// cell that an owner rule rejects, with its diagnostic and its class of defect. The
 /// test fails when a cell outside KNOWN fails and when a cell of KNOWN passes. So KNOWN can only
 /// shrink. Each program runs, also a program of KNOWN, and the test fails when a run fails.
 //
@@ -49,6 +49,7 @@ import fort.fir_verify;
 import fort.owner.prover;
 import fort.owner.report;
 import fort.session;
+import judgement;
 import modules_env;
 import run_env;
 import std.str;
@@ -700,18 +701,22 @@ fn compile_cell(check_env.env mut* c, fir.module mut* m, strbuf.str_buf mut* why
 }
 
 // Runs the program of `c` and `m` under fir.interpreter with the shadow state. It gives the kind
-// of the first failure of the run, or the empty string. Each event goes through
-// disposition.is_error, the gate of the closed world. `event` is an event of an error kind, and
-// `why` takes its kind and its location. No exit of a program is an exit into an abort block.
-// `end` is a run that does not end with status 0.
+// of the first failure of the run, or the empty string. Each event gets its ruling from
+// judgement.ruling_of, the one judgement of the closed world that the gate of oracle_test.ft and
+// the typed family use. The cell has no `dead` marker of an abort block and no report line, so
+// an event is an error unless the disposition table takes it as no error: an event of a kind
+// that the table trusts is an error too. `event` is an error event, and `why` takes its kind and
+// its location. `end` is a run that does not end with status 0.
 fn run_cell(check_env.env mut* c, fir.module* m, strbuf.str_buf mut* why) string {
     interpreter.machine mut* own it = interpreter.make(&c->ck, m, true);
     defer interpreter.drop_made(move(it));
     string[1] argv = {"forms"};
     interpreter.run_program(it, check_env.sym_main(c, "main"), argv[..]);
+    bool@ aborts = {};
+    judgement.named_line@ named = {};
     for (u64 mut e = 0; e < it->sh.events.len; e++) {
         shadow.event* ev = &it->sh.events.items[e];
-        if (disposition.is_error(ev, false)) {
+        if (judgement.ruling_of(ev, aborts, named) == judgement.ruling.ru_error) {
             strbuf.append(why, "event: ");
             strbuf.append(why, shadow.EVENT_TEXT[disposition.index_of(ev->kind)]);
             strbuf.append(why, " at ");
