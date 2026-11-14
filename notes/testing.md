@@ -730,8 +730,10 @@ bullet at a time and without a rewrite.
   reference type marks its site. A site with no error and such an event is a false accept, which
   fails the test. A site with an error and no such event is a false reject, which the test counts.
   The sets are the hand cases of the design reviews, an accept case and a reject case for each item
-  of design 5.4 that the rule uses, and the three families of `test/fort/support/generator.ft`. The
-  test keeps only the functions that check, lower and verify: a function whose lines hold a
+  of design 5.4 that the rule uses, and the seeded family and the shapes of
+  `test/fort/support/generator.ft`. The typed family of that module has tests of its own, and the
+  same rule judges it (the entry on the typed family below). The test keeps only the functions
+  that check, lower and verify: a function whose lines hold a
   diagnostic leaves its batch, and the test checks the batch again. Two checks at one location stop
   the test, because their verdicts would join. The expected stdout holds every count and the ends of
   the runs of each set (return, exit, abort, trap, outside, fault), so a change of the pass or of
@@ -742,32 +744,84 @@ bullet at a time and without a rewrite.
   **The gate judges each item in a closed world.** A rule of the compiler refuses an item in one of
   three ways. The pass gives one of its functions an error of D17.11, D17.20 or D17.21. The pass
   leaves a site of `--leak-report` or of `--whole-store-report` with no proof. The item holds a
-  one-operand `del` of a span of owners (`--span-del-report`, D17.9). An item also takes each rule
-  of each item whose function it names (`refuse_callers`). Each event of each run goes through
-  `disposition.is_error` (`test/fort/support/disposition.ft`). That function reads the kind of the
-  event, its cycle mark and one flag of its location. The flag says that a `leak` stands at the
-  `dead` marker of an abort block (`is_abort_exit`). An exit into an abort block has no obligation
-  (D17.20), so that `leak` is no error. A `leak` at a scope end before a `panic` is an error. The
-  test holds no list of event kinds or statement forms that it does not judge. The table `TABLE` has
-  one row for each event kind. An `overwrite`, a `leak` and a `use after move` are errors. A `leak
-  at exit` is an error unless a cycle of owners holds its allocation. The other kinds are trusted
-  (A1, A2, A8) until the run gate defines them. `disposition.index_of` is a `switch` with no
-  `default`, so a new event kind is a compile error there (D7.7). `disposition.is_complete` holds
-  the order of the rows, and the oracle test stops first when it fails.
-  `test/fort/owner/disposition_test.ft` holds the table and the error kinds for each cycle mark and
-  each flag. **A rule excuses only the events of its own kind** (`is_excused`). An error of the pass
-  refuses the program, so it excuses each event of its item. A line of `--leak-report` excuses a
-  `leak` and a `leak at exit`. A line of `--whole-store-report` excuses an `overwrite`. A line of
-  `--span-del-report` excuses a `leak` at the location of its `del`. No report option names a `use
-  after move`, so no line excuses one. An error event that no rule of its item excuses fails the
-  item, also an item with a report line. `KNOWN` lists the failing items by family, event kind and
-  class, and `hold_known` stops the test at each other count. A count of `KNOWN` only goes down, in
-  the change that makes its item pass. `FLOORS` holds the least count of accepted items of each
-  family, and `hold_floor` stops the test below it. So a family that accepts no item stops the test.
-  `FORCED` runs a case of `GATE_CASES` with a chosen set of report lines and no error. Each row
-  names the event kind that then fails the item, and another verdict stops the test (`run_forced`).
-  The rows hold that a line of one rule does not excuse an event of another rule. **The judge and
-  the pass call the same functions of `fir` and `types`.** This command lists them:
+  one-operand `del` of a span of owners (`--span-del-report`, D17.9). The gate runs
+  `fort.fir.release` too: the item of a `del(s, d)` whose drop is not release-only gets the error
+  of D17.9 (`judgement.refused_drain`, the case `drop_store`). An item also takes each rule of each
+  item whose function it names (`refuse_callers`). **One rule gives each event of each run its
+  ruling** (`judgement.ruling_of`, `test/fort/support/judgement.ft`). The gate of this test, the
+  typed family and the form corpus (`forms_test.ft`, `run_cell`) call it. 3 sites in `test/` read
+  the events of a run, and each of the 3 takes the ruling of each event from `ruling_of`:
+  `grep -rnE 'sh\.events\.items\[' test --include=*.ft` prints 3 lines (`judgement.collect`,
+  `oracle_test.collect`, `forms_test.run_cell`). This command counts the calls of a rule outside
+  `judgement.ft`, with the comment lines out:
+  `grep -rnE '\b(is_error|is_trusted|ruling_of|rule|is_silent)\(' test --include=*.ft | grep -v
+  '^test/fort/support/judgement.ft:' | grep -vE '^[^:]*:[0-9]+: *//'`. It printed 11 lines on
+  2026-11-14: the definition of `disposition.is_error` (1), the unit tests of the rules with
+  events that they make (`disposition_test.ft` 1, `judgement_test.ft` 5), the gate (3:
+  `ruling_of`, `is_trusted` for the count of the trusted kinds, and `is_silent` for the end of a
+  run) and the form corpus (1: `ruling_of`). The rule reads the one table of the
+  event kinds first (`disposition.is_error`, `test/fort/support/disposition.ft`). That function
+  reads the kind of the event, its cycle mark and one flag of its location. The flag says that a
+  `leak` stands at the `dead` marker of an abort block (`judgement.at_abort`). An exit into an
+  abort block has no obligation (D17.20), so that `leak` is no error. A `leak` at a scope end
+  before a `panic` is an error. The test holds no list of event kinds or statement forms that it
+  does not judge. The table `TABLE` has one row for each event kind. An `overwrite`, a `leak` and a
+  `use after move` are errors. A `leak at exit` is an error unless a cycle of owners holds its
+  allocation. The table trusts the other 6 kinds (A1, A2, A8), and `is_error` gives `false` for
+  them. **The rule takes an event of a trusted kind as an error too** (`judgement.is_trusted`). So
+  each of the 10 kinds is an error in each family. The two exceptions are the `leak` at an abort
+  block and the `leak at exit` of a cycle. Before the join the typed family had that rule, and the
+  gate of this test did not judge the 6 kinds. The one rule is the rule that rejects more.
+  `disposition.index_of` is a `switch` with no `default`, so a new event kind is a compile error
+  there (D7.7). `disposition.is_complete` holds the order of the rows, and the oracle test stops
+  first when it fails. `test/fort/owner/disposition_test.ft` holds the table and the error kinds
+  for each cycle mark and each flag. **A report line takes only an event of the kind that its
+  option owns, on the line that it names** (`judgement.rule`, `judgement.reports_at`). An error of
+  the pass refuses the program, so an item with an error gets no ruling for its events. A line of
+  `--leak-report` takes a `leak`. A line of `--whole-store-report` takes an `overwrite`. Each of
+  the two names a function, and it takes no event of another function: a FIR text gives two
+  functions the same lines. A line of `--span-del-report` takes a `leak` on the line of its `del`,
+  and the checker writes it with no function. A line of `--leak-report` at a `cast` names each
+  `del` of its function that frees an object with no owner by its type too
+  (`judgement.name_bare_dels`): the owners of the object of the `cast` leak at that `del`. It
+  names them only when its function has 1 `cast` statement (`judgement.cast_count`). With 2 or
+  more, the line cannot tell the `del` of the result of the reported `cast` from the `del` of the
+  result of a `cast` that the pass proved, so it names no `del` (`two_casts` of the hand batch of
+  `judgement_test.ft`). No
+  report option owns another kind, so no line takes a `use after move`. No line takes a
+  `leak at exit`: that event stands at the last statement of its run and not at the statement that
+  lost the allocation. Before the join, a line of `--leak-report` excused each `leak` and each
+  `leak at exit` of its item on each line. An error event that no rule takes fails the item, also
+  an item with a report line. **`judgement.KNOWN` is the one list of the known failures of the
+  closed-world tests.** A row gives the count of the failures of one unit with one class. The
+  units are the 3 sets of this test (the hand items with the FIR cases, the seeded family, the
+  shapes) and the 8 parts of the typed family. A failing item of this test has the class of its
+  first error event (`judgement.class_of_event`): `released` for a `use after release`, `scope`
+  for a `use after scope`, and no class for each other kind. A `use after move` reads the moved
+  tag of its access (`fir.shadow`): `moved` when no frame held the vacated slot (an owner that is
+  no local), `callee read` when a frame other than the one of the slot read it (X2 of
+  `spec/ownership-design.md` 3.4), and no class when a function read a vacated slot of its own
+  frame (rule (b), D17.21). The gate also fails an item with no error event of the pass when a
+  run of it ends in a fault that `judgement.is_silent` reads, as the typed family does
+  (`judge_end`); such an item has no class. 176 runs of items with no error of the pass ended in a
+  fault on 2026-11-14, and each holds an error event or ends in `null dereference`, so none fails
+  for this rule. `judgement.hold_known` stops the test when a set has a failure with no class, and
+  when the count of a class is above or below its row (`known_panic_test.ft` holds the stop). So
+  a count of `KNOWN` goes down only, in the change that makes its item pass, and it goes up only
+  with an edit of the list. The list has 20 rows and the total 548. The hand set has 14
+  (`released` 11, `scope` 2, `callee read` 1), the seeded family 97 (`moved` 1, `released` 96),
+  the shapes 18 (`released`) and the typed family 419 (`moved` 402, `span pointer` 13,
+  `range callback` 4). The lines `known:` of `judgement_test.ft` print each sum.
+  The gate did not count the 127 items of the classes `released` and `scope` before the join. The
+  last line of the expected stdout gives the events of a trusted kind in the items that the
+  compiler accepts with no error and no report line: 125, of them 123 `use after release` and 2
+  `use after scope`. `FLOORS` holds the least count of accepted items of each family, and
+  `hold_floor` stops the test below it. So a family that accepts no item stops the test. `FORCED`
+  runs a case of `GATE_CASES` with a chosen set of report lines and no error. Each of its 52 rows
+  names the line of each report line and the event kind that then fails the item, and another
+  verdict stops the test (`run_forced`). The rows hold that a line of one rule takes no event of
+  another rule and no event on another line. **The judge and the pass call the same functions of
+  `fir` and `types`.** This command lists them:
 
       comm -12 \
         <(grep -v '^ *//' test/fort/owner/oracle_test.ft \
@@ -834,16 +888,31 @@ bullet at a time and without a rewrite.
   lines by hand. **The row `leak at
   exit` judges only a run of a program whose `main` returns.** `shadow.test_exit` gives that event,
   and the interpreter calls it only there (`interpreter.run_program`). So the gate judges that kind
-  in the hand cases and in the seeded family only. A run of the exhaustive family, of the shapes or
-  of the FIR cases runs one function and gives no such event. The expected stdout of the test holds
-  each count of the gate. The site counts below stay as the report of each rule, and the rows of
+  in the hand cases and in the seeded family only. A run of the shapes or of the FIR cases runs
+  one function and gives no such event. The expected stdout of the test holds each count of the
+  gate. The site counts below stay as the report of each rule, and the rows of
   `tools/mutations/oracle.json` read them. `tools/mutations/disposition.json` holds the gate, with
-  the oracle test as its one stage. Its rows mute an error kind, change `KNOWN` or `FLOORS`, take a
-  rule from an item, or let a line excuse more. The row event-kinds of `tools/mutations/shadow.json`
-  adds an event kind, and the disposition test does not compile. The helper `drive` of
-  `generator.PRELUDE` builds each field of its struct through a local owner. With a store of `new`
-  straight into the field, the compiler refused each exhaustive and shapes batch. The gate then
-  accepted no item of the two families.
+  the oracle test as its one stage. Its rows mute an error kind, change `judgement.KNOWN` or
+  `FLOORS`, take the report lines of one option from each item, or let a line take more.
+  The table has 53 rows. `tools/mutate.py` counts a row as caught when the stage gives a `FAIL`
+  line of `test/lang/run_tests.py`. On 2026-11-14, 12 of the rows ran through `tools/mutate.py
+  --only` on the named native host (arm64 Darwin, host build, `--runner 'bash -c'`), and each gave
+  such a line. On 2026-11-13 a script on that host caught each of the 50 rows of that day by a
+  stop of the gate. The Linux VM ran no row. Its
+  `build` reads `disposition.ft`, `judgement.ft` and `oracle_test.ft`. The row event-kinds of
+  `tools/mutations/shadow.json` adds an event kind, and the disposition test does not compile.
+  **The exhaustive family of 97 statements is gone.** Until 2026-11-13 `generator.ft` held the
+  lists `PRELUDE`, `VOCABULARY` and `PROLOGUE`, and the oracle test judged the 19,014 functions of
+  at most 2 statements over them. That family gave events of 3 kinds, `overwrite`, `leak` and `use
+  after move`, and 1 failing item of the class `moved`. The 8 parts of the typed family give
+  46,529, 3,775 and 1,232 events of those 3 kinds, and 402 failures of the class `moved`. The
+  function of that failing item is the hand case `vacated_view` now. The site lines of the family
+  left the expected stdout with it. The largest held 85,958 sites of the overwrite rule with 0
+  false accepts. The hand cases, the seeded family and the shapes print their site lines as
+  before. The removal took no mutation row from the oracle test. Before it, the test alone caught
+  193 of the 280 rows of `tools/mutations/oracle.json`, `aggregate.json`, `leak.json` and
+  `vacated.json`. After it, the test catches each of those 193 and 2 more, compared by row on a
+  host with the debug preset.
   **The test holds part 1 of the leak rule of D17.20 too.** An exit site is a function and the
   location of a `dead` of an owner local outside an abort block, or of a `return`, and a `leak`
   event at it is in the scope of the rule. The sites come from the FIR, and the exits of the proof
@@ -885,9 +954,8 @@ bullet at a time and without a rewrite.
   one-operand `del` of a span whose elements hold owners gets a line of `--span-del-report` (D17.9).
   That line excuses the `leak` at its `del` and no other event. The cases of part 2 (`DEL_CASES`)
   give each kind of site, and the
-  seeded family inserts into them. The exhaustive family reaches part 2 through the local `r` of
-  `generator.LOCAL_DECL`, an owning pointer to a `pair` with a deferred `del`, and four statements
-  over `r->a`. A set prints its line of part 2 only when it holds a site of part 2. So a case with
+  seeded family inserts into them. A set prints its line of part 2 only when it holds a site of
+  part 2. So a case with
   none adds no line to the expected stdout. A store through a view after a proved `cast` gives the
   object an owner that the `del` of the new pointer leaks, and no site has that event, so the case
   would count a false accept: it stands in `test/fort/owner/prover_test.ft` (`cast_alias` with a
@@ -895,11 +963,11 @@ bullet at a time and without a rewrite.
   is a defect against the gate of D17.11 that a later change closes (`spec/fir.md` 11, Inner
   owners). The form with a view of the new pointer does not compile since D3.14 refuses a cast
   that hides an owner place, so `cast_view` is gone.
-  **The test holds the tests against null of D17.11 gen rule 6 too.** The vocabulary of
-  `generator.ft` holds an `if` on `==`, `!=`, a negation, `&&` and the `else` arm of `||`, over `x`,
-  `y`, `q->a`, `*p`, `r->a`, `G` and `arr[j]`, and a loop on `!=` that a `del` ends; the items
-  `test_null`, `test_loop` and `test_alias`, the exit case `tested` and the part 2 cases `tested`
-  and `tested_field` give each edge and a call or a store after the test. Only FIR text puts a
+  **The test holds the tests against null of D17.11 gen rule 6 too.** The items `test_null`,
+  `test_loop` and `test_alias`, the exit case `tested` and the part 2 cases `tested` and
+  `tested_field` give each edge and a call or a store after the test. The rows `if empty`,
+  `if live`, `while` and `choose load` of `generator.OPERATIONS` test the place of each cell of the
+  typed family against null. Only FIR text puts a
   statement between the read of a test and its `switch`, so the FIR cases `null_call`,
   `null_alias`, `null_place`, `null_temp` and `null_stale` hold those kills, and `null_leak` and
   `null_del` hold the edge of the other value. **A seeded case names no place that a loop of the
@@ -931,7 +999,7 @@ bullet at a time and without a rewrite.
   A second line gives its rejected sites that have no event at or after a `forged` event of their
   function. Such a site is no false reject, because the run reports no event after `forged`.
   The generator forges no pointer to a local, and no hand case does: no cast makes a pointer from an
-  integer (D3.14), so the vocabulary lends through `id(x)` where it read back an integer, a shape
+  integer (D3.14), so a shape
   lends through `cast(x, i32*)` where it kept a `u64`, and `g4` reads no pointer back after its cast
   to `u64`. So each set prints 0 `forged` events, and the other counts did not change when the event
   came (measured).
@@ -965,10 +1033,8 @@ bullet at a time and without a rewrite.
   false accept is such an event with no rejected site of that function and local. So a wrong proof
   of one read hides behind a rejected read of the same local in the same function, and a site with
   no event can count as one with an event (`h4`). A slot that held no allocation gives no moved tag,
-  so the locals of the exhaustive family, null at the entry, gave no event in two statements: the
-  local `z` of `generator.LOCAL_DECL` holds an allocation from its declaration, and five statements
-  over `z` and its pointer `pz` (a `del` and a load, directly and through `pz`, and a `move`) give
-  the family its events. The programs of `USE_CASES` hold rule (b) as hand cases, and the seeded
+  so a local that is null at the entry gives no event. The programs of `USE_CASES` hold rule (b)
+  as hand cases, and the seeded
   family inserts into them. A rejected use with no event at or after a `forged` event of its
   function counts apart, as the sites of the other rules do. Each set has 0 false accepts, and its
   false rejects come from three gaps of the rule: a `del` of one element can vacate another element
@@ -1021,19 +1087,21 @@ bullet at a time and without a rewrite.
   verifier gives `refused`. A pass of `owner.prover` or the release-only rule of D17.9 gives
   `rejected`. A report line gives `reported`, and each other function is `accepted`. The compiler
   exits 0 for `accepted` and for `reported`, and the judgement runs each such function with each
-  input that it reads. Each event of such a run goes through the gate of the oracle tests first
-  (`disposition.is_error`), and `judgement.rule` gives it a ruling. The gate takes two events as no
-  error. The first is a `leak` at a `dead` of a block that ends in an abort (D17.20). The second is
-  a `leak at exit` of a cycle of owners. The gate does not judge the six kinds that its table
-  trusts. The judgement takes an event of such a kind as an error, so each of the ten kinds of
-  `fir.shadow` is an error here. Three report rules take an error of the gate, and each needs a
-  report line that names the line of the event. A line of `--leak-report` takes a `leak` or a
-  `leak at exit` on the line that it names. A line of `--whole-store-report` takes an `overwrite` on
-  the line that it names. `--span-del-report` takes a `leak` on the line of a `del` that it lists. A
-  report line takes no event on another line of its function, and the test compares the line and not
-  the column. A path names the entry module only when its last component is `main.ft`
-  (`judgement.is_entry`). No report option owns another kind, so no report line takes a
-  `use after move` or a `use after release`. A run that ends in a fault other than
+  input that it reads. Each event of such a run gets its ruling from `judgement.ruling_of`. The
+  gate of the oracle test takes each ruling from the same function, so one rule judges each family
+  (the entry on the oracle test above). The rule reads the one table of the event kinds
+  (`disposition.is_error`). It takes two events as no error. The first is a `leak` at a `dead` of a
+  block that ends in an abort (D17.20). The second is a `leak at exit` of a cycle of owners. It
+  takes an event of each of the six kinds that the table trusts as an error, so each of the ten
+  kinds of `fir.shadow` is an error. Three report rules take an error, and each needs a report
+  line that names the line of the event. A line of `--leak-report` takes a `leak` on the line that
+  it names. A line of `--whole-store-report` takes an `overwrite` on the line that it names. Each
+  of the two takes an event of the function that it names only. `--span-del-report` takes a `leak`
+  on the line of a `del` that it lists. A report line takes no event on another line of its
+  function, and the test compares the line and not the column. A path names the entry module only
+  when its last component is `main.ft` (`judgement.is_entry`). No report option owns another kind,
+  so no report line takes a `leak at exit`, a `use after move` or a `use after release`. A run
+  that ends in a fault other than
   `null dereference` with no error event is an error too. A function with an error is a failure.
   **The family gives 4 of the 10 event kinds.** Its runs give `overwrite`, `leak`,
   `use after release` and `use after move`. They give no `leak at exit`, `double release`,
@@ -1056,8 +1124,11 @@ bullet at a time and without a rewrite.
   there. The place cannot be vacated at the error, in the sense of D17.21
   (`judgement.is_vacated`). A statement of `judgement.VACATES` before the error vacates the whole
   place. Two events end that state: a store into the place (`judgement.FILLS`), and the test of
-  `choose load` against `null`. A use of a place that can be vacated is a use of a moved local.
-  The use rule must reject it, so that failure has no class. The class `moved value` has a second
+  `choose load` against `null`. The row `defer` of `VACATES` is the exception: its drop runs at the
+  end of its block, so a `defer` before the error vacates nothing at the error. A `defer` counts
+  only in a later turn of a loop that opens before it (`judgement.is_turned`), and the test reads
+  no fill in that case. A use of a place that can be vacated is a use of a moved local. The use
+  rule must reject it, so that failure has no class. The class `moved value` has a second
   condition (`judgement.is_part_vacated`). No statement that moves or releases an inner owner of
   the place can run before the error. `judgement.is_part_vacate` finds such a statement by the text
   of its row of `OPERATIONS`: a `move` or a `del` of `%S` or of `%O`. So a new row of that shape
@@ -1065,18 +1136,28 @@ bullet at a time and without a rewrite.
   storage of the local. So the use rule must reject a use after that statement too. That test reads
   no store and no null test: no event ends the state of an inner owner for it. For both conditions
   a statement can run before the error in two cases. It stands before the statement of the error,
-  or a loop holds the error (`judgement.is_error_turned`). A loop that opens at the statement of
+  or a loop holds the error (`judgement.is_error_turned`). A `defer` before the error is no such
+  statement for the first condition, as the rule above says. A loop that opens at the statement of
   the error holds it too: the head of a `range` loop reads its collection in each turn. The cause
   of the class `moved value` must be present too. It is a store of `move(y)` before the error, or
-  a `self` after it in a storage class whose call moves the place. The expected stdout of each
+  a `self` after it in a storage class whose call moves the place. The class `moved value` has a
+  third condition (`judgement.is_between`). No statement before the error can run while the whole
+  place can be vacated. Such a statement follows a statement that vacates the whole place, with no
+  fill between the two, and it is no fill itself. The compiler must reject the function at that
+  statement when the statement uses the place (D17.21). The test holds no list of the statements
+  that use the place, so it is true for each statement there. So it gives no class to more
+  functions than the use rule rejects, and never a class to a function that the rule must reject.
+  A function of 4 operations is the first with such a statement before a store and a use. The
+  expected stdout of each
   `part_<k>_test.ft` holds the count of each class and two lines for each failure. The first line
   holds the key of the function: the names of its type, of its storage class and of its operations.
   So a new row of a table moves the key of no function. The second line holds the class, the first
   error, each other kind of error of the runs after `, also`, and the verdict. A function that
-  enters the list, one that leaves it and one that changes its class each change a line. A failure
-  with no class gives the exit status 1. So a change that adds a failure of a known class must bless
-  a longer list in its own diff. The review of that diff refuses it, and no test compares the list
-  with the list of an earlier commit. `python3 tools/typed_pins.py --fort <compiler>` writes the
+  enters the list, one that leaves it and one that changes its class each change a line. A part
+  gives the exit status 1 when a failure has no class, and when the count of a class is above or
+  below its row of `judgement.KNOWN` (`judgement.known_exit`). So a change that adds a failure of
+  a known class is red until it edits `KNOWN` too, and the review refuses that edit.
+  `python3 tools/typed_pins.py --fort <compiler>` writes the
   `//|` lines of the 8 parts and of `cells_test.ft` from their runs. It writes no file for a test
   that does not exit 0, and `--check` writes no file and exits 1 on a change. A test name after the
   options, as `judgement_test`, makes it write that test only. The cause of a class is a use that no
@@ -1086,12 +1167,22 @@ bullet at a time and without a rewrite.
   (D17.10).
   **`judgement_test.ft` holds the judgement itself.** It prints `rule` for each kind in each of its
   cases. Then it prints `is_entry`, `named_of`, `reports_at`, `at_abort`, `end_of`, `is_silent`,
-  `is_vacate`, `is_fill`, `is_part_vacate`, `class_of` and `exit_of` over tables. The line of
-  `is_part_vacate` holds a count: 3 of the 7 operations on an inner owner vacate it. A new
-  operation on an inner owner changes that line. It judges a batch of functions that it writes:
-  each rule that the typed family does not reach has a function there. Each row `judgement-*` of
-  `tools/mutations/generator.json` changes one rule, and each other row takes one row out of a
-  table. `count_test.ft` and `judgement_test.ft` are the stage.
+  `is_vacate`, `is_fill`, `is_part_vacate`, `class_of`, `class_of_event`, the rows and the sums of
+  `KNOWN`, `holds_known`, `known_exit` and `exit_of` over tables. The line of `is_part_vacate`
+  holds a count: 3 of the 7 operations on an inner owner vacate it. A new operation on an inner
+  owner changes that line. It judges a batch of functions that it writes: each rule that the typed
+  family does not reach has a function there.
+  `tools/mutations/generator.json` holds 97 rows of the generator and of the judgement in 2 stages:
+  `count_test.ft` with `judgement_test.ft` and `known_panic_test.ft`, then `part_6_test.ft` for the
+  2 rows that change `run_part`. On 2026-11-13 each of the 91 rows of that day changed a stage on a
+  host with the debug preset: 6 rows the exit status of a test, and 85 rows only its stdout. On
+  2026-11-14, 12 rows, 6 of them new, ran through `tools/mutate.py --only` on the named native host,
+  and each gave a `FAIL` line of `test/lang/run_tests.py`. So the count of the rules that the
+  test holds is the count of those rows, and a rule with no row has no measure. The boundaries of
+  `is_part_vacated` and of `is_passed` have 3 of the rows (`judgement-part-vacate-at-error`,
+  `judgement-passed-at-error`, `judgement-passed-before-error`). `is_between` has 4
+  (`judgement-between-none`, `-fill`, `-filled` and `-defer`). The length test of `is_entry` has 1
+  (`judgement-entry-length`), which the line of `std/libc.ft` catches.
   **The 8 parts are the 2-operation family.** Batch `j` of the family belongs to part `j` modulo 8.
   The compile of a part and its run each take less than 30 s in the VM with 4 parts at a time. The
   limit of the harness is 60 s for each step. `cells_test.ft` judges the functions of 0 and of 1
@@ -1102,10 +1193,27 @@ bullet at a time and without a rewrite.
   **The 3-operation mode is not in PR CI.** A compiled `part_<k>_test` with the arguments
   `<operations> <part> <parts>` judges that part of the family of that many operations. It prints
   the same lines, then the text of the first function of each class and of each function with no
-  class. It exits 1 only when a failure has no class. Compile `part_1_test.ft` once and run
-  `<binary> 3 <k> 400` for each `k` from 1 to 400. Functions of 3 operations reach the classes
-  `view` and `moved value`, which the 2-operation family does not reach. So those two classes have
-  the count 0 in each `part_<k>_test.ft`, and `judgement_test.ft` holds their rules.
+  class. It exits 1 only when a failure has no class: `KNOWN` has rows for the parts of PR CI only.
+  Compile `part_1_test.ft` once and run `<binary> 3 <k> 400` for each `k` from 1 to 400. Functions
+  of 3 operations reach the classes `view` and `moved value`, which the 2-operation family does not
+  reach. So those two classes have the count 0 in each `part_<k>_test.ft`, and `judgement_test.ft`
+  holds their rules.
+  **The judgement gives a class to each failure of 3 operations, and not to each failure of 4.**
+  On 2026-11-13 the binary of `part_6_test.ft` judged the whole family of 3 operations in 415
+  parts (`<binary> 3 <k> 415`): 3,318,911 functions and 34,858 failures. The classes took `moved`
+  32,749, `span pointer` 703, `range callback` 164, `view` 1,053 and `moved value` 189. No failure
+  had no class, and each of the 415 parts gave the exit status 0. The same binary judged 240 of
+  the 18,326 parts of the family of 4 operations (`<binary> 4 <k> 18326` for `k` = 1, 77, 153 and
+  so on to 18,165): 1,920,000 functions and 26,138 failures. 36 of those failures have no class,
+  and the 26 parts that hold them gave the exit status 1. Each of the 36 is a `use after move` at
+  a `read` or a `load` of an `arr`, a `cell`, a `nest` or a `box`. The key of each holds `self` or
+  an operation that stores `move(y)`: `move in`, `swap` or `choose`. That is the cause of the
+  class `moved value`. The text of 3 of the 36 was read, and no run measured the cause of the
+  other 33. The tests of `is_part_vacated` and of `is_between` deny
+  the class: the first reads no fill, and the second counts each statement. So a run of the
+  family of 4 operations is red at this revision, and no part of it counts as a pass. A finer
+  test in the judgement, or a rule of the compiler for the cause, must come before that family
+  joins a gate.
 - **The suites of fir.interpreter derive each expected value apart from the interpreter**
   (`test/fort/fir/interpreter_test.ft`, `interpreter_source_test.ft`). Python's integers and IEEE
   doubles gave each value at each boundary of each type when the cases were written: the wrap at
