@@ -1068,17 +1068,19 @@ bullet at a time and without a rewrite.
   verifier, the three errors of the owner rules and the three reports. Each program then runs
   under `fir.interpreter`, and each event goes through `disposition.is_error`. `KNOWN` lists each
   cell that an owner rule rejects, with its diagnostic and the letter of its class of defect
-  (`DEFECTS`). `KNOWN` only shrinks: the change that repairs a defect removes its rows and lowers
-  `KNOWN_COUNT`. The test stops when a cell outside `KNOWN` fails, when a cell of `KNOWN` passes
-  and when a cell of `KNOWN` fails with another text. The test also runs a program that an owner
-  rule rejects. A run with an event of an error kind, or with an exit status that is not 0, stops
-  the test, and no row of `KNOWN` excuses it. A new failing cell is a defect of the change that
-  makes it fail. Do not add a row for it. The expected stdout of the test holds each count: the
-  cells, the programs, each reason, each form and each class of defect. Read the counts there. The
-  test binary takes 2 arguments for a person. `list` prints each rejected cell as a row of `KNOWN`.
+  (`DEFECTS`). The change that repairs a defect removes its rows and lowers `KNOWN_COUNT`. A cell
+  that had a program before a change gets no new row in it. A cell that gets its first program can
+  enter `KNOWN` with its class of defect, and the ticket Notes name the owner of the class. The test
+  stops when a cell outside `KNOWN` fails, when a cell of `KNOWN` passes and when a cell of `KNOWN`
+  fails with another text. The test also runs a program that an owner rule rejects. A run with an
+  event of an error kind, or with an exit status that is not 0, stops the test, and no row of
+  `KNOWN` excuses it. A cell that had a program and fails is a defect of the change that makes it
+  fail. Do not add a row for it. The expected stdout of the test holds each count: the cells, the
+  programs, each reason, each form and each class of defect. Read the counts there. The test binary
+  takes 2 arguments for a person. `list` prints each rejected cell as a row of `KNOWN`.
   `dump <form> <class> <type>` prints the program of one cell, with each position from 0. Give the
-  dump to `fort --check --whole-store-report --leak-report --span-del-report` to see the
-  diagnostic of the driver.
+  dump to `fort --check --whole-store-report --leak-report --span-del-report` to see the diagnostic
+  of the driver.
 - **The typed family judges each function that the compiler takes with exit 0 against the runs of
   the oracle** (`test/fort/owner/typed/`, `test/fort/support/judgement.ft`).
   `test/fort/support/generator.ft` builds the family from three tables: `TYPES`, `STORAGES` and
@@ -1182,9 +1184,10 @@ bullet at a time and without a rewrite.
   holds a count: 3 of the 7 operations on an inner owner vacate it. A new operation on an inner
   owner changes that line. It judges a batch of functions that it writes: each rule that the typed
   family does not reach has a function there.
-  `tools/mutations/generator.json` holds 108 rows of the generator and of the judgement in 2 stages:
-  `count_test.ft` with `judgement_test.ft` and `known_stop_test.ft`, then `part_6_test.ft` for the 2
-  rows that change `run_part`. On 2026-11-13 each of the 91 rows of that day changed a stage on a
+  `tools/mutations/generator.json` holds 111 rows of the generator, of the judgement and of the
+  form corpus in 3 stages: `count_test.ft` with `judgement_test.ft` and `known_stop_test.ft`, then
+  `part_6_test.ft` for the 2 rows that change `run_part`, then `forms_test.ft` for the 2 rows of
+  the cells of form 7. On 2026-11-13 each of the 91 rows of that day changed a stage on a
   host with the debug preset: 6 rows the exit status of a test, and 85 rows only its stdout. On
   2026-11-14, 12 rows, 6 of them new, and then 12 more, 11 of them new, ran through `tools/mutate.py
   --only` on the named native host, and each gave a `FAIL` line of `test/lang/run_tests.py`. So the

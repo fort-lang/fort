@@ -574,6 +574,7 @@ u64 NONE = 18446744073709551615;
 //   %C a move through a cast          %H a shallow release         %G the head of a range loop
 //   %K a store into the key           %D a release of the container
 //   %M the arguments of a call of the function itself, before `false, i`
+//   %n the count of a `regrow` of the place
 //
 // `#` stands for the position of the statement, and `$` for the name of the function. A code
 // whose form is the empty text has no form in that cell, and an operation that names it does not
@@ -613,6 +614,9 @@ struct type_row {
     /// A `del` that releases the storage of `%P` and no owner inside it.
     string shallow;
     string each;
+    /// The count of a `regrow` of `%P`, or the empty text when `%P` is no `T mut@ own` (D12.2).
+    /// It is not below the length of each value that `%P` can hold: 0, 2 or the count itself.
+    string count;
 }
 
 /// The count of the rows of TYPES.
@@ -736,6 +740,7 @@ type_row[TYPE_COUNT] TYPES = {
         .read = "cast(*%P[0], u64)",
         .shallow = "del(%P);",
         .each = "for (i32 mut* n# : %P) {",
+        .count = "4",
     },
     {
         .name = "nest",
@@ -967,7 +972,7 @@ struct operation_row {
 }
 
 /// The count of the rows of OPERATIONS.
-u64 OPERATION_COUNT = 51;
+u64 OPERATION_COUNT = 52;
 
 /// The operation table. The whole value: an `alloc`, a release, a store of the empty value, a
 /// `move` out and in, and a drop. The inner owners: the same on the first one, and an `alloc` and
@@ -980,9 +985,10 @@ u64 OPERATION_COUNT = 51;
 /// `?:` with a `move` and with a load, a `switch` as a block and with two arms, a range loop, a
 /// release of the container, a `del` that keeps the inner owners, a whole store, a release and a
 /// `move` through a pointer to the place, a store into a part, and a `move` to and from a global.
-/// Last, a callee that reads through a pointer to the place (PEEK): after a `move` of a local
+/// Then a callee that reads through a pointer to the place (PEEK): after a `move` of a local
 /// place, the callee reads the vacated slot of a local of its caller (X2 of
-/// spec/ownership-design.md 3.4).
+/// spec/ownership-design.md 3.4). Last, form 7 of the form catalogue on an `own` span: a `regrow`
+/// that moves the place and stores the result back into it (D12.2, D17.11).
 operation_row[OPERATION_COUNT] OPERATIONS = {
     {"alloc", "%P = %F;"},
     {"release", "%R"},
@@ -1035,6 +1041,7 @@ operation_row[OPERATION_COUNT] OPERATIONS = {
     {"take", "{ %T t# = move(%P); drop_%N(move(t#)); }"},
     {"else", "if (b) { %R } else { %P = move(y); }"},
     {"callee read", "u = peek(&%P);"},
+    {"regrow", "%P = regrow(move(%P), %n);"},
 };
 
 /// A local that a function of the typed family can declare, and its declaration. A function
@@ -1137,6 +1144,7 @@ fn form(char code, frame* fr) string {
         case 'C': return fr->ty->convert;
         case 'H': return fr->ty->shallow;
         case 'G': return fr->ty->each;
+        case 'n': return fr->ty->count;
         case 'K': return fr->st->key;
         case 'D': return fr->st->container;
         default: return "";
