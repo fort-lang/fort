@@ -1,0 +1,147 @@
+//! run
+//! link: ffi/heap_calls.c
+//! stdout:
+//| filled: 32767
+//| at the limit: true true true true true
+//| small block: true true
+//| record in the middle: true false true true true
+//| last record: true true true true
+//| emptied: 32767 true
+//| filled again: 32767 32767 true
+// The allocator of the runtime holds at most 32768 mappings: its segments and its huge blocks
+// (stdlib.md 2.16). The first segment of the process is 1 of them, so 32767 huge blocks fill the
+// list. At the limit a huge block and a block that needs a new segment get null, the probes of the
+// two sizes give false, and the allocator asks the system for no mapping (D10.9 rule 5). A small
+// block still comes from the open chunk. The release of a huge block in the middle of the list
+// leaves the list full: its record names no mapping, and a second release of its address gives
+// false (rule 4). The release of the last block makes room for 1 block again, and the release of
+// each block makes room for each of them: a dead record leaves the list when each record after it
+// is dead. The C file of the test gives each huge block a pretended mapping, an address range that
+// the system does not know, so the test takes no address range of 2^47 bytes. The test accesses no
+// byte of a huge block.
+// D9.8, D10.9
+import extern;
+import std.heap;
+
+// The kind of an mmap call in test/lang/ffi/heap_calls.c.
+i32 MAP = 1;
+
+// The mappings that the allocator holds at most, and the huge blocks that fill its list after
+// the first segment.
+u64 MAPPINGS = 32768;
+u64 BLOCKS = 32767;
+// A huge block, and the largest large block: 2047 chunks, which only a segment with no
+// allocation holds.
+u64 HUGE = 4294967296;
+u64 ALMOST = 4292870144;
+
+// C: heap_calls_count, test/lang/ffi/heap_calls.c, which gives the calls of one kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_count(i32 kind) u64;
+// C: heap_calls_pretend, test/lang/ffi/heap_calls.c, which makes each later mmap give an
+// address range that the system does not know (from 2^60 up) when `on` is not 0.
+// gives: nothing. writes: no fort storage. keeps: no pointer. calls: no fort function.
+// frees: nothing.
+extern fn heap_calls_pretend(i32 on) void;
+
+// C call heap_calls_count: no pointer argument.
+fn maps() u64 {
+    return heap_calls_count(MAP);
+}
+
+// C call heap_calls_pretend: no pointer argument.
+fn pretend(i32 on) void {
+    heap_calls_pretend(on);
+}
+
+struct record {
+    void mut* at;
+}
+
+// Takes huge blocks until the allocator gives null or `row` is full, and returns their count.
+fn fill(record mut@ row) u64 {
+    u64 mut taken = 0;
+    while (taken < row.len) {
+        void mut* got = heap.take(HUGE);
+        if (got == null) {
+            break;
+        }
+        row[taken].at = got;
+        taken += 1;
+    }
+    return taken;
+}
+
+// Releases the blocks of `row` from the last one down, and returns the count of the releases
+// that gave true. Block `gone` is dead before the call; a `gone` of row.len names no block.
+// C call heap.drop: row[at].at, an address that heap.take gave in `fill`. drop tests the
+// address against the records of the allocator and reads no byte at it.
+fn empty(record mut@ row, u64 gone) u64 {
+    u64 mut released = 0;
+    u64 mut at = row.len;
+    while (at > 0) {
+        at -= 1;
+        if (at != gone && heap.drop(row[at].at)) {
+            released += 1;
+        }
+    }
+    return released;
+}
+
+// C call fill x2: row, the span of BLOCKS records of this function. fill stores into each
+// record that it fills the address that heap.take gave, and it reads no other byte.
+// C call empty x2: row, the span of BLOCKS records of this function, whose records hold the
+// addresses that heap.take gave in fill or in this function, and the index of the block that is
+// dead before the call, or BLOCKS for none.
+// C call heap.drop x4: the address of a block that heap.take gave in this function or in
+// `fill`, 2 times for the block in the middle and 1 time for each other block. drop tests the
+// address against the records of the allocator and reads no byte at it.
+fn main() i32 {
+    record mut@ own row = new(record, BLOCKS);
+    u64 start = heap.live_bytes();
+    pretend(1);
+    u64 before = maps();
+    u64 filled = fill(row);
+    println("filled: ", filled);
+
+    // each record is in use: no call asks the system
+    u64 full = maps();
+    void mut* huge = heap.take(HUGE);
+    bool can_huge = heap.can_take(HUGE);
+    void mut* almost = heap.take(ALMOST);
+    bool can_almost = heap.can_take(ALMOST);
+    println("at the limit: ", full - before == BLOCKS, " ", huge == null && !can_huge, " ",
+            almost == null && !can_almost, " ", maps() == full, " ",
+            heap.live_bytes() - start == BLOCKS * HUGE);
+
+    void mut* small = heap.take(16);
+    println("small block: ", small != null && heap.can_take(16), " ",
+            small != null && heap.drop(small));
+
+    // a dead record in the middle makes no room
+    u64 middle = 100;
+    bool released = heap.drop(row[middle].at);
+    bool twice = heap.drop(row[middle].at);
+    void mut* refused = heap.take(HUGE);
+    println("record in the middle: ", released, " ", twice, " ", refused == null, " ",
+            !heap.can_take(HUGE), " ", maps() == full);
+
+    // the release of the last record makes room for 1 block
+    bool last = heap.drop(row[BLOCKS - 1].at);
+    void mut* one = heap.take(HUGE);
+    row[BLOCKS - 1].at = one;
+    void mut* two = heap.take(HUGE);
+    println("last record: ", last, " ", one != null, " ", two == null, " ", maps() == full + 1);
+
+    u64 emptied = empty(row, middle);
+    println("emptied: ", emptied + 1, " ", heap.live_bytes() == start);
+
+    // the dead record in the middle left the list with the records after it
+    u64 again = fill(row);
+    u64 gone = empty(row, BLOCKS);
+    pretend(0);
+    println("filled again: ", again, " ", gone, " ", heap.live_bytes() == start);
+    del(row);
+    return 0;
+}

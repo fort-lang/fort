@@ -1,0 +1,32 @@
+//! run
+//! abort
+//! link: ffi/heap_calls.c
+//! stderr: ft:28:25: runtime error: out of memory
+//! stdout:
+//| before
+// A block of 2047 chunks needs a new segment of 4 GiB. The allocator maps the segment with no
+// access and then asks for the access to its table, 16 KiB at its start. The C file refuses
+// that call of `mprotect`, as the system does at the limit of the map entries. The `new` is then
+// the runtime error `out of memory` at its position (D10.9 rule 5), and the program gets no
+// storage that it cannot access. Test run/stdlib/185 holds that the allocator gives the address
+// range of that segment back.
+// D10.2, D10.6, D10.9
+import extern;
+
+// The kind of a call in test/lang/ffi/heap_calls.c: an mprotect that gives access.
+i32 ACCESS = 3;
+
+// C: heap_calls_refuse, test/lang/ffi/heap_calls.c, which makes one later call of one kind fail.
+// gives: nothing. writes: no fort storage. keeps: no pointer. calls: no fort function.
+// frees: nothing.
+extern fn heap_calls_refuse(i32 kind, u64 nth, u64 part) void;
+
+// C call heap_calls_refuse: no pointer argument.
+fn main() i32 {
+    println("before");
+    heap_calls_refuse(ACCESS, 1, 0);
+    u8 mut@ own block = new(u8, 4292870144);
+    println("after ", block.len);
+    del(block);
+    return 0;
+}

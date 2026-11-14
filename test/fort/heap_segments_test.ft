@@ -1,0 +1,174 @@
+//! run
+//! stdout:
+//| ok
+/// The segments of the allocator of the runtime (std.heap): a large block
+/// takes whole chunks at the frontier of the current segment, a block that
+/// the current segment cannot hold starts a new segment, and a block that no
+/// segment holds takes a mapping of its own. Each block of an old segment
+/// stays as it is, and its `del` releases it there (D10.9).
+import extern;
+import std.heap;
+
+// A chunk is 2 MiB and a segment is 4 GiB, of which the first chunk holds no
+// allocation. So a new segment holds 15 blocks of 128 chunks, and the largest
+// block of a segment has 2047 chunks.
+u64 CHUNK = 2097152;
+u64 BLOCK = 268435456;
+u64 SEGMENT = 4294967296;
+u64 BLOCKS_OF_A_SEGMENT = 15;
+u64 LARGEST = 4292870144;
+
+// The count of the blocks of a walk: more than 2 segments hold.
+u64 WALK = 32;
+
+fn address(u8@ block) u64 {
+    return cast(&block[0], u64);
+}
+
+// Whether the `a_size` bytes at `a` and the `b_size` bytes at `b` share no byte.
+fn apart(u64 a, u64 a_size, u64 b, u64 b_size) bool {
+    if (a > b) {
+        return a - b >= b_size;
+    }
+    return b - a >= a_size;
+}
+
+// Takes and releases WALK blocks of BLOCK bytes and stores the address of
+// each one in `at`.
+fn walk(u64 mut@ at) void {
+    for (u64 mut i = 0; i < WALK; i += 1) {
+        u8 mut@ own block = new(u8, BLOCK);
+        at[i] = address(block);
+        del(block);
+    }
+}
+
+// The block after a block of one segment starts where that block ends. A
+// block that starts elsewhere is the first block of a new segment. 32 blocks
+// need 3 segments, or 4 when the first of them holds 1 block only, and each
+// segment after the first one holds exactly 15 blocks.
+fn large_blocks_fill_a_segment_and_then_start_the_next_one() void {
+    u64[32] mut at = {};
+    walk(at[..]);
+    u64 mut crossings = 0;
+    u64 mut last_crossing = 0;
+    for (u64 mut i = 1; i < WALK; i += 1) {
+        if (at[i] == at[i - 1] + BLOCK) {
+            continue;
+        }
+        if (crossings > 0) {
+            assert(i - last_crossing == BLOCKS_OF_A_SEGMENT);
+        }
+        crossings += 1;
+        last_crossing = i;
+    }
+    assert(crossings == 2 || crossings == 3);
+    // no block takes a byte of an earlier block, which is dead storage
+    for (u64 mut i = 0; i < WALK; i += 1) {
+        for (u64 mut j = i + 1; j < WALK; j += 1) {
+            assert(apart(at[i], BLOCK, at[j], BLOCK));
+        }
+    }
+}
+
+// A large block and a small block stay live while 32 later blocks start new
+// segments. They keep their bytes, the next small block comes from the open
+// chunk of the old segment, and each `del` releases its block in the segment
+// that holds it.
+fn a_block_of_an_old_segment_keeps_its_bytes_and_releases() void {
+    u8 mut@ own kept = new(u8, BLOCK);
+    kept[0] = 3;
+    kept[BLOCK - 1] = 5;
+    u8 mut@ own small = new(u8, 64);
+    small[0] = 7;
+    small[63] = 9;
+    u64[32] mut at = {};
+    walk(at[..]);
+    for (u64 mut i = 0; i < WALK; i += 1) {
+        assert(apart(at[i], BLOCK, address(kept), BLOCK));
+    }
+    assert(kept[0] == 3 && kept[BLOCK - 1] == 5);
+    assert(small[0] == 7 && small[63] == 9);
+    u8 mut@ own next_small = new(u8, 64);
+    assert(address(next_small) == address(small) + 64);
+    u64 before = heap.live_bytes();
+    del(kept);
+    assert(before - heap.live_bytes() == BLOCK);
+    del(small);
+    del(next_small);
+    assert(before - heap.live_bytes() == BLOCK + 128);
+}
+
+// 2047 chunks are the largest block of a segment, and one byte more takes a
+// mapping of its own. Each of the two blocks holds its first and its last
+// byte, shares no byte with the other one, and releases at its start only.
+// C call heap.drop x4: &large[CHUNK] and &large[LARGEST - 1], addresses
+// inside the LARGEST bytes of `large`, and &huge[CHUNK] and &huge[LARGEST],
+// addresses inside the LARGEST + 1 bytes of `huge` (D9.8 rule 2). `new` gave
+// each block in this function. drop reads no byte at an address.
+fn the_largest_block_of_a_segment_and_the_first_block_with_its_own_mapping() void {
+    assert(heap.kept_bytes(LARGEST) == LARGEST);
+    assert(heap.kept_bytes(LARGEST + 1) == SEGMENT);
+    u64 before = heap.live_bytes();
+    u8 mut@ own large = new(u8, LARGEST);
+    large[0] = 1;
+    large[LARGEST - 1] = 2;
+    assert(heap.live_bytes() - before == LARGEST);
+    u8 mut@ own huge = new(u8, LARGEST + 1);
+    huge[0] = 3;
+    huge[LARGEST] = 4;
+    assert(heap.live_bytes() - before == LARGEST + SEGMENT);
+    assert(apart(address(large), LARGEST, address(huge), SEGMENT));
+    assert(large[0] == 1 && large[LARGEST - 1] == 2);
+    assert(huge[0] == 3 && huge[LARGEST] == 4);
+    assert(!heap.drop(cast(&large[CHUNK], void*)));
+    assert(!heap.drop(cast(&large[LARGEST - 1], void*)));
+    assert(!heap.drop(cast(&huge[CHUNK], void*)));
+    assert(!heap.drop(cast(&huge[LARGEST], void*)));
+    assert(heap.live_bytes() - before == LARGEST + SEGMENT);
+    del(large);
+    assert(heap.live_bytes() - before == SEGMENT);
+    del(huge);
+    assert(heap.live_bytes() == before);
+}
+
+// Two blocks with a mapping of their own, released in the order of their
+// `new` and then in the other order. The record of the first block leaves
+// the list of the allocator after the record of the second one, and each
+// `del` finds its block.
+fn blocks_with_their_own_mapping_release_in_each_order() void {
+    u64 before = heap.live_bytes();
+    for (u64 mut round = 0; round < 2; round += 1) {
+        u8 mut@ own first = new(u8, SEGMENT);
+        u8 mut@ own second = new(u8, SEGMENT);
+        first[SEGMENT - 1] = 1;
+        second[SEGMENT - 1] = 2;
+        assert(apart(address(first), SEGMENT, address(second), SEGMENT));
+        assert(heap.live_bytes() - before == 2 * SEGMENT);
+        if (round == 0) {
+            del(first);
+            assert(second[SEGMENT - 1] == 2);
+            del(second);
+        } else {
+            del(second);
+            assert(first[SEGMENT - 1] == 1);
+            del(first);
+        }
+        assert(heap.live_bytes() == before);
+    }
+    // a small block after the dead records: the allocator finds its segment
+    u8 mut@ own small = new(u8, 64);
+    small[63] = 6;
+    assert(small[63] == 6);
+    del(small);
+    assert(heap.live_bytes() == before);
+}
+
+fn main() i32 {
+    large_blocks_fill_a_segment_and_then_start_the_next_one();
+    a_block_of_an_old_segment_keeps_its_bytes_and_releases();
+    the_largest_block_of_a_segment_and_the_first_block_with_its_own_mapping();
+    blocks_with_their_own_mapping_release_in_each_order();
+    println("ok");
+    return 0;
+}

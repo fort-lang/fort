@@ -1,0 +1,41 @@
+//! run
+//! abort
+//! link: ffi/oracle.c
+//! stderr: ft:37:5: runtime error: invalid release
+//! stdout:
+//| before
+//| after the first del: 16
+// The test of a `del` reads the address of its pointer, and not the allocation that the
+// pointer came from (D10.9 rule 4). Two allocations of 16 bytes stand side by side, so the
+// address one after the last byte of the first is the start of the second. A trusted module
+// forges an owner of that address here. Its `del` releases the second allocation: the live
+// bytes go down by 16, and the `del` writes no error. The `del` of the owner that `new` gave
+// for the second allocation is then a second release, the runtime error `invalid release`.
+// Only a trusted module makes such an owner (D9.8). The interpreter reports the first `del`
+// (spec/ownership-design.md 3.5), and test/fir_run_test.py holds that difference.
+// D9.8, D10.3, D10.6, D10.9
+import extern;
+import std.heap;
+
+// C: oracle_pass, test/lang/ffi/oracle.c.
+// gives: p itself, which is no new allocation; this declaration says `own` to make an owner of
+// the address after an allocation. writes: nothing. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn oracle_pass(u8* p) u8 mut* own;
+
+// C call oracle_pass: after.ptr, the address one after the last byte of `first`, which the
+// empty span first[16..16] names (D9.8 rule 2: a bound of 0 bytes); C reads no byte.
+fn main() i32 {
+    u8 mut@ own first = new(u8, 16);
+    u8 mut@ own second = new(u8, 16);
+    u8@ after = first[16..16];
+    u8 mut* own forged = oracle_pass(after.ptr);
+    u64 live = heap.live_bytes();
+    println("before");
+    del(forged);
+    println("after the first del: ", live - heap.live_bytes());
+    del(second);
+    println("after the second del");
+    del(first);
+    return 0;
+}

@@ -3,11 +3,12 @@
 /// runs a function or the whole program with what the run writes captured, and gives the report.
 //
 // The runtime of the sandbox has the entries that a run calls: the entry of each check kind, the
-// print functions, `str_eq`, `alloc`, `free`, `args_init`, `args` and `flush_all`. A failed check
-// writes `<line>:<col>: <kind>` and its reported values to descriptor 2 and calls `abort`, so a
-// report names the entry and its arguments and no sandbox path. Its `std.libc` declares the
-// externs that the interpreter runs and the three model externs. The text of a run stays valid
-// until the next run.
+// print functions, `str_eq`, `alloc`, `release`, `args_init`, `args` and `flush_all`. A failed
+// check writes `<line>:<col>: <kind>` and its reported values to descriptor 2 and calls `abort`,
+// so a report names the entry and its arguments and no sandbox path. Its `std.libc` declares the
+// externs that the interpreter runs and the three model externs. Its `std.heap` declares the five
+// functions of the allocator that the interpreter models. The text of a run stays valid until
+// the next run.
 import fort.ast;
 import check_env;
 import fort.fir;
@@ -47,11 +48,34 @@ string[LIBC_LINES] LIBC = {
     "extern fn getpid() i32;",
 };
 
+// The count of the lines of HEAP.
+u64 HEAP_LINES = 15;
+
+// The sandbox std/heap.ft. The interpreter models each function, so no body of it runs.
+string[HEAP_LINES] HEAP = {
+    "fn take(u64 size) void mut* {",
+    "    return null;",
+    "}",
+    "fn drop(void* p) bool {",
+    "    return false;",
+    "}",
+    "fn can_take(u64 size) bool {",
+    "    return false;",
+    "}",
+    "fn live_bytes() u64 {",
+    "    return 0;",
+    "}",
+    "fn is_start(void* p) bool {",
+    "    return false;",
+    "}",
+};
+
 // The count of the lines of RUNTIME.
 u64 RUNTIME_LINES = 172;
 
 // The sandbox std/rt.ft.
 string[RUNTIME_LINES] RUNTIME = {
+    "import std.heap;",
     "import std.libc;",
     "struct enum_member {",
     "    i32 value;",
@@ -154,20 +178,19 @@ string[RUNTIME_LINES] RUNTIME = {
     "    put(2, msg);",
     "    stop();",
     "}",
-    "fn alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) void mut* own {",
-    "    u64 mut size = elem_size * count;",
-    "    if (size == 0) {",
-    "        size = 1;",
-    "    }",
-    "    void mut* own p = libc.calloc(1, size);",
+    "fn alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) void mut* {",
+    "    void mut* p = heap.take(elem_size * count);",
     "    if (p == null) {",
     "        at(line, col, \"out of memory\");",
     "        stop();",
     "    }",
     "    return p;",
     "}",
-    "fn free(void* own p) void {",
-    "    libc.free(move(p));",
+    "fn release(void* p, char* file, u32 line, u32 col) void {",
+    "    if (p != null && !heap.drop(p)) {",
+    "        at(line, col, \"invalid release\");",
+    "        stop();",
+    "    }",
     "}",
     "fn str_eq(char* a, u64 a_len, char* b, u64 b_len) bool {",
     "    if (a_len != b_len) {",
@@ -278,18 +301,28 @@ fn check(env mut* e, string@ lines) void {
     check_with(e, lines, RUNTIME[..]);
 }
 
-/// Checks `lines` as check does, with the lines of `runtime` as the sandbox std/rt.ft.
-fn check_with(env mut* e, string@ lines, string@ runtime) void {
-    check_env.reopen(&e->c);
+/// Adds the standard library of the sandbox to `c`: the lines of `runtime` as std/rt.ft, LIBC as
+/// std/libc.ft and HEAP as std/heap.ft.
+fn add_std(check_env.env mut* c, string@ runtime) void {
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
     join(&b, runtime);
-    check_env.add(&e->c, "std/rt.ft", strbuf.view(&b));
+    check_env.add(c, "std/rt.ft", strbuf.view(&b));
     strbuf.clear(&b);
     join(&b, LIBC[..]);
-    check_env.add(&e->c, "std/libc.ft", strbuf.view(&b));
-    modules_env.std_dir_without_runtime(&e->c.m, "std");
+    check_env.add(c, "std/libc.ft", strbuf.view(&b));
     strbuf.clear(&b);
+    join(&b, HEAP[..]);
+    check_env.add(c, "std/heap.ft", strbuf.view(&b));
+}
+
+/// Checks `lines` as check does, with the lines of `runtime` as the sandbox std/rt.ft.
+fn check_with(env mut* e, string@ lines, string@ runtime) void {
+    check_env.reopen(&e->c);
+    add_std(&e->c, runtime);
+    modules_env.std_dir_without_runtime(&e->c.m, "std");
+    strbuf.str_buf mut b = strbuf.create();
+    defer del(b.data);
     join(&b, lines);
     e->c.want_main = false;
     if (!check_env.check_src(&e->c, strbuf.view(&b))) {

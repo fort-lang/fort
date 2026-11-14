@@ -1,0 +1,69 @@
+//! run
+//! stdout:
+//| small: true false true false
+//| large: true false false true false
+//| other: false false false false
+// `heap.is_start` is the start test of `drop` with no release (D10.9 rule 4): `regrow` makes it
+// before it takes storage (D12.2). It gives true only at the start of a live allocation of the
+// allocator, and it changes nothing: the live bytes stay, and the `del` after the test releases
+// the allocation with no `invalid release`. An address inside an allocation, the start of a
+// later chunk of a large allocation, the start of a released allocation, null, the address of a
+// local, of a global and of a literal are no start.
+// D9.8, D10.2, D10.9
+import extern;
+import std.heap;
+
+u8 mut counter = 4;
+
+// Whether `p` starts a live allocation.
+// C call heap.is_start: p, an address that the caller names. is_start tests the address
+// against the records of the allocator and reads no byte at it.
+fn starts(void* p) bool {
+    return heap.is_start(p);
+}
+
+// A small allocation of 64 bytes.
+// C call starts x3: an address of the block of this function, the first byte or byte 16, also
+// after the `del`; starts reads no byte at it.
+fn small() void {
+    u8 mut@ own block = new(u8, 64);
+    u64 before = heap.live_bytes();
+    bool at_start = starts(cast(&block[0], void*));
+    bool inside = starts(cast(&block[16], void*));
+    bool kept = heap.live_bytes() == before;
+    u8* first = &block[0];
+    del(block);
+    println("small: ", at_start, " ", inside, " ", kept, " ", starts(cast(first, void*)));
+}
+
+// A large allocation of 2 chunks.
+// C call starts x4: an address of the block of this function, the first byte, byte 16 or the
+// first byte of its second chunk, also after the `del`; starts reads no byte at it.
+fn large() void {
+    u8 mut@ own block = new(u8, 4194304);
+    u64 before = heap.live_bytes();
+    bool at_start = starts(cast(&block[0], void*));
+    bool inside = starts(cast(&block[16], void*));
+    bool second = starts(cast(&block[2097152], void*));
+    bool kept = heap.live_bytes() == before;
+    u8* first = &block[0];
+    del(block);
+    println("large: ", at_start, " ", inside, " ", second, " ", kept, " ",
+            starts(cast(first, void*)));
+}
+
+// C call starts x4: null, the address of a local, of a global and of the first byte of a
+// literal; starts reads no byte at it.
+fn other() void {
+    u64 local = 7;
+    u8@ text = cast("literal", u8@);
+    println("other: ", starts(null), " ", starts(cast(&local, void*)), " ",
+            starts(cast(&counter, void*)), " ", starts(cast(&text[0], void*)));
+}
+
+fn main() i32 {
+    small();
+    large();
+    other();
+    return 0;
+}

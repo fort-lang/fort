@@ -161,10 +161,17 @@ so each import has one reading (`notes/style.md` 3.1 rule 1).
   a call of a listed extern in another form, ends the run as `outside`, which is no oracle case.
   When the oracle keeps the output of a run, a `write` to a descriptor other than 1 and 2 also
   ends the run as `outside`.
+- A model of the allocator of the runtime, and not the allocator. The run models the functions
+  `take`, `drop`, `is_start`, `can_take` and `live_bytes` of `std.heap` (`fir.md` 11, `stdlib.md`
+  2.16), so the `std.rt.alloc` of an `alloc` and the `std.rt.release` of a `del` run as in a build.
+  A `del` of an address that starts no live allocation of `take` ends the run with the runtime error
+  `invalid release` (D10.9 rule 4).
 - A call of `exit` ends the run at once, with no `leak at exit` test. That test runs only when the
   entry `main` returns.
 - The memory: a 64-bit address space that the interpreter never reuses. Each global, frame local
   and allocation gets a new range. A pointer is an address, so a `cast` to `u64` works (D3.14).
+  A released allocation of the runtime keeps its bytes, so a load or a store in it reads or
+  changes the value that the storage held last (D10.9 rule 2).
 
 ### 3.3 The shadow state and the tags
 
@@ -335,6 +342,12 @@ call of a null function pointer is the outcome `null call`.
   the list of 3.2, in the forms of that list. The oracle gives the output, the exit status and
   the runtime error that the test expects. The test counts the programs that run, those that are
   `outside` and the differences, which must be 0. It runs in 120 s or less in CI (estimated).
+  One program differs, and the test pins both of its runs: `run/errors/052` makes an owner of
+  the address one after the last byte of an allocation. That address is the start of the next
+  allocation, so the checked build releases the next allocation and reports the later `del` of
+  its owner, and the oracle reports the first `del` (`stdlib.md` 2.16). Each run reports
+  `invalid release` and gives no dead storage to another object. Only a trusted module writes
+  such an owner, or a module that takes a route into the state of `std.heap` (`stdlib.md` 2.16).
 - Each event has tests at its boundaries: the ends of an allocation and a span of length 0. Other
   tests cover a `del` of `null` and of an interior pointer, and a cycle of two owners. More tests
   cover a tag through a cast to `u64` and back, and a kept frame tag. The tests of `forged` cover

@@ -1205,7 +1205,7 @@ changes the function, and the verifier runs after it. The passes run in this ord
         only. No store through a pointer writes a borrow local, whose address the run never took.
      5. `del`, `move`, `live` and `dead` write only the zero value, which derives from no address,
         or free storage, and a terminator writes nothing. `alloc` and `del` call `std.rt.alloc` and
-        `std.rt.free` (12.2), which keep no operand and write no storage of F, so they expose
+        `std.rt.release` (12.2), which keep no operand and write no storage of F, so they expose
         nothing. A block starts with the union over its edges, and each edge holds (vi) on each run
         that takes it.
      So a store through a pointer writes the storage of `_x` only through a pointer that derives
@@ -1611,7 +1611,8 @@ writes it (section 12), and it starts a program as `toolchain.md` 6 item 22 star
   address of the destination comes after the right side (sections 6 and 7, 12.5).
 - A failed check calls the runtime entry of its kind with its reported operands and the file, the
   line and the column of the check (12.4). The message of `panic` goes as the address of its
-  place. `alloc` calls `std.rt.alloc` and `del` calls `std.rt.free` (12.2).
+  place. `alloc` calls `std.rt.alloc`, and `del` calls `std.rt.release` with its pointer and the
+  file, the line and the column of its statement (12.2).
 - A call of an extern of the list of `spec/ownership-design.md` 3.2 runs, from `std.rt` or from
   the program: `exit`, `abort`, `write`, `calloc`, `free`, `isatty`, `strlen`, `memcpy`,
   `memmove`, `memcmp`, `__errno_location`, `__error`, `strtod` and `strtof` with a null end
@@ -1622,11 +1623,24 @@ writes it (section 12), and it starts a program as `toolchain.md` 6 item 22 star
   call of a listed extern in another form, and a call of a function with no body end the run as
   `outside`. When the run keeps the output of the program, a `write` to a descriptor other than
   1 and 2 also ends the run as `outside`.
+- The run does not run the allocator of the runtime. It models five functions of `std.heap`
+  (`stdlib.md` 2.16), which `std.rt.alloc`, `std.rt.release` and a trusted module call. `take` gives
+  a new range of zero bytes, or null for a size above `std.heap.LIMIT_BYTES` or a size that the
+  interpreter has no storage for. `drop` makes the live allocation of `take` that starts at its
+  argument dead storage and returns `true`; for each other address it changes nothing and returns
+  `false`, so `std.rt.release` reports `invalid release` (D10.9 rule 4). `is_start` makes the same
+  test and changes nothing. `can_take` reports whether `take` gives the size, and `live_bytes` gives
+  the count of `std.heap`. A released allocation keeps its range and its bytes while the run lasts.
+  So no later allocation takes its range (D10.9 rule 1), and a load or a store in it reads or
+  changes the value that the storage held last, which is the first result of D10.9 rule 2. The run
+  never gives the second result, the memory fault. A `calloc` gives an allocation of C: only `free`
+  releases it, and its range and its bytes end there. A `free` of an address that is not null and
+  starts no live allocation of `calloc` is a fault, because C defines no result for it.
 - A run ends with the return of the function that it runs, an `exit`, an `abort`, a `trap`, an
   `outside`, or a fault: an operation for which the interpreter has no storage, such as a load
-  through null or outside each live range. In the end state a load through null fails its `check`
-  of the kind `null` (section 8), and a load or a store in dead storage has a result of D10.9. A
-  later change of the interpreter implements both.
+  through null or outside each range that the run holds. In the end state a load through null
+  fails its `check` of the kind `null` (section 8), and a load or a store in the storage of a
+  frame that ended has a result of D10.9. Later changes of the interpreter implement those two.
 - The shadow state `fir.shadow` (`src/fort/fir/shadow.ft`) observes each run and changes none of its
   outcome. It keeps the owner slots, the tags and the events of `spec/ownership-design.md` 3.3 and
   3.4. A run reports each event once, as the line `event <kind> in <function> at <line>:<col>`,
@@ -1645,9 +1659,10 @@ writes it (section 12), and it starts a program as `toolchain.md` 6 item 22 star
   in the cycle or below it. One holder in or below a cycle gives that end, also when a second holder
   stands in an allocation with the plain form. A run gives each of the two lines once at most, the
   line of a cycle last. A `leak` stands at the item where the owner count became 0, and an
-  event inside the `std.rt.free` of a `del` stands at the `del`. A `use after release`, `use after
-  scope` of a frame that returned, `double release` and `invalid release` stand before the fault
-  that ends the run, and a `use after move` before the fault `null dereference`.
+  event inside the `std.rt.release` of a `del` stands at the `del`. A `use after scope` of a frame
+  that returned stands before the fault that ends the run, and a `use after move` before the
+  fault `null dereference`. A `double release` and an `invalid release` stand before the runtime
+  error `invalid release`, which ends the run with `abort`. A `use after release` ends no run.
 
 `fort --fir-run` runs a program with it, and the pass `run` of a FIR test runs a function or a
 program (`toolchain.md` 1, 16.3). `fort --fir-run --fir-events` writes the events to stderr after
@@ -1731,8 +1746,8 @@ does not read the tree and it does not read the build mode.
   that is no `const zero`. The word `zeroed` is the mark only when a type follows it, so a
   struct named `zeroed` stays a type.
 - `call` is `call` with the signature of 12.3; an extern call carries `#3` (item 8).
-- `del(move p)` loads the pointer (field 0 for a span or `string`), calls `std.rt.free`, and
-  zeroes `p` (item 17).
+- `del(move p)` loads the pointer (field 0 for a span or `string`), calls `std.rt.release` with
+  the pointer and the file, the line and the column of the statement, and zeroes `p` (item 17).
 - `live(_n)` writes the zero value into the storage of `_n` (section 7, D10.1): `llvm.memset` of
   the whole `alloca` for an aggregate type, padding included, and a `store` of the zero constant
   for a scalar type. A `bool` stores `i8 0`, with no `zext`. `dead` prints nothing.

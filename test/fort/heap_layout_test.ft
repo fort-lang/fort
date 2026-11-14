@@ -1,0 +1,92 @@
+//! run
+//! link: ../lang/ffi/heap_calls.c
+//! stdout:
+//| ok
+/// The start test of the allocator of the runtime (std.heap) when the system places each new
+/// mapping directly below the one before it, from the top down. The address one after the last
+/// byte of the newer mapping is then the start of the older one. The start test skips each record
+/// whose mapping does not hold the address, and a mapping of `bytes` bytes holds the offsets
+/// below `bytes` only. So `is_start` and `drop` find the older huge allocation there (D10.9 rule
+/// 4). The test holds the other order too, from the bottom up. The C file gives pretended
+/// mappings: address ranges that the system does not know. So the test takes no address range,
+/// and it touches no byte of a block.
+import extern;
+import std.heap;
+
+// The orders of test/lang/ffi/heap_calls.c: real mappings, pretended ones from the bottom up,
+// and pretended ones from the top down.
+i32 REAL = 0;
+i32 UP = 1;
+i32 DOWN = 2;
+
+// The smallest huge block: each one has a mapping of its own.
+u64 HUGE = 4294967296;
+
+// C: heap_calls_pretend, test/lang/ffi/heap_calls.c, which sets the order of the later mappings.
+// gives: nothing. writes: no fort storage. keeps: no pointer. calls: no fort function.
+// frees: nothing.
+extern fn heap_calls_pretend(i32 on) void;
+
+// C call heap_calls_pretend x2: no pointer argument.
+// C call heap.is_start x5: a, b or c, which heap.take gave in this function; is_start reads no
+// byte at it.
+// C call heap.drop x4: a, b or c, which heap.take gave in this function; drop reads no byte at
+// it.
+fn top_down() void {
+    u64 start = heap.live_bytes();
+    heap_calls_pretend(DOWN);
+    void mut* a = heap.take(HUGE);
+    void mut* b = heap.take(HUGE);
+    void mut* c = heap.take(HUGE);
+    heap_calls_pretend(REAL);
+    assert(a != null && b != null && c != null);
+    // each new mapping ends where the one before it starts
+    assert(cast(b, u64) + HUGE == cast(a, u64));
+    assert(cast(c, u64) + HUGE == cast(b, u64));
+    assert(heap.live_bytes() - start == 3 * HUGE);
+
+    // the start of an older mapping is the address one after the end of the newer one
+    assert(heap.is_start(a));
+    assert(heap.is_start(b));
+    assert(heap.is_start(c));
+    // the test releases nothing
+    assert(heap.live_bytes() - start == 3 * HUGE);
+
+    // the oldest block, above both others, releases first
+    assert(heap.drop(a));
+    assert(!heap.drop(a));
+    assert(!heap.is_start(a));
+    assert(heap.is_start(b));
+    assert(heap.drop(b));
+    assert(heap.drop(c));
+    assert(heap.live_bytes() == start);
+}
+
+// C call heap_calls_pretend x2: no pointer argument.
+// C call heap.is_start x3: a or b, which heap.take gave in this function; is_start reads no byte
+// at it.
+// C call heap.drop x3: a or b, which heap.take gave in this function; drop reads no byte at it.
+fn bottom_up() void {
+    u64 start = heap.live_bytes();
+    heap_calls_pretend(UP);
+    void mut* a = heap.take(HUGE);
+    void mut* b = heap.take(HUGE);
+    heap_calls_pretend(REAL);
+    assert(a != null && b != null);
+    // the new mapping starts where the one before it ends
+    assert(cast(a, u64) + HUGE == cast(b, u64));
+    assert(heap.is_start(a));
+    assert(heap.is_start(b));
+    assert(heap.drop(a));
+    assert(!heap.is_start(a));
+    assert(heap.drop(b));
+    assert(!heap.drop(b));
+    assert(heap.live_bytes() == start);
+}
+
+fn main() i32 {
+    top_down();
+    bottom_up();
+    println("ok");
+    return 0;
+}

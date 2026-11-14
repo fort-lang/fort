@@ -1,0 +1,32 @@
+//! run
+//! link: ffi/oracle.c
+//! signal: SEGV
+//! signal-macos: BUS
+// The runtime gives the storage of a large allocation back to the system at its `del` and keeps
+// the address range (D10.9 rule 1). C code that a trusted module calls with a view of that
+// storage reads it with no system call, and the read stops the program with a memory fault
+// (rule 6, rule 2). The fault writes no line and does not flush the buffered output (D11.5):
+// stdout stays empty. The read gives no zero byte and no byte of the later allocation.
+// D9.8, D10.3, D10.9, D11.5
+import extern;
+
+// C: oracle_read, test/lang/ffi/oracle.c.
+// gives: the byte at p, no pointer. reads: 1 byte at p. writes: nothing. keeps: no pointer.
+// calls: no fort function. frees: nothing.
+extern fn oracle_read(u8* p) u8;
+
+// C call oracle_read: &view[4194303], the last byte of a view of 4194304 bytes (D9.8 rule 2).
+// The view is dead storage after the del, and rule 6 of D10.9 gives the result of the access.
+fn main() i32 {
+    u8 mut@ own block = new(u8, 4194304);
+    block[4194303] = 9;
+    u8@ view = block;
+    del(block);
+    u8 mut@ own later = new(u8, 4194304);
+    later[4194303] = 1;
+    println("before the read");
+    u8 seen = oracle_read(&view[4194303]);
+    println("after the read ", seen);
+    del(later);
+    return 0;
+}

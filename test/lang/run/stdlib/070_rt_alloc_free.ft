@@ -6,11 +6,12 @@
 //| true true 0
 //| true true
 //| true true
+//| true true
 //| freed
 import extern;
 import std.rt;
 
-// new and del call alloc and free (D10.2, D10.3, toolchain.md 5.1). Each
+// new calls alloc, and del calls release (D10.2, D10.3, toolchain.md 5.1). Each
 // line below asks one question of a block new made and of a block alloc made:
 // is it zeroed, is it not null, and does it accept a write to its last byte.
 // The pair holds the lowering of the builtin against a direct call, which is
@@ -35,7 +36,7 @@ extern fn bcmp(void* a, void* b, u64 n) i32;
 extern fn bcopy(void* source, void mut* destination, u64 n) void;
 
 // Answers whether all n bytes at p are zero, for an n above 0. D10.2 promises
-// that of both. The parameter is void*, which alloc's void mut* own result
+// that of both. The parameter is void*, which alloc's void mut* result
 // reaches by the monotone drop of D5.4, so a reader writes no cast. bcmp holds
 // the bytes against zeroed ones.
 // C call bcmp: p and n are parameter sources (D9.8 rule 1), so all_zero is a boundary function, and
@@ -62,7 +63,7 @@ fn byte_at(void* p, u64 i) u8 {
 
 // Writes one byte of a block alloc answered with. The parameter is void mut*,
 // which is what alloc answers: a callee that writes takes the result as it
-// comes. A caller that bound the result as void* own could not call this at
+// comes. A caller that bound the result as void* could not call this at
 // all, because the drop of D5.4 runs one way only (D3.11, toolchain.md 5.1).
 // bcopy copies the first i + 1 bytes out, and back with byte i set.
 // C call bcopy x2: p and i are parameter sources (D9.8 rule 1), so poke is a boundary function, and
@@ -76,21 +77,25 @@ fn poke(void mut* p, u64 i, u8 v) void {
     del(copy);
 }
 
-// C call rt.alloc x4: &FILE[0] names the global FILE, no mut global, which a literal initializes,
+// C call rt.alloc x5: &FILE[0] names the global FILE, no mut global, which a literal initializes,
 // with the NUL of that literal (D9.8 rule 4); the other arguments are integers.
-// C call all_zero x4: cast(&from_new[0], void*) keeps the bound of from_new from element 0, n bytes
-// (rule 2), with n; from_alloc with n, 64 bytes, zero_elem with 1, 1 byte, and large with big, big
-// bytes, each storage that rt.alloc gave in main: the gives: of rt.alloc states elem_size * count
-// zeroed bytes, or 1 byte for a product of 0, never null (D9.8 rule 3).
+// C call all_zero x5: cast(&from_new[0], void*) keeps the bound of from_new from element 0, n bytes
+// (rule 2), with n; from_alloc with n, 64 bytes, zero_elem with 1, 1 byte, large with big, big
+// bytes, and chunks with wide, wide bytes, each storage that rt.alloc gave in main: the gives: of
+// rt.alloc states elem_size * count zeroed bytes, or 1 byte for a product of 0, never null (D9.8
+// rule 3).
 // C call poke x2: from_alloc, the 64 bytes that rt.alloc gave (rule 3), with i 0 and n - 1, so i +
 // 1 is at most 64.
 // C call byte_at x2: from_alloc, 64 bytes, with i 0 and n - 1, as for poke.
-// C call rt.free x5: null, and four blocks that rt.alloc gave in this function, which free takes
-// (A3).
+// C call rt.release x5: null, and four blocks that rt.alloc gave in this function and that no
+// call released before: release tests the address and reads no byte at it. &FILE[0] is the
+// name of the rt.alloc row.
+// C call rt.free x2: null, and chunks, a block that rt.alloc gave in this function and that no
+// call released before; free tests the address as release does.
 fn main() i32 {
     u64 n = 64;
     u8 mut@ own from_new = new(u8, n);
-    void mut* own from_alloc = rt.alloc(1, n, &FILE[0], 1, 1);
+    void mut* from_alloc = rt.alloc(1, n, &FILE[0], 1, 1);
     println(from_new.ptr != null, " ", all_zero(cast(&from_new[0], void*), n));
     println(from_alloc != null, " ", all_zero(from_alloc, n));
 
@@ -110,26 +115,35 @@ fn main() i32 {
     // by asking for one byte when the product is zero. An element size of zero
     // reaches the same line from the other side.
     i32@ own empty_new = new(i32, 0);
-    void mut* own empty_alloc = rt.alloc(4, 0, &FILE[0], 1, 1);
-    void mut* own zero_elem = rt.alloc(0, 100, &FILE[0], 1, 1);
+    void mut* empty_alloc = rt.alloc(4, 0, &FILE[0], 1, 1);
+    void mut* zero_elem = rt.alloc(0, 100, &FILE[0], 1, 1);
     println(empty_new.ptr != null, " ", empty_alloc != null, " ", empty_new.len);
     println(zero_elem != null, " ", all_zero(zero_elem, 1));
 
-    // A product larger than one page, zeroed the whole way. calloc zeroes a
-    // large block by asking the kernel for fresh pages. That is a different
-    // path in the C library from the small block above.
+    // A product larger than one page, zeroed the whole way. The allocator gives
+    // fresh pages of the system and writes no zero. The block goes over many
+    // pages of one chunk of the allocator.
     u64 big = 1048576;
-    void mut* own large = rt.alloc(8, big / 8, &FILE[0], 1, 1);
+    void mut* large = rt.alloc(8, big / 8, &FILE[0], 1, 1);
     println(large != null, " ", all_zero(large, big));
 
-    // free releases what alloc answered with. A null p does nothing, and del
-    // of a zero own value does nothing either (D10.3, D17.9).
-    void* own nothing = null;
-    rt.free(move(nothing));
-    rt.free(move(from_alloc));
-    rt.free(move(empty_alloc));
-    rt.free(move(zero_elem));
-    rt.free(move(large));
+    // A product above 2,048,000 bytes takes whole chunks of the allocator, which
+    // is a different path from the blocks above.
+    u64 wide = 4194304;
+    void mut* chunks = rt.alloc(8, wide / 8, &FILE[0], 1, 1);
+    println(chunks != null, " ", all_zero(chunks, wide));
+
+    // release releases what alloc answered with, and free does too. A null p
+    // does nothing, and del of a zero own value does nothing either (D10.3,
+    // D17.9).
+    void* nothing = null;
+    rt.release(nothing, &FILE[0], 1, 1);
+    rt.release(from_alloc, &FILE[0], 1, 1);
+    rt.release(empty_alloc, &FILE[0], 1, 1);
+    rt.release(zero_elem, &FILE[0], 1, 1);
+    rt.release(large, &FILE[0], 1, 1);
+    rt.free(nothing);
+    rt.free(chunks);
     del(from_new);
     del(empty_new);
     println("freed");

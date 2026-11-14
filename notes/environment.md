@@ -369,7 +369,11 @@ without a rewrite.
   nothing. A re-run by hand of it gave the build error the batch had missed. On 2026-10-23 the
   first round of 3 of 4 runs of `tools/mutate.py` in VM slot 2 read `stale`, and every later
   round built: run a `stale` row again by hand, with the mutant written through a new inode
-  (`cp` then `mv` on the host), and compare the `md5sum` again. That check is also how
+  (`cp` then `mv` on the host), and compare the `md5sum` again. On 2026-11-14 a row of
+  `tools/mutations/interpreter.json` read `stale` in 2 of 2 runs in VM slot 3: `ninja -C
+  build/Linux/debug fort` printed only `Publishing build/fort` and rebuilt no compiler, while the
+  rows of `heap_fort.json`, whose build is a copy, ran. The host copy of the table (build in
+  `build/Darwin/debug`) built and caught the row. That check is also how
   a build that silently skipped a source is caught, which is worth one `md5sum` before any
   measurement that will be quoted as evidence. Undo the mutation from a saved copy of the file,
   never with `git checkout <file>`: the file usually also holds the
