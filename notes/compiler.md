@@ -2136,7 +2136,7 @@ error, exit 139 is SIGSEGV, and exit 124 is the limit of 20 s.
   today, and the item will. `no plan`: no guard holds it and no planned item closes it. `no
   undefined state`: the reference gives the emitted form no precondition, or the emitter has 0
   sites.
-- **The planned work items** are seven, and this tree implements none of them. `spec/decisions.md`
+- **The planned work items** are six, and this tree implements none of them. `spec/decisions.md`
   holds the rule of each of the first four. The null check: a dereference of a null pointer is the
   runtime error `null dereference`, and a call of a null function pointer is the runtime error `null
   call` (D10.5, D10.6, D3.10). Dead storage: the runtime never gives the storage of a `del` to
@@ -2146,23 +2146,23 @@ error, exit 139 is SIGSEGV, and exit 124 is the limit of 20 s.
   removes a check (D10.6, D14.1). The trusted premise that names the options of the builder: a build
   with one of these options is outside the guarantee, as a trusted module is. Case 4 of D10.7 names
   `--std-dir` and `--use std=<path>`; the rule for `-Xcc`, `--cc` and `-l` is a ruling and not yet a
-  decision. The test of the runtime table: a compile step or a test compares each part of each row
-  of `runtime_sig.ft` that the emitters call with the definition in `std/rt.ft`, where rule V7 does
-  not (E48); it is a ruling and not a decision. A reserved first segment `llvm` of a module path: no
-  module path starts with the segment `llvm` (E49); it is a change of D9.2 that waits for the user.
-  The zero bytes of a local when its declaration runs (D10.1) were an eighth item; the tree
-  implements them since 7a1d42fc, so the rows of that item are guarded now.
+  decision. A reserved first segment `llvm` of a module path: no module path starts with the segment
+  `llvm` (E49); it is a change of D9.2 that waits for the user. The zero bytes of a local when its
+  declaration runs (D10.1) were an eighth item; the tree implements them since 7a1d42fc, so the rows
+  of that item are guarded now. The test of the runtime table was one more item; the test
+  `runtime-table` implements it, so row E48 is guarded now.
 - **The methods.** `mutation-measured`: a mutant of the compiler removed the property and the test
-  `ir-flags` (`test/ir_flags_test.py`) went red. `probed`: a program was compiled and run, or the
-  test `ir-flags` counted the corpus, and the row quotes the result. `read`: the code was read and
-  nothing ran. Use a `read` row as an argument, not as a test.
+  `ir-flags` (`test/ir_flags_test.py`) went red. For E48, a mutant of the table of the runtime
+  entries or of `std/rt.ft` made the test `runtime-table` (`test/runtime_table_test.py`) go red.
+  `probed`: a program was compiled and run, or the test `ir-flags` counted the corpus, and the row
+  quotes the result. `read`: the code was read and nothing ran. Use a `read` row as an argument, not
+  as a test.
 - **The rows: 76.** 50 for the emitter, 23 for `std/rt.ft`, 3 for the back end line.
-- **By state.** `guarded`: 46. Closed by a planned work item: 10. `no plan`: 0. `no undefined
+- **By state.** `guarded`: 47. Closed by a planned work item: 9. `no plan`: 0. `no undefined
   state`: 20. The rows of each item: the null check 4; dead storage 2; frame storage 2; the removal
-  of `--no-bounds-check` 1; the trusted premise that names the options of the builder 1; the test of
-  the runtime table 1; a reserved first segment `llvm` of a module path 1. E19 names three items, so
-  these seven counts add up to 12.
-- **By method.** `mutation-measured`: 4. `probed`: 48. `read`: 24.
+  of `--no-bounds-check` 1; the trusted premise that names the options of the builder 1; a reserved
+  first segment `llvm` of a module path 1. E19 names three items, so these six counts add up to 11.
+- **By method.** `mutation-measured`: 5. `probed`: 47. `read`: 24.
 - **The rows with no plan: 0.** The census found 4 rows with no guard and no planned work item. One
   was E41, the copy of two places that overlap in part: the emitter wrote `llvm.memcpy` for it, and
   it writes `llvm.memmove` now (D6.3, D19.3). E11: a `load` of a padding byte that no `store` wrote:
@@ -2688,27 +2688,27 @@ fn main() i32 {
   (`rt_sig_of`, `runtime_sig.ft:160`) and its argument types from the call site. The definition
   takes its text from the fort function of `std/rt.ft`. The emitters can call 17 entries of the
   table: `grep -o 'rt_entry\.rt_[a-z_0-9]*' src/fort/fir_llvm.ft src/fort/gen.ft`, unique, less
-  `rt_none`. Guard: partial. Rule V7 of the verifier (`runtime_holds`, `fir_verify.ft:192`;
-  `entry_fits`, `fir_verify.ft:211`; called at `gen_fir.ft:138`) reads the declaration in
-  `std/rt.ft` of the entry of each `check` and `fail` that the build mode keeps, at each compile. It
-  compares the count of its parameters with the count of the reported operands plus 3, and the type
-  of each reported operand. So V7 holds the operands of the 10 check entries: `fail_bounds`,
-  `fail_span`, `fail_overflow`, `fail_shift`, `fail_div_zero`, `fail_div_overflow`,
-  `fail_alloc_count`, `fail_enum`, `assert_fail` and `panic`. The gap: V7 does not compare the types
-  of the 3 location parameters (the file, the line and the column) and the result type of these 10,
-  and it compares nothing of the 7 other entries: `alloc`, `free`, `args_init`, `args`, `flush_all`,
-  `regrow` and `regrow_move`. No test compares these with `std/rt.ft`: a test of `test/fort` runs in
-  a temporary directory and cannot open the file, and `bootstrap0/test/runtime_sig_test.c` compares
-  the table of the C compiler. `fir_terminator_test.ft` and `runtime_sig_test.ft` compare rows with
-  signatures that a person wrote. The rows are the same for each program, so no fort source changes
-  them. Evidence: in review, a `std/rt.ft` whose `fail_bounds` takes `u64 index` gives the compile
-  error "the runtime `std.rt` has no entry `fail_bounds` with the parameters that `cmp` needs". One
-  whose `fail_bounds` takes `u64 line` builds, and the program prints the runtime error and exits
-  134. Probes that ran: clang 18.1.3 and `opt -passes=verify` refuse a module whose call names a
-  function that the module does not hold (`use of undefined value`). Both accept a call with the
-  argument types `(i32, i32)` of a function that the module defines with `(i64)`. So a wrong name in
-  a row stops the build, and a wrong type in a row does not. State: closed by the test of the
-  runtime table. Method: probed.
+  `rt_none`. Guard: the test `runtime-table` (`test/runtime_table_test.py`). It finds the entries
+  that the emitters can call as the command above does, and for each one it compares the row of
+  `rt_sig_of` with the definition in `std/rt.ft`: the name, each parameter form in order (the 3
+  location parameters included), the count of the parameters, the result form and the `noreturn`
+  state. The definition must be a fort `fn` with a body, not an `extern fn` and with no `...`, so
+  the call and the definition have the default calling convention (E18). An entry with no row, with
+  no definition or with two definitions fails, and so does a type that the test cannot read. The
+  test reads the texts of the tree and not the `std` of a build: a build with `--std-dir` is outside
+  the guarantee (B03). Rule V7 of the verifier (`runtime_holds`, `fir_verify.ft:192`; `entry_fits`,
+  `fir_verify.ft:211`; called at `gen_fir.ft:138`) also reads, at each compile, the declaration in
+  `std/rt.ft` of the entry of each `check` and `fail` that the build mode keeps, and compares the
+  count of its parameters and the type of each reported operand. Evidence: the test compares 17
+  entries. Each of the 7 rows of `tools/mutations/runtime_table.json` changes one part of one
+  signature: the name in the row and in `std/rt.ft`, a parameter type in the row, a location type in
+  `std/rt.ft` (`u64 line` in `fail_bounds`), the result type in the row and in `std/rt.ft`, and the
+  `noreturn` state. Each one turns the test red: `python3 tools/mutate.py
+  tools/mutations/runtime_table.json --runner 'bash -c'` gives 7 `caught`. Earlier probes: clang
+  18.1.3 and `opt -passes=verify` refuse a module whose call names a function that the module does
+  not hold (`use of undefined value`). Both accept a call with the argument types `(i32, i32)` of a
+  function that the module defines with `(i64)`. So before the test, a wrong name in a row stopped
+  the build, and a wrong type in a row did not. State: guarded. Method: mutation-measured.
 - **E49. The name of a fort function or of a fort global with the prefix `llvm.`.** Sites:
   `gen_symbol` joins the module path, a dot and the name (`gen.ft:680`), and `gen_symbol_ref` writes
   the result in quotes (`gen.ft:698`). So each function and each global of a module whose path
