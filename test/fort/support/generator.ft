@@ -972,7 +972,7 @@ struct operation_row {
 }
 
 /// The count of the rows of OPERATIONS.
-u64 OPERATION_COUNT = 52;
+u64 OPERATION_COUNT = 53;
 
 /// The operation table. The whole value: an `alloc`, a release, a store of the empty value, a
 /// `move` out and in, and a drop. The inner owners: the same on the first one, and an `alloc` and
@@ -987,8 +987,11 @@ u64 OPERATION_COUNT = 52;
 /// `move` through a pointer to the place, a store into a part, and a `move` to and from a global.
 /// Then a callee that reads through a pointer to the place (PEEK): after a `move` of a local
 /// place, the callee reads the vacated slot of a local of its caller (X2 of
-/// spec/ownership-design.md 3.4). Last, form 7 of the form catalogue on an `own` span: a `regrow`
-/// that moves the place and stores the result back into it (D12.2, D17.11).
+/// spec/ownership-design.md 3.4). Then form 7 of the form catalogue on an `own` span: a `regrow`
+/// that moves the place and stores the result back into it (D12.2, D17.11). Last, a store of the
+/// result of a call that takes the address of the place and fills the place through it: the
+/// operand reaches the destination, so the compiler refuses each function with it (D6.3, D17.11,
+/// spec/fir.md 11, Reach).
 operation_row[OPERATION_COUNT] OPERATIONS = {
     {"alloc", "%P = %F;"},
     {"release", "%R"},
@@ -1042,6 +1045,7 @@ operation_row[OPERATION_COUNT] OPERATIONS = {
     {"else", "if (b) { %R } else { %P = move(y); }"},
     {"callee read", "u = peek(&%P);"},
     {"regrow", "%P = regrow(move(%P), %n);"},
+    {"refill", "%P = refill(&%P);"},
 };
 
 /// A local that a function of the typed family can declare, and its declaration. A function
@@ -1068,8 +1072,9 @@ local_row[TYPED_LOCAL_COUNT] TYPED_LOCALS = {
 
 /// The declarations of a batch after TYPE_DECLS and the declaration of the storage: the two
 /// globals, a function that gives a live or an empty value, a callee that changes an owner through
-/// a pointer in the swap form, and a callee that returns its view.
-u64 TYPED_PRELUDE_LINES = 17;
+/// a pointer in the swap form, a callee that returns its view, and a callee that fills the place
+/// through its pointer and returns the empty value.
+u64 TYPED_PRELUDE_LINES = 21;
 string[TYPED_PRELUDE_LINES] TYPED_PRELUDE = {
     "%T mut G = %I;",
     "%T mut H = %I;",
@@ -1087,6 +1092,10 @@ string[TYPED_PRELUDE_LINES] TYPED_PRELUDE = {
     "}",
     "fn id(%U w) %U {",
     "    return w;",
+    "}",
+    "fn refill(%T mut* s) %T {",
+    "    put(s);",
+    "    return %Z;",
     "}",
 };
 

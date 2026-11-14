@@ -796,6 +796,11 @@
 //| gate vacated_view: leak sites 3, rejected 0, with an event 0, false rejects 0
 //| gate vacated_view: aggregate sites 1, rejected 0, with an event 0, false rejects 0
 //| gate vacated_view: use sites 1, rejected 0, with an event 0, false rejects 0
+//| gate reached: gate: accepted 0 of 1, failing 0
+//| gate reached: sites 2, rejected 0, with an event 0, false rejects 0
+//| gate reached: leak sites 2, rejected 0, with an event 0, false rejects 0
+//| gate reached: aggregate sites 1, rejected 0, with an event 0, false rejects 0
+//| gate reached: use sites 1, rejected 0, with an event 0, false rejects 0
 //| forced whole: leak line 0, whole line 0, span line 0: fails with overwrite
 //| forced whole: item 0 fails the gate: overwrite in main_0 at 6:9
 //| forced whole: item 0: error events 1, accepted
@@ -919,6 +924,10 @@
 //| forced vacated_view: leak line 8, whole line 8, span line 8: fails with use after move
 //| forced vacated_view: item 0 fails the gate: use after move in view_0 at 8:9
 //| forced vacated_view: item 0: error events 1, refused by a report line
+//| forced reached: leak line 0, whole line 0, span line 0: fails with overwrite
+//| forced reached: item 0 fails the gate: overwrite in main_0 at 10:15
+//| forced reached: item 0: error events 1, accepted
+//| forced reached: leak line 0, whole line 10, span line 0: fails with none
 //| forced whole_chain: leak line 0, whole line 0, span line 0: fails with overwrite
 //| forced whole_chain: item 0 fails the gate: overwrite in main_0 at 13:9
 //| forced whole_chain: item 0: error events 2, accepted
@@ -1055,10 +1064,10 @@
 //| fir del_join: use false reject at 11:1
 //| fir del_join: use false reject at 12:1
 //| fir: use sites 70, rejected 5, with an event 0, false rejects 5
-//| hand: items 236, dropped 0, runs 236
-//| hand ends: return 80, exit 106, abort 6, trap 1, outside 1, fault 42
-//| hand gate: accepted 46, refused 190, failing 14, of them refused 0
-//| hand gate overwrite: error, rejected 93, excused 2, failing 0, no error 0
+//| hand: items 237, dropped 0, runs 237
+//| hand ends: return 80, exit 107, abort 6, trap 1, outside 1, fault 42
+//| hand gate: accepted 46, refused 191, failing 14, of them refused 0
+//| hand gate overwrite: error, rejected 94, excused 2, failing 0, no error 0
 //| hand gate leak: error, rejected 42, excused 18, failing 0, no error 4
 //| hand gate leak at exit: cycle leak, rejected 1, excused 0, failing 0, no error 2
 //| hand gate double release: trusted, rejected 1, excused 0, failing 0, no error 0
@@ -1068,15 +1077,15 @@
 //| hand gate use after scope: trusted, rejected 2, excused 0, failing 2, no error 0
 //| hand gate duplicate owner: trusted, rejected 1, excused 0, failing 0, no error 0
 //| hand gate forged: trusted, rejected 0, excused 0, failing 0, no error 0
-//| hand: sites 1015, rejected 117, with an event 89, false accepts 0, false rejects 28
+//| hand: sites 1017, rejected 117, with an event 89, false accepts 0, false rejects 28
 //| hand: rejected sites after a forged event 0
-//| hand leak: sites 598, rejected 35, with an event 22
+//| hand leak: sites 600, rejected 35, with an event 22
 //| hand leak: false accepts 0, false rejects 13
 //| hand part 2: sites 71, rejected 45, with an event 17
 //| hand part 2: false accepts 0, false rejects 28
-//| hand use: sites 264, rejected 34, with an event 36
+//| hand use: sites 265, rejected 34, with an event 36
 //| hand use: false accepts 0, false rejects 12
-//| hand aggregate: sites 83, rejected 36, with an event 13
+//| hand aggregate: sites 84, rejected 36, with an event 13
 //| hand aggregate: false accepts 0, false rejects 23, masked 1, masked with an event 1
 //| hand gate: accepted items 46, floor 46
 //| hand gate: failures in KNOWN 14
@@ -4004,7 +4013,7 @@ string[AGG_COUNT] AGG_NAMES = {
 };
 
 // The count of the lines of GATE_CASES.
-u64 GATE_LINES = 214;
+u64 GATE_LINES = 227;
 
 // The hand cases of the gate, in the format of HAND. The seeded family does not insert into these
 // cases. FORCED gives each case a set of rules and names the event that fails it.
@@ -4054,6 +4063,9 @@ u64 GATE_LINES = 214;
 // reads the vacated slot of the local `s` of `main$` (X2). Its function has the statements of
 // the one function that failed in the family of the 97 statements, which this case replaces. The
 // operation `callee read` of the typed family reaches the same class.
+// In `reached` the call `fill$(&h)` stores an owner into `h.p` through its operand before the
+// store of its result writes `h`. The compiler gives the error of D17.11 (spec/fir.md 11, Reach),
+// and the `overwrite` of the run stays an error; a line of `--whole-store-report` would take it.
 // In `silent` a function calls itself with no end. The run gives no event and ends in a fault that
 // is no `null dereference`, so the item fails the gate with no error event (judge_end), and no
 // class of judgement.KNOWN holds it. For that reason only FORCED runs the case.
@@ -4249,6 +4261,19 @@ string[GATE_LINES] GATE_CASES = {
     "    del(s.b);",
     "    return 0;",
     "}",
+    "// places: h.p:u8",
+    "struct holder { u8 mut* own p; u64 n; }",
+    "fn fill$(holder mut* q) holder {",
+    "    del(q->p);",
+    "    q->p = new(u8);",
+    "    return holder{null, 1};",
+    "}",
+    "fn main$() i32 {",
+    "    holder mut h = holder{null, 0};",
+    "    h = fill$(&h);",
+    "    del(h.p);",
+    "    return 0;",
+    "}",
     "// places: s.a:link",
     "struct link { link mut* own next; }",
     "struct duo { link mut* own a; link mut* own b; }",
@@ -4275,18 +4300,18 @@ string[GATE_LINES] GATE_CASES = {
 };
 
 // The count of the cases of the gate.
-u64 GATE_COUNT = 18;
+u64 GATE_COUNT = 19;
 
 string[GATE_COUNT] GATE_NAMES = {
     "whole", "before_abort", "cycle", "use", "span", "span_chain", "before_check", "abort_block",
     "inner", "nested_array", "unreachable", "string_owner", "whole_pointer", "span_aggregate",
-    "drop_store", "vacated_view", "whole_chain", "silent",
+    "drop_store", "vacated_view", "reached", "whole_chain", "silent",
 };
 
 // The count of the cases of the gate that run as items of the hand set. Only FORCED runs the
 // last two cases, `whole_chain` and `silent`, and the test stops when no row of FORCED names such
 // a case.
-u64 GATE_ITEMS = 16;
+u64 GATE_ITEMS = 17;
 
 // One forced run of a case of the gate: the test gives the item of the case `name` the report
 // lines that the three fields name and no error, whatever the compiler says of it. `fails` is the
@@ -4300,7 +4325,7 @@ struct forced {
 }
 
 // The count of the rows of FORCED.
-u64 FORCED_ROWS = 54;
+u64 FORCED_ROWS = 56;
 
 // The forced runs of the cases of the gate. A row names the line of the text of its case that
 // each report line names, or 0 for no line of that option. A person derived each verdict from the
@@ -4317,10 +4342,12 @@ u64 FORCED_ROWS = 54;
 // no error with each set of lines. `before_check` and `abort_block` hold the two sides of
 // fir.term_is_abort, which the pass reads too. The `leak` at the `dead` of a block that ends in
 // a `check` is an error. The `leak` at the `dead` of an abort block is no error with no line.
-// `unreachable` gives no event. In `whole_chain` the row with the whole line alone is the set of
-// rules that the compiler gives that item. `silent` gives no event, and its run ends in a fault
-// that is no `null dereference` (judge_end): the item fails with no line and with a line of
-// `--leak-report` on the line of the fault, which takes no end of a run.
+// `unreachable` gives no event. In `reached` the whole line takes the `overwrite`, and the
+// compiler gives the item an error in place of that line. In `whole_chain` the row with the
+// whole line alone is the set of rules that the compiler gives that item. `silent` gives no
+// event, and its run ends in a fault that is no `null dereference` (judge_end): the item fails
+// with no line and with a line of `--leak-report` on the line of the fault, which takes no end of
+// a run.
 forced[FORCED_ROWS] FORCED = {
     forced{"whole", 0, 0, 0, "overwrite"},
     forced{"whole", 6, 0, 0, "overwrite"},
@@ -4369,6 +4396,8 @@ forced[FORCED_ROWS] FORCED = {
     forced{"drop_store", 0, 0, 0, "leak"},
     forced{"vacated_view", 0, 0, 0, "use after move"},
     forced{"vacated_view", 8, 8, 8, "use after move"},
+    forced{"reached", 0, 0, 0, "overwrite"},
+    forced{"reached", 0, 10, 0, "none"},
     forced{"whole_chain", 0, 0, 0, "overwrite"},
     forced{"whole_chain", 13, 0, 0, "overwrite"},
     forced{"whole_chain", 0, 13, 0, "leak at exit"},

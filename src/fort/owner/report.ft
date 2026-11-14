@@ -4,7 +4,8 @@
 /// an owning aggregate type that owner.prover does not prove, the error of rule (b) (D17.21) for
 /// each use that it does not prove, the line of `--leak-report` for each site of part 2 that it
 /// does not prove, and the lines of `--whole-store-report` for each store of a whole value of an
-/// owning aggregate that it does not prove.
+/// owning aggregate that it does not prove. Such a store that an operand of a call of its
+/// statement can reach takes the error of D17.11 and no line of the report.
 //
 // The module holds no module-level mutable state: each buffer belongs to one call.
 import fort.ast;
@@ -32,6 +33,11 @@ string LEAK_LIMIT_NOTE =
 /// aggregate work has a limit of its own, which the leak work does not reach, so the note does not
 /// name the leak rule.
 string AGGREGATE_LIMIT_NOTE = "the function exceeds the aggregate work limit; split it";
+
+/// The second note of the error of a whole store that an operand of a call of its statement can
+/// reach (prover.is_reached, D17.11): it names the cause and the swap form of the form catalogue.
+string REACH_NOTE =
+    "a call of this statement can reach the destination; put its result in a local, then swap";
 
 // The offset of `line`:`col` in `src`, or the length of `src` past its end.
 fn offset(string src, u32 line, u32 col) u64 {
@@ -250,19 +256,26 @@ fn write_error(fir.func* f, fir.place p, diag.loc at, bool limit, session.sessio
     strbuf.clear(place);
     write_place(f, p, at, s, place);
     diag.loc where = site(f, p, at);
+    write_lines(where, strbuf.view(place), s, text);
+    if (limit) {
+        diag.note(session.diags(s), where, LIMIT_NOTE);
+    }
+}
+
+// Reports the error of D17.11 and its note at `where` for the text `place`. `text` is a buffer of
+// the caller.
+fn write_lines(diag.loc where, string place, session.session mut* s, strbuf.str_buf mut* text)
+    void {
     strbuf.clear(text);
     strbuf.append(text, "overwriting owned value: cannot prove '");
-    strbuf.append(text, strbuf.view(place));
+    strbuf.append(text, place);
     strbuf.append(text, "' is empty here");
     diag.error(session.diags(s), where, strbuf.view(text));
     strbuf.clear(text);
     strbuf.append(text, "del or move '");
-    strbuf.append(text, strbuf.view(place));
+    strbuf.append(text, place);
     strbuf.append(text, "' before this store");
     diag.note(session.diags(s), where, strbuf.view(text));
-    if (limit) {
-        diag.note(session.diags(s), where, LIMIT_NOTE);
-    }
 }
 
 /// Reports each check and each store of `f` that `p` does not prove, once for each location: in
@@ -270,12 +283,40 @@ fn write_error(fir.func* f, fir.place p, diag.loc at, bool limit, session.sessio
 /// error `overwriting owned value: cannot prove '<place>' is empty here` and the note
 /// `del or move '<place>' before this store`, at the declared name or at the `=`. When the work
 /// of `f` passed prover.WORK_LIMIT, the first error takes a second note, LIMIT_NOTE (D17.11).
+/// Then each whole store that `p` does not prove and that a call of its statement can reach
+/// (prover.whole, `reached`) takes the error and the note with the text of the report of the whole
+/// stores (write_whole_owner), and the note REACH_NOTE, once for each position.
 fn write(fir.func* f, prover.proof* p, session.session mut* s) void {
     strbuf.str_buf mut place = strbuf.create();
     defer del(place.data);
     strbuf.str_buf mut text = strbuf.create();
     defer del(text.data);
     write_errors(f, p, s, &place, &text);
+    write_reached(f, p, s, &place, &text);
+}
+
+// The errors of the whole stores of write, with the scratch buffers `place` and `text`. The
+// caller keeps the buffers, so they are no local owners here.
+fn write_reached(fir.func* f, prover.proof* p, session.session mut* s, strbuf.str_buf mut* place,
+                 strbuf.str_buf mut* text) void {
+    diag.loc mut@ own seen = new(diag.loc, p->wholes.len);
+    defer del(seen);
+    u64 mut count = 0;
+    for (u64 mut k = 0; k < p->wholes.len; k++) {
+        prover.whole* w = &p->wholes[k];
+        diag.loc mut at = diag.loc{};
+        if (w->reached) {
+            strbuf.clear(place);
+            write_whole_owner(f, w, s, place, &at);
+        }
+        if (w->reached && !has_position(seen[..count], at)) {
+            seen[count] = at;
+            count += 1;
+            diag.loc where = site(f, fir.block_statement(f, w->block, w->index)->place, at);
+            write_lines(where, strbuf.view(place), s, text);
+            diag.note(session.diags(s), where, REACH_NOTE);
+        }
+    }
 }
 
 // The errors of write, with the scratch buffers `place` and `text`. The caller keeps the buffers,
@@ -909,7 +950,8 @@ fn has_position(diag.loc@ seen, diag.loc at) bool {
 /// (write_whole_owner). A deferred store expands at each exit with one location, and the arms of a
 /// conditional store at one `=`, so the first store of a position gives its lines. Such a store is
 /// no error until the migration of the whole stores ends, so the lines go to `out` and not to the
-/// diagnostics.
+/// diagnostics. A store that a call of its statement can reach is an error (write), and it gives
+/// no line here.
 fn write_wholes(fir.func* f, prover.proof* p, session.session mut* s, strbuf.str_buf mut* out)
     void {
     strbuf.str_buf mut owner = strbuf.create();
@@ -929,6 +971,11 @@ fn write_whole_lines(fir.func* f, prover.proof* p, session.session mut* s,
     while (k < p->wholes.len) {
         prover.whole* w = &p->wholes[k];
         diag.loc mut at = diag.loc{};
+        // a store that a call of its statement can reach is an error of write, and no line here
+        if (w->reached) {
+            k += 1;
+            continue;
+        }
         if (!w->proved) {
             strbuf.clear(owner);
             write_whole_owner(f, w, s, owner, &at);

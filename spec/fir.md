@@ -1509,7 +1509,8 @@ changes the function, and the verifier runs after it. The passes run in this ord
    - **Whole stores.** A whole store is an assignment whose place has an owning aggregate type
      (D17.7), but a store into fixed storage of an aggregate `_0`, which no lvalue names
      (**Stores**). D17.11 checks it, and until the migration of the whole stores ends it only
-     reports, so no build and no `--check` changes its verdict. The obligation of a whole store is
+     reports, so no build and no `--check` changes its verdict, but for a store that a call of its
+     statement reaches (**Reach** below), which is an error. The obligation of a whole store is
      the fact of each owner below its destination: the tracked places below it whose type is an
      `own` reference, in the order of the inner owners of **Inner owners**, with each field and each
      element at each constant index of a fixed array. The test stands where the test of a store into
@@ -1564,8 +1565,32 @@ changes the function, and the verifier runs after it. The passes run in this ord
      `addr` of `_a` when they are more. When it passes 1048576, the pass proves no whole store of
      the function. The work of D17.11, the leak work, the inner work and the aggregate work keep
      their own limits, so no other verdict changes.
+     **Reach.** A whole store that the pass does not prove is an error of D17.11, and no line of
+     the report, when a call of its source statement has an operand that can reach its destination
+     (D6.3): the callee can store an owner there before the store writes it. The calls of the
+     statement are the store and the calls before it in its block with its statement index (9.7).
+     Index 0 names no source statement, so there only the store counts. The destination is the
+     place of the store, or for `(*_a)` the place of the one `addr` of `_a`. A constant, and an
+     operand whose type is no pointer, span, `string`, struct or fixed array, reach nothing: a cast
+     never makes a pointer of an integer (D3.14). Fixed storage of a local that is no memory has no
+     address, so no operand reaches it. Fixed storage of a memory local is reached by each other
+     operand while the local can be exposed after the reads of the store (**Alias**): other code
+     reaches a frame only through a value that derives from an address that the run took (D10.7).
+     For a store with no fact the state stands before its reads. Each destination is also reached
+     by an operand whose place lies in the destination or around it: one base, and the projections
+     of the shorter place start the longer, where two indexes match. A whole local that one store
+     writes reads as the place of its `addr` or `slice`, or of the operand of its copy or its cast.
+     So `h = f(&h)`, `*q = f(q)`, `o.h = f(&o.h)`, `h = s{g(&h)}` and `v->items[i] = f(v)` are
+     errors, and the address of a field that is separate from the destination reaches nothing.
+     Each other route, as through a second pointer to the object, stays a line of the report until
+     the migration of the whole stores ends. Past the whole-store work the map of **Alias** is
+     off, so each memory local can be exposed. The error stands at the position of the report with
+     the message and the note of D17.11 and a second note, `a call of this statement can reach the
+     destination; put its result in a local, then swap`, once for each position. The swap form of
+     the form catalogue puts the result in a local of its own statement and compiles (D17.11).
      `--whole-store-report` writes three lines for each position of a whole store that the pass does
-     not prove, in the order of the stores, for the first store at that position:
+     not prove and that is no error, in the order of the stores, for the first store at that
+     position:
      `<file>:<line>:<col>: overwriting owned value: cannot prove '<place>' is empty here`,
      `<file>:<line>:<col>: note: del or move '<place>' before this store` and `<file>:<line>:<col>:
      note: cause <n>: <text>`. The position is the `=` of the assignment whose right side holds the

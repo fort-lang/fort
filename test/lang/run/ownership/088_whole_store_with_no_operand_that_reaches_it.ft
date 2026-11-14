@@ -1,0 +1,97 @@
+//! run
+//! stdout:
+//| swap 1 9
+//| number 3
+//| constant 7
+//| separate 5 0
+// A whole store of a call result whose operands cannot reach its destination compiles (D17.11).
+// The swap form puts the result of `f(&h)` in a local of its own statement, then moves `h` out
+// and the result in (the form catalogue). An operand that holds no reference reaches nothing,
+// also when an earlier call exposed the local (D3.14), and so does a constant. The address of a
+// field that is separate from the destination names none of its storage. Each store but the
+// swap is a line of `--whole-store-report` and no error, and no run stores over an owner.
+struct holder {
+    u8 mut* own p;
+    u64 n;
+}
+
+struct pair {
+    holder a;
+    holder b;
+}
+
+holder mut* mut KEPT = null;
+
+fn fill(holder mut* h) void {
+    del(h->p);
+    h->p = new(u8);
+    *h->p = 9;
+}
+
+fn f(holder mut* q) holder {
+    fill(q);
+    return holder{null, 1};
+}
+
+fn holder_drop(holder mut h) void {
+    del(h.p);
+}
+
+fn keep(holder mut* q) void {
+    KEPT = q;
+}
+
+fn count(u64 n) holder {
+    return holder{null, n};
+}
+
+fn other(holder mut* q) holder {
+    return holder{null, q->n};
+}
+
+fn swap() void {
+    holder mut h = holder{null, 0};
+    holder nv = f(&h);
+    holder old = move(h);
+    h = move(nv);
+    println("swap ", h.n, " ", *old.p);
+    holder_drop(move(old));
+    del(h.p);
+}
+
+fn number(u64 n) void {
+    holder mut h = holder{null, 0};
+    keep(&h);
+    KEPT = null;
+    h = count(n);
+    println("number ", h.n);
+    del(h.p);
+}
+
+fn constant() void {
+    holder mut h = holder{null, 0};
+    holder mut* q = &h;
+    q->n = 2;
+    h = count(7);
+    println("constant ", h.n);
+    del(h.p);
+}
+
+fn separate(pair mut* p) void {
+    p->a = other(&p->b);
+}
+
+fn main() i32 {
+    swap();
+    number(3);
+    constant();
+    pair mut* own p = new(pair);
+    p->b.n = 5;
+    separate(p);
+    pair v = move(*p);
+    del(p);
+    println("separate ", v.a.n, " ", v.a.n - 5);
+    holder_drop(move(v.a));
+    holder_drop(move(v.b));
+    return 0;
+}

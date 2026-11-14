@@ -122,7 +122,9 @@ enum whole_cause {
 /// whose destination holds `owners` owners (place.count_owners). `first` is the first owner that
 /// the analysis does not prove, in the order of place.next_owner_step, `cause` says why, and
 /// `proved` says that it proves each owner. Such a store only reports until the migration of the
-/// whole stores ends (D17.11).
+/// whole stores ends (D17.11). `reached` says that the analysis does not prove it and that a call
+/// of its source statement has an operand that can reach its destination (is_reached): such a
+/// store is a compile error (D6.3, D17.11).
 struct whole {
     u32 block;
     u32 index;
@@ -130,6 +132,7 @@ struct whole {
     u64 first;
     whole_cause cause;
     bool proved;
+    bool reached;
 }
 
 /// The verdict of each `check(overwrite: p)` and of each store that needs a proof in one function,
@@ -157,9 +160,10 @@ struct whole {
 /// paths of their owners to `inner_work` (count_aggregate_steps), and `aggregate_over` says that it
 /// passed the limit. `wholes` holds the stores of a whole value of an owning aggregate in block
 /// order and in statement order (find_wholes), and `whole_leaks` counts those that the analysis
-/// does not prove, which are no error. `whole_work` adds the steps of the paths of the owners below
-/// their destinations to `aggregate_work` (count_whole_steps), and `whole_over` says that it passed
-/// the limit.
+/// does not prove. Of those, `whole_errors` counts the stores that an operand of a call of their
+/// statement can reach, each a compile error (has_error); the others are no error. `whole_work`
+/// adds the steps of the paths of the owners below their destinations to `aggregate_work`
+/// (count_whole_steps), and `whole_over` says that it passed the limit.
 struct proof {
     bool mut@ own proved;
     store mut@ own stores;
@@ -187,6 +191,7 @@ struct proof {
     bool aggregate_over;
     whole mut@ own wholes;
     u32 whole_leaks;
+    u32 whole_errors;
     u64 whole_work;
     bool whole_over;
 }
@@ -229,11 +234,15 @@ fn is_proved(proof* p, u32 b) bool {
 /// Whether `p` leaves a compile error: a check or a store that it does not prove, the error of
 /// D17.11, an exit of an owner local or of a local of an owning aggregate type that it does not
 /// prove, the error of part 1 of the leak rule (D17.20), or a use that it does not prove, the error
-/// of rule (b) (D17.21). A function with an error reaches no later pass. An obligation of part 2
-/// that it does not prove is no error yet: part 2 only reports (D17.20). A store of a whole value
-/// of an owning aggregate that it does not prove is no error until the migration of those stores
-/// ends (D17.11).
+/// of rule (b) (D17.21), or a store of a whole value of an owning aggregate that it does not prove
+/// and that an operand of a call of its statement can reach (D17.11). A function with an error
+/// reaches no later pass. An obligation of part 2 that it does not prove is no error yet: part 2
+/// only reports (D17.20). Each other whole store that it does not prove is no error until the
+/// migration of those stores ends (D17.11).
 fn has_error(proof* p) bool {
+    if (p->whole_errors > 0) {
+        return true;
+    }
     return p->unproved > 0 || p->leaks > 0 || p->aggregate_leaks > 0 || p->use_unproved > 0;
 }
 
@@ -1237,7 +1246,7 @@ fn prove_into(fir.func* f, u64 limit, u64 use_limit, proof mut* out) void {
     out->whole_work = types.capped_sum(out->aggregate_work, whole_steps);
     out->whole_over = out->whole_work > limit;
     if (out->whole_over) {
-        pass_wholes(out);
+        pass_wholes(c, out);
     }
     if (out->leak_over) {
         find_exits(c, null, out);
@@ -2050,7 +2059,7 @@ fn scan_wholes(fir.func* f, proof mut* out, bool fill) u64 {
             if (is_whole_store(f, s)) {
                 if (fill) {
                     u64 owners = place.count_owners(fir.place_type(f, s->place));
-                    out->wholes[k] = whole{b, i, owners, 0, whole_cause.wc_none, false};
+                    out->wholes[k] = whole{b, i, owners, 0, whole_cause.wc_none, false, false};
                 }
                 k += 1;
             }
@@ -2078,14 +2087,22 @@ fn find_wholes(fir.func* f, proof mut* out) void {
 // `(*_a)` of a temporary `_a` that one `addr` writes, those of the place of the `addr` when they
 // are more (place.whole_source).
 fn destination_steps(context* c, fir.place p) u64 {
-    u64 mut steps = cast(p.proj_len, u64);
+    u64 steps = cast(address_source(c, p).proj_len, u64);
+    if (steps > cast(p.proj_len, u64)) {
+        return steps;
+    }
+    return cast(p.proj_len, u64);
+}
+
+// The place of the one `addr` of the local `_a` for the place `(*_a)`, or else `p`.
+fn address_source(context* c, fir.place p) fir.place {
     if (place.is_deref_local(c->places.f, p) && place.is_single(&c->places, p.local)) {
         fir.rvalue r = place.store_of(&c->places, p.local)->value;
-        if (r.kind == fir.rvalue_kind.rv_addr && cast(r.place.proj_len, u64) > steps) {
-            steps = cast(r.place.proj_len, u64);
+        if (r.kind == fir.rvalue_kind.rv_addr) {
+            return r.place;
         }
     }
-    return steps;
+    return p;
 }
 
 // The count of the steps of the paths of the owners below the destination of each whole store of
@@ -2109,16 +2126,118 @@ fn count_whole_steps(context* c, proof* out) u64 {
 }
 
 // Writes the verdict of each whole store past the whole-store work limit: none is proved, the first
-// owner is the first that the analysis does not prove, and the cause is the limit.
-fn pass_wholes(proof mut* out) void {
+// owner is the first that the analysis does not prove, and the cause is the limit. The map of
+// owner.alias is off here, so each memory local can be exposed (is_reached).
+fn pass_wholes(context* c, proof mut* out) void {
     u64 mut k = 0;
     while (k < out->wholes.len) {
-        out->wholes[k].proved = false;
-        out->wholes[k].first = 0;
-        out->wholes[k].cause = whole_cause.wc_limit;
+        whole mut* w = &out->wholes[k];
+        w->proved = false;
+        w->first = 0;
+        w->cause = whole_cause.wc_limit;
+        w->reached = is_reached(c, w, null);
         out->whole_leaks += 1;
+        if (w->reached) {
+            out->whole_errors += 1;
+        }
         k += 1;
     }
+}
+
+// Whether a call of the source statement of the whole store `w` has an operand that can reach the
+// destination of `w`, so that the callee can store an owner there before the store (D6.3, D17.11).
+// The calls of the statement are the store and the calls with its statement index before it in its
+// block. Index 0 names no source statement (spec/fir.md 9.7), so there only the store counts. The
+// destination is the place of the store, or for `(*_a)` the place of the one `addr` of `_a`
+// (address_source). An operand that holds no reference reaches nothing: a cast never makes a
+// pointer of an integer (D3.14). Fixed storage of a local that is no memory has no address. Fixed
+// storage of a memory local is reached by each operand while owner.alias can expose the local in
+// `aliased` (alias.is_exposed): other code reaches a frame only through a value that derives from
+// an address that the run took (D10.7). Each destination is reached by an operand that names
+// storage in it or around it (derives).
+fn is_reached(context* c, whole* w, fir_flow.bits* aliased) bool {
+    fir.func* f = c->places.f;
+    fir.statement* st = fir.block_statement(f, w->block, w->index);
+    fir.place p = address_source(c, st->place);
+    bool memory = fir.place_fixed(f, p);
+    if (memory && !c->places.locals[cast(p.local, u64)].memory) {
+        return false;
+    }
+    bool exposed = memory && alias.is_exposed(&c->aliases, aliased, p.local);
+    bool mut reached = false;
+    for (u32 mut i = 0; i <= w->index; i++) {
+        fir.statement* s = fir.block_statement(f, w->block, i);
+        if (s->stmt != st->stmt || (st->stmt == 0 && i != w->index)) {
+            continue;
+        }
+        fir.operand mut o = fir.operand{};
+        u32 mut k = 0;
+        while (place.is_call(s) && fir.stmt_reads(f, s, k, &o)) {
+            bool held = o.kind != fir.operand_kind.ok_const
+                && can_hold_reference(fir.place_type(f, o.place));
+            reached = reached || (held && (exposed || derives(c, o.place, p)));
+            k += 1;
+        }
+    }
+    return reached;
+}
+
+// Whether a value of type `t` can hold a reference: a pointer, a span, a `string`, or a struct or a
+// fixed array, which can hold one in a field or an element.
+fn can_hold_reference(types.node* t) bool {
+    bool aggregate = t->kind == types.type_kind.k_struct || t->kind == types.type_kind.k_array;
+    return aggregate || types.type_is_reference(t);
+}
+
+// Whether the operand place `q` names storage in the destination `p` or around it (is_nested): a
+// copy of the pointer that a step of `p` loads, a value read from `p`, or an address in `p`. A
+// whole local with one store reads as the place of its `addr`, its `slice`, or the copy or the cast
+// that the store writes. Other routes, as through a second pointer, are no error and stay lines
+// of the report until the migration of the whole stores ends (D17.11).
+fn derives(context* c, fir.place q, fir.place p) bool {
+    if (is_nested(c->places.f, q, p)) {
+        return true;
+    }
+    if (!place.is_local(q) || !place.is_single(&c->places, q.local)) {
+        return false;
+    }
+    fir.rvalue r = place.store_of(&c->places, q.local)->value;
+    switch (r.kind) {
+    case fir.rvalue_kind.rv_addr, fir.rvalue_kind.rv_slice:
+        return is_nested(c->places.f, r.place, p);
+    case fir.rvalue_kind.rv_use, fir.rvalue_kind.rv_cast:
+        fir.operand o = fir.rvalue_operand(c->places.f, r, 0);
+        return o.kind != fir.operand_kind.ok_const && is_nested(c->places.f, o.place, p);
+    case fir.rvalue_kind.rv_call, fir.rvalue_kind.rv_alloc, fir.rvalue_kind.rv_add,
+        fir.rvalue_kind.rv_sub, fir.rvalue_kind.rv_mul, fir.rvalue_kind.rv_add_overflows,
+        fir.rvalue_kind.rv_sub_overflows, fir.rvalue_kind.rv_mul_overflows, fir.rvalue_kind.rv_div,
+        fir.rvalue_kind.rv_rem, fir.rvalue_kind.rv_and, fir.rvalue_kind.rv_or,
+        fir.rvalue_kind.rv_xor, fir.rvalue_kind.rv_not, fir.rvalue_kind.rv_shl,
+        fir.rvalue_kind.rv_shr, fir.rvalue_kind.rv_fadd, fir.rvalue_kind.rv_fsub,
+        fir.rvalue_kind.rv_fmul, fir.rvalue_kind.rv_fdiv, fir.rvalue_kind.rv_fneg,
+        fir.rvalue_kind.rv_eq, fir.rvalue_kind.rv_ne, fir.rvalue_kind.rv_lt, fir.rvalue_kind.rv_le,
+        fir.rvalue_kind.rv_gt, fir.rvalue_kind.rv_ge, fir.rvalue_kind.rv_slice_ptr,
+        fir.rvalue_kind.rv_regrow, fir.rvalue_kind.rv_aggregate:
+        // the chain stops: the value is new, a number, or of several operands
+        return false;
+    }
+}
+
+// Whether one of the places `a` and `b` lies in the other: one base, and the projections of the
+// shorter start the longer. The steps before a position fix the type there, so two steps at one
+// position have one kind. Two indexes match, because their values can be equal, and only two
+// fields can differ: fir.place_deref and fir.place_index give each step the `field` 0.
+fn is_nested(fir.func* f, fir.place a, fir.place b) bool {
+    if (!fir.same_base(a, b)) {
+        return false;
+    }
+    u64 steps = min_u64(cast(a.proj_len, u64), cast(b.proj_len, u64));
+    for (u32 mut i = 0; cast(i, u64) < steps; i++) {
+        if (fir.place_projection(f, a, i).field != fir.place_projection(f, b, i).field) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Proves each whole store of `out` into fixed storage of a named local whose scope has ended on
@@ -2250,8 +2369,10 @@ fn first_unheld(context* c, proof* out, u64 k, fir_flow.dataflow* d, probes* pr)
 // (apply_facts). The first owner whose fact does not hold is `first`. The cause is cause 3 when
 // each fact held before the kill of the `call`, and else cause 4; a destination that is no tracked
 // place keeps the cause of collect_destination. Each store that the analysis does not prove counts
-// in out->whole_leaks. The walk of each block that holds a whole store starts from the sets that
-// its entry has in the dataflows, and it gives both probes one set. With a null `d`, no fact holds.
+// in out->whole_leaks, and in out->whole_errors when an operand of a call of its statement can
+// reach it, with the state of owner.alias after its reads (is_reached). The walk of each block
+// that holds a whole store starts from the sets that its entry has in the dataflows, and it gives
+// both probes one set. With a null `d`, no fact holds.
 fn judge_wholes(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fresh,
                 fir_flow.dataflow* d, proof mut* out) void {
     fir.func* f = c->places.f;
@@ -2305,13 +2426,21 @@ fn judge_wholes(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
                         w->cause = whole_cause.wc_call;
                     }
                 }
+                w->reached = !w->proved && is_reached(c, w, &at_alias);
                 if (d != null) {
                     apply_store(c, s, &at_stale, &at_fresh, &at_alias, pr);
                 }
                 i += 1;
+            } else if (!w->proved) {
+                // no fact: the walk applies the store with the next one, so the state of
+                // owner.alias stands before its reads, and derives takes its own operands
+                w->reached = is_reached(c, w, &at_alias);
             }
             if (!w->proved) {
                 out->whole_leaks += 1;
+            }
+            if (w->reached) {
+                out->whole_errors += 1;
             }
             k += 1;
         }

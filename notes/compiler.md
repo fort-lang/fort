@@ -1079,6 +1079,15 @@ came here.
   location of its statement (` exit <line>:<col>`), so each expansion of a deferred store is a site
   of its own, and no event of one expansion marks another (`mixed` in that test). The ticket of the
   change holds the count of the sites by directory and by cause, and the command that measures it.
+  **A whole store that a call of its statement can reach is an error** (`prover.is_reached`,
+  `spec/fir.md` 11, Reach). `h = f(&h)`, `h = f(q)` with `q = &h`, `o.h = f(&o.h)` and `*q =
+  f(q)` passed `--check` with a line of the report, and each run gave an `overwrite`
+  (`fail/ownership` 120 to 124). A memory local takes the exposure of `owner.alias`
+  (`alias.is_exposed`), and each destination an operand that lies in it or around it
+  (`prover.derives`, `prover.is_nested`). A first form took each operand that is no constant for
+  a destination through a pointer: 413 sites of the trees became errors, such as `*m = parse(e)`.
+  The overlap form makes none: the address of a field that is separate from the destination
+  reaches nothing, so `c->aliases = alias.make(&c->places, n)` stays a line of the report.
 - **The emptiness pass proves rule (b) of D17.21, and each use that it does not prove is an error**
   (`spec/fir.md` 11, Uses). `owner.prover.prove_uses` runs after the facts, in the same context, so
   it reuses the survey of the places, the stale dataflow, the tests against null and the map of
@@ -1165,7 +1174,7 @@ came here.
   `spec/fir.md` 11: a forged pointer is outside it only by D10.7, and an `own` pointer only by
   D17.1.
 - **Each dispatch over a FIR kind in `owner` is a `switch` with no `default:`, and each predicate
-  has one definition** (D7.7, D17.11, D17.20, D17.21). The 17 dispatches of `owner.place`,
+  has one definition** (D7.7, D17.11, D17.20, D17.21). The 18 dispatches of `owner.place`,
   `owner.prover`, `owner.alias` and `owner.report` over a statement kind, an rvalue kind, a
   terminator kind, an operand kind or a place step kind list each member, so a new kind is a
   compile error at each of them. An arm that does nothing names its kinds and gives the reason in

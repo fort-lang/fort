@@ -1,0 +1,104 @@
+//! fail
+// Each route by which an operand of a call of the statement reaches the destination of a whole
+// store: the address of a field, a span of a fixed array, a field of an argument, a call in a
+// literal, a call in the operand of a call, the address of a global, and a destination in a
+// span behind a parameter. Each callee stores an owner into the destination first.
+struct holder {
+    u8 mut* own p;
+    u64 n;
+}
+
+struct ctx {
+    holder mut* h;
+}
+
+struct vec {
+    holder mut@ own items;
+}
+
+holder mut G = holder{null, 0};
+
+fn fill(holder mut* h) void {
+    del(h->p);
+    h->p = new(u8);
+}
+
+fn f(holder mut* q) holder {
+    fill(q);
+    return holder{null, 1};
+}
+
+fn f_field(u8 mut* own mut* s) holder {
+    del(*s);
+    *s = new(u8);
+    return holder{null, 2};
+}
+
+fn f_span(holder mut@ s) holder[2] {
+    fill(&s[0]);
+    holder[2] r = {};
+    return r;
+}
+
+fn f_ctx(ctx c) holder {
+    fill(c.h);
+    return holder{null, 3};
+}
+
+fn mk(holder mut* q) u8 mut* own {
+    fill(q);
+    return null;
+}
+
+fn id(holder h) holder {
+    return h;
+}
+
+fn f_vec(vec mut* v) holder {
+    fill(&v->items[0]);
+    return holder{null, 4};
+}
+
+fn r_field() void {
+    holder mut h = holder{null, 0};
+    h = f_field(&h.p); //! error: overwriting owned value: cannot prove 'h.p' is empty here
+    del(h.p);
+}
+
+fn r_span() void {
+    holder[2] mut hs = {};
+    hs = f_span(hs[..]); //! error: overwriting owned value: cannot prove 'hs[0].p' is empty here
+    del(hs[0].p);
+    del(hs[1].p);
+}
+
+fn r_ctx() void {
+    holder mut h = holder{null, 0};
+    ctx c = ctx{&h};
+    h = f_ctx(c); //! error: overwriting owned value: cannot prove 'h.p' is empty here
+    del(h.p);
+}
+
+fn r_literal() void {
+    holder mut h = holder{null, 0};
+    h = holder{mk(&h), 1}; //! error: overwriting owned value: cannot prove 'h.p' is empty here
+    del(h.p);
+}
+
+fn r_nested() void {
+    holder mut h = holder{null, 0};
+    h = id(f(&h)); //! error: overwriting owned value: cannot prove 'h.p' is empty here
+    del(h.p);
+}
+
+fn r_global() void {
+    G = f(&G); //! error: overwriting owned value: cannot prove 'G.p' is empty here
+}
+
+fn r_vec(vec mut* v) void {
+    v->items[0] = f_vec(v); //! error: cannot prove 'v->items[0].p' is empty here
+}
+
+fn main() i32 {
+    return 0;
+}

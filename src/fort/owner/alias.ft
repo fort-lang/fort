@@ -361,7 +361,7 @@ fn can_be(map* m, fir_flow.bits* state, place.path q, u32 x) bool {
         return true;
     }
     u32 k = m->frame_rank[cast(x, u64)];
-    bool exposed = fir_flow.bits_get(state, exposure_bit(m, k));
+    bool exposed = is_exposed(m, state, x);
     switch (q.via) {
     case place.via_kind.vk_none:
         return true;
@@ -377,6 +377,17 @@ fn can_be(map* m, fir_flow.bits* state, place.path q, u32 x) bool {
     case place.via_kind.vk_other:
         return exposed;
     }
+}
+
+/// Whether the memory local `x` can be exposed in `state`: a call or a store into memory can have
+/// taken a value that borrows its frame. Only such a value lets other code reach the local
+/// (D10.7). When the map is off, each local can be exposed. When it is on, a local with no frame
+/// is no memory local or an aggregate `_0`, which this test does not take.
+fn is_exposed(map* m, fir_flow.bits* state, u32 x) bool {
+    if (!is_frame(m, x)) {
+        return !m->on;
+    }
+    return fir_flow.bits_get(state, exposure_bit(m, m->frame_rank[cast(x, u64)]));
 }
 
 /// Runs the fixpoint of the map `m` over the blocks of its function with the predecessor table

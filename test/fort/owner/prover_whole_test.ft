@@ -6,6 +6,7 @@
 //| whole work ok
 //| whole report ok
 //| whole text ok
+//| whole reach ok
 /// Checks the stores of a whole value of an owning aggregate in owner.prover, which only report
 /// until the migration of those stores ends (D17.11, spec/fir.md 11, Whole stores): the owners
 /// below each destination and their facts, the address of a whole store, the scope of a named
@@ -25,7 +26,7 @@ import std.strbuf;
 // `outer` holds a `box` and a fixed array of two after an integer, three owners. A `link` holds a
 // pointer that does not own before a `box`. `fill` gives a box whose owner holds an allocation, and
 // `take` frees the owner of a box. `G` is a global box.
-string[48] PRELUDE = {
+string[78] PRELUDE = {
     "struct box {",
     "    u8 mut* own data;",
     "}",
@@ -71,6 +72,36 @@ string[48] PRELUDE = {
     "fn refill(box mut* b) box {",
     "    return box{};",
     "}",
+    "fn keep(box mut* b) void {",
+    "}",
+    "fn count(u64 n) box {",
+    "    return box{};",
+    "}",
+    "fn mk(box mut* b) u8 mut* own {",
+    "    return null;",
+    "}",
+    "fn fill2(box mut@ s) box[2] {",
+    "    box[2] r = {};",
+    "    return r;",
+    "}",
+    "fn relink(link mut* l) link {",
+    "    return link{};",
+    "}",
+    "fn relink2(link mut* l) box {",
+    "    return box{};",
+    "}",
+    "struct ctx {",
+    "    box mut* h;",
+    "}",
+    "fn f_ctx(ctx c) box {",
+    "    return box{};",
+    "}",
+    "fn f_arr(box mut*[1] a) box {",
+    "    return box{};",
+    "}",
+    "fn refill_n(box mut* b, u64 n) box {",
+    "    return box{};",
+    "}",
     "fn main() i32 {",
     "    return 0;",
     "}",
@@ -78,7 +109,7 @@ string[48] PRELUDE = {
 
 // Each case is a FIR function and the verdicts of its whole stores (write_verdicts), which its
 // comment gives. Each owner below the destination must hold the zero value at the store.
-string[799] CASES = {
+string[1121] CASES = {
     // a fresh `new` makes the owner of its object empty (gen rule 5): P
     "fn main.c1(_1 (b): box) -> void {",
     "    let _2 (p): box mut* own;",
@@ -968,24 +999,379 @@ string[799] CASES = {
     "        return;",
     "    }",
     "}",
+    // a call whose operand holds the address of the memory local `h` (D6.3): P R0:3
+    "fn main.r1() -> void {",
+    "    let _1 (h): box;",
+    "    let _2: box mut*;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = const zero box;",
+    "        _2 = addr mut(_1);",
+    "        _1 = call fn main.refill(copy _2);",
+    "        del(move _1.0);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // an earlier call exposes `h`, and an operand that holds no reference reaches nothing: P U0:4
+    "fn main.r2(_1 (n): u64) -> void {",
+    "    let _2 (h): box;",
+    "    let _3: box mut*;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        live(_2);",
+    "        _2 = const zero box;",
+    "        _3 = addr mut(_2);",
+    "        _4 = call fn main.keep(copy _3);",
+    "        _2 = call fn main.count(copy _1);",
+    "        del(move _2.0);",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
+    // the exposed `h` and an operand that holds a pointer, which can reach it through memory:
+    // P R0:4
+    "fn main.r3(_1 (q): box mut*) -> void {",
+    "    let _2 (h): box;",
+    "    let _3: box mut*;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        live(_2);",
+    "        _2 = const zero box;",
+    "        _3 = addr mut(_2);",
+    "        _4 = call fn main.keep(copy _3);",
+    "        _2 = call fn main.refill(copy _1);",
+    "        del(move _2.0);",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
+    // the address of `h` reaches no call and no memory, so no operand reaches `h`: P U0:3
+    "fn main.r4(_1 (q): box mut*) -> void {",
+    "    let _2 (h): box;",
+    "    let _3: box mut*;",
+    "    bb0: {",
+    "        live(_2);",
+    "        _2 = const zero box;",
+    "        _3 = addr mut(_2);",
+    "        _2 = call fn main.refill(copy _1);",
+    "        del(move _2.0);",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
+    // the exposed `h` and a constant operand, which reaches nothing; the result `_0` holds a
+    // reference, so the place of the constant, the zero place, would hold one: P U0:4
+    "fn main.r5(_1 (q): box mut*) -> box mut* {",
+    "    let _2 (h): box;",
+    "    let _3: box mut*;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        live(_2);",
+    "        _2 = const zero box;",
+    "        _3 = addr mut(_2);",
+    "        _4 = call fn main.keep(copy _3);",
+    "        _2 = call fn main.refill(const null box mut*);",
+    "        del(move _2.0);",
+    "        dead(_2);",
+    "        _0 = copy _1;",
+    "        return;",
+    "    }",
+    "}",
+    // a call of the statement of a literal store, right before it, takes the address: P R0:4
+    "fn main.r6() -> void {",
+    "    let _1 (h): box;",
+    "    let _2: box mut*;",
+    "    let _3: u8 mut* own;",
+    "    bb0: {",
+    "        live(_1) #1:1 s1;",
+    "        _1 = const zero box #1:1 s1;",
+    "        _2 = addr mut(_1) #2:1 s2;",
+    "        _3 = call fn main.mk(copy _2) #2:1 s2;",
+    "        _1 = aggregate box(move _3) #2:1 s2;",
+    "        del(move _1.0) #3:1 s3;",
+    "        dead(_1) #3:1 s3;",
+    "        return #3:1 s3;",
+    "    }",
+    "}",
+    // the call stands in another statement: P U0:4
+    "fn main.r7() -> void {",
+    "    let _1 (h): box;",
+    "    let _2: box mut*;",
+    "    let _3: u8 mut* own;",
+    "    bb0: {",
+    "        live(_1) #1:1 s1;",
+    "        _1 = const zero box #1:1 s1;",
+    "        _2 = addr mut(_1) #2:1 s2;",
+    "        _3 = call fn main.mk(copy _2) #2:1 s2;",
+    "        _1 = aggregate box(move _3) #3:1 s3;",
+    "        del(move _1.0) #4:1 s4;",
+    "        dead(_1) #4:1 s4;",
+    "        return #4:1 s4;",
+    "    }",
+    "}",
+    // with no statement index, only the store itself is a call of its statement: P U0:4
+    "fn main.r8() -> void {",
+    "    let _1 (h): box;",
+    "    let _2: box mut*;",
+    "    let _3: u8 mut* own;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = const zero box;",
+    "        _2 = addr mut(_1);",
+    "        _3 = call fn main.mk(copy _2);",
+    "        _1 = aggregate box(move _3);",
+    "        del(move _1.0);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // the address of a global: R0:4
+    "fn main.r9() -> void {",
+    "    let _1: box mut*;",
+    "    bb0: {",
+    "        _1 = addr mut(global main.G);",
+    "        global main.G = call fn main.refill(copy _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the pointer of the destination: R0:4
+    "fn main.r10(_1 (q): box mut*) -> void {",
+    "    let _2: box mut*;",
+    "    bb0: {",
+    "        _2 = addr mut((*_1));",
+    "        (*_2) = call fn main.refill(copy _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the address of a separate field of the object names no byte of the destination: U0:4
+    "fn main.r11(_1 (o): outer mut*) -> void {",
+    "    let _2: u64;",
+    "    let _3: box mut*;",
+    "    let _4: box mut*;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        _3 = addr mut((*_1).2[_2]);",
+    "        _4 = addr mut((*_1).1);",
+    "        (*_4) = call fn main.refill(copy _3);",
+    "        return;",
+    "    }",
+    "}",
+    // the address of the destination itself: R0:4
+    "fn main.r12(_1 (o): outer mut*) -> void {",
+    "    let _2: box mut*;",
+    "    let _3: box mut*;",
+    "    bb0: {",
+    "        _2 = addr mut((*_1).1);",
+    "        _3 = addr mut((*_1).1);",
+    "        (*_3) = call fn main.refill(copy _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a copy of the pointer of the destination: R0:4
+    "fn main.r13(_1 (q): box mut*) -> void {",
+    "    let _2: box mut*;",
+    "    let _3: box mut*;",
+    "    bb0: {",
+    "        _3 = copy _1;",
+    "        _2 = addr mut((*_1));",
+    "        (*_2) = call fn main.refill(copy _3);",
+    "        return;",
+    "    }",
+    "}",
+    // a copy of a copy, which the chain of one store does not follow: U0:4
+    "fn main.r14(_1 (q): box mut*) -> void {",
+    "    let _2: box mut*;",
+    "    let _3: box mut*;",
+    "    let _4: box mut*;",
+    "    bb0: {",
+    "        _3 = copy _1;",
+    "        _4 = copy _3;",
+    "        _2 = addr mut((*_1));",
+    "        (*_2) = call fn main.refill(copy _4);",
+    "        return;",
+    "    }",
+    "}",
+    // a cast of the pointer of the destination: R0:4
+    "fn main.r15(_1 (q): box mut*) -> void {",
+    "    let _2: box mut*;",
+    "    let _3: box mut*;",
+    "    bb0: {",
+    "        _3 = cast<box mut*>(copy _1);",
+    "        _2 = addr mut((*_1));",
+    "        (*_2) = call fn main.refill(copy _3);",
+    "        return;",
+    "    }",
+    "}",
+    // a slice of the destination: R0:4
+    "fn main.r16(_1 (q): box[2] mut*) -> void {",
+    "    let _2: box mut@;",
+    "    bb0: {",
+    "        _2 = slice mut((*_1), const u64 0, const u64 2);",
+    "        (*_1) = call fn main.fill2(copy _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a value read from the destination through a fresh `new`, which the call keeps empty: P
+    "fn main.r17() -> void {",
+    "    let _1 (p): link mut* own;",
+    "    let _2: link mut*;",
+    "    bb0: {",
+    "        _1 = const zero link mut* own;",
+    "        live(_1);",
+    "        _1 = alloc<link>(const u64 1);",
+    "        _2 = addr mut((*_1));",
+    "        (*_2) = call fn main.relink(copy (*_1).0);",
+    "        del(move (*_1).1.0);",
+    "        del(move _1);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a local that is no memory has no address, so no operand reaches it: P U0:4
+    "fn main.r18(_1 (q): box mut*) -> void {",
+    "    let _2 (b): box;",
+    "    bb0: {",
+    "        live(_2);",
+    "        _2 = call fn main.fill();",
+    "        _2 = call fn main.refill(copy _1);",
+    "        del(move _2.0);",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
+    // a struct operand that holds the address of `h`: P R0:3
+    "fn main.r19() -> void {",
+    "    let _1 (h): box;",
+    "    let _2: box mut*;",
+    "    let _3: ctx;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = const zero box;",
+    "        _2 = addr mut(_1);",
+    "        _3 = aggregate ctx(copy _2);",
+    "        _1 = call fn main.f_ctx(copy _3);",
+    "        del(move _1.0);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a fixed array operand that holds the address of `h`: P R0:3
+    "fn main.r20() -> void {",
+    "    let _1 (h): box;",
+    "    let _2: box mut*;",
+    "    let _3: box mut*[1];",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = const zero box;",
+    "        _2 = addr mut(_1);",
+    "        _3 = aggregate box mut*[1](copy _2);",
+    "        _1 = call fn main.f_arr(copy _3);",
+    "        del(move _1.0);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a pointer read through the address of the object, which the chain of one whole local does
+    // not follow: U0:4
+    "fn main.r21(_1 (o): link mut*) -> void {",
+    "    let _2: link mut*;",
+    "    let _3: box mut*;",
+    "    bb0: {",
+    "        _2 = addr mut((*_1));",
+    "        _3 = addr mut((*_1).1);",
+    "        (*_3) = call fn main.relink2(copy (*_2).0);",
+    "        return;",
+    "    }",
+    "}",
+    // a local with two stores is no chain: U0:4
+    "fn main.r22(_1 (q): box mut*, _2 (s): box mut*) -> void {",
+    "    let _3 (r): box mut*;",
+    "    let _4: box mut*;",
+    "    bb0: {",
+    "        live(_3);",
+    "        _3 = copy _2;",
+    "        _3 = copy _1;",
+    "        _4 = addr mut((*_1));",
+    "        (*_4) = call fn main.refill(copy _3);",
+    "        dead(_3);",
+    "        return;",
+    "    }",
+    "}",
+    // a copy of a constant: U0:4
+    "fn main.r23(_1 (q): box mut*) -> box mut* {",
+    "    let _2: box mut*;",
+    "    bb0: {",
+    "        _0 = copy _1;",
+    "        _2 = const null box mut*;",
+    "        (*_0) = call fn main.refill(copy _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a declaration that the scope bit proves, in a loop that exposes `h`: P
+    "fn main.r24(_1 (q): box mut*, _2 (c): bool) -> void {",
+    "    let _3 (h): box;",
+    "    let _4: box mut*;",
+    "    let _5: void;",
+    "    bb0: {",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        live(_3);",
+    "        _3 = call fn main.refill(copy _1);",
+    "        _4 = addr mut(_3);",
+    "        _5 = call fn main.keep(copy _4);",
+    "        del(move _3.0);",
+    "        dead(_3);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // an operand that reaches `h`, then a constant: P R0:3
+    "fn main.r25() -> void {",
+    "    let _1 (h): box;",
+    "    let _2: box mut*;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = const zero box;",
+    "        _2 = addr mut(_1);",
+    "        _1 = call fn main.refill_n(copy _2, const u64 1);",
+    "        del(move _1.0);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a destination that is no tracked place, behind a second deref, takes the reach: R0:2
+    "fn main.r26(_1 (l): link mut*) -> void {",
+    "    bb0: {",
+    "        (*(*_1).0).1 = call fn main.relink2(copy _1);",
+    "        return;",
+    "    }",
+    "}",
 };
 
-string[59] VERDICTS = {
+string[85] VERDICTS = {
     "P", "P", "P", "U0:4", "U0:4", "U0:4 P", "U1:4", "P", "P", "U0:1", "U0:4 P", "U0:2",
     "U0:2", "U0:2", "U0:4", "P P", "U0:4", "P", "P U0:4", "P", "P U0:4", "P U0:4", "", "U0:4 P",
     "U0:3", "U0:4", "P", "P U1:4", "P P", "P", "U0:2", "P P", "U0:4 P", "U2:4", "P", "U4:4",
-    "P", "P U0:4", "U0:4", "U0:2", "P", "U0:3", "U0:3", "U0:4", "U0:3", "U0:2", "U0:4", "P U0:4",
+    "P", "P U0:4", "U0:4", "U0:2", "P", "R0:3", "U0:3", "U0:4", "U0:3", "U0:2", "U0:4", "P U0:4",
     "P P", "P U0:4", "U0:2", "U0:4 P P", "U0:4 U0:4 P", "P U0:4 P U0:4", "P U0:4 P",
-    "P U0:4 U0:4 U0:4", "P P", "P U0:2", "U0:4",
+    "P U0:4 U0:4 U0:4", "P P", "P U0:2", "U0:4", "P R0:3", "P U0:4", "P R0:4", "P U0:3",
+    "P U0:4", "P R0:4", "P U0:4", "P U0:4", "R0:4", "R0:4", "U0:4", "R0:4", "R0:4", "U0:4", "R0:4",
+    "R0:4", "P", "P U0:4", "P R0:3", "P R0:3", "U0:4", "U0:4", "U0:4", "P", "P R0:3", "R0:2",
 };
 
 // Writes the verdict of each whole store of p->wholes into `out`, in order, with a space between
 // two: `P` for a store that `p` proves, or `U`, the number of the first owner that it does not
-// prove, `:` and the digit of its cause. Holds the count of `p` against the verdicts, and that no
-// such store is an error.
+// prove, `:` and the digit of its cause. A store that a call of its statement can reach takes `R`
+// in place of `U`. Holds the counts of `p` against the verdicts: each store that the pass does not
+// prove is a leak, and only a reached store is an error.
 fn write_verdicts(prover.proof* p, strbuf.str_buf mut* out) void {
     strbuf.clear(out);
     u32 mut leaks = 0;
+    u32 mut errors = 0;
     u64 mut k = 0;
     while (k < p->wholes.len) {
         prover.whole* w = &p->wholes[k];
@@ -995,8 +1381,14 @@ fn write_verdicts(prover.proof* p, strbuf.str_buf mut* out) void {
         if (w->proved) {
             strbuf.push(out, 'P');
             assert(w->first == w->owners && w->cause == prover.whole_cause.wc_none);
+            assert(!w->reached);
         } else {
-            strbuf.push(out, 'U');
+            if (w->reached) {
+                strbuf.push(out, 'R');
+                errors += 1;
+            } else {
+                strbuf.push(out, 'U');
+            }
             strbuf.append_u64(out, w->first);
             strbuf.push(out, ':');
             strbuf.append_u64(out, cast(cast(w->cause, i32), u64));
@@ -1005,12 +1397,13 @@ fn write_verdicts(prover.proof* p, strbuf.str_buf mut* out) void {
         }
         k += 1;
     }
-    assert(p->whole_leaks == leaks);
+    assert(p->whole_leaks == leaks && p->whole_errors == errors);
 }
 
 // Proves `f` and holds that its whole stores get the verdicts `want`, that a whole store that the
-// pass does not prove is no error, and that the whole stores change no other verdict
-// (expect_other_verdicts_stay). `name` names the function in a failure.
+// pass does not prove is an error only when a call of its statement reaches it, and that the whole
+// stores change no other verdict (expect_other_verdicts_stay). `name` names the function in a
+// failure.
 fn expect_function(fir.func* f, string want, string name) void {
     strbuf.str_buf mut got = strbuf.create();
     defer del(got.data);
@@ -1023,13 +1416,15 @@ fn expect_function(fir.func* f, string want, string name) void {
     }
     bool others = p->unproved > 0 || p->leaks > 0 || p->aggregate_leaks > 0
         || p->use_unproved > 0;
-    assert(prover.has_error(p) == others);
+    assert(prover.has_error(p) == (others || p->whole_errors > 0));
     expect_other_verdicts_stay(f, p);
 }
 
 // Holds that the whole stores of `f` change no other verdict of its proof `p`: just past the
 // whole-store work, which holds each other work, the pass proves no whole store and gives each the
-// cause 5, and it gives each other verdict of `p` again, one by one (same_other_verdicts).
+// cause 5, and it gives each other verdict of `p` again, one by one (same_other_verdicts). Past
+// the limit no map of owner.alias decides the reach, so each store that `p` takes as reached is
+// reached there too.
 fn expect_other_verdicts_stay(fir.func* f, prover.proof* p) void {
     if (p->wholes.len == 0) {
         assert(p->whole_work == p->aggregate_work && p->whole_leaks == 0);
@@ -1043,8 +1438,10 @@ fn expect_other_verdicts_stay(fir.func* f, prover.proof* p) void {
     u64 mut k = 0;
     while (k < q->wholes.len) {
         assert(q->wholes[k].cause == prover.whole_cause.wc_limit && q->wholes[k].first == 0);
+        assert(!p->wholes[k].reached || q->wholes[k].reached);
         k += 1;
     }
+    assert(q->whole_errors >= p->whole_errors);
     same_other_verdicts(f, p, q);
 }
 
@@ -1150,7 +1547,7 @@ fn expect_module(lower_env.env mut* e, fir.module* m, string@ want) void {
 
 // Fort sources whose whole stores the pass proves and does not prove, of each cause. A comment
 // gives the verdicts of each function (write_verdicts).
-string[164] SOURCE = {
+string[188] SOURCE = {
     "struct box {",
     "    u8 mut* own data;",
     "}",
@@ -1344,19 +1741,48 @@ string[164] SOURCE = {
     "    del(p->data);",
     "    del(p);",
     "}",
+    // a call whose operand holds the address of the memory local `h`: P R0:3
+    "fn refill(box mut* b) box {",
+    "    return box{};",
+    "}",
+    "fn reach_addr() void {",
+    "    box mut h = box{};",
+    "    h = refill(&h);",
+    "    del(h.data);",
+    "}",
+    // the pointer of the destination: R0:4
+    "fn reach_param(box mut* q) void {",
+    "    *q = refill(q);",
+    "}",
+    // the two arms of a conditional, which the error gives once: P R0:3 R0:3
+    "fn reach_cond(bool c) void {",
+    "    box mut h = box{};",
+    "    h = c ? refill(&h) : refill(&h);",
+    "    del(h.data);",
+    "}",
+    // the swap form puts the result in a local of its own statement: P P P P
+    "fn swap_form() void {",
+    "    box mut h = box{};",
+    "    box nv = refill(&h);",
+    "    box old = move(h);",
+    "    h = move(nv);",
+    "    del(old.data);",
+    "    del(h.data);",
+    "}",
 };
 
-string[25] SOURCE_NAMES = {
+string[29] SOURCE_NAMES = {
     "make", "fill", "probe", "fresh_move", "fresh_call", "fresh_lit", "field_first", "nested",
     "element", "element_field", "through", "local_reassign", "loop_decl", "deferred",
     "global_store", "cond", "cond_live", "twice", "call_first", "param_call", "nested_zero",
-    "designated", "live_member", "sibling", "cond_fresh",
+    "designated", "live_member", "sibling", "cond_fresh", "reach_addr", "reach_param",
+    "reach_cond", "swap_form",
 };
 
-string[25] SOURCE_VERDICTS = {
+string[29] SOURCE_VERDICTS = {
     "", "P", "U0:4", "P", "P", "P", "P", "U0:4 P", "P", "U0:1", "U0:2", "P P U0:4", "P",
     "P P", "U0:4", "P P", "U0:4 U0:4", "P U0:4", "P", "U0:3", "P P P P", "P P", "P U0:4",
-    "P P U1:4", "P P",
+    "P P U1:4", "P P", "P R0:3", "R0:4", "P R0:3 R0:3", "P P P P",
 };
 
 // Lowers the function `name` of the checked source of `e` and holds that the verifier accepts it.
@@ -1504,6 +1930,7 @@ fn report_function(lower_env.env mut* e, string name, strbuf.str_buf mut* out) v
 // The report names the first owner below the destination of each whole store that the pass does
 // not prove, at the `=` of its assignment, with its cause, in the file of the function. It writes
 // no diagnostic: such a store is no error until the migration of the whole stores ends (D17.11).
+// A store that a call of its statement reaches is an error, and it gives no line here.
 fn the_report_names_the_first_owner_of_each_store() void {
     strbuf.str_buf mut got = strbuf.create();
     defer del(got.data);
@@ -1520,6 +1947,59 @@ fn the_report_names_the_first_owner_of_each_store() void {
     }
     expect_lines(strbuf.view(&got), file, REPORTED[..]);
     assert(check_env.reports(&e->c) == before);
+}
+
+// The diagnostics of report.write for the reached stores of SOURCE: the error and the note of
+// D17.11 and REACH_NOTE at the `=`, once for the two arms of a conditional, which share it.
+string[9] REACHED = {
+    "170:7: overwriting owned value: cannot prove 'h.data' is empty here",
+    "170:7: del or move 'h.data' before this store",
+    "170:7: ",
+    "174:8: overwriting owned value: cannot prove '(*q).data' is empty here",
+    "174:8: del or move '(*q).data' before this store",
+    "174:8: ",
+    "178:7: overwriting owned value: cannot prove 'h.data' is empty here",
+    "178:7: del or move 'h.data' before this store",
+    "178:7: ",
+};
+
+// Each reached store of SOURCE takes the error of D17.11 with its two notes, the second
+// REACH_NOTE, at the `=` of its assignment, and the arms of a conditional give them once.
+fn the_error_of_a_reached_store_names_its_owner() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    lower_env.check_lines(e, SOURCE[..], true);
+    u64 before = check_env.reports(&e->c);
+    write_function(e, "reach_addr");
+    write_function(e, "reach_param");
+    write_function(e, "reach_cond");
+    write_function(e, "swap_form");
+    assert(check_env.reports(&e->c) == before + REACHED.len);
+    for (u64 mut k = 0; k < REACHED.len; k++) {
+        strbuf.str_buf mut want = strbuf.create();
+        defer del(want.data);
+        strbuf.append(&want, REACHED[k]);
+        if (k % 3 == 2) {
+            strbuf.append(&want, report.REACH_NOTE);
+        }
+        string severity = check_env.report_severity(&e->c, before + k);
+        assert((severity == "error") == (k % 3 == 0));
+        string got = check_env.report_text(&e->c, before + k);
+        if (got != strbuf.view(&want)) {
+            eprintln(got, " and not ", strbuf.view(&want));
+            panic("prover_whole_test: a diagnostic of a reached store differs");
+        }
+    }
+}
+
+// Writes the diagnostics of report.write for the function `name` of the checked source of `e`.
+fn write_function(lower_env.env mut* e, string name) void {
+    fir.func mut* own f = fir.func_make();
+    defer fir.func_drop_made(move(f));
+    lower(e, name, f);
+    prover.proof mut* own p = prover.prove_made(f);
+    defer prover.drop_made(move(p));
+    report.write(f, p, &e->c.m.s);
 }
 
 // A FIR text with locations and no tree: a parameter gives its declared name and the names of the
@@ -1592,5 +2072,7 @@ fn main() i32 {
     println("whole report ok");
     the_report_of_a_fir_text_names_the_fir_place();
     println("whole text ok");
+    the_error_of_a_reached_store_names_its_owner();
+    println("whole reach ok");
     return 0;
 }

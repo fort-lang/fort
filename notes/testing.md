@@ -822,7 +822,7 @@ bullet at a time and without a rewrite.
   compiler accepts with no error and no report line: 125, of them 123 `use after release` and 2
   `use after scope`. `FLOORS` holds the least count of accepted items of each family, and
   `hold_floor` stops the test below it. So a family that accepts no item stops the test. `FORCED`
-  runs a case of `GATE_CASES` with a chosen set of report lines and no error. Each of its 52 rows
+  runs a case of `GATE_CASES` with a chosen set of report lines and no error. Each of its 56 rows
   names the line of each report line and the event kind that then fails the item, and another
   verdict stops the test (`run_forced`). The rows hold that a line of one rule takes no event of
   another rule and no event on another line. **The judge and the pass call the same functions of
@@ -1639,14 +1639,21 @@ bullet at a time and without a rewrite.
   was full during a run of `tools/mutations/generator.json`. The compiler could not write
   its output in 34 of 50 rows, the harness printed a line `ERROR` and each row read `caught`. So
   read the logs of `--log-dir` before you trust a run: `grep -l '^ERROR' <log dir>/*` must print no
-  file, and each log must hold a line `FAIL`.
+  file, and each log must hold a line `FAIL`. A mutant that makes the compiler crash gives `ERROR`
+  in each stage and no `FAIL`: the compiler of a module test proves the modules that the test
+  imports, so a guard of an index in `src/fort/owner` stops that compile. Write each guard so that
+  its mutant gives a wrong verdict and no crash, as `alias.is_exposed` does with `alias.is_frame`
+  (`tools/mutations/whole.json`, rows `D17.11-reach-*`, 2026-11-14).
   **Each table describes itself.** `ls tools/mutations/*.json` lists the tables.
   `jq -r '[input_filename] + .sources | join(" ")' tools/mutations/*.json` prints each table and
-  the files that it covers. That is the `"sources"` list that the runner saves. The `comment` list
-  at the head of a table says what its rows cover, which `binary` its md5 guard reads, and how to
-  run it: the host, the build and the `--runner`. Write a fact about one table into its
-  `comment`, not into this file. `--check` exits 1 for a table whose `comment` list is empty or
-  absent. Two earlier changes
+  the files that it covers. That is the `"sources"` list that the runner saves. A row whose file
+  is not in that list is never restored, and `--check` does not see it: on 2026-11-14 two rows of
+  `src/fort/owner/alias.ft` ran in `whole.json` without it, the second ran over the first, and the
+  restored compiler read `MISMATCH`. Add the file to `"sources"` with its first row. The
+  `comment` list at the head of a table says what its rows cover, which `binary` its md5 guard
+  reads, and how to run it: the host, the build and the `--runner`. Write a fact about one table
+  into its `comment`, not into this file. `--check` exits 1 for a table whose `comment` list is
+  empty or absent. Two earlier changes
   mutated `src/fort/check.ft`, and then both compilers, by hand, because no table covered either
   file. `tools/mutations/checker_fort.json` covers one rule of the fort checker, the pointer places
   that a cast keeps (D3.14), since 2026-10-26. `tools/mutations/extern_fort.json` covered the rule
