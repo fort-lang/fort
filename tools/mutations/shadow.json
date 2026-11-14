@@ -154,16 +154,51 @@
     {
       "decision": "use-after-release",
       "file": "src/fort/fir/shadow.ft",
-      "old": "    } else if (!low && has_dead(&sh->allocations, addr, len)) {",
-      "new": "    } else if (!low && has_dead(&sh->allocations, addr, len) && false) {",
+      "old": "    } else if (!low && has_released(sh, addr, len)) {",
+      "new": "    } else if (!low && has_released(sh, addr, len) && false) {",
       "what": "an access in a released allocation makes no `use after release`"
     },
     {
       "decision": "use-after-release-end",
       "file": "src/fort/fir/shadow.ft",
+      "old": "        if (!r->live && addr < r->base + r->size) {",
+      "new": "        if (!r->live && addr <= r->base + r->size) {",
+      "what": "the byte past the end of a released allocation is in its range"
+    },
+    {
+      "decision": "use-after-release-before",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        if (r->base >= addr +% len) {",
+      "new": "        if (r->base > addr +% len) {",
+      "what": "the byte before a released allocation is in its range"
+    },
+    {
+      "decision": "use-after-release-search",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    if (lo > 0) {\n        lo -= 1;\n    }\n    for (u64 mut i = lo; i < sh->allocations.len; i++) {",
+      "new": "    for (u64 mut i = lo; i < sh->allocations.len; i++) {",
+      "what": "the search for a released allocation starts after the one that holds the address"
+    },
+    {
+      "decision": "use-after-scope-end",
+      "file": "src/fort/fir/shadow.ft",
       "old": "        if (!r->live && r->base < addr +% len && addr < r->base + r->size) {",
       "new": "        if (!r->live && r->base < addr +% len && addr <= r->base + r->size) {",
-      "what": "the byte past the end of a released allocation is in its range"
+      "what": "the byte past the end of a frame that returned is in its range"
+    },
+    {
+      "decision": "release-foreign",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    } else if (a == NONE || foreign) {",
+      "new": "    } else if (a == NONE) {",
+      "what": "a `del` of an allocation of C is no `invalid release`"
+    },
+    {
+      "decision": "release-foreign-feed",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "    shadow.free_through(&it->sh, addr, ptr, is_start(it, ptr, region_kind.rk_c));",
+      "new": "    shadow.free_through(&it->sh, addr, ptr, false);",
+      "what": "the interpreter never says that a `del` names an allocation of C"
     },
     {
       "decision": "use-after-move",
@@ -595,7 +630,7 @@
     {
       "decision": "forged-del-place",
       "file": "src/fort/fir/interpreter.ft",
-      "old": "    if (find_region(it, addr, types.type_sizeof(t)) != NONE) {\n        shadow.access(&it->sh, addr, types.type_sizeof(t), true, false);\n    }\n",
+      "old": "    u64 i = find_region(it, addr, types.type_sizeof(t));\n    if (i != NONE) {\n        shadow.access(&it->sh, addr, types.type_sizeof(t), is_alive(it, i), false);\n    }\n",
       "new": "",
       "what": "a `del` tests only the pointer word of its place"
     },
@@ -630,7 +665,7 @@
     {
       "decision": "forged-del-no-fault",
       "file": "src/fort/fir/interpreter.ft",
-      "old": "    if (find_region(it, addr, types.type_sizeof(t)) != NONE) {\n        shadow.access(&it->sh, addr, types.type_sizeof(t), true, false);\n    }\n",
+      "old": "    u64 i = find_region(it, addr, types.type_sizeof(t));\n    if (i != NONE) {\n        shadow.access(&it->sh, addr, types.type_sizeof(t), is_alive(it, i), false);\n    }\n",
       "new": "    reach(it, addr, types.type_sizeof(t), true);\n",
       "what": "the test of the whole place of a `del` faults where no region holds it, so the shadow changes the outcome"
     },

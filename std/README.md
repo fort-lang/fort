@@ -3,10 +3,13 @@
 The standard library modules of decision D13.2 live here as `.ft` sources; `spec/stdlib.md`
 specifies them. `std.libc` (thin libc `extern` declarations and the open, lseek and errno
 constants), `std.rt` (the runtime itself: it starts and ends the process, allocates, writes the
-failure lines, and formats and buffers what the print family writes, over `std.libc` and
-`std.strbuf`;
+failure lines, and formats and buffers what the print family writes, over `std.heap`,
+`std.libc` and `std.strbuf`;
 `spec/toolchain.md` 5 owns its entry points and `spec/stdlib.md` 3 owns the four that the rest
 of the library calls),
+`std.heap` (the allocator of the runtime: it takes its storage from the system with `mmap`,
+calls no allocator of C and never gives the storage of a released allocation to another object,
+D10.9),
 `std.mem`, `std.str`, `std.sys`, `std.strbuf` (the growable buffer), `std.vec` (`int_vec` and
 the non-generic container pattern), `std.strmap` (the open-addressing table),
 `std.io` (descriptors, whole files and streams), `std.math` (the integer limits, the float

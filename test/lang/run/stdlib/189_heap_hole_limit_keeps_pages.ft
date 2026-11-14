@@ -1,0 +1,123 @@
+//! run
+//! link: ffi/heap_calls.c
+//! stdout:
+//| below the limit: true true
+//| at the limit: true true true true
+// The cost of the limit of the holes (stdlib.md 2.16). A release that makes one more hole than
+// 8192 does not run its give-back: the allocator makes no `mprotect` and no `madvise` for it,
+// and the dead storage keeps its pages and its bytes for the rest of the run (D10.9 rule 2).
+// So after 16 blocks of 4 MiB, each with a store into each page, one live at a time, the
+// process holds less than 3 blocks more than before below the limit, and 14 to 18 blocks more
+// at the limit: each release that the limit keeps holds the pages of its block.
+// The allocator cannot drop the pages of a range that the program can still access: a later
+// read of such a range gives zero bytes on Linux, which is no byte that the storage held last.
+// D10.9
+import extern;
+
+// The kinds of a call in test/lang/ffi/heap_calls.c: an mprotect that takes each access away,
+// and an madvise.
+i32 NO_ACCESS = 4;
+i32 ADVISE = 5;
+
+u64 CHUNK = 2097152;
+u64 LARGE = 4194304;
+u64 ROUNDS = 16;
+
+// The limit of the allocator, and 2 blocks for each hole and 1 more block.
+u64 HOLES = 8192;
+u64 BLOCKS = 16385;
+
+// C: heap_calls_count, test/lang/ffi/heap_calls.c, which gives the calls of one kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_count(i32 kind) u64;
+// C: heap_calls_byte, test/lang/ffi/heap_calls.c, which gives the byte at an address, or -1
+// when nothing can access the address. The system reads the byte for write(2), so no memory
+// fault stops the program.
+// gives: an int64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_byte(u64 address) i64;
+// C: heap_calls_resident, test/lang/ffi/heap_calls.c, which gives the memory that the process
+// holds now, in bytes.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_resident() u64;
+
+struct slot {
+    u8 mut@ own bytes;
+}
+
+// What the rounds of one phase gave.
+struct phase {
+    // the memory that the process holds before the rounds and after them, in bytes
+    u64 before;
+    u64 after;
+    // the calls of mprotect that take access away and of madvise
+    u64 calls;
+    // the dead blocks whose last byte reads as the value that the round stored
+    u64 kept;
+    // the dead blocks whose last byte nothing can access
+    u64 gone;
+}
+
+// Takes and releases ROUNDS blocks of LARGE bytes, one live at a time, with a store into each
+// page and a mark in the last byte.
+// C call heap_calls_resident x2: no pointer argument.
+// C call heap_calls_count x4: no pointer argument.
+// C call heap_calls_byte: the argument is a number, the address of the last byte of the block
+// that this round released. C gives it to write(2), and the system reads the byte or refuses
+// the address: no code of the process reads dead storage (D10.9 rule 6).
+fn rounds() phase {
+    phase mut got = {};
+    got.before = heap_calls_resident();
+    u64 calls = heap_calls_count(NO_ACCESS) + heap_calls_count(ADVISE);
+    for (u64 mut i = 0; i < ROUNDS; i += 1) {
+        u8 mut@ own block = new(u8, LARGE);
+        for (u64 mut at = 0; at < LARGE; at += 4096) {
+            block[at] = 1;
+        }
+        block[LARGE - 1] = 9;
+        u64 last = cast(&block[LARGE - 1], u64);
+        del(block);
+        i64 seen = heap_calls_byte(last);
+        if (seen == 9) {
+            got.kept += 1;
+        }
+        if (seen == -1) {
+            got.gone += 1;
+        }
+    }
+    got.after = heap_calls_resident();
+    got.calls = heap_calls_count(NO_ACCESS) + heap_calls_count(ADVISE) - calls;
+    return got;
+}
+
+fn main() i32 {
+    phase below = rounds();
+    println("below the limit: ", below.after < below.before + 3 * LARGE, " ",
+            below.gone == ROUNDS && below.kept == 0 && below.calls == 2 * ROUNDS);
+
+    // Blocks of one chunk side by side. Each block with an odd number dies between two live
+    // blocks, so each release makes one hole until the count of the holes is 8192. The program
+    // stores into no block, so the blocks that the limit keeps hold no page.
+    slot mut@ own slots = new(slot, BLOCKS);
+    for (u64 mut i = 0; i < BLOCKS; i += 1) {
+        del(slots[i].bytes);
+        slots[i].bytes = new(u8, CHUNK);
+    }
+    for (u64 mut i = 1; i < BLOCKS; i += 2) {
+        del(slots[i].bytes);
+    }
+
+    // Each block of a round stands after a live block or after a block that the limit kept, so
+    // its release makes one more hole than the limit.
+    phase at_limit = rounds();
+    println("at the limit: ", at_limit.after >= at_limit.before + (ROUNDS - 2) * LARGE, " ",
+            at_limit.after <= at_limit.before + (ROUNDS + 2) * LARGE, " ",
+            at_limit.kept == ROUNDS && at_limit.gone == 0, " ", at_limit.calls == 0);
+    for (u64 mut i = 0; i < BLOCKS; i += 2) {
+        del(slots[i].bytes);
+    }
+    del(slots);
+    return 0;
+}

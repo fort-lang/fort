@@ -1,0 +1,39 @@
+//! run
+//! signal: SEGV
+//! signal-macos: BUS
+// The runtime gives the storage of dead allocations back to the system when no live allocation
+// stands in the same 16 KiB, and it keeps the address range (D10.9 rule 1). The program releases
+// 32 blocks of 32 KiB that stand side by side, so the storage of block 1 goes back. A read
+// through a view of that block then stops the program with a memory fault (rule 2), and the
+// fault writes no line and does not flush the buffered output (D11.5): stdout stays empty. The
+// read gives no zero byte and no byte of the later allocation.
+// D10.3, D10.9, D11.5
+struct block {
+    u8 mut@ own bytes;
+}
+
+fn count() u64 {
+    return 32;
+}
+
+fn main() i32 {
+    block mut@ own blocks = new(block, count());
+    for (u64 mut i = 0; i < count(); i += 1) {
+        del(blocks[i].bytes);
+        blocks[i].bytes = new(u8, 32768);
+        blocks[i].bytes[0] = 7;
+        blocks[i].bytes[32767] = 9;
+    }
+    u8@ view = blocks[1].bytes;
+    for (u64 mut i = 0; i < count(); i += 1) {
+        del(blocks[i].bytes);
+    }
+    u8 mut@ own later = new(u8, 32768);
+    later[0] = 1;
+    println("before the read");
+    u8 seen = view[0];
+    println("after the read ", seen);
+    del(later);
+    del(blocks);
+    return 0;
+}

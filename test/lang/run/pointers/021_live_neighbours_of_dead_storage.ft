@@ -1,0 +1,68 @@
+//! run
+//! stdout:
+//| 3 5 7 9 11 13
+//| 0 0
+//| 3 5 7 9 11 13
+// The runtime gives the storage of dead allocations back to the system, and it gives back no
+// byte of a live allocation (D10.9). Three allocations of 16 bytes stand before, between and
+// after 32 blocks of 32 KiB. The program releases the 32 blocks, so their storage goes back to
+// the system. The first byte and the last byte of each of the three still hold their values. A
+// later allocation takes storage that no allocation held before, so its bytes are zero (D10.2),
+// and a write into it changes no byte of the three.
+// D10.2, D10.3, D10.9
+struct block {
+    u8 mut@ own bytes;
+}
+
+fn half() u64 {
+    return 16;
+}
+
+fn fill(block mut@ blocks) void {
+    for (u64 mut i = 0; i < blocks.len; i += 1) {
+        del(blocks[i].bytes);
+        blocks[i].bytes = new(u8, 32768);
+        blocks[i].bytes[0] = 1;
+        blocks[i].bytes[32767] = 1;
+    }
+}
+
+fn release(block mut@ blocks) void {
+    for (u64 mut i = 0; i < blocks.len; i += 1) {
+        del(blocks[i].bytes);
+    }
+}
+
+fn main() i32 {
+    block mut@ own low = new(block, half());
+    block mut@ own high = new(block, half());
+    u8 mut@ own before = new(u8, 16);
+    fill(low);
+    u8 mut@ own between = new(u8, 16);
+    fill(high);
+    u8 mut@ own after = new(u8, 16);
+    before[0] = 3;
+    before[15] = 5;
+    between[0] = 7;
+    between[15] = 9;
+    after[0] = 11;
+    after[15] = 13;
+    release(low);
+    release(high);
+    println(before[0], " ", before[15], " ", between[0], " ", between[15], " ", after[0], " ",
+            after[15]);
+
+    u8 mut@ own later = new(u8, 32768);
+    println(later[0], " ", later[32767]);
+    later[0] = 255;
+    later[32767] = 255;
+    println(before[0], " ", before[15], " ", between[0], " ", between[15], " ", after[0], " ",
+            after[15]);
+    del(later);
+    del(before);
+    del(between);
+    del(after);
+    del(low);
+    del(high);
+    return 0;
+}

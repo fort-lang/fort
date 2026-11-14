@@ -1,0 +1,31 @@
+//! run
+//! abort
+//! link: ffi/heap_calls.c
+//! stderr: ft:27:25: runtime error: out of memory
+//! stdout:
+//| before
+// The system can refuse the access to new storage: `mprotect` fails with ENOMEM at the limit of
+// the map entries of the process. A `new` whose storage the system refuses is the runtime error
+// `out of memory` at the position of the `new` (D10.9 rule 5). The block is a large block of 2
+// chunks, and the allocator gives the access to its chunks with one call of `mprotect`, which
+// the C file refuses. The program gets no storage that it cannot access.
+// D10.2, D10.6, D10.9
+import extern;
+
+// The kind of a call in test/lang/ffi/heap_calls.c: an mprotect that gives access.
+i32 ACCESS = 3;
+
+// C: heap_calls_refuse, test/lang/ffi/heap_calls.c, which makes one later call of one kind fail.
+// gives: nothing. writes: no fort storage. keeps: no pointer. calls: no fort function.
+// frees: nothing.
+extern fn heap_calls_refuse(i32 kind, u64 nth, u64 part) void;
+
+// C call heap_calls_refuse: no pointer argument.
+fn main() i32 {
+    println("before");
+    heap_calls_refuse(ACCESS, 1, 0);
+    u8 mut@ own block = new(u8, 4194304);
+    println("after ", block.len);
+    del(block);
+    return 0;
+}

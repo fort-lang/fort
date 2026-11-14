@@ -1,0 +1,31 @@
+//! run
+//! abort
+//! link: ffi/heap_calls.c
+//! link: ffi/heap_first_map.c
+//! stderr: runtime error: out of memory
+// The first `new` of a process maps the first segment of the allocator, an address range of 4
+// GiB (stdlib.md 2.16). The C files of the test refuse that mapping before the program starts, as
+// the system does when the address-space limit of the process is lower (ENOMEM). The first `new`
+// is then the runtime error `out of memory` (D10.9 rule 5). The runtime makes that `new` for the
+// arguments of `main`, before `main` runs, so the error stands at a position in std/rt.ft and
+// stdout stays empty. test/lang/run/stdlib/194 holds the size of the first segment. The
+// interpreter does not run the C files, so `main` calls C first: the interpreter then reports
+// the program as one that it does not run (test/fir_run_test.py).
+// D10.2, D10.6, D10.9
+import extern;
+
+// The kind of an mmap call in test/lang/ffi/heap_calls.c.
+i32 MAP = 1;
+
+// C: heap_calls_count, test/lang/ffi/heap_calls.c, which gives the calls of one kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_count(i32 kind) u64;
+
+// C call heap_calls_count: no pointer argument.
+fn main() i32 {
+    println("main runs after ", heap_calls_count(MAP), " mappings");
+    u8 mut@ own block = new(u8, 16);
+    del(block);
+    return 0;
+}

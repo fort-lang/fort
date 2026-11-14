@@ -1362,8 +1362,9 @@ came here.
     signedness, as `fir_llvm.bound_value` makes it.
   - A failed check calls the runtime entry of its kind with its reported operands and the file, the
     line and the column of its terminator, `alloc<T>(n)` calls `std.rt.alloc` with the location of
-    its statement, and `del` calls `std.rt.free` and then zeroes its place (`spec/fir.md` 12.2,
-    12.4). So the message of a runtime error is the message of `std.rt`, byte for byte.
+    its statement, and `del` calls `std.rt.release` with its pointer and the location of its
+    statement and then zeroes its place (`spec/fir.md` 12.2, 12.4). So the message of a runtime
+    error is the message of `std.rt`, byte for byte.
   - An extern of the list of `spec/ownership-design.md` 3.2 runs in `call_model`, from `std.rt` or
     from the program: `exit`, `abort`, `write`, `calloc`, `free`, `isatty`, `strlen`, `memcpy`,
     `memmove`, `memcmp`, `__errno_location`, `__error`, `strtod` and `strtof` with a null end
@@ -1372,6 +1373,17 @@ came here.
     form, and each function with no body, ends the run as `outside`. A `calloc` that the C
     library of the compiler refuses gives the program null, as a native `calloc` does. The errno
     of the compiler goes to the errno of the run only after a call that sets it.
+  - The run does not run the allocator `std.heap`: its `mmap` is no extern of the list. `run_heap`
+    models `take`, `drop`, `is_start`, `can_take` and `live_bytes`, which it finds by symbol
+    (`HEAP_NAMES`).
+    `take` makes a region of the kind `rk_heap`, and `drop` changes its kind to `rk_dead`. A dead
+    region keeps its entry and its bytes while the run lasts: an access to it reads or changes
+    the bytes that it held last, and the shadow reports `use after release` (D10.9 rule 2). A
+    `calloc` makes a region of the kind `rk_c`, which only the `free` of C ends. The start test of
+    `drop` (`is_start`) reads the kind, so a `del` of an allocation of C and a `free` of an
+    allocation of the runtime both fail. The result of a modelled function derives from its
+    argument, as the result of an extern does (D10.7). A function of `std.heap` with no model
+    runs its body, and the run ends as `outside` when that body reaches `mmap`.
   - The shadow state `fir.shadow` (`src/fort/fir/shadow.ft`) observes each run, with or without
     `--fir-events`, and changes no outcome. The interpreter calls it at each access (`reach`),
     load, store, move zeroing (`zero_bytes`), `del`, `live`, `dead`, frame push and pop, `calloc`,
@@ -1383,7 +1395,7 @@ came here.
     or a `del` of an owner slot puts the owner in transit and the next typed store of an owning
     word (`settle`) takes it, so a transfer keeps the count; the test at the end of each statement
     and terminator ends the owners still in transit and reports a count of 0 as a `leak`. A
-    `return` tests with `_0` in transit, and the items of the `std.rt.free` that a `del` calls
+    `return` tests with `_0` in transit, and the items of the `std.rt.release` that a `del` calls
     test nothing, so an owner inside a freed object leaks at the `del`.
   - The test of `leak at exit` (`test_exit`) tags an allocation as of a cycle or not. It counts,
     for each live allocation that no global reaches, the owner slots inside such allocations that
@@ -1485,7 +1497,7 @@ came here.
   and an argument of the variadic tail none. The move did
   not change the direct path's text: `tools/ir_snapshot.sh` of `main` and of the branch gave an
   empty `diff -r` over 427 run tests in three modes. The calls that the translator makes itself,
-  `std.rt.alloc`, `std.rt.free` and the failure entries, still come from the rows of
+  `std.rt.alloc`, `std.rt.release` and the failure entries, still come from the rows of
   `runtime_sig`, as the direct path's did. `gen.function_begin`, `gen.function_end` and
   `gen.gen_main` stand in `gen`, because `fir_llvm` must not import the module that writes a
   program: `gen_fir` calls the translator, and a circular import is an error (D9.5).
@@ -1530,8 +1542,9 @@ came here.
   pass keeps needs its entry (review round 2 of T-255: a pass that kept shift checks under
   `--release` passed the verifier and called a missing `fail_shift`). Only a test with a stub
   `std.rt`, or an old `--std-dir`, meets the second, the third or the fourth. The compiler tests
-  no other `std.rt` function: `alloc`, `free`, `args_init`, `args` and `flush_all` are assumed, so
-  `del(p)` under `--release` with an empty `std.rt` writes a call to an undefined `std.rt.free`.
+  no other `std.rt` function: `alloc`, `release`, `args_init`, `args` and `flush_all` are assumed,
+  so `del(p)` under `--release` with an empty `std.rt` writes a call to an undefined
+  `std.rt.release`.
   Until T-255 the direct path (`gen_stmt.ft`, `gen_expr.ft`) wrote both. On T-253's tree and on
   414d8b7c, `--fir-stats` gave `lowered N of N` over `test/lang`, `src/fort`, `src/lsp` and `std`
   in the three modes, so no program of the corpus took the direct path, and T-255's
@@ -1597,19 +1610,20 @@ came here.
   store of a value that is not zero. `test/fort/owner/prover_regrow_test.ft` holds 14 functions of
   FIR text against the events of the interpreter. `fir.rvalue_owns` names `rv_regrow`, which rule
   V6 reads. `alias.add_rvalue` borrows the origins of its operands, and `place.is_fresh_new` is
-  false for it. `fir_llvm.regrow_value` calls
-  `std.rt.regrow`, `std.rt.regrow_move` and `std.rt.free`, and gives `regrow_move` the private
+  false for it. `fir_llvm.regrow_value` calls `std.rt.regrow`, `std.rt.regrow_move` and
+  `std.rt.release` with the position of the `regrow`, and gives `regrow_move` the private
   constant `@.words.N`, which holds the offsets of `fir.owner_word_at`. `gen.gen_words_ref` gives
   one name for each `regrow` site and joins no two by content (D19.5), and `gen_data.emit_data`
   writes the constants after the enum tables. So a site stores no offset:
   `test/fort/fir_llvm_regrow_test.ft` counts 0 such stores and 3 constants for 3 sites of 2
-  tables. `fir.interpreter` calls `std.rt.regrow` and `std.rt.free` and moves the elements and
+  tables. `fir.interpreter` calls `std.rt.regrow` and `std.rt.release` and moves the elements and
   their owners itself (`regrow_back`, `move_owners`), because the shadow gives each owner slot of
   the new storage its owner there. `move_owners` and `std.rt.regrow_move` are two implementations of
   one move, and `test/fir_run_test.py` holds the two equal on each program that it runs. The
-  interpreter makes its operand test in `regrow_from`, before the call of the entry:
-  `passes_count_tests` repeats the first three tests of D12.2, so `invalid release` comes before
-  `out of memory` (`test/fir/run/013_regrow_released.fir`).
+  entry makes the operand test with `std.heap.is_start`, which the interpreter models, so the run
+  writes the same `invalid release` line as a build. `regrow_from` repeats the first three tests of
+  D12.2 (`passes_count_tests`) only to report the event of the refused release first, and
+  `invalid release` comes before `out of memory` (`test/fir/run/013_regrow_released.fir`).
 - **A vacate ends each fact below the owner that it vacates** (the kill at a vacate, `spec/fir.md`
   11, Kill). Before, `del` and `move` had a gen rule only, so `top[0].sub = regrow(move(top), 2)`
   compiled and stored an owner into released storage, and `p->next = move(p)` compiled and made a
@@ -1638,20 +1652,65 @@ came here.
 ## 7. The runtime and the standard library
 
 - **`std.rt.regrow` takes the pointer and the length of the span, and no span** (D12.2,
-  `spec/toolchain.md` 5.1). The entry makes the tests in the order of D12.2. A null pointer with a
-  length that is not 0 is `invalid release`. The test of a pointer that is not null and starts no
-  live allocation needs the allocator of the runtime (D10.9): the change that adds the allocator
-  adds that test before the call of `alloc` in the body. Until then such a pointer goes to the
-  `free` of C, and a view of dead storage can give one: `q = &s[0]`, then `s = regrow(move(s), 2)`,
-  then `regrow(move(q->data), 3)`. So "the zero value or a memory fault" of D12.2 holds only with
-  that allocator, as for `del`. The tests `180` to `184` of `test/lang/run/stdlib` call `regrow` and
-  `regrow_move` directly, and they hold the order of the tests and the zero stores of `regrow_move`.
+  `spec/toolchain.md` 5.1). The entry makes the tests in the order of D12.2. Its operand test is
+  `heap.is_start`, the test of `drop` with no release (D10.9 rule 4): a zero span passes, and a null
+  pointer with a length that is not 0, or a pointer that starts no live allocation, is `invalid
+  release`. A view of dead storage gives no such pointer: after `q = &s[0]` and `s = regrow(move(s),
+  2)`, the owner slot `q->data` holds the zero value, because `regrow` stores it into each owner
+  slot of each old element (D12.2). So `regrow(move(q->data), 3)` gets the zero span and new
+  storage, and no error. Only an owner that a trusted module forges gives such a pointer:
+  `run/errors/068` holds a forged span owner whose `.ptr` is byte 16 of an allocation. The compiled
+  code calls `std.rt.release` for the old storage after `regrow_move`. The tests `181` to `185` of
+  `test/lang/run/stdlib` call `regrow` and `regrow_move` directly, and they hold the order of the
+  tests and the zero stores of `regrow_move`.
 
 - **Extern declarations keep allocator failure calls** (T-149).
   Apple clang `-O1` removes a `calloc` and matching `free` when the caller reads
   no storage, even with `#3 nobuiltin` at the call site. The emitter adds
   `nobuiltin` to each extern declaration on both targets.
   Check the optimized entry function for `call ptr @calloc` in the OOM fixtures.
+  A `new` calls no `calloc` since the runtime has its own allocator (`std.heap`, below). The
+  attribute stays for a program that calls `libc.calloc` or `libc.malloc` itself.
+
+- **The allocator of the runtime is `std.heap`, and no byte of an allocation holds its state**
+  (D10.3, D10.9, `stdlib.md` 2.16). `std.rt.alloc` calls `heap.take`, and `std.rt.release` calls
+  `heap.drop` and reports `invalid release` for a `false`. The invariants, each with the test
+  that holds it in `tools/mutations/heap_fort.json`:
+  - **No address comes twice.** A bump pointer and a frontier only move up, no `mmap` has a fixed
+    address, and no `munmap` takes a range that an allocation used. `munmap` has two callers:
+    `add_segment` after a failed `mprotect` of the table and `can_map`, whose probe mapping no
+    allocation used. A dead huge allocation keeps its mapping with no access.
+  - **The state stands outside the allocations.** It stands in the globals of the module, in the
+    first unit of each segment and in the first 3 units of each small chunk. So a store through
+    a view of dead storage changes no state, and `drop` reads no byte at its argument. `drop`
+    tests the address against the records of the mappings, then against the table word of the
+    chunk, then against the live bit of the granule. A small chunk that goes back gets the table
+    word of a chunk with no allocation. So a later `drop` of an address in it reads no state of
+    the chunk, which nothing can access then (`run/errors/057_invalid_release_chunk_went_back`).
+  - **Give-back takes the access away first.** `mprotect(PROT_NONE)` comes before `madvise`. In
+    the other order a read between the two calls gets zero bytes, which is no result of D10.9
+    rule 2. `MADV_DISCARD` is `MADV_DONTNEED` on Linux and `MADV_FREE` on Darwin.
+  - **The holes have a limit.** A range with no access between two ranges with access costs
+    kernel map entries, and Linux limits them (`vm.max_map_count`, 65,530 by default). `holes`
+    counts them, and a give-back that makes one more than `HOLE_LIMIT` (8192) does not run.
+    Such storage keeps its pages too: a `madvise` with no `mprotect` before it makes a later read
+    give zero bytes on Linux, which rule 2 forbids (`stdlib.md` 2.16 states the growth).
+  - **A refused call changes no record.** A refused `mprotect` or `mmap` for new storage gives
+    null (`out of memory`) and moves no frontier. A refused give-back drops no page. A small chunk
+    whose give-back the system refused gets the table word `TABLE_KEPT`, because a refused call
+    can take the access to its state away: no later `drop` reads that state. The C file
+    `test/lang/ffi/heap_calls.c` refuses a chosen call in the tests `run/stdlib/190` and `191`
+    and `run/errors/064` to `067`.
+  A segment is exactly 2^32 bytes, the size of `libc.map_range`: the pointee of the result of an
+  extern lies inside its storage (A7), so `mmap` cannot give a pointer to a struct that is larger
+  than the mapping. One reservation of 2^46 bytes was the first design; it cost 61 to 80 ms in
+  each process on macOS, so each segment is a mapping of its own. A module that imports
+  `std.heap` can call each of its 26 functions other than the 6 of `stdlib.md` 2.16, and it can
+  store into each of its 7 `mut` globals: a call of `heap.room` or a store into `heap.bump`
+  breaks rule 1, and a call of `heap.seal` breaks rule 2. No rule of the language refuses such a
+  call or store yet (`stdlib.md` 2.16).
+  `std.rt.free(p)` stays beside `release`: the compiler of `tools/bootstrap.ref` emits a call of
+  `free` with one argument for a `del`. Remove `free` when the pinned compiler emits `release`.
 
 - **Mac std.net uses Darwin's 16-byte IPv4 address** (T-145).
   `test/lang/ffi/sockaddr.c` holds the length, family, port and address offsets at 0, 1, 2 and 4.
@@ -1683,8 +1742,10 @@ came here.
   `git grep -nE 'libc\.[a-z_0-9]+\(|str\.from_cstr\(|^\s*extern fn' -- src/fort` finds nothing.
   A suite of `test/fort` makes its files with `os.set_mode`, `os.make_symlink`, `os.make_fifo`
   and `os.set_umask`, moves a descriptor with `io.dup` and `io.dup2`, and removes a variable with
-  `sys.unset_env`. `test/fort/support/heap.ft` is the one module there that declares and calls C,
-  for the heap counters of glibc and Darwin, and it starts with `import extern;`. A suite text
+  `sys.unset_env`. No suite module there declares a C function: `test/fort/support/heap.ft`
+  reads `std.heap.live_bytes` for the leak probes. `test/fort/heap_full_test.ft` and
+  `test/fort/heap_segments_test.ft` are the two suite modules that start with `import extern;`,
+  each for calls of `std.heap.drop`, a boundary function (D9.8). A suite text
   that a test compiles is a program and not a suite module: it declares or calls C when it starts
   with `check_env.TRUST`, `import extern; ` with no newline, so each item keeps its line.
 
@@ -1725,8 +1786,11 @@ came here.
   a build directory and could not be checked out on another machine.
 - **Writing a library module against C** (`stdlib.md` 1.4, D13.4): a span is not a pointer, so
   `cast(u8 mut@ own, void* own)` is rejected (D3.14 lists pointer-to-pointer, not span-to-pointer).
-  The `libc.free(cast(move(p), void* own))` idiom of `stdlib.md` 2.2 therefore applies to a
-  `T mut* own` from `new(T)` or `libc.malloc`; a `T mut@ own` from `new(T, n)` is released with
+  A value of `libc.malloc` or `libc.calloc` is released with `libc.free(move(p))` (`stdlib.md`
+  2.2), and a value of `new` with `del` only. The runtime has its own allocator, so a `libc.free`
+  of a value of `new` gives the allocator of C an address that it did not give, and a `del` of a
+  value of `malloc` is the runtime error `invalid release` (D10.3, D10.9). A `T mut@ own` from
+  `new(T, n)` is released with
   `del`, and what crosses to C is its `.ptr`, a view. A byte buffer crosses with no cast at all,
   since T-086 gave the six byte functions `u8*` and `u8 mut*`: write
   `libc.read(fd, buf.ptr, buf.len)` for a `u8 mut@ buf`, and keep the cast only where the types
@@ -2115,54 +2179,61 @@ Product tests hold these forms directly. The project does not maintain C-to-fort
 
 The goal: no program outside the trusted modules has an undefined state. This section lists each
 construct of the emitted IR that has a precondition in the LLVM language reference, each raw
-operation of `std/rt.ft`, and the back end line. It gives each one a row. The census changes no
-behavior of the compiler: it lists a gap and does not close it.
+operation of `std/rt.ft` and of `std/heap.ft`, and the back end line. It gives each one a row. The
+census changes no behavior of the compiler: it lists a gap and does not close it.
 
 The reference is the LLVM 18.1.8 language reference; each text in double quotes is from it. Each
 line number and each count of source lines is a measurement of the tree of `main` at f386f857
-(2026-11-14); no test holds them. A `.ft` path with no directory is under `src/fort/`. The probes
-ran in the VM: clang 18.1.3, `--target=x86_64-linux-gnu`, the program under `qemu-x86_64`. "Both
-modes" means the checked mode and the release mode (D11.1). Exit 134 is SIGABRT after a runtime
-error, exit 139 is SIGSEGV, and exit 124 is the limit of 20 s.
+(2026-11-14), moved to the tree of the change that adds the allocator `std.heap`; no test holds
+them. A `.ft` path with no directory is under `src/fort/`. The probes ran in the VM: clang 18.1.3,
+`--target=x86_64-linux-gnu`, the program under `qemu-x86_64`. "Both modes" means the checked mode
+and the release mode (D11.1). Exit 134 is SIGABRT after a runtime error, exit 139 is SIGSEGV, and
+exit 124 is the limit of 20 s.
 
 ### 9.1 The summary
 
 - **How to read a row.** A row gives the construct and its undefined state, the sites where the
   compiler writes it, the precondition, the guard that holds the precondition or `none`, the
   evidence, the state and the method. The id starts with `E` for the emitter (`gen.ft`,
-  `gen_data.ft`, `fir_llvm.ft`), `R` for `std/rt.ft` and `B` for the back end line.
+  `gen_data.ft`, `fir_llvm.ft`), `R` for `std/rt.ft`, `H` for `std/heap.ft` and `B` for the back end
+  line.
 - **The states.** `guarded`: the construct has a precondition, and a compile error, a run-time check
   or a fixed property of the emitter holds it. `closed by` a planned work item: no guard holds it
   today, and the item will. `no plan`: no guard holds it and no planned item closes it. `no
   undefined state`: the reference gives the emitted form no precondition, or the emitter has 0
   sites.
 - **The planned work items** are seven, and this tree implements none of them. `spec/decisions.md`
-  holds the rule of each of the first four. The null check: a dereference of a null pointer is the
+  holds the rule of each of the first three. The null check: a dereference of a null pointer is the
   runtime error `null dereference`, and a call of a null function pointer is the runtime error `null
-  call` (D10.5, D10.6, D3.10). Dead storage: the runtime never gives the storage of a `del` to
-  another object, and a read of it gives the value that it held last or a memory fault (D10.9).
-  Frame storage: a local that an `&` names gets storage of the same kind, which is dead after its
-  run returns (D10.1, D10.9). The removal of `--no-bounds-check`: the compiler has no option that
-  removes a check (D10.6, D14.1). The trusted premise that names the options of the builder: a build
-  with one of these options is outside the guarantee, as a trusted module is. Case 4 of D10.7 names
-  `--std-dir` and `--use std=<path>`; the rule for `-Xcc`, `--cc` and `-l` is a ruling and not yet a
-  decision. The test of the runtime table: a compile step or a test compares each part of each row
-  of `runtime_sig.ft` that the emitters call with the definition in `std/rt.ft`, where rule V7 does
-  not (E48); it is a ruling and not a decision. A reserved first segment `llvm` of a module path: no
-  module path starts with the segment `llvm` (E49); it is a change of D9.2 that waits for the user.
-  The zero bytes of a local when its declaration runs (D10.1) were an eighth item; the tree
-  implements them since 7a1d42fc, so the rows of that item are guarded now.
+  call` (D10.5, D10.6, D3.10). Frame storage: a local that an `&` names gets storage of the same
+  kind, which is dead after its run returns (D10.1, D10.9). The removal of `--no-bounds-check`: the
+  compiler has no option that removes a check (D10.6, D14.1). The trusted premise that names the
+  options of the builder: a build with one of these options is outside the guarantee, as a trusted
+  module is. Case 4 of D10.7 names `--std-dir` and `--use std=<path>`; the rule for `-Xcc`, `--cc`
+  and `-l` is a ruling and not yet a decision. The test of the runtime table: a compile step or a
+  test compares each part of each row of `runtime_sig.ft` that the emitters call with the definition
+  in `std/rt.ft`, where rule V7 does not (E48); it is a ruling and not a decision. A reserved first
+  segment `llvm` of a module path: no module path starts with the segment `llvm` (E49); it is a
+  change of D9.2 that waits for the user. A rule of visibility (`priv`) for the state of `std.heap`:
+  a module outside the trusted set names no `mut` global and no helper function of `std.heap` (H06);
+  it is a change of D9.6 that waits for the user. The zero bytes of a local when its declaration
+  runs (D10.1) were an eighth item; the tree implements them since 7a1d42fc, so the rows of that
+  item are guarded now. Dead storage was an item of the first census, and the visibility rule took
+  its place: the runtime never gives the storage of a `del` to another object, and a read of it
+  gives the value that it held last or a memory fault (D10.9). The allocator `std.heap` implements
+  it (`stdlib.md` 2.16), so its rows are guarded now (E02).
 - **The methods.** `mutation-measured`: a mutant of the compiler removed the property and the test
   `ir-flags` (`test/ir_flags_test.py`) went red. `probed`: a program was compiled and run, or the
   test `ir-flags` counted the corpus, and the row quotes the result. `read`: the code was read and
   nothing ran. Use a `read` row as an argument, not as a test.
-- **The rows: 76.** 50 for the emitter, 23 for `std/rt.ft`, 3 for the back end line.
-- **By state.** `guarded`: 46. Closed by a planned work item: 10. `no plan`: 0. `no undefined
-  state`: 20. The rows of each item: the null check 4; dead storage 2; frame storage 2; the removal
-  of `--no-bounds-check` 1; the trusted premise that names the options of the builder 1; the test of
-  the runtime table 1; a reserved first segment `llvm` of a module path 1. E19 names three items, so
-  these seven counts add up to 12.
-- **By method.** `mutation-measured`: 4. `probed`: 48. `read`: 24.
+- **The rows: 82.** 50 for the emitter, 23 for `std/rt.ft`, 6 for `std/heap.ft`, 3 for the back end
+  line.
+- **By state.** `guarded`: 52. Closed by a planned work item: 10. `no plan`: 0. `no undefined
+  state`: 20. The rows of each item: the null check 4; frame storage 2; the removal of
+  `--no-bounds-check` 1; the trusted premise that names the options of the builder 1; the test of
+  the runtime table 1; a reserved first segment `llvm` of a module path 1; a rule of visibility
+  (`priv`) for the state of `std.heap` 1. E19 names two items, so these seven counts add up to 11.
+- **By method.** `mutation-measured`: 4. `probed`: 54. `read`: 24.
 - **The rows with no plan: 0.** The census found 4 rows with no guard and no planned work item. One
   was E41, the copy of two places that overlap in part: the emitter wrote `llvm.memcpy` for it, and
   it writes `llvm.memmove` now (D6.3, D19.3). E11: a `load` of a padding byte that no `store` wrote:
@@ -2269,9 +2340,10 @@ fn main() i32 {
 ```
 
 **B03, the options of the builder.** The program prints `0` with no option. With `-Xcc -static -Xcc
--Wl,--defsym=calloc=malloc` the linker gives the name `calloc` to `malloc`, the storage of `new` is
-not 0, and the program prints `132817`. `-Xcc -ffast-math` gave the same result as no option for the
-probe of E29 in this VM.
+-Wl,--defsym=mprotect=getpid` the linker gives the name `mprotect` to `getpid`, the allocator gets
+no storage, and the first `new` is the runtime error `out of memory` (exit 134). `new` calls no
+`calloc` now, so the option `--defsym=calloc=malloc` of the first census changes nothing. `-Xcc
+-ffast-math` gave the same result as no option for the probe of E29 in this VM.
 
 ```fort
 fn main() i32 {
@@ -2293,13 +2365,15 @@ fn main() i32 {
   `i32* p = pick(false, &v); println(*p);`, where `pick` returns `null`, exits 139 (SIGSEGV) in both
   modes. State: closed by the null check. Method: probed.
 - **E02. A `load` or a `store` through a view after the `del` of its storage.** Sites: as E01.
-  Precondition: as E01; the reference gives a freed object no address range. Guard: none in this
-  tree: `del` is `free` (R11), and a later `calloc` can give the same storage to another object.
-  D10.9 makes the storage dead storage: the runtime never gives it to another object (rule 1), and a
-  read gives the value that the storage held last or a memory fault (rule 2). Evidence: `i32* v = p;
-  del(p); i32 mut* own q = new(i32); *q = 9; println(*v);` prints `1431655795` in the checked mode
-  and `1431655796` in the release mode. The first value of `*p` was 7. State: closed by dead
-  storage. Method: probed.
+  Precondition: as E01; the reference gives a freed object no address range. Guard: the allocator of
+  the runtime, `std.heap` (`stdlib.md` 2.16). A `del` calls `std.rt.release`, which makes the
+  storage dead storage (R11). The storage is a part of a mapping that `mmap` gave (H01), and no call
+  that the module of the program can see ends that mapping, so the address range stays: no later
+  allocation, frame or mapping takes it (D10.9 rule 1). A read gives the value that the storage held
+  last, or a memory fault where the allocator took the access away (rule 2, H04). Evidence: `i32* v
+  = p; del(p); i32 mut* own q = new(i32); *q = 9; println(*v);` prints `7`, the value that `*p` held
+  last, in both modes. `test/lang/run/pointers/015` to `025` hold the two results. State: guarded.
+  Method: probed.
 - **E03. A `load` or a `store` through a pointer to a local after its function returns.** Sites: as
   E01, and each `alloca` (E39). Precondition: as E01; the storage of an `alloca` ends when its
   function returns. Guard: none in this tree. D10.1 puts a local that an `&` names in frame storage,
@@ -2349,11 +2423,11 @@ fn main() i32 {
   `gen_data.ft:436` and `gen_data.ft:452`. Precondition: "Overestimating the alignment results in
   undefined behavior." Guard: each number is `type_alignof` of the type of the place
   (`types.ft:1307`). Each object has that alignment or more: an `alloca` and a global carry the same
-  number, and `calloc` gives storage that fits each object type (C11 7.22.3). A cast never gives a
-  pointer a pointee with more alignment (`report_pointee_growth`, `check.ft:4154`). Evidence:
-  `cast(&pair, i64*)` for an `i32[2] pair` is the error `a cast never makes the alignment larger (4
-  to 8 bytes)`. The test `ir-flags` holds an alignment on each `load` and each `store`; a mutant
-  that removes the text turns it red. State: guarded. Method: probed.
+  number, and `heap.take` gives storage at a multiple of 16 (R10). A cast never gives a pointer a
+  pointee with more alignment (`report_pointee_growth`, `check.ft:4154`). Evidence: `cast(&pair,
+  i64*)` for an `i32[2] pair` is the error `a cast never makes the alignment larger (4 to 8 bytes)`.
+  The test `ir-flags` holds an alignment on each `load` and each `store`; a mutant that removes the
+  text turns it red. State: guarded. Method: probed.
 - **E09. A `store` into a global `constant`.** Sites: the 4 texts of `constant` for a global:
   `gen_data.ft:99`, `gen_data.ft:124`, `gen_data.ft:430` and `gen_data.ft:449`. Precondition: "the
   contents of the variable will never be modified". Guard: a pointer to a constant has no `mut`, and
@@ -2366,18 +2440,19 @@ fn main() i32 {
   Guard: `var_decl_head` of `spec/grammar.md` gives each local an initializer: `i32 mut x;` is the
   error `expected '=', found ';'`. `{}` writes the whole place with `llvm.memset` (`place_zero`,
   `fir_llvm.ft:497`), and a designated literal does the same before its fields (`aggregate_into`,
-  `fir_llvm.ft:1145`). The verifier refuses a read of a temporary before its assignment (V13,
-  `fir_verify.ft:119`). `new` is `calloc` (R10). Each `live` writes the zero value into the storage
-  of its local before the initializer stores: `llvm.memset` for an aggregate and a `store` of the
-  zero constant for a scalar (`live_zero`, `fir_llvm.ft:510`, called at `fir_llvm.ft:1258`; D10.1).
-  The entry block stores the zero value into `%result`, the storage of a scalar `_0`
-  (`fir_llvm.ft:345`). Evidence: for a `struct padded { u8 small; u64 big; }` the 7 padding bytes
-  read 0 after `{}`, after a designated literal, in an array literal, in a parameter and after a
-  copy, in both modes. The padding of a positional literal is E11. State: guarded. Method: probed.
+  `fir_llvm.ft:1147`). The verifier refuses a read of a temporary before its assignment (V13,
+  `fir_verify.ft:119`). `new` gives storage that no allocation held, all 0 (R10). Each `live` writes
+  the zero value into the storage of its local before the initializer stores: `llvm.memset` for an
+  aggregate and a `store` of the zero constant for a scalar (`live_zero`, `fir_llvm.ft:510`, called
+  at `fir_llvm.ft:1262`; D10.1). The entry block stores the zero value into `%result`, the storage
+  of a scalar `_0` (`fir_llvm.ft:345`). Evidence: for a `struct padded { u8 small; u64 big; }` the 7
+  padding bytes read 0 after `{}`, after a designated literal, in an array literal, in a parameter
+  and after a copy, in both modes. The padding of a positional literal is E11. State: guarded.
+  Method: probed.
 - **E11. A `load` of a padding byte that no `store` wrote: the positional literal.** Sites:
   `lower_literal` writes `aggregate T(...)` with no fill for a literal with no designator
   (`fir_lower.ft:2024`), and `aggregate_into` then writes one `store` for each field
-  (`fir_llvm.ft:1134`). D3.14 lets a program read each byte of a struct through a cast to a pointee
+  (`fir_llvm.ft:1136`). D3.14 lets a program read each byte of a struct through a cast to a pointee
   of the same size. Precondition: as E10. Guard: D10.1 gives each byte of a local the value 0 when
   its declaration runs. The `live` of a named local writes `llvm.memset` over its storage before the
   field stores (E10). Into the whole storage of a temporary or of `_0`, the lowering writes a
@@ -2444,7 +2519,7 @@ fn main() i32 {
   a function pointer. 2 texts write a call of a runtime entry (E48), and 5 write a call of an
   intrinsic (E34, E41, E42, E43, E28). Precondition: the type and the calling convention of a call
   match the callee. Guard: one function, `signature_of` (`gen.ft:1374`), gives the text of the call
-  (`fir_llvm.ft:1028`), of the definition (`fir_llvm.ft:1537`), of the two declarations
+  (`fir_llvm.ft:1030`), of the definition (`fir_llvm.ft:1541`), of the two declarations
   (`gen_data.ft:464`, `gen_data.ft:529`) and of `main` (`gen.ft:1621`). The emitter writes no
   calling convention keyword, so each side has the default one: the test `ir-flags` holds the
   permitted words of a `declare`, a `define` and a `call` line (E44). State: guarded. Method: read.
@@ -2457,7 +2532,7 @@ fn main() i32 {
   `%t1` is the null pointer that a `load` gave, and the program exits 139 in both modes. D10.6 makes
   each evaluation of a place through a null pointer the runtime error `null dereference`, so the
   null check stands before the call. A dead destination is E02 and E03. State: closed by the null
-  check, dead storage and frame storage. Method: probed.
+  check and frame storage. Method: probed.
 - **E20. The declaration and the call of an `extern` function.** Sites: `declare ... nobuiltin`,
   `gen_data.ft:531` and `gen_data.ft:549`. Precondition: the declaration agrees with the C function,
   and each call holds the preconditions of that function. Guard: only a trusted module declares or
@@ -2498,12 +2573,12 @@ fn main() i32 {
   the error in the checked mode and `-2147483648` in the release mode. State: guarded. Method:
   probed.
 - **E26. `add`, `sub`, `mul`: integer overflow.** Sites: `fir_llvm.ft:780`, `fir_llvm.ft:782`,
-  `fir_llvm.ft:784`, and the `sub` of a span length (`fir_llvm.ft:1166`, `fir_llvm.ft:1179`).
+  `fir_llvm.ft:784`, and the `sub` of a span length (`fir_llvm.ft:1168`, `fir_llvm.ft:1181`).
   Precondition: none, because the emitter writes no `nsw` and no `nuw`: the result wraps. The
   checked mode calls the overflow intrinsic and keeps `chk_overflow` (`fir_lower.ft:2735`), so an
   overflow of `+`, `-`, `*`, unary `-`, `++` and `--` traps. The release mode removes the check and
   the result wraps (D11.1). `regrow_value` writes 2 more plain `mul` in both modes, the bytes of the
-  old elements and of the new storage (`fir_llvm.ft:983`, `fir_llvm.ft:984`). They take no check:
+  old elements and of the new storage (`fir_llvm.ft:984`, `fir_llvm.ft:985`). They take no check:
   `std.rt.regrow` ends the program before them when the count is below the length or the product of
   the count and the size does not fit, so neither product wraps. Evidence: a mutant that writes `add
   nsw` turns the test `ir-flags` red. `max + 1` and `-min` for an `i32` give `runtime error: integer
@@ -2514,7 +2589,7 @@ fn main() i32 {
   `inrange`, `nnan`, `ninf`, `nsz`, `arcp`, `contract`, `afn`, `reassoc` and `fast`. State: no
   undefined state. Method: probed.
 - **E28. A float to an integer.** Sites: `llvm.fptosi.sat` and `llvm.fptoui.sat`: the name
-  (`gen.ft:1759`, `gen.ft:1761`), the call (`fir_llvm.ft:1758`) and the declaration
+  (`gen.ft:1759`, `gen.ft:1761`), the call (`fir_llvm.ft:1762`) and the declaration
   (`gen_data.ft:575`). A plain `fptosi` or `fptoui` is poison when "the value cannot fit"; the
   emitter writes 0 of them and the test `ir-flags` holds 0. The saturating intrinsic has no
   precondition (D3.14). Evidence: `cast(1e300, i32)`, `cast(nan, i32)`, `cast(inf, u8)` and
@@ -2522,8 +2597,8 @@ fn main() i32 {
   state. Method: probed.
 - **E29. The float instructions and the integer to float conversions.** Sites: `fadd`, `fsub`,
   `fmul`, `fdiv` (`fir_llvm.ft:809`, `fir_llvm.ft:811`, `fir_llvm.ft:813`, `fir_llvm.ft:815`),
-  `fneg` (`fir_llvm.ft:1085`), `fcmp` (`gen.ft:958`), `fptrunc`, `fpext` (`fir_llvm.ft:1737`,
-  `fir_llvm.ft:1739`), `sitofp`, `uitofp` (`fir_llvm.ft:1743`, `fir_llvm.ft:1745`). Precondition: no
+  `fneg` (`fir_llvm.ft:1087`), `fcmp` (`gen.ft:958`), `fptrunc`, `fpext` (`fir_llvm.ft:1741`,
+  `fir_llvm.ft:1743`), `sitofp`, `uitofp` (`fir_llvm.ft:1747`, `fir_llvm.ft:1749`). Precondition: no
   operand is undefined: `fdiv` by 0 gives an infinity or a NaN, and `sitofp` rounds. Each
   instruction assumes the default floating-point environment: "Running LLVM code in an environment
   where these assumptions are not met can lead to undefined behavior." Guard: fort has no construct
@@ -2532,20 +2607,20 @@ fn main() i32 {
   prints `inf`, `cast(18446744073709551615, f32)` prints `1.8446744e+19`, and the product of the
   smallest normal `f64` and 0.5 is above 0. State: guarded. Method: read.
 - **E30. A pointer comparison, and a pointer to an integer.** Sites: `icmp`, `gen.ft:942`, and
-  `ptrtoint`, `fir_llvm.ft:1700`. Precondition: none: `icmp` compares the two addresses, and
+  `ptrtoint`, `fir_llvm.ft:1704`. Precondition: none: `icmp` compares the two addresses, and
   `ptrtoint` gives the address. fort has `==` and `!=` on pointers only: `a < f` for two `i32*` is
   the error `'<' takes ordered operands, not i32*` (`check.ft:2333`). D10.7 ("The number of an
   address") fixes no number: one storage has one number in one run, and two runs can give different
   numbers. Two literals of one text gave one address in both modes. State: no undefined state.
   Method: probed.
-- **E31. An integer to a pointer.** Sites: `inttoptr` in `cast_value`, `fir_llvm.ft:1697`.
+- **E31. An integer to a pointer.** Sites: `inttoptr` in `cast_value`, `fir_llvm.ft:1701`.
   Precondition: none at the instruction; an access through the result needs an address inside a live
   object. Guard: no fort source reaches the site, because the checker refuses each cast of an
   integer to a pointer (`check.ft:4192`; D3.14). Evidence: `cast(bits, i32*)` for a `u64 bits` is
   the error `a cast never makes a pointer from an integer`, and the test `ir-flags` holds 0
   `inttoptr`. State: guarded. Method: probed.
 - **E32. A pointer cast.** Sites: no instruction: a pointer is `ptr`, and `cast_value` returns its
-  operand (`fir_llvm.ft:1685`). Precondition: none at the cast. The access after it has the
+  operand (`fir_llvm.ft:1689`). Precondition: none at the cast. The access after it has the
   preconditions of E01, E04, E08, E09 and E14. Guard: D3.14: a cast never makes the pointee larger
   or more aligned (`check.ft:4154`), never gives a type to a `void*` (`check.ft:4201`), never adds
   `mut` (`check.ft:4217`) or `own` (`check.ft:4227`), and keeps each pointer place (E14). Evidence:
@@ -2554,18 +2629,18 @@ fn main() i32 {
   that overlap in part, whose copy has a defined result (E41), and a view of the padding, which
   holds 0 (E11). State: guarded. Method: probed.
 - **E33. `unreachable` after the call of a failure entry.** Sites: `fail_block`, `gen.ft:1697`, and
-  `fail_call`, `fir_llvm.ft:1394`. Precondition: `unreachable` "has no defined semantics", so
+  `fail_call`, `fir_llvm.ft:1398`. Precondition: `unreachable` "has no defined semantics", so
   control must not reach it. Why control does not: the line before it is a call of one of the 10
   failure entries of `std.rt` (`fail_overflow`, `fail_shift`, `fail_div_zero`, `fail_div_overflow`,
   `fail_bounds`, `fail_span`, `fail_alloc_count`, `fail_enum`, `assert_fail`, `panic`). Each one is
-  `noreturn` (E36) and ends in `abort()` (`std/rt.ft:829`). Evidence: the test `ir-flags` holds this
+  `noreturn` (E36) and ends in `abort()` (`std/rt.ft:830`). Evidence: the test `ir-flags` holds this
   form for each such `unreachable`. State: guarded. Method: probed.
-- **E34. `unreachable` after `llvm.trap`.** Sites: `fir_llvm.ft:1509`. Why control does not reach
+- **E34. `unreachable` after `llvm.trap`.** Sites: `fir_llvm.ft:1513`. Why control does not reach
   it: `llvm.trap` ends the program. The lowering writes the pair after each call of a `noreturn`
   function (`fir_lower.ft:2138`) and at the end of a `noreturn` function (`fir_lower.ft:270`).
   Evidence: a mutant that removes the call of `llvm.trap` turns the test `ir-flags` red. State:
   guarded. Method: mutation-measured.
-- **E35. `unreachable` alone.** Sites: `fir_llvm.ft:1511`, from the end of a function that returns a
+- **E35. `unreachable` alone.** Sites: `fir_llvm.ft:1515`, from the end of a function that returns a
   value (`lower_end`, `fir_lower.ft:274`). Why control does not reach it: the checker refuses a body
   whose end a path reaches (`missing return`, `check_stmt.ft:908`), and the verifier refuses a
   function in which a path from `bb0` reaches it (V9, `fir_verify.ft:115`). Evidence: `fn value(bool
@@ -2595,7 +2670,7 @@ fn main() i32 {
   insufficient stack space for the allocation." Guard: each definition carries
   `"probe-stack"="inline-asm"` (`gen_data.ft:23`; D10.8), so a frame above one page touches each
   page, and the guard page ends the program. D10.7 names this memory fault as a defined result. The
-  ctest `stack_depth` holds the probes (`CMakeLists.txt:839`). Evidence: a frame of 64 MB whose
+  ctest `stack_depth` holds the probes (`CMakeLists.txt:853`). Evidence: a frame of 64 MB whose
   first write goes to the far end exits 139 (SIGSEGV) in both modes. Limit: the reference has no
   exception for a probed stack. The guard is a property of the two targets, not of the IR. State:
   guarded. Method: probed.
@@ -2632,14 +2707,14 @@ fn main() i32 {
   Sites: the copy intrinsic of E41, `gen.ft:1143`, and `gen.ft:1160`. `memset_at` writes each
   `llvm.memset` of the translator. It has 6 call sites: `place_zero` and `live_zero`
   (`fir_llvm.ft:500`, `fir_llvm.ft:514`), `hold` (`fir_llvm.ft:652`), `write_held`
-  (`fir_llvm.ft:662`), `regrow_value` (`fir_llvm.ft:997`) and `aggregate_into` (`fir_llvm.ft:1146`).
+  (`fir_llvm.ft:662`), `regrow_value` (`fir_llvm.ft:999`) and `aggregate_into` (`fir_llvm.ft:1148`).
   Precondition: both pointers are valid for the length, and the length is a defined value. Guard:
   the length is the literal `type_sizeof` of the type of the place (`types.ft:1298`), the alignment
   is E08, and the last argument is the literal `false`. The pointers are the places of E01, E02 and
   E03. Evidence: the test `ir-flags` holds each call at one of two forms with a literal length.
   State: guarded. Method: probed.
 - **E43. Each other intrinsic.** Sites: the 6 overflow intrinsics
-  `llvm.{s,u}{add,sub,mul}.with.overflow` (call `fir_llvm.ft:1636`, declaration `gen_data.ft:587`),
+  `llvm.{s,u}{add,sub,mul}.with.overflow` (call `fir_llvm.ft:1640`, declaration `gen_data.ft:587`),
   the 2 saturating conversions (E28) and `llvm.trap` (`gen_data.ft:570`). None has a precondition.
   With the copy intrinsic (E41) and `llvm.memset` the emitter declares 5 forms, and the test
   `ir-flags` refuses a `declare` line of another form. State: no undefined state. Method: probed.
@@ -2680,9 +2755,9 @@ fn main() i32 {
   defines breaks the link and not the run. State: no undefined state. Method: read.
 - **E48. A `call` of a runtime entry: the signature of the call and of `std/rt.ft`.** Sites:
   `gen_call_rt` (`gen.ft:1659`) and `gen_call_rt_value` (`gen.ft:1669`), from 10 call sites: the
-  allocation (`fir_llvm.ft:914`), the release (`fir_llvm.ft:1231`), the failure entry of a check
-  (`fir_llvm.ft:1393`), the fail block (`gen.ft:1696`), the 3 calls of `regrow` (`fir_llvm.ft:981`,
-  `fir_llvm.ft:991`, `fir_llvm.ft:995`) and the 3 calls of the emitted `main` (`gen.ft:1603`,
+  allocation (`fir_llvm.ft:914`), the release (`fir_llvm.ft:1235`), the failure entry of a check
+  (`fir_llvm.ft:1397`), the fail block (`gen.ft:1696`), the 3 calls of `regrow` (`fir_llvm.ft:982`,
+  `fir_llvm.ft:992`, `fir_llvm.ft:997`) and the 3 calls of the emitted `main` (`gen.ft:1603`,
   `gen.ft:1610`, `gen.ft:1633`). Precondition: as E18. `signature_of` does not write these calls.
   The call takes its name and its result type from a row of the table of `runtime_sig.ft`
   (`rt_sig_of`, `runtime_sig.ft:160`) and its argument types from the call site. The definition
@@ -2737,52 +2812,54 @@ fn main() i32 {
   `libc.memcpy` and writes zero into the old elements (R08), so each span must hold its bytes inside
   its object. Guard: the new span is the result of `std.rt.regrow`, an allocation of `alloc` of the
   count times the size bytes, with the product of the count and the size as its length. The old span
-  is the pointer and the length of the operand times the size, and `std.rt.regrow` refuses a null
-  pointer with a length that is not 0. The span of the offsets is the constant `@.words.N` (E47) and
-  its count, or `null` and 0 when the element has no owner word. Each length is a product that does
-  not wrap (E26). The pointer of the operand is the start of its allocation by the owner rules,
-  which the census does not audit (R11). State: guarded. Method: read.
+  is the pointer and the length of the operand times the size, and `std.rt.regrow` refuses an
+  operand that is no zero span and starts no live allocation (`heap.is_start`, D10.9 rule 4). The
+  span of the offsets is the constant `@.words.N` (E47) and its count, or `null` and 0 when the
+  element has no owner word. Each length is a product that does not wrap (E26). The release of the
+  old storage and of each `del` tests the start of its allocation, so the guard does not need the
+  owner rules (R11). State: guarded. Method: read.
 
 ### 9.4 The rows of `std/rt.ft`
 
-The module has 1126 lines. `grep -n 'libc\.[a-z_]*(' std/rt.ft`, less the comment lines, gives 18
-call lines of 14 functions of `std.libc`. 11 of them are `extern` functions of the C library. The
+The module has 1160 lines. `grep -n 'libc\.[a-z_]*(' std/rt.ft`, less the comment lines, gives 16
+call lines of 12 functions of `std.libc`. 9 of them are `extern` functions of the C library. The
 other 3 are fort functions of `std.libc` that call C: `snprintf_float`, `errno` and `set_errno`.
-Each of the 14 has one row, but `errno` and `set_errno` share one row: 13 rows. Each call of C
-carries a `// C call` comment that states its pointer arguments (D9.8). A row says what C behavior
-the operation relies on.
+Each of the 12 has one row, but `errno` and `set_errno` share one row: 11 rows. Two more rows give
+the calls of `std.heap` that replaced `calloc` and `free` (R10, R11). Each call of C carries a `// C
+call` comment that states its pointer arguments (D9.8). A row says what C behavior the operation
+relies on.
 
-- **R01. `libc.write`.** Site: `std/rt.ft:111`. C behavior: POSIX `write` reads `rest.len` bytes at
+- **R01. `libc.write`.** Site: `std/rt.ft:112`. C behavior: POSIX `write` reads `rest.len` bytes at
   `rest.ptr`; an `fd` that is not open gives -1 and `EBADF`. Guard: the pointer and the length come
   from one span, and `rest.len > 0` because `done < bytes.len`. State: guarded. Method: read.
-- **R02. `libc.errno` and `libc.set_errno`: the `errno` of C as a value.** Sites: `std/rt.ft:82`,
-  `std/rt.ft:84`, `std/rt.ft:113`. `std/rt.ft` holds no pointer to `errno`: the two functions give
+- **R02. `libc.errno` and `libc.set_errno`: the `errno` of C as a value.** Sites: `std/rt.ft:83`,
+  `std/rt.ft:85`, `std/rt.ft:114`. `std/rt.ft` holds no pointer to `errno`: the two functions give
   and take the value. The load and the store through the pointer stand in `std.libc`, directly at
-  the call of C: `std/linux/libc.ft:134`, `std/linux/libc.ft:141`, `std/darwin/libc.ft:134`,
-  `std/darwin/libc.ft:141`. C behavior: `__errno_location` of glibc and `__error` of the Darwin C
+  the call of C: `std/linux/libc.ft:180`, `std/linux/libc.ft:187`, `std/darwin/libc.ft:180`,
+  `std/darwin/libc.ft:187`. C behavior: `__errno_location` of glibc and `__error` of the Darwin C
   library return a pointer to the `errno` of the thread, which is never null and lives as long as
   the thread (C11 7.5). Guard: the trusted declaration of `std.libc`; no call of C stands between
   the call that gives the pointer and the access through it (D9.8). State: guarded. Method: read.
-- **R03. `libc.isatty`.** Site: `std/rt.ft:83`. C behavior: POSIX `isatty` takes each `int`; a bad
+- **R03. `libc.isatty`.** Site: `std/rt.ft:84`. C behavior: POSIX `isatty` takes each `int`; a bad
   descriptor gives 0 and sets `errno`, which the function saves and restores. No pointer argument.
   State: guarded. Method: read.
-- **R04. `libc.memmove`.** Site: `std/rt.ft:163`. C behavior: `memmove` copies `n` bytes and permits
+- **R04. `libc.memmove`.** Site: `std/rt.ft:164`. C behavior: `memmove` copies `n` bytes and permits
   an overlap (C11 7.24.2.2); both pointers must be valid, also for `n` 0. Guard: `n` is `bytes.len`,
   the function returns before the call when `n` is 0, and the flush before it leaves `n` bytes in
   `room`. Evidence: a module with no `import extern;` appends `b->data[1..5]` to the buffer `b` that
   holds `abcdef`; the output is `abcdefbcde` in both modes. State: guarded. Method: probed.
-- **R05. `libc.strtod`.** Site: `std/rt.ft:619`. C behavior: `strtod` reads a string up to its NUL
+- **R05. `libc.strtod`.** Site: `std/rt.ft:620`. C behavior: `strtod` reads a string up to its NUL
   (C11 7.22.1.3); a null `endptr` is legal. Guard: `text` is a local array, and `decimal_text`
   stores the NUL through a checked index. State: guarded. Method: read.
-- **R06. `libc.strtof`.** Site: `std/rt.ft:627`. C behavior and guard: as R05. State: guarded.
+- **R06. `libc.strtof`.** Site: `std/rt.ft:628`. C behavior and guard: as R05. State: guarded.
   Method: read.
-- **R07. `libc.snprintf_float`.** Sites: `std/rt.ft:640`, `std/rt.ft:665`. C behavior: `snprintf`
+- **R07. `libc.snprintf_float`.** Sites: `std/rt.ft:641`, `std/rt.ft:666`. C behavior: `snprintf`
   writes at most the given size with a NUL, and `%.*e` reads one `int` and one `double` from the
   variable arguments (C11 7.21.6.1, 7.21.6.5). An argument of another type is undefined in C. Guard:
   the size is the length of the local `scratch`; the format is one constant; the declaration of
   `std.libc` fixes the two argument types, and the `f32` caller casts to `f64`. State: guarded.
   Method: read.
-- **R08. `libc.memcpy`.** Sites: `std/rt.ft:691`, `std/rt.ft:699`, `std/rt.ft:1049`. C behavior:
+- **R08. `libc.memcpy`.** Sites: `std/rt.ft:692`, `std/rt.ft:700`, `std/rt.ft:1083`. C behavior:
   `memcpy` needs two objects of `n` bytes that do not overlap (C11 7.24.2.1). Guard: in the first 2,
   the two pointers are the addresses of two locals of 8 bytes (4 for `f32`), and the length is that
   constant. In `regrow_move`, `room` is `fresh[0..old.len]`, whose span expression checks its bound,
@@ -2790,63 +2867,64 @@ the operation relies on.
   allocation of `old`, so the two do not overlap; the function returns before the call when
   `old.len` is 0, because the pointer of an empty span is null. The two spans are the spans of E50.
   State: guarded. Method: read.
-- **R09. `libc.abort`.** Site: `std/rt.ft:829`. C behavior: `abort` raises SIGABRT and does not
+- **R09. `libc.abort`.** Site: `std/rt.ft:830`. C behavior: `abort` raises SIGABRT and does not
   return (C11 7.22.4.1). `std` installs no handler (R22), so the process ends. Evidence: each
   runtime error of 9.3 exits 134. State: guarded. Method: probed.
-- **R10. `libc.calloc`.** Site: `std/rt.ft:981`, in `alloc`. C behavior: `calloc` gives null or new
-  storage of `size` bytes, all 0, with an alignment that fits each object type (C11 7.22.3,
-  7.22.3.2). E10 and E08 rely on this. Guard: `alloc` tests the product of the element size and the
-  count for overflow, makes the size 0 into 1, and reports `out of memory` for null. The compiler
-  tests a count below 0 before the call (`chk_alloc_count`, `fir_lower.ft:1860`). `regrow` makes its
-  own tests of the count before it calls `alloc`. The link line can give the name `calloc` to
-  another function (B03). State: guarded. Method: read.
-- **R11. `libc.free`.** Site: `std/rt.ft:993`. C behavior: `free` takes null or a pointer that
-  `calloc` gave and that no call freed (C11 7.22.3.3). Guard: `free` is a boundary function. The
-  compiler calls it for `del` of an owner and for the old storage of `regrow` after `regrow_move`,
-  and an owner comes from `new` or from a trusted module: a cast never adds `own` (`check.ft:4227`),
-  a copy of an owner needs `move` (`check.ft:1722`), and `del` writes null into the owner
-  (`gen_zero_owner`, `gen.ft:1705`). Evidence: `del(p); del(p);` exits 0 in both modes; `box mut b =
-  a;` for a struct with an owner is the error `copying an owning value requires 'move'`; a `mut`
-  cast of a struct of two owners to a struct of two plain pointers is the error `a 'mut' cast hides
-  the pointer i32 mut* own at byte 0`; `rt.free(null)` in a module that is not trusted is the error
-  `'std.rt.free' is a boundary function`. The census does not audit the ownership rules. D10.9 (rule
-  4) makes a `del` of a pointer that is no start of a live allocation the runtime error `invalid
-  release`, in a later change; the guard then does not need the ownership rules. State: guarded.
-  Method: probed.
-- **R12. `libc.memcmp`.** Site: `std/rt.ft:1079`, in `str_eq`. C behavior: `memcmp` reads `n` bytes
+- **R10. The storage of `alloc`: `heap.take`, which replaced `libc.calloc`.** Site: `std/rt.ft:979`,
+  in `alloc`. Behavior: `std.heap.take` gives null or the storage of a new allocation of the size,
+  or of 1 byte for 0, at a multiple of 16 and all 0, which no earlier allocation held (`stdlib.md`
+  2.16, H01). E10 and E08 rely on this. `std/rt.ft` calls no allocator of C. Guard: `alloc` tests
+  the product of the element size and the count for overflow and reports `out of memory` for null
+  (D10.9 rule 5). The compiler tests a count below 0 before the call (`chk_alloc_count`,
+  `fir_lower.ft:1860`). `regrow` makes its own tests of the count before it calls `alloc`. Evidence:
+  the run tests `test/lang/run/stdlib/186` to `195` and `run/errors/054` and `064` to `067`. State:
+  guarded. Method: probed.
+- **R11. The release: `heap.drop` in `release` and `free`, which replaced `libc.free`.** Sites:
+  `std/rt.ft:999`, in `release`, and `std/rt.ft:1019`, in `free`. Behavior: `std.heap.drop` releases
+  the live allocation that starts at its argument and returns `true`, or returns `false` and changes
+  nothing. It reads no byte at the argument: it tests the address against the records of the
+  allocator (`stdlib.md` 2.16). Guard: `release` and `free` are boundary functions, and they report
+  a `false` for a pointer that is not null as the runtime error `invalid release` (D10.9 rule 4). So
+  a second `del`, a `del` of an inner address, of a local, of a global or of storage of C is that
+  error and no release of other storage; the guard does not need the owner rules. The compiler calls
+  `release` for `del` and for the old storage of `regrow`; only the compiler of
+  `tools/bootstrap.ref` calls `free`. Evidence: `test/lang/run/errors/048` to `053`, `055` to `063`
+  and `068`; `rt.free(null)` in a module that is not trusted is the error `'std.rt.free' is a
+  boundary function`. State: guarded. Method: probed.
+- **R12. `libc.memcmp`.** Site: `std/rt.ft:1113`, in `str_eq`. C behavior: `memcmp` reads `n` bytes
   of two objects; a null pointer is undefined, also for `n` 0 (C11 7.24.1, 7.24.4.1). Guard: the
   call runs only when the two lengths are equal and above 0. `str_eq` is a boundary function, and
   the compiler calls it with the `.ptr` and the `.len` of two strings. Evidence: `rt.str_eq(null, 1,
   null, 1)` in a module that is not trusted is the error `'std.rt.str_eq' is a boundary function`.
   State: guarded. Method: probed.
-- **R13. `libc.exit`.** Site: `std/rt.ft:1125`. C behavior: `exit` runs the `atexit` handlers and
+- **R13. `libc.exit`.** Site: `std/rt.ft:1159`. C behavior: `exit` runs the `atexit` handlers and
   does not return; a second call of `exit` from a handler is undefined (C11 7.22.4.4). Guard: `std`
   registers no handler: `grep -rn 'extern fn atexit\|\.atexit(' std` finds 0 lines. State: guarded.
   Method: read.
-- **R14. `str.from_cstr`, which calls `libc.strlen`.** Sites: 6 calls: `std/rt.ft:369`,
-  `std/rt.ft:813`, `std/rt.ft:885`, `std/rt.ft:934`, `std/rt.ft:957`, `std/rt.ft:1104`. C behavior:
+- **R14. `str.from_cstr`, which calls `libc.strlen`.** Sites: 6 calls: `std/rt.ft:370`,
+  `std/rt.ft:814`, `std/rt.ft:886`, `std/rt.ft:935`, `std/rt.ft:958`, `std/rt.ft:1138`. C behavior:
   `strlen` reads up to a NUL inside the object (C11 7.24.6.3). Guard: `from_cstr` is a boundary
   function and tests for null. 5 calls take a pointer that the compiler emits: a file name, a type
   name, the text of an `assert` or the name of an enum member, each a constant with its NUL. The
   last of the 6 calls takes an element of `argv` (R21). State: guarded. Method: read.
-- **R15. A span of a raw pointer: `argv[0..n]`.** Site: `std/rt.ft:1102`, in `args_init`. C
+- **R15. A span of a raw pointer: `argv[0..n]`.** Site: `std/rt.ft:1136`, in `args_init`. C
   behavior: `argv` has `argc` elements (C11 5.1.2.2.1). Guard: `n` is `argc`, and the function
   returns before the span when `argc <= 0`. Only the bodies of `str.from_cstr` and `rt.args_init`
   can write this form (`raw_span_allowed`, `check.ft:2713`; D6.9). A span beyond the object is case
   3 of the trusted premise (D10.7). Evidence: `p[0..8]` for an `i32* p` in a module that is not
   trusted is the error `cannot take a span of i32*: a pointer has no length`. State: guarded.
   Method: probed.
-- **R16. A pointer cast: 6 casts to `u8 mut*` and `u8*`.** Sites: `std/rt.ft:691`, `std/rt.ft:699`,
-  `std/rt.ft:1079`. C behavior: a pointer to a character type can read and write each byte of an
+- **R16. A pointer cast: 6 casts to `u8 mut*` and `u8*`.** Sites: `std/rt.ft:692`, `std/rt.ft:700`,
+  `std/rt.ft:1113`. C behavior: a pointer to a character type can read and write each byte of an
   object (C11 6.5 paragraph 7). Guard: each cast goes to a pointee of 1 byte, which D3.14 permits in
   each module. The other 42 casts of the module are 35 among integers, `char` and floats, 6 from a
   `string` or a `char` span to `u8@`, and 1 pointer to `u64` (R17). State: guarded. Method: read.
-- **R17. A pointer to an integer: `cast(p, u64)`.** Site: `std/rt.ft:348`, in `print_ptr`. C
+- **R17. A pointer to an integer: `cast(p, u64)`.** Site: `std/rt.ft:349`, in `print_ptr`. C
   behavior: none: the function prints the address. The emitted instruction is `ptrtoint` (E30).
   State: no undefined state. Method: read.
 - **R18. Pointer arithmetic.** Sites: 0. The language has none: `&x + 1` is the error `there is no
   pointer arithmetic` (E04). The module reaches an element through a span index, which carries its
-  check, and takes `.ptr` of a span on 2 lines (`std/rt.ft:111`, `std/rt.ft:163`) for R01 and R04.
+  check, and takes `.ptr` of a span on 2 lines (`std/rt.ft:112`, `std/rt.ft:164`) for R01 and R04.
   State: no undefined state. Method: probed.
 - **R19. A cast of an integer to a pointer.** Sites: 0 of the 48 casts of the module. D3.14 refuses
   the cast in each module, a trusted one too (E31). State: no undefined state. Method: probed.
@@ -2854,7 +2932,7 @@ the operation relies on.
   library. The emitter writes no inline assembly, and the test `ir-flags` holds 0 `asm`. State: no
   undefined state. Method: probed.
 - **R21. The start-up code.** Sites: the emitted `main` (`gen_main`, `gen.ft:1581`) and `args_init`
-  (`std/rt.ft:1095`). The start files of the C library call `main(argc, argv)`. The emitted `main`
+  (`std/rt.ft:1129`). The start files of the C library call `main(argc, argv)`. The emitted `main`
   calls `std.rt.args_init`, `std.rt.args`, the `main` of the program and `std.rt.flush_all`, and
   returns the status with the mask 255 (`gen.ft:1635`). C behavior: `argv[0]` to `argv[argc - 1]`
   point to strings with a NUL, and the return from `main` calls `exit` (C11 5.1.2.2.1, 5.1.2.2.3).
@@ -2865,12 +2943,78 @@ the operation relies on.
   finds 0 lines, so no fort code runs at a signal. `abort` gives SIGABRT (exit 134), the guard page
   gives SIGSEGV (exit 139), and `llvm.trap` gives the trap of the target. `sys.raise_signal` sends a
   signal to the process, whose default action applies. State: no undefined state. Method: read.
-- **R23. The 6 mutable globals.** Sites: `std/rt.ft:64`, `std/rt.ft:65`, `std/rt.ft:69`,
-  `std/rt.ft:70`, `std/rt.ft:73`, `std/rt.ft:76`. C behavior: none. Each output call and each
+- **R23. The 6 mutable globals.** Sites: `std/rt.ft:65`, `std/rt.ft:66`, `std/rt.ft:70`,
+  `std/rt.ft:71`, `std/rt.ft:74`, `std/rt.ft:77`. C behavior: none. Each output call and each
   failure reads and writes them with no lock, so a second thread gives the race of E15. D10.7 says
   that a fort program has one thread (D9.8). Guard: as E15. State: guarded. Method: read.
 
-### 9.5 The rows of the back end line
+### 9.5 The rows of `std/heap.ft`
+
+The allocator of the runtime (`stdlib.md` 2.16) has 840 lines. `grep -n 'libc\.[a-z_]*('
+std/heap.ft`, less the comment lines, gives 11 call lines of 4 `extern` functions of the C library:
+`mmap`, `munmap`, `mprotect` and `madvise`. Each has one row, and the casts and the state of the
+module have one row each.
+
+- **H01. `libc.mmap`.** Site: `std/heap.ft:162`, in `map_bytes`, for a segment and for a huge
+  allocation. C behavior: POSIX `mmap` with a null address, `MAP_PRIVATE | MAP_ANON`, the descriptor
+  -1 and the offset 0 gives a new mapping of `bytes` bytes, each 0, at an address that no mapping
+  holds, or `MAP_FAILED` with `errno`. Guard: `map_bytes` asks for `SEGMENT_BYTES` (2^32) or more,
+  so the whole pointee of the result, a `libc.map_range` of 2^32 bytes, lies in the mapping, and it
+  tests the result against `MAP_FAILED` before each other use (`std/heap.ft:163`). The flags have no
+  `MAP_FIXED`, so the call changes no range that an object holds (D10.9 rule 6). A null result is
+  `out of memory` (D10.9 rule 5). Evidence: `test/lang/run/stdlib/190` and `193` refuse a chosen
+  call through `test/lang/ffi/heap_calls.c`; the rows `D10.9-5-map-failed` and `D10.9-1-unmap-huge`
+  of `tools/mutations/heap_fort.json` turn the run tests red. State: guarded. Method: probed.
+- **H02. `libc.munmap`.** Sites: `std/heap.ft:187`, in `add_segment`, and `std/heap.ft:730`, in
+  `can_map`. C behavior: POSIX `munmap` ends the mapping of the range; a later mapping can take it.
+  Guard: each call ends a whole mapping that `map_bytes` gave in the same call, before an allocation
+  took storage of it: a segment whose top table the system refused, and the probe of `can_take` for
+  a huge size. So no dead storage loses its range (D10.9 rule 1). The mapping of a dead huge
+  allocation stays. Evidence: `test/lang/run/stdlib/188` counts 0 calls at the release of a huge
+  block, and `190` counts 1 call for each of the two cases. State: guarded. Method: probed.
+- **H03. `libc.mprotect`.** Sites: 6 calls: `std/heap.ft:185`, `std/heap.ft:237`, `std/heap.ft:264`,
+  `std/heap.ft:267`, `std/heap.ft:319`, `std/heap.ft:707`. C behavior: POSIX `mprotect` sets the
+  access of the whole pages of a range of one mapping. It gives -1 with `ENOMEM` at the limit of the
+  map entries, and it can change the first part of the range before it fails. Guard: each address is
+  `&h->words[i]` of a checked index, or the start of a mapping of `map_bytes`, and each length stays
+  inside the same mapping (D9.8 rule 2). Access goes only to the top table, to chunks at or above
+  the frontier and to a probe; `PROT_NONE` goes only to dead storage, to state with no live
+  allocation, or to a range that no allocation used (D10.9 rule 6). A refusal for new storage is
+  `out of memory`; a refused give-back drops no page, and a small chunk whose give-back the system
+  refused takes no later read of its state. Evidence: `test/lang/run/stdlib/190`, `191` and
+  `run/errors/064` to `067` refuse each call through `test/lang/ffi/heap_calls.c`, also with a
+  changed first part. State: guarded. Method: probed.
+- **H04. `libc.madvise`.** Sites: `std/heap.ft:322`, in `seal`, and `std/heap.ft:708`, in
+  `drop_huge`. C behavior: `MADV_DONTNEED` of Linux drops the pages of the range, and a later read
+  of a page that the program can read gives 0. `MADV_FREE` of Darwin can drop them later. Guard:
+  each call follows an `mprotect` with `PROT_NONE` of the same range that returned 0, so no read
+  reaches a dropped page: it stops with a memory fault, a result of D10.9 rule 2. At the limit of
+  the holes the allocator makes neither call, and the storage keeps its pages and its bytes.
+  Evidence: `test/lang/run/stdlib/187` and `188` hold the order and the range of the two calls and
+  the memory of the process; with `MADV_DONTNEED` on a range that the program can read, 1024 of 1024
+  pages read 0 in the VM. State: guarded. Method: probed.
+- **H05. The casts of an address: 17 casts.** Sites: 4 casts of a pointer to `u64`, for a test and
+  for an offset: `std/heap.ft:163`, `std/heap.ft:657`, `std/heap.ft:776` and `std/heap.ft:798`; 13
+  casts of a pointer to `void*` or `void mut*`: the arguments of the 4 calls of C above and the
+  results of `take`, for example `std/heap.ft:508`. C behavior: none. The emitted instructions are
+  `ptrtoint` (E30) and no instruction. Guard: D3.14 permits a cast to `void` and to an integer in
+  each module, and it refuses a cast of an integer to a pointer and a cast that gives a type to a
+  `void*`, so no cast of the module makes a pointer from an integer (R19). The compiler types the
+  result of `new` itself. State: guarded. Method: read.
+- **H06. The 7 mutable globals and the 26 helper functions of `std.heap`.** Sites:
+  `std/heap.ft:132`, `std/heap.ft:133`, `std/heap.ft:134`, `std/heap.ft:138`, `std/heap.ft:139`,
+  `std/heap.ft:142` and `std/heap.ft:143`. C behavior: none. Guard: none for a module outside the
+  trusted set. D9.6 exports each module-level name, so such a module can store into each of the 7
+  globals and call each of the 26 functions of `std.heap` other than the 6 of `stdlib.md` 2.16. A
+  store into `heap.bump` or a call of `heap.room` gives a live allocation to a second object (D10.9
+  rule 1), and a call of `heap.seal` takes the access to live storage away (rule 2). A second thread
+  gives the race of E15. No file of the repository outside `std/heap.ft` names one of them.
+  Evidence: a module with no `import extern;` that stores into `heap.room(1)->frontier` gets one
+  address for two live allocations (`same address true`); one that calls `heap.seal` on a live block
+  ends with a bus error at its next access (exit 138, macOS). State: closed by a rule of visibility
+  (`priv`) for the state of `std.heap`. Method: probed.
+
+### 9.6 The rows of the back end line
 
 - **B01. The compile line and the link line.** Sites: `push_cc_line` (`driver.ft:1154`) and
   `link_entry` (`driver.ft:2666`). The compile line is `<cc> --target=<triple> -O1 -fPIE
@@ -2897,11 +3041,11 @@ the operation relies on.
   Guard: none. The source of the program holds no trusted module, and the build line still changes
   what a trusted call means. Case 4 of the trusted premise (D10.7) names a build with `--std-dir`
   (D14.1) and with `--use std=<path>` (D9.11). No decision names `-Xcc`, `--cc` or `-l` yet.
-  Evidence: the third program of 9.2 prints `0` with no option and `132817` with `-Xcc -static -Xcc
-  -Wl,--defsym=calloc=malloc`. State: closed by the trusted premise that names the options of the
-  builder. Method: probed.
+  Evidence: the third program of 9.2 prints `0` with no option and stops with the runtime error `out
+  of memory` (exit 134) with `-Xcc -static -Xcc -Wl,--defsym=mprotect=getpid`. State: closed by the
+  trusted premise that names the options of the builder. Method: probed.
 
-### 9.6 The index, the inventory and the limits
+### 9.7 The index, the inventory and the limits
 
 - **The constructs by name.** `getelementptr inbounds`: E04, E05, E06, E07. `unreachable`: E33, E34,
   E35. `load`, `store`: E01, E02, E03, E08, E09, E10, E11, E14, E15. An indirect `call`: E16, E17.
@@ -2924,9 +3068,9 @@ the operation relies on.
   the guard page in the checked mode, and a loop with no end in the release mode, where the back end
   removes the frame.
 - **The limits.** The probes ran for the Linux target only; the test `ir-flags` reads the Darwin
-  modules and runs none. The census lists the calls of `std/rt.ft` and not the call lines of the C
-  library in the other modules of `std` that have one (`grep -rn 'libc\.[a-z_0-9]*(' std`, less the
-  comment lines). It does not audit the ownership rules, a library archive, or the passes of clang.
-  It does not cover the C bootstrap compiler, which builds `bootstrap-1` and still writes
-  `llvm.memcpy` with `noalias` (`bootstrap0/src/gen.c:664`, `bootstrap0/src/gen_data.c:585`). A row
-  with the method `read` has no test.
+  modules and runs none. The census lists the calls of `std/rt.ft` and of `std/heap.ft` and not the
+  call lines of the C library in the other modules of `std` that have one (`grep -rn
+  'libc\.[a-z_0-9]*(' std`, less the comment lines). It does not audit the ownership rules, a
+  library archive, or the passes of clang. It does not cover the C bootstrap compiler, which builds
+  `bootstrap-1` and still writes `llvm.memcpy` with `noalias` (`bootstrap0/src/gen.c:664`,
+  `bootstrap0/src/gen_data.c:585`). A row with the method `read` has no test.

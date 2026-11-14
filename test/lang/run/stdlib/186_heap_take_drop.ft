@@ -1,0 +1,163 @@
+//! run
+//! stdout:
+//| kept 16 16 16 32 2048000 2097152 2097152 4194304
+//| size 0: true true 16 true false 0
+//| size 1: true true 16 true false 0
+//| size 16: true true 16 true false 0
+//| size 17: true true 32 true false 0
+//| size 2048000: true true 2048000 true false 0
+//| size 2048001: true true 2097152 true false 0
+//| size 4194305: true true 6291456 true false 0
+//| no start: false false false false
+//| small: false false false false 128
+//| large: false false false 6291456 false false
+//| huge: false false false 4294967296 false
+//| rising: 1000
+//| refused: false false false true true 0
+//| can take: true true true
+//| live 0
+// std.heap is the allocator of the runtime (D10.9). `take` gives storage that starts at a
+// multiple of 16, and `live_bytes` goes up by the bytes that the allocator keeps for it
+// (`kept_bytes`). `drop` releases an allocation only at its start and only once: an address
+// inside an allocation, an address of dead storage, an address of a local and null are no start
+// of a live allocation (rule 4). No `take` gives the address of
+// an earlier one again (rule 1). A size that no address space holds is refused, and the refusal
+// takes no storage (rule 5). The sizes stand at the edges of the allocator: 0, 1 and 16 bytes
+// take one granule, 17 takes two, 2048000 is the largest size that shares a chunk, 2048001 is
+// the first that takes whole chunks of 2 MiB, and 4 GiB is the first that takes a mapping of
+// its own.
+// D9.8, D10.2, D10.9
+import extern;
+import std.heap;
+
+// Takes `size` bytes and releases them twice. Prints whether storage came, whether it starts at
+// a multiple of 16, how far the live bytes went up, the result of each release, and how far the
+// live bytes stand above their start at the end.
+// C call heap.drop x2: p, the address that heap.take gave in this function. drop tests the
+// address against the records of the allocator and reads no byte at it.
+fn round(u64 size) void {
+    u64 before = heap.live_bytes();
+    void mut* p = heap.take(size);
+    u64 held = heap.live_bytes() - before;
+    bool first = heap.drop(p);
+    bool second = heap.drop(p);
+    println("size ", size, ": ", p != null, " ", cast(p, u64) % 16 == 0, " ", held, " ", first,
+            " ", second, " ", heap.live_bytes() - before);
+}
+
+// Two neighbours of 64 bytes that `new` made. An address inside one of them releases nothing:
+// the second granule, the last granule, an address that is no multiple of 16, and the last
+// byte. Each `del` after that releases its allocation, so no `drop` changed one.
+// C call heap.drop x4: &a[16], &a[48], &a[8] and &b[63], each an address inside the 64 bytes
+// that `new` gave in this function (D9.8 rule 2). drop reads no byte at an address.
+fn small_edges() void {
+    u8 mut@ own a = new(u8, 64);
+    u8 mut@ own b = new(u8, 64);
+    bool second_granule = heap.drop(cast(&a[16], void*));
+    bool last_granule = heap.drop(cast(&a[48], void*));
+    bool odd = heap.drop(cast(&a[8], void*));
+    bool last_byte = heap.drop(cast(&b[63], void*));
+    u64 live = heap.live_bytes();
+    del(a);
+    del(b);
+    println("small: ", second_granule, " ", last_granule, " ", odd, " ", last_byte, " ",
+            live - heap.live_bytes());
+}
+
+// An allocation of 3 chunks. The start of its second chunk and of its third chunk release
+// nothing while it lives, and its start and its second chunk release nothing after its `del`.
+// C call heap.drop x5: an address inside the 4194305 bytes that `new` gave in this function
+// (D9.8 rule 2), 3 times before the `del` and 2 times after it. drop reads no byte at an
+// address, so the dead storage takes no access.
+fn large_edges() void {
+    u8 mut@ own p = new(u8, 4194305);
+    bool inside = heap.drop(cast(&p[16], void*));
+    bool second_chunk = heap.drop(cast(&p[2097152], void*));
+    bool third_chunk = heap.drop(cast(&p[4194304], void*));
+    void* start = cast(&p[0], void*);
+    void* second = cast(&p[2097152], void*);
+    u64 live = heap.live_bytes();
+    del(p);
+    println("large: ", inside, " ", second_chunk, " ", third_chunk, " ",
+            live - heap.live_bytes(), " ", heap.drop(start), " ", heap.drop(second));
+}
+
+// An allocation of 4 GiB, which takes a mapping of its own. The program touches no byte of it.
+// An address inside it releases nothing while it lives, and its start releases nothing after
+// its `del`.
+// C call heap.drop x4: an address inside the 4294967296 bytes that `new` gave in this function
+// (D9.8 rule 2), 3 times before the `del` and 1 time after it. drop reads no byte at an
+// address, so the dead storage takes no access.
+fn huge_edges() void {
+    u8 mut@ own p = new(u8, 4294967296);
+    bool inside = heap.drop(cast(&p[16], void*));
+    bool second_chunk = heap.drop(cast(&p[2097152], void*));
+    bool last_byte = heap.drop(cast(&p[4294967295], void*));
+    void* start = cast(&p[0], void*);
+    u64 live = heap.live_bytes();
+    del(p);
+    println("huge: ", inside, " ", second_chunk, " ", last_byte, " ", live - heap.live_bytes(),
+            " ", heap.drop(start));
+}
+
+// Takes and releases 48 bytes 1000 times, and counts the rounds whose address is above the
+// address of the round before. Each address is above the last one, so no two are equal.
+// C call heap.drop: p, the address that heap.take gave in the same round of the loop. drop
+// reads no byte at it.
+fn rising() u64 {
+    u64 mut last = 0;
+    u64 mut above = 0;
+    for (u64 mut i = 0; i < 1000; i += 1) {
+        void mut* p = heap.take(48);
+        if (cast(p, u64) > last) {
+            above += 1;
+        }
+        last = cast(p, u64);
+        heap.drop(p);
+    }
+    return above;
+}
+
+// C call heap.drop x4: null, the address of the local `local`, and 2 addresses inside the 32
+// bytes that `new` gave in this function and that `del` released (D9.8 rule 2). drop reads no
+// byte at an address, so the dead storage takes no access.
+fn main() i32 {
+    u64 start = heap.live_bytes();
+    println("kept ", heap.kept_bytes(0), " ", heap.kept_bytes(1), " ", heap.kept_bytes(16), " ",
+            heap.kept_bytes(17), " ", heap.kept_bytes(2048000), " ", heap.kept_bytes(2048001),
+            " ", heap.kept_bytes(2097152), " ", heap.kept_bytes(2097153));
+    round(0);
+    round(1);
+    round(16);
+    round(17);
+    round(2048000);
+    round(2048001);
+    round(4194305);
+
+    // null, the address of a local, and the start and the second granule of a dead allocation
+    i32 local = 1;
+    void* nothing = null;
+    u8 mut@ own gone = new(u8, 32);
+    void* gone_start = cast(&gone[0], void*);
+    void* gone_inner = cast(&gone[16], void*);
+    del(gone);
+    println("no start: ", heap.drop(nothing), " ", heap.drop(cast(&local, void*)), " ",
+            heap.drop(gone_start), " ", heap.drop(gone_inner));
+    small_edges();
+    large_edges();
+    huge_edges();
+    println("rising: ", rising());
+
+    // 2^47 bytes are the whole address space of a process, so the system has no range for them,
+    // and the allocator asks the system for no size above them.
+    u64 before = heap.live_bytes();
+    u64 limit = 140737488355328;
+    u64 most = 18446744073709551615;
+    println("refused: ", heap.can_take(limit), " ", heap.can_take(limit + 1), " ",
+            heap.can_take(most), " ", heap.take(limit) == null, " ", heap.take(most) == null,
+            " ", heap.live_bytes() - before);
+    println("can take: ", heap.can_take(0), " ", heap.can_take(2048000), " ",
+            heap.can_take(2048001));
+    println("live ", heap.live_bytes() - start);
+    return 0;
+}

@@ -1,0 +1,59 @@
+//! run
+//! stdout:
+//| 0 7 9
+//| 0 7 9
+//| 3 5
+// A read through a view of dead storage gives the value that the storage held last (D10.9 rule
+// 2), and the runtime gives the storage to no later allocation (rule 1). The program releases an
+// allocation that has a live neighbour on each side, so its storage stays with the runtime. Then
+// it makes 100,000 allocations of the same size, and no address of them is the dead address. The
+// first loop releases each allocation at once; the second loop keeps 1,000 live at a time.
+// D10.3, D10.9
+fn count() u64 {
+    return 100000;
+}
+
+fn main() i32 {
+    u8 mut@ own before = new(u8, 4);
+    u8 mut@ own block = new(u8, 4);
+    u8 mut@ own after = new(u8, 4);
+    before[0] = 3;
+    after[3] = 5;
+    block[0] = 7;
+    block[3] = 9;
+    u8@ view = block;
+    u64 dead = cast(&view[0], u64);
+    del(block);
+
+    u64 mut equal = 0;
+    for (u64 mut i = 0; i < count(); i += 1) {
+        u8 mut@ own later = new(u8, 4);
+        later[0] = 1;
+        later[3] = 1;
+        if (cast(&later[0], u64) == dead) {
+            equal += 1;
+        }
+        del(later);
+    }
+    println(equal, " ", view[0], " ", view[3]);
+
+    u8 mut* own mut@ own kept = new(u8 mut* own, 1000);
+    for (u64 mut i = 0; i < count(); i += 1) {
+        u64 slot = i % 1000;
+        del(kept[slot]);
+        kept[slot] = new(u8);
+        *kept[slot] = 1;
+        if (cast(kept[slot], u64) == dead) {
+            equal += 1;
+        }
+    }
+    for (u64 mut i = 0; i < kept.len; i += 1) {
+        del(kept[i]);
+    }
+    del(kept);
+    println(equal, " ", view[0], " ", view[3]);
+    println(before[0], " ", after[3]);
+    del(before);
+    del(after);
+    return 0;
+}
