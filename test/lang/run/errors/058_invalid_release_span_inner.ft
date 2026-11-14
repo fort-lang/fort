@@ -1,0 +1,42 @@
+//! run
+//! abort
+//! link: ffi/oracle.c
+//! stderr: ft:38:5: runtime error: invalid release
+//! stdout:
+//| before
+// A `del` of a span owner tests the `.ptr` of the span (D10.9 rule 4). A trusted module forges
+// a span owner here: the two words of a span header stand in a local, and a pointer from C
+// gives them the type of a struct with a span owner. The `.ptr` is byte 16 of an allocation of
+// 64 bytes, which has the alignment of a start and starts no allocation, so the `del` is the
+// runtime error `invalid release`. The length of the forged span is no part of the test.
+// D10.3, D10.6, D10.9
+import extern;
+
+struct holder {
+    u8 mut@ own bytes;
+}
+
+// The two words of a span header.
+struct words {
+    u64 ptr;
+    u64 len;
+}
+
+// C: oracle_pass, test/lang/ffi/oracle.c.
+// gives: p itself, which is no new allocation; this declaration gives the storage the type of a
+// struct with a span owner, to make an owner that starts no allocation. writes: nothing. keeps:
+// no pointer. calls: no fort function. frees: nothing.
+extern fn oracle_pass(words* p) holder mut*;
+
+// C call oracle_pass: &raw, the address of a local, one words (D9.8 rule 2); C reads no byte.
+fn main() i32 {
+    u8 mut@ own block = new(u8, 64);
+    block[16] = 5;
+    words mut raw = {.ptr = cast(&block[16], u64), .len = 48};
+    holder mut* forged = oracle_pass(&raw);
+    println("before");
+    del(forged->bytes);
+    println("after ", block[16]);
+    del(block);
+    return 0;
+}

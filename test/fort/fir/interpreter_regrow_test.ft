@@ -13,8 +13,9 @@
 /// fort source gives.
 ///
 /// The runtime is the sandbox of run_env. Its entry `regrow` writes `regrow <n> <len>` for a
-/// count below the length and `invalid release` for a span of a null pointer and a length that is
-/// not 0.
+/// count below the length, `allocation size overflow` for a size above the greatest `u64`, and
+/// `invalid release` for an operand that is no zero span and starts no live allocation: its test
+/// calls `std.heap.is_start`, which the run models (D10.9 rule 4).
 import fort.fir;
 import run_env;
 
@@ -115,7 +116,7 @@ string[106] SOURCE = {
     "    return r;",
     "}",
     "fn stale() i32 {",
-    "    i32 mut@ own mut s = new(i32, 2);",
+    "    i32 mut@ own mut s = new(i32, 2); s[0] = 7; s[1] = 9;",
     "    i32* v = &s[0];",
     "    s = regrow(move(s), 4);",
     "    i32 r = *v;",
@@ -358,6 +359,14 @@ fn reports(run_env.env mut* e, fir.module* m, string name, string first, string 
     run_env.expect(run_env.run_in(e, m, name, a[..0]), want[..]);
 }
 
+// Runs `name` of `m` with no argument and holds that the entry `regrow` refuses the operand: it
+// writes `invalid release` at 9:1 and aborts, and the run reports the event `event`.
+fn refuses(run_env.env mut* e, fir.module* m, string name, string event) void {
+    u64[1] a = {0};
+    string[3] want = {"stderr \"9:1: invalid release\\x0A\"", event, "abort"};
+    run_env.expect(run_env.run_in(e, m, name, a[..0]), want[..]);
+}
+
 // ---- moves ---------------------------------------------------------------------------
 
 fn moves(run_env.env mut* e) void {
@@ -422,15 +431,17 @@ fn events(run_env.env mut* e) void {
     e->events = true;
     fir.module mut* own none = fir.module_make();
     defer fir.module_drop_made(move(none));
-    // A view of the old storage is stale after the `regrow`: the storage is released.
+    // A view of the old storage is stale after the `regrow`: the storage is released. The read
+    // gives the value that the storage held last, 7, and no zero of a fill, and the run goes on
+    // (D10.9 rule 2).
     reports(e, none, "stale",
         "event use after release in main.stale at 99:13 through owner main.stale _1",
-        "fault invalid access at 99:13");
+        "return i32 7");
     // The result is a fresh allocation: a function that drops it leaks.
     reports(e, none, "dropped", "event leak in main.dropped at 106:1", "return");
-    // Without the events the stale read still faults.
+    // Without the events the stale read gives the same value.
     e->events = false;
-    gives_plain(e, "stale", "fault invalid access at 99:13");
+    gives_plain(e, "stale", "return i32 7");
 }
 
 // ---- forged --------------------------------------------------------------------------
@@ -446,19 +457,22 @@ fn reports_for(run_env.env mut* e, fir.module* m, string name, u64 arg, string@ 
 fn order(run_env.env mut* e, fir.module* m) void {
     string[2] below = {"stderr \"9:1: regrow 1 2\\x0A\"", "abort"};
     string[2] negative = {"stderr \"9:1: alloc_count -1\\x0A\"", "abort"};
-    string[2] refused = {
+    string[3] refused = {
+        "stderr \"9:1: invalid release\\x0A\"",
         "event double release in main.late at 9:1 through owner main.late _2",
-        "fault invalid release at 9:1",
+        "abort",
     };
-    string[2] refused_signed = {
+    string[3] refused_signed = {
+        "stderr \"9:1: invalid release\\x0A\"",
         "event double release in main.late_signed at 9:1 through owner main.late_signed _2",
-        "fault invalid release at 9:1",
+        "abort",
     };
-    string[2] refused_wide = {
+    string[3] refused_wide = {
+        "stderr \"9:1: invalid release\\x0A\"",
         "event double release in main.late_wide at 9:1 through owner main.late_wide _2",
-        "fault invalid release at 9:1",
+        "abort",
     };
-    string[2] wide = {"stderr \"104:30: overflow\\x0A\"", "abort"};
+    string[2] wide = {"stderr \"9:1: allocation size overflow\\x0A\"", "abort"};
     // A count below the length fails the second test: the run does not reach the operand.
     reports_for(e, m, "main.late", 1, below[..]);
     // A negative count fails the first test.
@@ -470,8 +484,7 @@ fn order(run_env.env mut* e, fir.module* m) void {
     reports_for(e, m, "main.late", 18446744073709551615, refused[..]);
     // Elements of 8 bytes: 2305843009213693951 is the greatest count whose size fits a `u64`.
     reports_for(e, m, "main.late_wide", 2305843009213693951, refused_wide[..]);
-    // The next count fails the third test. The entry of the sandbox has no size test of its own:
-    // its `alloc` reports the overflow of the product at line 104 of run_env.RUNTIME.
+    // The next count fails the third test, the size, before the operand test.
     reports_for(e, m, "main.late_wide", 2305843009213693952, wide[..]);
 }
 
@@ -481,17 +494,14 @@ fn forged(run_env.env mut* e) void {
     defer fir.module_drop_made(move(m));
     e->events = true;
     // A pointer into the middle of a live allocation starts no allocation.
-    reports(e, m, "main.inside",
-        "event invalid release in main.inside at 9:1 through owner main.inside _1",
-        "fault invalid release at 9:1");
+    refuses(e, m, "main.inside",
+        "event invalid release in main.inside at 9:1 through owner main.inside _1");
     // The address of a local starts no allocation.
-    reports(e, m, "main.frame",
-        "event invalid release in main.frame at 9:1 through frame main.frame _1",
-        "fault invalid release at 9:1");
+    refuses(e, m, "main.frame",
+        "event invalid release in main.frame at 9:1 through frame main.frame _1");
     // The start of an allocation that a `del` released is live no more.
-    reports(e, m, "main.released",
-        "event double release in main.released at 9:1 through owner main.released _1",
-        "fault invalid release at 9:1");
+    refuses(e, m, "main.released",
+        "event double release in main.released at 9:1 through owner main.released _1");
     // A null pointer with a length that is not 0 is no zero span: the entry of the runtime
     // refuses it.
     reports(e, m, "main.null_with_length", "stderr \"9:1: invalid release\\x0A\"", "abort");

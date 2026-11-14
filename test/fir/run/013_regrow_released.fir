@@ -1,12 +1,14 @@
 //! pass: run main.f 1
 //! expect:
+//| stderr "run/013_regrow_released.fir:11:2: runtime error: invalid release\x0A"
 //| event duplicate owner in main.f at 11:1
 //| event double release in main.f at 11:2 through owner main.f _5
-//| fault invalid release at 11:2
+//| abort
 // The operand of the `regrow` is the start of storage that a `del` released, and the count is
 // the greatest `u64`, which no storage holds. The test of the operand comes before the test of
-// the storage (D12.2), so the run reports `invalid release` and not `out of memory`. No fort
-// source gives this operand: `_5` is a copy of an owner.
+// the storage (D12.2), so the entry `std.rt.regrow` reports `invalid release` and not `out of
+// memory`: its test is `std.heap.is_start` (D10.9 rule 4). No fort source gives this operand:
+// `_5` is a copy of an owner.
 fn main.f(_1 (n): u64) -> u64 {
     let _2 (s): u8 mut@ own;
     let _3: u8 mut* own;

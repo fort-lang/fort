@@ -2,15 +2,16 @@
 import extern;
 import std.rt;
 
-// std.rt.alloc answers void mut* own (toolchain.md 5.1): the storage is fresh,
-// so the caller owns it and may write it, which is what an allocation is for.
-// A caller that binds the result as void* own throws that mark away, and the
-// monotone drop of D5.4 runs one way, so nothing gets it back for that binding.
-// These are the diagnostics that make the signature real. The count of them is
-// in check_conv.the_runtime_allocator_hands_the_caller_storage_it_may_write,
-// because the harness groups what the compiler reported by (file, line) and a
-// fail test therefore holds the text and the position and never a number.
-// D3.11, D5.4
+// std.rt.alloc answers void mut* (toolchain.md 5.1): the storage is fresh, so
+// the caller may write it, which is what an allocation is for. A caller that
+// binds the result as void* throws that mark away, and the monotone drop of
+// D5.4 runs one way, so nothing gets it back for that binding. The result has
+// no `own`: the allocator of the runtime makes the pointer from its address
+// range, and no cast and no binding adds the mark (D3.14). The compiler gives
+// the type of a `new` itself. These are the diagnostics that make the
+// signature real. The harness groups what the compiler reported by (file,
+// line), so a fail test holds the text and the position and never a number.
+// D3.11, D3.14, D5.4
 string FILE = "006_rt_alloc_keeps_its_mark.ft";
 
 // bzero(3) writes zeros through a `void mut*`: no cast gives a type to a void*
@@ -33,14 +34,18 @@ fn main() i32 {
     // The binding that keeps the mark reaches the writing callee with no cast
     // and no diagnostic. It stands here so that the refusals below are about
     // the mark and not about the call.
-    void mut* own writable = rt.alloc(1, 8, &FILE[0], 1, 1);
+    void mut* writable = rt.alloc(1, 8, &FILE[0], 1, 1);
     fill(writable, 8);
-    rt.free(move(writable));
+    rt.release(writable, &FILE[0], 1, 1);
 
     // The binding that drops the mark reaches nothing that writes.
-    void* own plain = rt.alloc(1, 8, &FILE[0], 1, 1);
-    fill(plain, 8);   //! error: the argument expects void mut*, not void* own
-    void mut* back = plain;   //! error: the initializer expects void mut*, not void* own
-    rt.free(move(plain));
+    void* plain = rt.alloc(1, 8, &FILE[0], 1, 1);
+    fill(plain, 8);   //! error: the argument expects void mut*, not void*
+    void mut* back = plain;   //! error: the initializer expects void mut*, not void*
+    rt.release(plain, &FILE[0], 1, 1);
+
+    // No binding adds `own` to the result, with the `mut` mark or with no mark.
+    void mut* own held = rt.alloc(1, 8, &FILE[0], 1, 1);   //! error: void mut* own, not void mut*
+    void* own read = rt.alloc(1, 8, &FILE[0], 1, 1);   //! error: void* own, not void mut*
     return 0;
 }
