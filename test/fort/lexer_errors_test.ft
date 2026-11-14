@@ -236,14 +236,18 @@ fn a_second_file_starts_a_new_budget() void {
     assert(diag.budget_left(session.diags(&f->sess)));
 }
 
-// A lone carriage return is whitespace, so it ends a line for a resync too. A
-// file written with `\r` alone keeps the tokens after the bad line.
-fn a_carriage_return_ends_a_resync() void {
+// A lone carriage return is whitespace and ends no line (D2.1), for the line
+// count and for a resync alike. So a resync drops the tokens on both sides of
+// it, and its line reports 1 error at most (D14.2). CR LF ends a line.
+fn a_lone_carriage_return_ends_no_line() void {
     lex_env.env mut* own f = lex_env.make();
     defer lex_env.drop_made(move(f));
     assert(lex_env.one_error(f, "a #\rx = 1;\r", 1, 3, "unexpected character '#'"));
-    assert(kept(f) == 4);
-    assert(lex_env.text(f, 0) == "x");
+    assert(kept(f) == 0);
+    assert(lex_env.one_error(f, "a #\rb #\nx = 1;\n", 1, 3, "unexpected character '#'"));
+    assert(resumed_line(f, 2));
+    assert(lex_env.one_error(f, "x = 1;\ra #", 1, 10, "unexpected character '#'"));
+    assert(kept(f) == 0);
     assert(lex_env.one_error(f, "a #\r\nx = 1;\n", 1, 3, "unexpected character '#'"));
     assert(resumed_line(f, 2));
 }
@@ -273,7 +277,7 @@ fn main() i32 {
     a_literal_after_a_resync_is_decoded();
     a_file_reports_at_most_twenty_diagnostics();
     a_second_file_starts_a_new_budget();
-    a_carriage_return_ends_a_resync();
+    a_lone_carriage_return_ends_no_line();
     a_clean_file_reports_nothing();
     println("ok");
     return 0;
