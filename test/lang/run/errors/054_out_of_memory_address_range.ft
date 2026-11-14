@@ -1,0 +1,33 @@
+//! run
+//! abort
+//! stderr: ft:24:29: runtime error: out of memory
+//! stdout:
+//| before
+// The runtime never gives the address range of a released allocation to a later allocation (D10.9
+// rule 1). So a loop that allocates and releases 4 GiB comes to the end of the address space of
+// the process, and the `new` there is the runtime error `out of memory` (rule 5). The loop
+// writes the last byte of the first 4 allocations only, so the run needs little storage. The
+// program prints no count: the size of the address space is a property of the system. The
+// address space of each target has at most 2^47 bytes, which is 32768 allocations of 4 GiB, so
+// the loop stops after 65536 rounds: a run that gets to the end prints a line that the test
+// does not expect, and it ends in a bounded time.
+// D10.2, D10.6, D10.9
+fn size() u64 {
+    return 4294967296;
+}
+
+fn main() i32 {
+    println("before");
+    u64 n = size();
+    u64 mut sum = 0;
+    for (u64 mut i = 0; i < 65536; i += 1) {
+        u8 mut@ own block = new(u8, n);
+        if (i < 4) {
+            block[n - 1] = 1;
+            sum += cast(block[n - 1], u64);
+        }
+        del(block);
+    }
+    println("after ", sum);
+    return 0;
+}

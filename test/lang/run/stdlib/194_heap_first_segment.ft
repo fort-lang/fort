@@ -1,0 +1,48 @@
+//! run
+//! link: ffi/heap_calls.c
+//! stdout:
+//| first mapping: true true true
+//| first block: true true
+// The first `new` of a process maps the first segment of the allocator: one mapping of 4 GiB of
+// address range, which nothing can access at first (stdlib.md 2.16). The runtime makes that
+// `new` for the arguments of `main`, before `main` runs. So at the start of `main` the process
+// made 1 mmap, of 4 GiB, and a small block of `main` lies inside that mapping, after its first
+// chunk. test/lang/run/errors/067 holds the `out of memory` when the system refuses the mapping.
+// D10.2, D10.9
+import extern;
+
+// The kind of an mmap call in test/lang/ffi/heap_calls.c.
+i32 MAP = 1;
+
+u64 SEGMENT = 4294967296;
+u64 CHUNK = 2097152;
+
+// C: heap_calls_count, test/lang/ffi/heap_calls.c, which gives the calls of one kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_count(i32 kind) u64;
+// C: heap_calls_address, test/lang/ffi/heap_calls.c, which gives the address of the last call
+// of one kind as a number; for mmap, its result.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_address(i32 kind) u64;
+// C: heap_calls_bytes, test/lang/ffi/heap_calls.c, which gives the length of the last call of
+// one kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_bytes(i32 kind) u64;
+
+// C call heap_calls_count x2: no pointer argument.
+// C call heap_calls_address: no pointer argument.
+// C call heap_calls_bytes: no pointer argument.
+fn main() i32 {
+    u64 maps = heap_calls_count(MAP);
+    u64 base = heap_calls_address(MAP);
+    println("first mapping: ", maps == 1, " ", heap_calls_bytes(MAP) == SEGMENT, " ", base != 0);
+    u8 mut@ own block = new(u8, 16);
+    u64 at = cast(&block[0], u64);
+    println("first block: ", heap_calls_count(MAP) == 1, " ",
+            at >= base + CHUNK && at < base + SEGMENT);
+    del(block);
+    return 0;
+}

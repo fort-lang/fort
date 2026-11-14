@@ -1,0 +1,31 @@
+//! run
+//! abort
+//! link: ffi/oracle.c
+//! stderr: ft:27:5: runtime error: invalid release
+//! stdout:
+//| before
+// A `del` of a pointer into an allocation is the runtime error `invalid release`: the address
+// starts no live allocation (D10.9 rule 4). Byte 8 is not at a border of the allocator.
+// D10.3, D10.6, D10.9
+import extern;
+
+// C: oracle_pass, test/lang/ffi/oracle.c.
+// gives: p itself, which is no new allocation; this declaration says `own` to make an owner that
+// starts no allocation. writes: nothing. keeps: no pointer. calls: no fort function.
+// frees: nothing.
+extern fn oracle_pass(u8* p) u8 mut* own;
+
+// C call oracle_pass: &block[8] keeps the bound of block from element 8, 56 bytes (D9.8 rule 2);
+// C reads no byte.
+fn main() i32 {
+    u8 mut@ own block = new(u8, 64);
+    block[8] = 5;
+    u8 mut* own inner = oracle_pass(&block[8]);
+    println("before");
+    // The line of the runtime error ends the run, and nothing flushes after it but the error
+    // path itself (D11.4).
+    del(inner);
+    println("after ", block[8]);
+    del(block);
+    return 0;
+}

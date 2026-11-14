@@ -14,7 +14,8 @@ zero bytes of a local, of a global, of an emptied place and of an element of `re
 runtime errors `null dereference`, `null call` and `invalid
 release` (D10.6), the allocator of the runtime (D10.3), `regrow` (D12.2), and no option that removes
 a check (D10.6). The compiler writes the zero bytes of a local on the stack now (`fir.md` 7). The
-compiler and the runtime implement the other rules in later changes.
+runtime implements its allocator, the dead storage of an allocation and the `invalid release` of
+a `del`. The compiler and the runtime implement the other rules in later changes.
 
 ## 1. Memory regions
 

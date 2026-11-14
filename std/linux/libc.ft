@@ -41,6 +41,52 @@ extern fn calloc(u64 n, u64 size) void mut* own;
 // calls: no fort function.
 extern fn free(void* own p) void;
 
+// mmap(2) and mprotect(2) protections and mmap(2) flags, Linux x86-64 values.
+i32 PROT_NONE = 0;
+i32 PROT_READ = 1;
+i32 PROT_WRITE = 2;
+i32 MAP_PRIVATE = 2;
+i32 MAP_ANON = 0x20;
+// The madvise(2) advice after which the system holds no page for a range: MADV_DONTNEED.
+i32 MADV_DISCARD = 4;
+
+// The count of 8-byte words of one map_range: 2^29 words are 2^32 bytes.
+u64 MAP_RANGE_WORDS = 536870912;
+
+// The first 2^32 bytes of a mapping that mmap gives, as words. No caller of mmap maps fewer
+// bytes, so the whole map_range lies inside each mapping.
+struct map_range {
+    u64[MAP_RANGE_WORDS] words;
+}
+
+// C: mmap, mmap(2) of POSIX.1-2017 and mmap(2) of Linux.
+// gives: the address -1 (MAP_FAILED) and no object, or the start of a new mapping of len bytes
+// at a multiple of the page size, which holds zero bytes where prot lets a read through; the
+// call row says why len is the 2^32 bytes of the result type or more, and that the function
+// tests the result against MAP_FAILED before another use. The mapping stays until a munmap of
+// it. With MAP_FIXED in flags, C replaces each mapping in the range at addr, so the call row
+// says why that range holds no dead storage (D10.9 rule 6). writes: no fort storage.
+// keeps: no pointer. calls: no fort function. frees: nothing.
+extern fn mmap(void* addr, u64 len, i32 prot, i32 flags, i32 fd, i64 offset) map_range mut*;
+// C: munmap, munmap(2) of POSIX.1-2017.
+// frees: each mapping in the len bytes at addr, so a later mapping can take that range; the
+// call row says why the range holds no dead storage and no live object (D10.9 rule 6).
+// gives: 0, or -1 with errno, and no pointer. writes: no storage. keeps: no pointer.
+// calls: no fort function.
+extern fn munmap(void* addr, u64 len) i32;
+// C: mprotect, mprotect(2) of POSIX.1-2017.
+// writes: no byte; C sets the access of the pages of the len bytes at addr to prot, so a later
+// access there can stop with a memory fault, and the call row says why the range holds no dead
+// storage, or that the runtime gives dead storage back (D10.9 rule 6). gives: 0, or -1 with
+// errno, and no pointer. keeps: no pointer. calls: no fort function. frees: nothing.
+extern fn mprotect(void* addr, u64 len, i32 prot) i32;
+// C: madvise, madvise(2) of Linux.
+// writes: no byte through a pointer of fort code; with MADV_DISCARD the system drops the pages
+// of the len bytes at addr, so the call row says why no later read of the range gives a
+// changed byte (D10.9 rule 2). gives: 0, or -1 with errno, and no pointer. keeps: no pointer.
+// calls: no fort function. frees: nothing: the mapping stays.
+extern fn madvise(void* addr, u64 len, i32 advice) i32;
+
 // C: memcpy, ISO C11 7.24.2.1, memcpy(3).
 // writes: n bytes at dst, from the n bytes at src; the two must not overlap, so the call row
 // says why they do not. gives: no pointer: C gives back dst, and the `void` result keeps it out

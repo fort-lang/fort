@@ -11,16 +11,17 @@ the compiler has no option that removes a check (D10.6, D14.1). The compiler of 
 takes the option `--no-bounds-check`, which removes the index and span checks. The compiler removes
 the option in a later change. Bootstrap-0 is frozen, and it keeps its option (D10.6). Sections 5 and
 6 describe the runtime and the IR of that date. Later changes of the compiler and the runtime bring
-these points to them: the allocator of the runtime (D10.3, D10.9), the check of `null` (D10.6),
-frame storage (D10.9, D19.4) and the release-only bit in `summaries/` (D9.11). The entry of
-`regrow` (D12.2) is in the runtime, and 5.1 names the one part of its operand test that the
-allocator adds. Sections 2.2, 5.1 and 5.2, and item 10 of section 6, name each point where it
-applies. The compiler gives `llvm.memmove` for each copy of an aggregate (D6.3, D19.3): items 3
-and 8 of section 6 state it. The compiler writes the zero bytes of a local on the stack (D10.1,
-item 10 of section 6); the same bytes in frame storage come with frame storage. D10.1 gives also
-the zero bytes of a global, of a place that a `move` or a `del` empties, and of an element of
-`regrow`. The run tests `run/structs/028_store_padding` to `030_store_padding_o2` hold a global
-and a place that a `move` empties. A later change measures each other lowering against that rule.
+three points to them: the check of `null` (D10.6), frame storage (D10.9, D19.4) and the
+release-only bit in `summaries/` (D9.11). Sections 2.2, 5.1 and 5.2, and item 10 of section 6,
+name each point where it applies. The allocator of the runtime (D10.3, D10.9) and the entry of
+`regrow` (D12.2) are implemented: sections 5, 5.1 and 5.2, item 17 of section 6 and `spec/fir.md`
+12.2 describe them. The compiler gives `llvm.memmove` for each copy of an aggregate (D6.3, D19.3):
+items 3 and 8 of section 6 state it. The compiler writes the zero bytes of a local on the stack
+(D10.1, item 10 of section 6); the same bytes in frame storage come with frame storage. D10.1
+gives also the zero bytes of a global, of a place that a `move` or a `del` empties, and of an
+element of `regrow`. The run tests `run/structs/028_store_padding` to `030_store_padding_o2` hold
+a global and a place that a `move` empties. A later change measures each other lowering against
+that rule.
 
 Sections: 1 Command line; 2 Build pipeline; 3 Build modes; 4 Diagnostics; 5 The runtime;
 6 Code generation contract; 7 Testing; 8 Compiler architecture sketch; 9 Not in v1.
@@ -838,10 +839,10 @@ trapping for correctness (D11.1); the wrapping operators exist for code that nee
 both modes. `p[lo..hi]` on a raw pointer is never checked (D6.9): a range beyond the object is a
 case of the trusted premise (D10.7). An access to dead storage has the results of D10.9 in both
 modes, and a memory fault is no trap of this table: it writes no line (D11.4). The compiler and the
-runtime implement four rows in later changes: the two rows of `null` and the rows of `del` and of
-frame storage. The rows of `regrow` are implemented, but for the part of `invalid release` that the
-allocator of the runtime adds (5.1). The row of `invalid release` covers a `del` and a `regrow`
-whose operand is not zero and starts no live allocation of the runtime (D10.9, D12.2).
+runtime implement three rows in later changes: the two rows of `null` and the row of frame
+storage. The rows of `del` and of `regrow` are implemented. The row of `invalid release` covers a
+`del` and a `regrow` whose operand is not zero and starts no live allocation of the runtime
+(D10.9, D12.2).
 
 ## 4. Diagnostics
 
@@ -1061,8 +1062,10 @@ every import closure and emits into the program's module like any other (D13.1, 
 process start and exit (D11.6), heap allocation (D10.2, D10.3), the runtime-error and panic paths
 (D11.4), formatting and buffering for the print family (D11.5, D11.7, D12.2, D18), and the program
 arguments for `std.sys`. It imports `std.libc` and reaches the operating system through it (D9.8):
-`write` for the buffers, `calloc` and `free` for `alloc` and `free` below, `abort` for the failure
-paths, `isatty` for D11.5's question and `strlen` for `str.from_cstr`. A program that writes
+`write` for the buffers, `abort` for the failure paths, `isatty` for D11.5's question and `strlen`
+for `str.from_cstr`. It imports `std.heap`, the allocator of the runtime (D10.9, `stdlib.md` 2.16),
+for `alloc`, `release` and `free` below. `std.heap` takes its storage from the system with `mmap`
+and calls no allocator of C. A program that writes
 `import std.rt;` calls it as it calls any module (D9.3), but for `args_init`: only the `main`
 that the compiler emits calls it (section 6 item 22), and each name of it in source is the error
 `'std.rt.args_init' belongs to the start of the program` (D6.9).
@@ -1084,29 +1087,30 @@ each entry point that it calls with the `declare` lines of `module-system.md` 10
 ### 5.1 Entry points
 
 **The state since 2026-11-11.** D10.3, D10.6, D10.9 and D12.2 change four points of this section.
-The compiler and the runtime implement the first three points, and the frame storage of the
-fourth, in later changes. Until then, the text below describes the `std.rt` of that date for those
-points. The entry of `regrow` of the fourth point is implemented, but for one part of one test,
-which this paragraph names. First, the runtime has its own allocator: `alloc` and `free` do
-not call `calloc` and `free` of C, and the runtime never gives dead storage to another object
-(D10.9). Second, `free` takes the position of its `del` and reports `invalid release` for a pointer
-that is not `null` and starts no live allocation of the runtime (D10.9, D11.4). Third, `std.rt` gets
+The first two points and the entry of `regrow` of the fourth point are implemented, and the text
+below describes them. The compiler and the runtime implement the third point and the frame
+storage of the fourth in later changes. Until then, the text below describes the `std.rt` of that
+date for those two. First, the runtime has its own allocator: `alloc`, `release` and `free` do not
+call `calloc` and `free` of C, and the runtime never gives dead storage to another object (D10.9).
+Second, the entry `release` takes the position of its `del` and reports `invalid release` for a
+pointer that is not `null` and starts no live allocation of the runtime (D10.9, D11.4). The entry
+has a new name because the compiler that builds this one still emits a call of `free` with one
+argument: `free` stays for that compiler, and it reports `invalid release` with no position of a
+`del`. Third, `std.rt` gets
 the entry of the check kind `null`, `fn fail_null(bool call, char* file, u32 line, u32 col)
 noreturn` (`spec/fir.md` 8). Fourth, `std.rt` gets an entry for `regrow`, which makes its five tests
 inside the runtime (D12.2, D19.6), and the runtime gives and releases the frame storage of a run
 (D10.9). `regrow` stores the zero value into each owner slot of each old element before it releases
 the old storage (D12.2). The runtime makes these stores, in `regrow_move`, from the offsets that
 the compiled code gives: the byte offset of each word of each owner slot in one element. The
-compiled code calls `regrow`, then `regrow_move`, then `free` with the old pointer (`spec/fir.md`
-12.2). `regrow` makes four of the five tests in full: the negative count, the count below the
-length, the size and the storage. Of the test on the operand it makes one part: a null pointer with
-a length that is not 0 is `invalid release`. The part for a pointer that is not `null` and starts
-no live allocation needs the allocator of the runtime, and the change that adds the allocator adds
-that part to the body of `regrow`. Until then, such a pointer goes to the `free` of C. A program
-gets one from a view of dead storage (D10.9): after `s = regrow(move(s), 2)`, a view `q` of an old
-element names storage that the `free` of C can give to another object, and `regrow(move(q->data),
-3)` reads its operand there. So the sentence of D12.2 "a `move` through a view of an old element
-gives the zero value or a memory fault" holds only with the allocator of the runtime, as the
+compiled code calls `regrow`, then `regrow_move`, then `release` with the old pointer and the
+position of the `regrow` (`spec/fir.md` 12.2). `regrow` makes the five tests in full. Its test of
+the operand is the test of a `del` with no release, `heap.is_start` (`stdlib.md` 2.16): a zero
+span passes, and a null pointer with a length that is not 0, or a pointer that is not `null` and
+starts no live allocation of the runtime, is `invalid release`. A program gets such a pointer from a
+view of dead storage (D10.9): after `s = regrow(move(s), 2)`, a view `q` of an old element names
+dead storage, and `regrow(move(q->data), 3)` reads its operand there. The sentence of D12.2 "a
+`move` through a view of an old element gives the zero value or a memory fault" holds, as the
 results of D10.9 for a `del` do. The change that adds an entry adds its signature to the list
 below.
 
@@ -1124,38 +1128,46 @@ abbreviates the three parameters `char* file, u32 line, u32 col`, the position o
 // `%fort.enum_member` the compiler emits (section 6 items 2 and 21).
 struct enum_member { i32 value; char* name; }
 
-// Allocation (D10.2, D10.3). `alloc` returns zeroed storage for `count` elements
+// Allocation (D10.2, D10.3, D10.9). `alloc` returns zeroed storage of the
+// allocator of the runtime (`std.heap`, `stdlib.md` 2.16) for `count` elements
 // of `elem_size` bytes, at least one byte so the result is never null (`new(T, 0)`
-// is non-null); an overflowing product or a failed allocation is a runtime error
-// at `loc`. `free` releases what `alloc` returned; a null `p` is a no-op.
+// is non-null); an overflowing product is the runtime error `allocation size
+// overflow` at `loc`, and a failed allocation is `out of memory` at `loc`: the
+// system gives no storage, or the allocator has no address range left (D10.9
+// rule 5). `release` releases the allocation of `alloc` that starts at `p`, for
+// the `del` at `loc`; a null `p` is a no-op, and a `p` that starts no live
+// allocation of `alloc` is the runtime error `invalid release` at `loc` (D10.9
+// rule 4): an address inside an allocation, the start of a dead allocation,
+// storage of C, a local or a global. `free` does what `release` does with no
+// position: its `invalid release` stands at `<runtime>:0:0`. The compiler
+// emits a call of `release` for each `del` and no call of `free`; `free` stays
+// for the compiler of `tools/bootstrap.ref`, which emits a call of it.
 // Ownership (D17) is erased: the runtime sees plain pointers, and the compiler
 // zeroes a `del` or `move` operand itself (section 6, items 17 and 18). The
-// result is `void mut* own`, the type `libc.calloc` answers with: storage of no
-// type that the caller owns and may write (D3.11, `stdlib.md` 2.2). `alloc`
-// carries that mark out rather than dropping it. No cast gives a type to a
-// `void*` (D3.14), so a program that calls this entry point directly gives the
-// result only to C, to `free` or to `del`; the compiler types the result of a
-// `new` itself (section 6, item 17). `free`
-// takes `void* own`, which every result of `alloc` reaches by the monotone drop
-// of D5.4. The mark reaches no instruction, no signature and no size: every
-// pointer is one machine word, so the IR form of item 7 is `ptr` either way
-// (D3.11).
-// The two are not called `new` and `del`: `new` is a keyword (D2.4), and `del`
+// result of `alloc` is `void mut*`, storage of no type that the caller may
+// write, and it has no `own`: `std.heap.take` gives a plain pointer, and no
+// cast adds the mark (D3.14). The compiler types the result of a `new` itself
+// (section 6, item 17). No cast gives a type to a `void*` (D3.14), so a program
+// that calls this entry point directly gives the result only to C, to `release`
+// or to `free`. `release` and `free` take `void*`, which each pointer reaches by
+// the monotone drop of D5.4.
+// The entries are not called `new` and `del`: `new` is a keyword (D2.4), and `del`
 // is a universe function that a module-level declaration of that name shadows
 // (D12.2, D7.9) -- inside `std.rt`, which releases its own buffers and its argv
 // storage with `del`, that would cost the module the operation it needs. A name
 // is free to take when the module implements the builtin rather than using it,
 // which is why `panic` below is `panic`.
-fn alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) void mut* own;
-fn free(void* own p) void;
+fn alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) void mut*;
+fn release(void* p, char* file, u32 line, u32 col) void;
+fn free(void* p) void;
 
 // `regrow` (D12.2). `regrow` makes the tests of a `regrow` in their order and gives the
 // new storage of `count` elements, each byte 0: `old` and `old_len` are the pointer and
 // the length of the operand span, and `is_signed` says that `count` holds the bits of an
 // `i64`. `regrow_move` copies the bytes of the old elements into `fresh` and then stores
 // zero into each word of `old` that `slots` names in each element of `elem_size` bytes.
-// It releases nothing: the compiled code calls `free` with the old pointer after it.
-fn regrow(void* old, u64 old_len, u64 elem_size, u64 count, bool is_signed, loc) void mut* own;
+// It releases nothing: the compiled code calls `release` with the old pointer after it.
+fn regrow(void* old, u64 old_len, u64 elem_size, u64 count, bool is_signed, loc) void mut*;
 fn regrow_move(u8 mut@ fresh, u8 mut@ old, u64 elem_size, u64@ slots) void;
 
 // Strings (D3.7). `str_eq` is true when the two strings have the same length and
@@ -1271,6 +1283,7 @@ are those of 5.1, in `std.rt`:
 | `fail_alloc_count`    | `runtime error: negative allocation count -1`                |
 | `alloc` (overflow)    | `runtime error: allocation size overflow`                    |
 | `alloc` (no memory)   | `runtime error: out of memory`                               |
+| `release` (no start)  | `runtime error: invalid release`                             |
 | `fail_enum`           | `runtime error: enum value 0 is not a member of level`       |
 | `panic`               | `panic: <message bytes>`                                     |
 | `assert_fail`         | `assertion failed: <expression text>`                        |
@@ -1280,13 +1293,15 @@ the allocation count are printed as signed values. Falling off the end of a `nor
 executes the trap of section 6 item 20 (D8.5, D19.7). Linux x86-64 raises SIGILL with no message.
 Mac arm64 raises SIGTRAP with no message.
 
-The changes that implement D10.6, D10.9 and D12.2 add four lines (5.1, the state since 2026-11-11):
+`free` writes the line of `release` after `<runtime>:0:0: ` (5.1). The line `out of memory` of
+`alloc` also reports the end of the address range of the allocator (D10.9 rule 5).
+
+The changes that implement D10.6 and D12.2 add three lines (5.1, the state since 2026-11-11):
 
 | Source                | Line after `<file>:<line>:<col>: ` (D11.4)     |
 |-----------------------|------------------------------------------------|
 | `fail_null`, a place  | `runtime error: null dereference`              |
 | `fail_null`, a call   | `runtime error: null call`                     |
-| `free` (no start)     | `runtime error: invalid release`               |
 | the entry of `regrow` | `runtime error: regrow count 2 below length 3` |
 
 The entry of `regrow` also writes the line `runtime error: invalid release`, for an operand that is
@@ -1725,9 +1740,11 @@ emitter's text is a change here.
     `icmp slt i64 %n, 0` to `std.rt.fail_alloc_count(i64 %n, ...)`; it then calls
     `std.rt.alloc(sizeof(T), %n, loc)` and writes the header field by field into the destination
     place (`getelementptr inbounds %fort.span, ptr %d, i32 0, i32 0` for `ptr`, `i32 0, i32 1`
-    for `len`). `del(x)` loads the pointer (field 0 for a span or `string`), calls `std.rt.free`
-    and, on an lvalue operand, zeroes the place: `store ptr null` for a pointer, a 16-byte
-    `llvm.memset` for a span or `string`. On an rvalue nothing is stored.
+    for `len`). `del(x)` loads the pointer (field 0 for a span or `string`), calls
+    `std.rt.release(ptr %p, ptr @.file.0, i32 <line>, i32 <col>)` with the position of the name
+    `del` (D11.4) and, on an lvalue operand, zeroes the place: `store ptr null` for a pointer, a
+    16-byte `llvm.memset` for a span or `string`. On an rvalue nothing is stored. The runtime makes
+    the start test of D10.9 rule 4 inside `release`, so the compiled code has no branch for it.
 
 18. **Ownership** (D17). `own` is erased: same types, same ABI, same normalization, and neither the
     module nor the runtime carries ownership information. `move(lv)` reads the operand's value into
