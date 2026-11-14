@@ -85,6 +85,27 @@ fn list_drop(list mut l) void {
     }
 }
 
+// Frees the tail of a node that the caller moves in. `del` is shallow, so each node gives up its
+// tail before it is freed.
+fn node_drop(node mut n) void {
+    while (n.next != null) {
+        node mut* own gone = move(n.next);
+        node mut* own rest = move(gone->next);
+        del(gone);
+        n.next = move(rest);
+    }
+}
+
+// Ends a node and its tail that the caller moves in, or nothing for null.
+fn node_drop_made(node mut* own p) void {
+    if (p == null) {
+        return;
+    }
+    node v = move(*p);
+    del(p);
+    node_drop(move(v));
+}
+
 // Ends a list in an allocation that the caller moves in.
 fn list_drop_made(list mut* own p) void {
     list kept = move(*p);
@@ -130,8 +151,10 @@ fn reverse(list mut* l) void {
     while (l->head != null) {
         node mut* own step = move(l->head);
         l->head = move(step->next);
-        del(step->next);
-        step->next = move(done);
+        node mut* own nv = move(done);
+        node mut* own old = move(step->next);
+        step->next = move(nv);
+        node_drop_made(move(old));
         done = move(step);
     }
     del(l->head);

@@ -9,8 +9,8 @@
 //| 3
 // The container idiom of memory-model.md 2.3: pushing moves the new element
 // in and popping moves it out, and every field a store overwrites was emptied
-// by a `move` or a `del` first, so the compiler proves each store (D17.5,
-// D17.6, D17.11). `del(pop(l))` frees an owning rvalue on the spot (D17.8).
+// by a `move` first, so the compiler proves each store (D17.5, D17.6, D17.11).
+// `node_drop_made(pop(l))` frees an owning rvalue on the spot (D17.8).
 struct node {
     i32 value;
     node mut* own next;
@@ -21,11 +21,38 @@ struct list {
     u64 size;
 }
 
+// Frees the tail of a node that the caller moves in. `del` is shallow, so each node gives up its
+// tail before it is freed.
+fn node_drop(node mut n) void {
+    while (n.next != null) {
+        node mut* own gone = move(n.next);
+        node mut* own rest = move(gone->next);
+        del(gone);
+        n.next = move(rest);
+    }
+}
+
+// Ends a node and its tail that the caller moves in, or nothing for null.
+fn node_drop_made(node mut* own p) void {
+    if (p == null) {
+        return;
+    }
+    node v = move(*p);
+    del(p);
+    node_drop(move(v));
+}
+
+// Each store swaps: the old value of a slot leaves it before the store, and node_drop_made frees
+// it. The entry value of n->next is unknown, and the store through n kills the fact of l->head.
 fn push(list mut* l, node mut* own n) void {
-    del(n->next);                             // the entry value of n->next is unknown
-    n->next = move(l->head);                  // the head slot is empty afterwards
-    del(l->head);                             // frees nothing: the store through n killed its fact
-    l->head = move(n);                        // and takes the new node
+    node mut* own tail = move(l->head);       // the head slot is empty afterwards
+    node mut* own old_next = move(n->next);
+    n->next = move(tail);
+    node_drop_made(move(old_next));
+    node mut* own fresh = move(n);
+    node mut* own old_head = move(l->head);
+    l->head = move(fresh);                    // and takes the new node
+    node_drop_made(move(old_head));
     l->size += 1;
 }
 
@@ -78,7 +105,7 @@ fn main() i32 {
     while (l->head != null) {
         node mut* own n = pop(l);
         println(n->value, " ", l->size);
-        del(n);
+        node_drop_made(move(n));
     }
     println(l->size, " ", l->head == null);
     i32 mut freed = 0;
@@ -86,7 +113,7 @@ fn main() i32 {
     push(l, new(node));
     push(l, new(node));
     while (l->head != null) {
-        del(pop(l));                          // an own rvalue: freed on the spot
+        node_drop_made(pop(l));               // an own rvalue: freed on the spot
         freed += 1;
     }
     println(freed);

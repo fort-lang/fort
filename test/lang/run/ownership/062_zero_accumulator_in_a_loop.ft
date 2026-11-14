@@ -11,18 +11,40 @@ struct node {
 
 i32 mut freed = 0;
 
-fn push(node mut* own mut* head, i64 v) void {
+// Frees the tail of a node that the caller moves in. `del` is shallow, so each node gives up its
+// tail before it is freed.
+fn node_drop(node mut n) void {
+    while (n.next != null) {
+        node mut* own gone = move(n.next);
+        node mut* own rest = move(gone->next);
+        del(gone);
+        n.next = move(rest);
+    }
+}
+
+// Ends a node and its tail that the caller moves in, or nothing for null.
+fn node_drop_made(node mut* own p) void {
+    if (p == null) {
+        return;
+    }
+    node v = move(*p);
+    del(p);
+    node_drop(move(v));
+}
+
+// Gives back the new head, so that head stays a local that is not memory (D17.11 form 2).
+fn push(node mut* own head, i64 v) node mut* own {
     node mut* own fresh = new(node);
     fresh->value = v;
-    fresh->next = move(*head);
-    *head = move(fresh);
+    fresh->next = move(head);
+    return fresh;
 }
 
 fn main() i32 {
     node mut* own mut head = null;
-    push(&head, 3);
-    push(&head, 2);
-    push(&head, 1);
+    head = push(move(head), 3);
+    head = push(move(head), 2);
+    head = push(move(head), 1);
     node mut* own mut done = null;
     while (head != null) {
         node mut* own step = move(head);
@@ -48,6 +70,6 @@ fn main() i32 {
     }
     del(done);                                // null now: `del` of a null frees nothing
     println("freed ", freed);
-    del(head);                                // the calls can write head through its address
+    node_drop_made(move(head));               // null now: node_drop_made frees nothing
     return 0;
 }

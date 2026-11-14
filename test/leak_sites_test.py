@@ -40,26 +40,9 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "lang"))
 import run_tests  # noqa: E402
 
-# The sites of part 2 in the test trees, relative to the root: the `del`s of the nodes of a list or
-# a tree whose inner owners the analysis cannot prove empty. They wait for their own migration.
-EXPECTED = {
-    ("test/lang/programs/binary_tree.ft", "(*out)->left"): 1,
-    ("test/lang/programs/binary_tree.ft", "heir->left->left"): 1,
-    ("test/lang/programs/binary_tree.ft", "heir->right->left"): 1,
-    ("test/lang/programs/binary_tree.ft", "node->left->left"): 3,
-    ("test/lang/programs/binary_tree.ft", "node->right->left"): 2,
-    ("test/lang/programs/binary_tree.ft", "successor->left"): 1,
-    ("test/lang/programs/binary_tree.ft", "t->root->left"): 2,
-    ("test/lang/programs/binary_tree.ft", "t.root->left"): 1,
-    ("test/lang/programs/json.ft", "tail->next->first"): 2,
-    ("test/lang/programs/json.ft", "v->first->first"): 2,
-    ("test/lang/programs/linked_list.ft", "step->next->next"): 1,
-    ("test/lang/run/ownership/021_list_push_pop.ft", "l->head->next"): 1,
-    ("test/lang/run/ownership/021_list_push_pop.ft", "n->next"): 1,
-    ("test/lang/run/ownership/021_list_push_pop.ft", "n->next->next"): 1,
-    ("test/lang/run/ownership/021_list_push_pop.ft", "pop(l)->next"): 1,
-    ("test/lang/run/ownership/062_zero_accumulator_in_a_loop.ft", "head->next"): 1,
-}
+# The sites of part 2 in the test trees, relative to the root. Each `del` of a node of a list or a
+# tree takes a form of the catalogue (D17.11), so the trees hold none.
+EXPECTED = {}
 
 # The entries at the change that added this test, as floors, so that a parallel change that adds
 # an entry does not turn the test red, and a pattern that finds none does: the suites of test/fort
