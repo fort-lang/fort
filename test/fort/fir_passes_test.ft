@@ -749,7 +749,8 @@ string[9] RVALUE_PRELUDE = {
 
 // Each pure rvalue goes with its assignment, and each other rvalue stays, in the default mode,
 // which removes no check. The text of each case is `_8 = <rvalue>;` and `return;`. The test also
-// holds fir_passes.pure against the kind of each rvalue.
+// holds fir_passes.pure against the kind of each rvalue. A temporary that holds an allocation
+// reaches no `return` (V16), so the block of such a case ends in `trap`.
 fn a_pure_rvalue_goes_and_the_others_stay() void {
     strbuf.str_buf mut assign = strbuf.create();
     defer del(assign.data);
@@ -779,6 +780,10 @@ fn a_pure_rvalue_goes_and_the_others_stay() void {
         strbuf.push(&assign, ';');
         lines[2] = strbuf.view(&let7);
         lines[4] = strbuf.view(&assign);
+        lines[5] = "        return;";
+        if (RVALUE_TYPES[k] == "u8 mut* own") {
+            lines[5] = "        trap;";
+        }
         fir.module mut* own fm = fir.module_make();
         *fm = pass_env.parse(e, RVALUE_PRELUDE[..], lines[..]);
         fir.func mut* f = &fm->funcs.items[0];
@@ -971,7 +976,7 @@ fn the_pointer_of_an_overwrite_check_stays_as_the_pointer_of_its_store() void {
 fn the_proof_decides_each_overwrite() void {
     lower_env.env mut* own e = lower_env.make();
     defer lower_env.drop_made(move(e));
-    string[22] text = {
+    string[23] text = {
         "fn main.both(_1 (p): u8 mut* own) -> void {",
         "    let _2 (q): u8 mut* own;",
         "    let _3: u8 mut* own;",
@@ -991,11 +996,12 @@ fn the_proof_decides_each_overwrite() void {
         "        _1 = move _4;",
         "        del(move _2);",
         "        del(move _1);",
+        "        dead(_2);",
         "        return;",
         "    }",
         "}",
     };
-    string[19] want = {
+    string[20] want = {
         "fn main.both(_1 (p): u8 mut* own) -> void {",
         "    let _0: void;",
         "    let _2 (q): u8 mut* own;",
@@ -1012,6 +1018,7 @@ fn the_proof_decides_each_overwrite() void {
         "        _1 = move _4;",
         "        del(move _2);",
         "        del(move _1);",
+        "        dead(_2);",
         "        return;",
         "    }",
         "}",

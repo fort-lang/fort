@@ -343,19 +343,60 @@ fn parse_unverified_made(env mut* e, string@ text) fir.module mut* own {
 /// rule of the verifier.
 fn parse_made(env mut* e, string@ text) fir.module mut* own {
     fir.module mut* own m = parse_unverified_made(e, text);
+    strbuf.str_buf mut last = strbuf.create();
+    defer del(last.data);
+    if (premise_breaks(e, m, &last) != 0) {
+        eprintln(strbuf.view(&last));
+        panic("run_env.parse_made: a function breaks a premise rule: use parse_breaks_made");
+    }
+    return m;
+}
+
+/// Parses `text` as parse_unverified_made does, and holds that each of its functions keeps each
+/// rule V1 to V13 of the verifier and that `breaks` of them break a premise rule V14 to V16
+/// (spec/fir.md 10). It is for a text that a test of the shadow memory writes by hand: the test
+/// holds the event of a function that breaks a premise of the lowering, which the lowering does not
+/// write. `breaks` is the count that the test function of the text states, and it is 1 or more: a
+/// text whose functions keep the 16 rules goes through parse_made. A text that breaks no premise
+/// stops the test, as each other count does.
+fn parse_breaks_made(env mut* e, string@ text, u64 breaks) fir.module mut* own {
+    if (breaks == 0) {
+        panic("run_env.parse_breaks_made: a text that keeps each rule goes through parse_made");
+    }
+    fir.module mut* own m = parse_unverified_made(e, text);
+    strbuf.str_buf mut last = strbuf.create();
+    defer del(last.data);
+    u64 broken = premise_breaks(e, m, &last);
+    if (broken != breaks) {
+        eprintln(broken, " functions break a premise rule, and not ", breaks);
+        eprintln(strbuf.view(&last));
+        panic("run_env.parse_breaks_made: another count of functions breaks a premise rule");
+    }
+    return m;
+}
+
+// The count of the functions of `m` that break a premise rule V14 to V16 of the verifier. A
+// violation of a rule V1 to V13 stops the test. The premise rules run last, so a violation of one
+// says that the function keeps each rule V1 to V13. `last` gets the text of the last violation,
+// for the caller that stops the test.
+fn premise_breaks(env mut* e, fir.module* m, strbuf.str_buf mut* last) u64 {
     fir_verify.runtime rt = fir_verify.runtime_of(&e->c.ck);
+    u64 mut broken = 0;
     u64 mut i = 0;
     while (i < m->funcs.len) {
         fir_verify.violation mut v = fir_verify.violation{};
         if (fir_verify.find_violation(&m->funcs.items[i], &rt, &v)) {
-            strbuf.clear(&e->text);
-            fir_verify.violation_text(&m->funcs.items[i], &v, &e->text);
-            eprintln(strbuf.view(&e->text));
-            panic("run_env.parse: the verifier refuses the text");
+            strbuf.clear(last);
+            fir_verify.violation_text(&m->funcs.items[i], &v, last);
+            if (v.rule < fir_verify.RULE_V14) {
+                eprintln(strbuf.view(last));
+                panic("run_env.parse: the verifier refuses the text");
+            }
+            broken += 1;
         }
         i += 1;
     }
-    return m;
+    return broken;
 }
 
 // Whether `name` is the bare name or the dotted name of `s`. `b` holds the dotted name.

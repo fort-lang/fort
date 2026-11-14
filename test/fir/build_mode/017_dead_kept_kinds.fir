@@ -33,7 +33,7 @@
 //|         _9 = slice(_2, const u64 0, const u64 1);
 //|         _10 = const null u8 mut* own;
 //|         del(move _10);
-//|         return;
+//|         trap;
 //|     }
 //| }
 // The pass removes an assignment only when its place is a whole temporary that nothing reads and
@@ -41,7 +41,9 @@
 // or `addr`, with no `move` operand. Nothing reads `_3`, `_4`, `_5`, `_6`, `_7`, `_8` or `_9`, and
 // each assignment stays: a `call`, an `alloc`, a named local, a place with a projection, a `move`
 // operand, an `aggregate` and a `slice`. A `del` is no assignment, and it reads `_10`. Only `_11 =
-// add(copy _5, const i32 6)` goes. The mode is the default mode, which removes no check.
+// add(copy _5, const i32 6)` goes. The mode is the default mode, which removes no check. The block
+// ends in `trap`: nothing ends the allocations of `_4` and `_7`, and no `return` comes while a
+// scratch temporary holds one (V16).
 fn main.kept(_1 (o): u8 mut* own, _2 (s): u8@) -> void {
     let _3: i32;
     let _4: u8 mut* own;
@@ -64,6 +66,6 @@ fn main.kept(_1 (o): u8 mut* own, _2 (s): u8@) -> void {
         _10 = const null u8 mut* own;
         _11 = add(copy _5, const i32 6);
         del(move _10);
-        return;
+        trap;
     }
 }
