@@ -6,6 +6,7 @@
 //| floats ok
 //| casts ok
 //| places ok
+//| live over ok
 //| bounds ok
 //| bools ok
 //| terminators ok
@@ -1596,7 +1597,7 @@ string[588] CASTS = {
 
 // The places of spec/fir.md 5.5 and the constants of 5.6 over storage: fields, elements,
 // spans, `string` headers, pointers, the globals, the data of a constant, and allocations.
-string[409] PLACES = {
+string[386] PLACES = {
     "fn main.fields() -> u16 {",
     "    let _1: pad;",
     "    bb0: {",
@@ -1806,30 +1807,6 @@ string[409] PLACES = {
     "        return;",
     "    }",
     "}",
-    "fn main.live_twice() -> i32 {",
-    "    let _1 (p): i32 mut* own;",
-    "    bb0: {",
-    "        live(_1) #3:1;",
-    "        _1 = alloc<i32>(const u64 1) #4:1;",
-    "        live(_1) #5:1;",
-    "        _0 = const i32 0 #6:1;",
-    "        dead(_1) #7:1;",
-    "        return #8:1;",
-    "    }",
-    "}",
-    "fn main.live_second() -> i32 {",
-    "    let _1 (t): i32 mut* own[2];",
-    "    let _2: u64;",
-    "    bb0: {",
-    "        live(_1) #3:1;",
-    "        _2 = const u64 1 #4:1;",
-    "        _1[_2] = alloc<i32>(const u64 1) #4:1;",
-    "        live(_1) #5:1;",
-    "        _0 = const i32 0 #6:1;",
-    "        dead(_1) #7:1;",
-    "        return #8:1;",
-    "    }",
-    "}",
     "fn main.global_value() -> i32 {",
     "    bb0: {",
     "        _0 = copy global main.G;",
@@ -1980,6 +1957,7 @@ string[409] PLACES = {
     "        _1 = alloc<i32>(const u64 1);",
     "        del(move _1);",
     "        _0 = eq(copy _1, const null i32 mut* own);",
+    "        dead(_1);",
     "        return;",
     "    }",
     "}",
@@ -2004,6 +1982,35 @@ string[409] PLACES = {
     "        _0 = cast<u64>(copy _3[_1]);",
     "        del(move _3);",
     "        return;",
+    "    }",
+    "}",
+};
+
+// Two functions whose second `live` comes while the local holds an allocation. Both break V14 of
+// the verifier (spec/fir.md 10), which the lowering never does, and the run holds the event.
+string[24] LIVE_OVER = {
+    "fn main.live_twice() -> i32 {",
+    "    let _1 (p): i32 mut* own;",
+    "    bb0: {",
+    "        live(_1) #3:1;",
+    "        _1 = alloc<i32>(const u64 1) #4:1;",
+    "        live(_1) #5:1;",
+    "        _0 = const i32 0 #6:1;",
+    "        dead(_1) #7:1;",
+    "        return #8:1;",
+    "    }",
+    "}",
+    "fn main.live_second() -> i32 {",
+    "    let _1 (t): i32 mut* own[2];",
+    "    let _2: u64;",
+    "    bb0: {",
+    "        live(_1) #3:1;",
+    "        _2 = const u64 1 #4:1;",
+    "        _1[_2] = alloc<i32>(const u64 1) #4:1;",
+    "        live(_1) #5:1;",
+    "        _0 = const i32 0 #6:1;",
+    "        dead(_1) #7:1;",
+    "        return #8:1;",
     "    }",
     "}",
 };
@@ -2382,7 +2389,7 @@ string[122] BOOLS = {
 
 // The terminators of spec/fir.md 8: a `switch` on each kind of operand, a loop, the checks
 // that pass, the failed check of each kind, `fail`, `trap`, `exit` and `abort`.
-string[211] TERMS = {
+string[212] TERMS = {
     "fn main.choose(_1: i32) -> i32 {",
     "    bb0: {",
     "        switch(copy _1) -> [i32 1: bb1, i32 -5: bb2, otherwise: bb3];",
@@ -2477,7 +2484,7 @@ string[211] TERMS = {
     "    }",
     "}",
     "fn main.overwrite() -> i32 {",
-    "    let _1: i32 mut* own;",
+    "    let _1 (p): i32 mut* own;",
     "    let _2: i32 mut* own;",
     "    bb0: {",
     "        _1 = alloc<i32>(const u64 1);",
@@ -2488,6 +2495,7 @@ string[211] TERMS = {
     "        _1 = move _2;",
     "        del(move _1);",
     "        _0 = const i32 1;",
+    "        dead(_1);",
     "        return;",
     "    }",
     "}",
@@ -2598,7 +2606,7 @@ string[211] TERMS = {
 
 // Calls of spec/fir.md 6: a fort function, a function value, a recursion, aggregate arguments
 // and results, the model externs, and the functions of the prelude that the run lowers.
-string[226] CALLS = {
+string[227] CALLS = {
     "fn main.bump_param(_1: pair) -> i32 {",
     "    bb0: {",
     "        _1.0 = const i32 99;",
@@ -2637,6 +2645,7 @@ string[226] CALLS = {
     "        _1 = alloc<i32>(const u64 1);",
     "        _2 = call fn main.take(move _1);",
     "        _0 = eq(copy _1, const null i32 mut* own);",
+    "        dead(_1);",
     "        return;",
     "    }",
     "}",
@@ -7143,23 +7152,6 @@ fn places(run_env.env mut* e) void {
     // the zero bytes reach the last byte of the local: the value of the run before has a bit in
     // each byte, and run 2 and run 3 read 0
     run_env.expect_line(run_env.run_in(e, m, "main.live_word", z3[..1]), "return u64 0");
-    // the zero bytes of a `live` are a store for the shadow state: a `live` over a live owner is an
-    // `overwrite`, and the allocation makes no `leak` after it
-    bool before = e->events;
-    e->events = true;
-    string[2] twice = {
-        "event overwrite in main.live_twice at 5:1",
-        "return i32 0",
-    };
-    run_env.expect(run_env.run_in(e, m, "main.live_twice", z3[..0]), twice[..]);
-    // that store covers the whole local: the owner in the second word of an array of 2 is an
-    // `overwrite` too, and no `leak` at the `dead`
-    string[2] second = {
-        "event overwrite in main.live_second at 5:1",
-        "return i32 0",
-    };
-    run_env.expect(run_env.run_in(e, m, "main.live_second", z3[..0]), second[..]);
-    e->events = before;
     u64[1] a1838 = {0};
     run_env.expect_line(run_env.run_in(e, m, "main.global_value", a1838[..0]), "return i32 42");
     u64[1] a1839 = {0};
@@ -7226,6 +7218,32 @@ fn places(run_env.env mut* e) void {
     u64[1] a1866 = {2};
     run_env.expect_line(run_env.run_in(e, m, "main.owned_span", a1866[..1]), "return u64 9");
     println("places ok");
+}
+
+// The zero bytes of a `live` are a store for the shadow state: a `live` over a live owner is an
+// `overwrite`. The text breaks V14 in its 2 functions, so it goes through the loose helper.
+fn live_over(run_env.env mut* e) void {
+    run_env.check(e, PRELUDE[..]);
+    fir.module mut* own m = run_env.parse_breaks_made(e, LIVE_OVER[..], 2);
+    defer fir.module_drop_made(move(m));
+    u64[1] none = {0};
+    bool before = e->events;
+    e->events = true;
+    // the allocation has no owner left, so the `dead` reports no `leak` after the `overwrite`
+    string[2] twice = {
+        "event overwrite in main.live_twice at 5:1",
+        "return i32 0",
+    };
+    run_env.expect(run_env.run_in(e, m, "main.live_twice", none[..0]), twice[..]);
+    // that store covers the whole local: the owner in the second word of an array of 2 is an
+    // `overwrite` too, and no `leak` at the `dead`
+    string[2] second = {
+        "event overwrite in main.live_second at 5:1",
+        "return i32 0",
+    };
+    run_env.expect(run_env.run_in(e, m, "main.live_second", none[..0]), second[..]);
+    e->events = before;
+    println("live over ok");
 }
 
 // Each bound of `slice_ptr` becomes 64 bits by the signedness of its own type, as
@@ -7924,6 +7942,7 @@ fn main() i32 {
     floats(e);
     casts(e);
     places(e);
+    live_over(e);
     bounds(e);
     bools(e);
     terminators(e);

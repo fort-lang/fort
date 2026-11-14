@@ -922,6 +922,32 @@ statement index.
   the empty set and every other block with the set of all temporaries, so a block that no edge
   reaches, such as the block after a terminator (D14.2), passes. V13 follows every edge, the edge
   that V9 prunes on a constant `switch` included.
+- **V14**: no `return` stands in the open scope of a named owner local, on any path. A named
+  owner local is a named local whose type is an `own` reference or an owning aggregate (D17.7).
+  Three items open the scope of `_n`: `live(_n)`; an assignment whose place designates fixed
+  storage of `_n` and whose rvalue is no zero rvalue; and an `addr`, or a `slice` of a fixed
+  array, whose place designates fixed storage of `_n`. Only `dead(_n)` closes the scope. A zero
+  rvalue is a `use` or an `aggregate` whose operands are all `zero T` or `null T`. No
+  `live(_n)` comes while the scope of `_n` is open, on any path: a `live` writes the zero value
+  into the storage of `_n` (12.2), so there it writes over a value that can be an allocation.
+- **V15**: no assignment into fixed storage of an aggregate `_0` comes after another one, on any
+  path. An assignment into a member of `_0` is such an assignment. Each path from `bb0` to a
+  `return` holds an assignment of the whole `_0`. No `addr` and no `slice` has a place that
+  designates fixed storage of an aggregate `_0`, at any projection and in any block. So only an
+  assignment into `_0` puts a value there: no address of `_0` reaches a store or a `call`. The
+  third clause asks no type of the place of a `slice`, so it refuses a `slice` of a span in `_0`
+  too. A `move` whose place is in `_0` leaves the zero value there (5.6) and puts no value there,
+  so the rule does not name it. The rule reads `_0` of each aggregate type (5.3), whether the
+  type owns or not.
+- **V16**: no assignment writes a whole scratch local while the local is live, on any path, and
+  no `return` comes while a scratch temporary is live. A scratch local is a temporary, or a `_0`
+  of no aggregate type, whose type is an `own` reference and whose storage no `addr` and no
+  `slice` of a fixed array names (section 11, **Scratch**). An assignment into the local makes
+  it live, but an assignment of a zero rvalue into an empty local leaves it empty. A `move`
+  operand whose place is the whole local leaves it empty, the operand of a `del` included. The
+  verifier tests an assignment after the `move` operands of its own statement. A
+  `check(overwrite: p)` right before the assignment changes nothing. A `_0` passes its value to
+  the caller, so the second clause names temporaries only.
 V9 closes the termination gap of section 1. The direct path wrote `unreachable` at the end of a
 body because `check_terminates` said that the body terminates, and the translator writes the
 `unreachable` that the lowering puts there for the same reason. With V9, a disagreement is an
@@ -932,6 +958,30 @@ because `while (true)` lowers to `switch(const true)`, and D8.4 counts that loop
 in a terminating statement, and that no `break` targets. T-210 added the last condition: before
 it, a `break` inside such a clause left the `switch`, the body fell off its end, and V9 reported
 it. The implementation must measure V9 over the corpus before it trusts the rule (section 16).
+
+V14, V15 and V16 are the premise rules. The emptiness pass (section 11) takes three premises from
+the lowering, and each rule holds one of them on FIR text that no lowering made:
+
+- V14 holds the premise of 9.5: the lowering writes the `dead` of each named local of each scope
+  that a `return` leaves. Past the leak work limit, the pass gives a named local no exit at a
+  `return` (section 11, the leak rule). The pass reads a `live` as no store, so V14 also holds
+  that no `live` comes in an open scope.
+- V15 holds the premise of 9.6: the lowering stores into an aggregate `_0` once on each path to
+  `return`, and it names `_0` in no `addr` and no `slice`. The pass gives such a store no proof
+  (section 11, **Stores**).
+- V16 holds the premise of D17.8: the lowering writes no store over a live scratch local and no
+  `return` while a scratch temporary holds an allocation. Past its work limits, the pass counts
+  each store into a whole scratch local and each exit of a scratch local as proved.
+
+The scope of V14 is open wherever the pass could not prove that the local holds no allocation, and
+after each `live` too. The verifier tests the three rules last, with one forward dataflow over the
+blocks: one bit for each named owner local, each scratch local and the aggregate `_0`, and one bit
+that says that no assignment of the whole `_0` came yet. The join is the union, and each block
+starts with the empty set. `bb0` starts with the last bit set for an aggregate `_0`. So a block
+that no edge reaches passes the second clause of V15. The third clause of V15 reads each statement
+with no dataflow, so no block passes it. The dataflow follows every edge, the edge that V9 prunes
+on a constant `switch` included. The three rules report in number order, as each
+other rule does. A violation of one of them says that the function keeps V1 to V13.
 
 V7 closes the gap of T-072. The lowering takes the fort type of a runtime entry from the
 declaration in `std/rt.ft` that the checker checked. The declaration and each call then have one
@@ -1327,17 +1377,20 @@ changes the function, and the verifier runs after it. The passes run in this ord
    - **Stores.** A store needs a proof when it is an assignment into a place of an `own` reference
      type, a store into a temporary or into `_0` included, with two exceptions that no check stands
      right before. A check stands right before a store when the store is the first statement of the
-     continuation block of the check and the place of the store is the place of the check: one
-     base and equal projections, index locals included. The first exception is a store into fixed
-     storage of an aggregate `_0`, the destination of the caller (5.3). No lvalue of the source
-     names `_0`, and the lowering stores into it once on each path to `return`. FIR text that stores
-     into an aggregate `_0` over an allocation is the first of two shapes outside the guarantee of
-     the pass; **Proof** gives the second. An entry fact for an aggregate `_0` would reject fort
-     source: the storage of an `own` span or `string` result is memory, and each `call` before its
-     store kills its fact. The second exception is the entry zeroing of 9.2: a store of the zero
-     value into a whole named local in `bb0`, when no statement of `bb0` before it writes a place of
-     that local or takes the address of one. No edge enters `bb0` (V2), so the local holds no
-     allocation of the call there. Each other store needs a proof, with a check or with none.
+     continuation block of the check and the place of the store is the place of the check: one base
+     and equal projections, index locals included. The first exception is a store into fixed storage
+     of an aggregate `_0`, the destination of the caller (5.3). No lvalue of the source names `_0`,
+     and the lowering stores into it once on each path to `return` and takes no address of it. V15
+     holds that premise on FIR text that no lowering made (section 10): the verifier refuses a text
+     that stores into an aggregate `_0` twice on a path or that names it in an `addr` or a `slice`.
+     FIR text that stores into an aggregate `_0` over an allocation is the first of two shapes
+     outside the guarantee of the pass; **Proof** gives the second. An entry fact for an aggregate
+     `_0` would reject fort source: the storage of an `own` span or `string` result is memory, and
+     each `call` before its store kills its fact. The second exception is the entry zeroing of 9.2:
+     a store of the zero value into a whole named local in `bb0`, when no statement of `bb0` before
+     it writes a place of that local or takes the address of one. No edge enters `bb0` (V2), so the
+     local holds no allocation of the call there. Each other store needs a proof, with a check or
+     with none.
    - **Proof.** A store that needs a proof is proved when its destination is a tracked place and its
      fact holds after the reads of its operands and the kill of its `call`, before the kill rules of
      the store (**Order**). That is the test of D17.11: the fact after the right-hand side and
@@ -1368,8 +1421,9 @@ changes the function, and the verifier runs after it. The passes run in this ord
      dataflow. When it passes 1048576 (2^20), the pass proves no check and no store of the function
      (D17.11). A store into a whole scratch local is then no error: no lvalue names it, and D17.8
      keeps the lowering from a store over a live one. So FIR text past the limit that stores over a
-     live scratch local is the second shape outside the guarantee. The lowered FIR past the limit
-     stays sound by D17.8. A scratch dataflow past the limit would not help: its sets are the second
+     live scratch local is the second shape outside the guarantee. V16 refuses that text, past the
+     limit or not (section 10). The lowered FIR past the limit stays sound by D17.8. A scratch
+     dataflow past the limit would not help: its sets are the second
      count, which alone puts `big` of `fail/ownership/060` past the limit. The first error of the
      function takes the second note of D17.11. A function with no check and no store that needs a
      proof has no work. The pass reports each check and each store that it does not prove, once for
@@ -1408,7 +1462,8 @@ changes the function, and the verifier runs after it. The passes run in this ord
      a scratch local, and a named local has no exit at a `return`; the overwrite proof keeps its own
      limit. So FIR text past that limit that returns with a live scratch local, or with a live named
      local that no `dead` ends, is outside the guarantee of the leak rule; the lowered FIR stays
-     sound by D17.8 and by 9.5. The pass reports the error of D17.20 and its note at each exit that
+     sound by D17.8 and by 9.5. V16 refuses the first text and V14 the second, past the limit or
+     not (section 10). The pass reports the error of D17.20 and its note at each exit that
      it does not prove, once for each location and owner local, at the location of the `dead` or of
      the `return`. The errors of a function stand in the order of its exits, after its errors of
      D17.11. Past the limit the first error takes the second note of D17.20, the note of the limit

@@ -165,10 +165,17 @@ fn verdict(bool proved) char {
     return 'U';
 }
 
-// Parses `text` against PRELUDE, holds that the verifier accepts each function, proves each one,
-// and holds that function `k` of the module gives the verdicts `want[k]` (write_all), and that
-// the kill rules read the map of owner.alias in each function that has one.
+// Parses `text` against PRELUDE, holds that each function keeps every rule of the verifier, proves
+// each one, and holds that function `k` of the module gives the verdicts `want[k]` (write_all), and
+// that the kill rules read the map of owner.alias in each function that has one.
 fn expect(string@ text, string@ want) void {
+    expect_breaks(text, want, 0);
+}
+
+// As expect does, for a text of which `breaks` functions break a premise rule V14 to V16 of the
+// verifier and each function keeps the rules V1 to V13 (pass_env.verified_with). The test function
+// states the count.
+fn expect_breaks(string@ text, string@ want, u64 breaks) void {
     strbuf.str_buf mut got = strbuf.create();
     defer del(got.data);
     lower_env.env mut* own e = lower_env.make();
@@ -177,10 +184,10 @@ fn expect(string@ text, string@ want) void {
     *m = pass_env.parse(e, PRELUDE[..], text);
     defer fir.module_drop_made(move(m));
     assert(m->funcs.len == want.len);
+    pass_env.verified_with(e, m, breaks, "alias_test: the verifier refuses the input");
     u64 mut k = 0;
     while (k < m->funcs.len) {
         fir.func* f = fir.module_function_at(m, k);
-        pass_env.verified(e, f, "alias_test: the verifier refuses the input");
         prover.proof mut* own p = prover.make();
         *p = prover.prove(f);
         write_all(f, p, &got);
@@ -724,7 +731,7 @@ string[18] BORROWS_VERDICTS = {
 };
 
 fn each_value_borrows_the_origins_of_its_operands() void {
-    expect(BORROWS[..], BORROWS_VERDICTS[..]);
+    expect_breaks(BORROWS[..], BORROWS_VERDICTS[..], 18);
 }
 
 // ---- the exposure of a frame -------------------------------------------------------------------
@@ -1051,7 +1058,7 @@ string[12] EXPOSURE_VERDICTS = {
 };
 
 fn a_store_into_memory_exposes_each_frame_of_its_value() void {
-    expect(EXPOSURE[..], EXPOSURE_VERDICTS[..]);
+    expect_breaks(EXPOSURE[..], EXPOSURE_VERDICTS[..], 10);
 }
 
 // ---- calls -------------------------------------------------------------------------------------
@@ -1201,7 +1208,7 @@ string[5] CALLS_VERDICTS = {
 };
 
 fn a_call_exposes_its_operands_and_its_result_borrows_exposed() void {
-    expect(CALLS[..], CALLS_VERDICTS[..]);
+    expect_breaks(CALLS[..], CALLS_VERDICTS[..], 5);
 }
 
 // ---- a store straight into a memory local ------------------------------------------------------
@@ -1451,7 +1458,7 @@ string[10] STRAIGHT_VERDICTS = {
 };
 
 fn a_straight_store_kills_a_fact_only_through_a_pointer_that_can_reach_it() void {
-    expect(STRAIGHT[..], STRAIGHT_VERDICTS[..]);
+    expect_breaks(STRAIGHT[..], STRAIGHT_VERDICTS[..], 8);
 }
 
 // ---- lowered source ----------------------------------------------------------------------------
@@ -1703,7 +1710,7 @@ fn each_transfer_of_a_block_charges_its_units() void {
     *m = pass_env.parse(e, PRELUDE[..], CHARGE[..]);
     defer fir.module_drop_made(move(m));
     fir.func* f = fir.module_function_at(m, 0);
-    pass_env.verified(e, f, "alias_test: the verifier refuses the input");
+    pass_env.breaks_premise(e, f, "alias_test: the verifier refuses the input");
     prover.proof mut* own p = prover.make();
     *p = prover.prove(f);
     defer prover.drop_made(move(p));
@@ -1771,7 +1778,7 @@ fn expect_limit(lower_env.env mut* e, fir_parse.prelude pre, string text, u64 wo
     defer fir.module_drop_made(move(m));
     assert(check_env.errors(&e->c) == 0 && m->funcs.len == 1);
     fir.func* f = fir.module_function_at(m, 0);
-    pass_env.verified(e, f, "alias_test: the verifier refuses the generated function");
+    pass_env.breaks_premise(e, f, "alias_test: the verifier refuses the generated function");
     prover.proof mut* own p = prover.make();
     *p = prover.prove(f);
     defer prover.drop_made(move(p));

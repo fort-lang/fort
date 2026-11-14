@@ -1008,9 +1008,10 @@ fn needs_proof(fir.func* f, u32@ check_of, u32 b, u32 i, fir_flow.bits mut* writ
 // Lists in out->stores each store that needs a proof, in block order: each store into a place of
 // an `own` reference type, a store into a temporary or into `_0` included, but for two kinds that
 // no check stands right before. A store into fixed storage of an aggregate `_0` writes the
-// destination of the caller, which can hold owners, so the pass gives it no fact at the entry. An
-// entry zeroing in `bb0` writes a named local that no statement before it wrote or took an
-// address of: no edge enters `bb0` (rule V2), so the local holds no allocation of the call.
+// destination of the caller, which can hold owners, so the pass gives it no fact at the entry.
+// Rule V15 refuses a second such store on a path, and each `addr` and each `slice` of that
+// storage. An entry zeroing in `bb0` writes a named local that no statement before it wrote or
+// took an address of: no edge enters `bb0` (rule V2), so the local holds no allocation of the call.
 fn find_stores(fir.func* f, u32@ check_of, proof mut* out) void {
     u64 mut count = 0;
     fir_flow.bits mut written = fir_flow.bits_new(fir.local_count(f));
@@ -1375,7 +1376,7 @@ fn run_aliases(context mut* c, fir.pred_table* pt, proof mut* out) void {
 // Writes the verdict of each store and of each check into `out`, and counts the ones that are not
 // proved. With no fact `d` is null, and a store that the facts dataflow tests is not proved. Past
 // the limit each set is null and nothing is proved, but a store into a whole scratch local counts
-// as proved: no lvalue names it, and D17.8 keeps the lowering from a store over a live one.
+// as proved: no lvalue names it, and rule V16 refuses a store over a live one (D17.8).
 fn judge(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fresh,
          fir_flow.dataflow* d, fir_flow.dataflow* scratch, proof mut* out) void {
     u64 mut k = 0;
@@ -1705,7 +1706,7 @@ fn count_owner_facts(context* c) u64 {
 // an obligation at the `return` that ends block `b`. A parameter and a temporary have one. A named
 // local has one when `ended` does not prove that its scope ended on each path to the end of the
 // block. With a null `ended` it has none: the lowering writes the `dead` of each named local of
-// each scope that a `return` leaves (spec/fir.md 9.5).
+// each scope that a `return` leaves (spec/fir.md 9.5), and rule V14 of the verifier holds that.
 fn has_return_obligation(fir.func* f, fir_flow.dataflow* ended, u32 b, u32 n, bool aggregate)
     bool {
     if (!is_exit_local(f, n, aggregate)) {
@@ -1821,7 +1822,7 @@ fn count_aggregate_steps(fir.func* f) u64 {
 }
 
 // Writes the verdict of each exit past the work limit. Only an exit of a scratch local holds: no
-// lvalue names it, and D17.8 keeps the lowering from a `return` while one holds an allocation.
+// lvalue names it, and rule V16 refuses a `return` while a scratch temporary holds a value (D17.8).
 fn pass_exits(context* c, proof mut* out) void {
     u64 mut k = 0;
     while (k < out->exits.len) {
