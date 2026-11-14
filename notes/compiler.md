@@ -45,7 +45,9 @@ came here.
   first compiler with it is the one that the chain builds from the tree with the rule, and
   `tools/fixpoint.sh` then applies it to `src/fort` and `std`.
   `tools/mutations/lexer_fort.json` holds the bounds and the five places. It holds the skip of
-  the byte order mark and the limit of 20 diagnostics (D14.2) too.
+  the byte order mark and the limit of 20 diagnostics (D14.2) too. Its rows
+  `D14.2-resync-lone-cr` and `D14.2-line-base-lone-cr` hold that a lone CR ends no line for
+  a resync (D2.1). Bootstrap-0 is frozen, so it still resyncs at a lone CR.
 
 ## 3. The parser
 
