@@ -278,11 +278,10 @@ fn ty(env mut* e, string name) types.node* {
     return check_env.sym_main(&e->c, name)->ty;
 }
 
-// The FIR function of the prelude function `name`, with no statement and no terminator.
-fn func_of(env mut* e, string name) fir.func {
-    // The type comes from ty, so this function, whose result is an aggregate, reads nothing
-    // through a pointer before its first store (D17.21).
-    return fir.func_new(tt(e), check_env.sym_main(&e->c, name), ty(e, name));
+// The FIR function of the prelude function `name`, with no statement and no terminator, in an
+// allocation of its own, which the caller ends through fir.func_drop_made.
+fn func_made(env mut* e, string name) fir.func mut* own {
+    return fir.func_new_made(tt(e), check_env.sym_main(&e->c, name), ty(e, name));
 }
 
 fn at(u32 line, u32 col) diag.loc {
@@ -341,11 +340,11 @@ fn lines_verdict(env mut* e, string header, string@ lines, fir_verify.violation 
 }
 
 // Parses the text of the case in e->text. The text must parse with no diagnostic.
-fn parse_text(env mut* e) fir.module {
+fn parse_text(env mut* e) fir.module mut* own {
     string text = strbuf.view(&e->text);
     u64 before = check_env.errors(&e->c);
     fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e->c, "main"), &e->c.ck};
-    fir.module mut m = fir_parse.parse_module(&e->c.m.s, "t.fir", text, pre);
+    fir.module mut* own m = fir_parse.parse_made(&e->c.m.s, "t.fir", text, pre);
     if (check_env.errors(&e->c) != before) {
         eprintln("fir_verify_test: ", check_env.report_text(&e->c, before), " in");
         eprintln(text);
@@ -358,8 +357,7 @@ fn parse_text(env mut* e) fir.module {
 fn text_verdict(env mut* e, fir_verify.violation mut* v) bool {
     // `m` lives in an allocation, so that the leak rule proves its end: no call changes the
     // pointer, and drop_made holds each release once.
-    fir.module mut* own m = fir.module_make();
-    *m = parse_text(e);
+    fir.module mut* own m = parse_text(e);
     defer fir.module_drop_made(move(m));
     return fir_verify.find_violation(fir.module_function_at(m, 0), &e->rt, v);
 }
@@ -572,8 +570,7 @@ fn the_text_names_the_rule_the_function_the_block_and_the_statement() void {
     defer del(b.data);
     env mut* own e = make();
     defer drop_made(move(e));
-    fir.func mut* own f = fir.func_make();
-    *f = func_of(e, "nothing");
+    fir.func mut* own f = func_made(e, "nothing");
     defer fir.func_drop_made(move(f));
     fir.block_new(f);
     fir.block_set_terminator(f, 0, fir.term_goto(1, at(1, 1), 3));
@@ -593,8 +590,7 @@ fn the_text_names_the_rule_the_function_the_block_and_the_statement() void {
     assert(got[0..want.len] == want);
     assert(got[want.len..got.len] == "main.nothing bb1 statement 0 (s7)");
     // a terminator gives the statement index of the terminator
-    fir.func mut* own g = fir.func_make();
-    *g = func_of(e, "nothing");
+    fir.func mut* own g = func_made(e, "nothing");
     defer fir.func_drop_made(move(g));
     fir.block_set_terminator(g, 0, fir.term_goto(0, at(1, 1), 4));
     assert(fir_verify.find_violation(g, &e->rt, &v));
@@ -604,8 +600,7 @@ fn the_text_names_the_rule_the_function_the_block_and_the_statement() void {
     assert(got[0..want.len] == want);
     assert(got[want.len..got.len] == "main.nothing bb0 statement 0 (s4)");
     // a function with no symbol
-    fir.func mut* own h = fir.func_make();
-    *h = fir.func_new(tt(e), null, ty(e, "nothing"));
+    fir.func mut* own h = fir.func_new_made(tt(e), null, ty(e, "nothing"));
     defer fir.func_drop_made(move(h));
     assert(fir_verify.find_violation(h, &e->rt, &v));
     assert(text_of(h, &v, &b)
@@ -618,8 +613,7 @@ fn v1_every_block_has_a_terminator() void {
     env mut* own e = make();
     defer drop_made(move(e));
     // the text cannot hold a block with no terminator, so the constructors build it
-    fir.func mut* own f = fir.func_make();
-    *f = func_of(e, "nothing");
+    fir.func mut* own f = func_made(e, "nothing");
     defer fir.func_drop_made(move(f));
     fir.block_new(f);
     fir.block_new(f);
@@ -630,15 +624,13 @@ fn v1_every_block_has_a_terminator() void {
     fir.block_set_terminator(f, 2, fir.term_return(at(1, 1), 1));
     green_func(e, f);
     // V1 comes before V2, though bb0 breaks V2 and only bb1 breaks V1
-    fir.func mut* own g = fir.func_make();
-    *g = func_of(e, "nothing");
+    fir.func mut* own g = func_made(e, "nothing");
     defer fir.func_drop_made(move(g));
     fir.block_new(g);
     fir.block_set_terminator(g, 0, fir.term_goto(0, at(1, 1), 1));
     red_func(e, g, 1, fir_verify.V1_NO_TERMINATOR, 1, 0);
     // the first block may be the one with no terminator
-    fir.func mut* own h = fir.func_make();
-    *h = func_of(e, "nothing");
+    fir.func mut* own h = func_made(e, "nothing");
     defer fir.func_drop_made(move(h));
     red_func(e, h, 1, fir_verify.V1_NO_TERMINATOR, 0, 0);
 }
@@ -647,24 +639,21 @@ fn v2_names_no_block_past_the_last() void {
     env mut* own e = make();
     defer drop_made(move(e));
     // the parser refuses an unknown block, so the constructors build these
-    fir.func mut* own f = fir.func_make();
-    *f = func_of(e, "nothing");
+    fir.func mut* own f = func_made(e, "nothing");
     defer fir.func_drop_made(move(f));
     fir.block_new(f);
     fir.block_set_terminator(f, 1, fir.term_return(at(1, 1), 1));
     fir.block_set_terminator(f, 0, fir.term_goto(2, at(1, 1), 1));
     red_func(e, f, 2, fir_verify.V2_NO_BLOCK, 0, 0);
     // the last block is a block of the function
-    fir.func mut* own g = fir.func_make();
-    *g = func_of(e, "nothing");
+    fir.func mut* own g = func_made(e, "nothing");
     defer fir.func_drop_made(move(g));
     fir.block_new(g);
     fir.block_set_terminator(g, 1, fir.term_return(at(1, 1), 1));
     fir.block_set_terminator(g, 0, fir.term_goto(1, at(1, 1), 1));
     green_func(e, g);
     // an arm and the otherwise block of a switch, and the continuation of a check
-    fir.func mut* own s = fir.func_make();
-    *s = func_of(e, "nothing");
+    fir.func mut* own s = func_made(e, "nothing");
     defer fir.func_drop_made(move(s));
     fir.block_new(s);
     fir.block_set_terminator(s, 1, fir.term_return(at(1, 1), 1));
@@ -673,15 +662,13 @@ fn v2_names_no_block_past_the_last() void {
     fir.operand cond = fir.operand_const(fir.const_bool(true));
     fir.block_set_terminator(s, 0, fir.term_switch(cond, first, 2, 1, at(1, 1), 1));
     red_func(e, s, 2, fir_verify.V2_NO_BLOCK, 0, 0);
-    fir.func mut* own o = fir.func_make();
-    *o = func_of(e, "nothing");
+    fir.func mut* own o = func_made(e, "nothing");
     defer fir.func_drop_made(move(o));
     fir.block_new(o);
     fir.block_set_terminator(o, 1, fir.term_return(at(1, 1), 1));
     fir.block_set_terminator(o, 0, fir.term_switch(cond, 0, 0, 7, at(1, 1), 1));
     red_func(e, o, 2, fir_verify.V2_NO_BLOCK, 0, 0);
-    fir.func mut* own c = fir.func_make();
-    *c = func_of(e, "nothing");
+    fir.func mut* own c = func_made(e, "nothing");
     defer fir.func_drop_made(move(c));
     fir.block_new(c);
     fir.block_set_terminator(c, 0, fir.term_goto(1, at(1, 1), 1));
@@ -810,8 +797,7 @@ fn v3_names_a_local_of_the_function() void {
     env mut* own e = make();
     defer drop_made(move(e));
     // the parser refuses an unknown local, so the constructors build these
-    fir.func mut* own f = fir.func_make();
-    *f = func_of(e, "nothing");
+    fir.func mut* own f = func_made(e, "nothing");
     defer fir.func_drop_made(move(f));
     u32 one = fir.local_add(f, prim_ty(e, prim.prim_kind.prim_i32), fir.local_kind.lk_temp,
                             null, at(1, 1));
@@ -820,8 +806,7 @@ fn v3_names_a_local_of_the_function() void {
     fir.block_set_terminator(f, 0, fir.term_return(at(1, 1), 1));
     red_func(e, f, 3, fir_verify.V3_NO_LOCAL, 0, 0);
     // the last local is a local of the function
-    fir.func mut* own g = fir.func_make();
-    *g = func_of(e, "nothing");
+    fir.func mut* own g = func_made(e, "nothing");
     defer fir.func_drop_made(move(g));
     u32 two = fir.local_add(g, prim_ty(e, prim.prim_kind.prim_i32), fir.local_kind.lk_temp,
                             null, at(1, 1));
@@ -830,8 +815,7 @@ fn v3_names_a_local_of_the_function() void {
     fir.block_set_terminator(g, 0, fir.term_return(at(1, 1), 1));
     green_func(e, g);
     // an index local past the last local
-    fir.func mut* own h = fir.func_make();
-    *h = func_of(e, "nothing");
+    fir.func mut* own h = func_made(e, "nothing");
     defer fir.func_drop_made(move(h));
     types.node* cells = types.type_array(tt(e), prim_ty(e, prim.prim_kind.prim_i32), 4);
     u32 arr = fir.local_add(h, cells, fir.local_kind.lk_temp, null, at(1, 1));
@@ -1246,8 +1230,7 @@ fn u8_span(env mut* e, fir.func mut* f) u8_span_local {
 fn v4_an_rvalue_has_the_count_of_its_form() void {
     env mut* own e = make();
     defer drop_made(move(e));
-    fir.func mut* own f = fir.func_make();
-    *f = func_of(e, "nothing");
+    fir.func mut* own f = func_made(e, "nothing");
     defer fir.func_drop_made(move(f));
     types.node* i32t = prim_ty(e, prim.prim_kind.prim_i32);
     u32 one = fir.local_add(f, i32t, fir.local_kind.lk_temp, null, at(1, 1));
@@ -1256,8 +1239,7 @@ fn v4_an_rvalue_has_the_count_of_its_form() void {
     fir.block_append(f, 0, fir.stmt_assign(fir.place_local(one), add, at(1, 1), 1));
     fir.block_set_terminator(f, 0, fir.term_return(at(1, 1), 1));
     red_func(e, f, 4, fir_verify.V4_ARITY, 0, 0);
-    fir.func mut* own g = fir.func_make();
-    *g = func_of(e, "nothing");
+    fir.func mut* own g = func_made(e, "nothing");
     defer fir.func_drop_made(move(g));
     types.node* ptr = types.type_ptr(tt(e), i32t, false, false);
     u32 two = fir.local_add(g, ptr, fir.local_kind.lk_temp, null, at(1, 1));
@@ -1272,8 +1254,7 @@ fn v4_an_rvalue_has_the_count_of_its_form() void {
     fir.block_set_terminator(g, 0, fir.term_return(at(1, 1), 1));
     red_func(e, g, 4, fir_verify.V4_ARITY, 0, 0);
     // a regrow has the span and the count, and no third operand
-    fir.func mut* own h = fir.func_make();
-    *h = func_of(e, "nothing");
+    fir.func mut* own h = func_made(e, "nothing");
     defer fir.func_drop_made(move(h));
     u8_span_local span = u8_span(e, h);
     u32 args = fir.operand_push(h, fir.operand_move(fir.place_local(span.span)));
@@ -1340,8 +1321,7 @@ fn v4_an_overwrite_check_names_its_place() void {
     // a fail of the kind keeps V4, and V7 refuses it: the kind names no runtime entry
     red(e, lets, "fail(overwrite); }", 7, fir_verify.V7_NO_ENTRY, 0, 0);
     // the constructors give the same record as the text
-    fir.func mut* own f = fir.func_make();
-    *f = func_of(e, "nothing");
+    fir.func mut* own f = func_made(e, "nothing");
     defer fir.func_drop_made(move(f));
     fir.block_new(f);
     fir.block_set_terminator(f, 1, fir.term_return(at(1, 1), 1));
@@ -2020,8 +2000,7 @@ fn v10_live_and_dead_name_a_named_local() void {
         fir_verify.V10_LOCAL, 0, 1);
     green(e, "let _1 (x): i32;", "bb0: { live(_1); dead(_1); return; }");
     // the parser refuses an unknown local, so the constructors build this one
-    fir.func mut* own f = fir.func_make();
-    *f = func_of(e, "nothing");
+    fir.func mut* own f = func_made(e, "nothing");
     defer fir.func_drop_made(move(f));
     fir.block_append(f, 0, fir.stmt_live(1, at(1, 1), 1));
     fir.block_set_terminator(f, 0, fir.term_return(at(1, 1), 1));
@@ -2750,8 +2729,7 @@ fn flow_rules_scale_to_a_long_chain() void {
 // Parses the function `header` whose lines are `lines` and returns what verify_report returns.
 fn lines_report(env mut* e, string header, string@ lines, strbuf.str_buf mut* out) bool {
     lines_text(e, header, lines);
-    fir.module mut* own m = fir.module_make();
-    *m = parse_text(e);
+    fir.module mut* own m = parse_text(e);
     defer fir.module_drop_made(move(m));
     return fir_verify.verify_report(fir.module_function_at(m, 0), &e->rt, out);
 }

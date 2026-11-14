@@ -65,8 +65,7 @@ fn a_set_takes_one_word_for_each_64_numbers() void {
     u64 mut k = 0;
     while (k < 7) {
         // The set lives in an allocation, so that the free under test runs and its drop ends it.
-        fir_flow.bits mut* own s = fir_flow.bits_make();
-        *s = fir_flow.bits_new(counts[k]);
+        fir_flow.bits mut* own s = fir_flow.bits_new_made(counts[k]);
         defer fir_flow.bits_drop_made(move(s));
         assert(s->count == counts[k]);
         assert(s->words.len == words[k]);
@@ -242,7 +241,6 @@ fn drop_made(env mut* own p) void {
 // Parses the function `f` with the `let` lines `lets` and the blocks `blocks`, one text for each
 // block, and returns it. The function stays valid until the next call.
 fn parse(env mut* e, string lets, string@ blocks) fir.func* {
-    fir.module_free(&e->m);
     strbuf.str_buf mut b = strbuf.create();
     defer del(b.data);
     strbuf.append(&b, "fn main.f(_1 (c): bool) -> i32 {\n");
@@ -260,7 +258,11 @@ fn parse(env mut* e, string lets, string@ blocks) fir.func* {
     }
     strbuf.append(&b, "}\n");
     u64 before = fir_env.errors(&e->fx);
-    e->m = fir_parse.parse_module(&e->fx.c.m.s, "t.fir", strbuf.view(&b), fir_env.prelude(&e->fx));
+    fir.module nv =
+        fir_parse.parse_module(&e->fx.c.m.s, "t.fir", strbuf.view(&b), fir_env.prelude(&e->fx));
+    fir.module old = move(e->m);
+    e->m = move(nv);
+    fir.module_drop(move(old));
     if (fir_env.errors(&e->fx) != before) {
         eprintln(strbuf.view(&b));
         panic("fir_dataflow_test.parse: a text does not parse");
@@ -453,8 +455,7 @@ fn a_table_built_once_gives_the_same_result() void {
     env mut* own e = make();
     defer drop_made(move(e));
     fir.func* f = parse(e, "", LOOP[..]);
-    fir.pred_table mut* own pt = fir.pred_table_make();
-    *pt = fir.func_predecessors(f);
+    fir.pred_table mut* own pt = fir.func_predecessors_made(f);
     defer fir.pred_table_drop_made(move(pt));
     fir_flow.dataflow mut* own some =
         fir_flow.dataflow_make(4, fir_flow.join_kind.join_union, mark_block);
@@ -597,13 +598,15 @@ fn nested_loops_carry_the_inner_back_edge_to_the_outer_head() void {
 // The chain of the release probe, a chain of 199 diamonds with a back edge from its end to bb1,
 // as one function.
 fn chain_func(env mut* e) fir.func* {
-    fir.module_free(&e->m);
     strbuf.str_buf mut text = strbuf.create();
     defer del(text.data);
     chain(&text);
     u64 before = fir_env.errors(&e->fx);
-    e->m = fir_parse.parse_module(&e->fx.c.m.s, "t.fir", strbuf.view(&text),
-                                  fir_env.prelude(&e->fx));
+    fir.module nv = fir_parse.parse_module(&e->fx.c.m.s, "t.fir", strbuf.view(&text),
+                                              fir_env.prelude(&e->fx));
+    fir.module old = move(e->m);
+    e->m = move(nv);
+    fir.module_drop(move(old));
     assert(fir_env.errors(&e->fx) == before);
     fir.func* f = fir.module_function_at(&e->m, 0);
     assert(fir.block_count(f) == BLOCKS);
@@ -668,8 +671,7 @@ fn small_rounds_leave_the_heap_where_it_was() void {
     env mut* own e = make();
     defer drop_made(move(e));
     fir.func* f = parse(e, "", LOOP[..]);
-    fir.pred_table mut* own pt = fir.pred_table_make();
-    *pt = fir.func_predecessors(f);
+    fir.pred_table mut* own pt = fir.func_predecessors_made(f);
     defer fir.pred_table_drop_made(move(pt));
     u64[3] mut live_at = {};
     u64 mut round = 0;
@@ -706,8 +708,7 @@ fn a_set_in_an_allocation_leaves_the_heap_where_it_was() void {
     u64[3] mut live_at = {};
     u64 mut round = 0;
     while (round < fir_env.LEAK_ROUNDS) {
-        fir_flow.bits mut* own s = fir_flow.bits_make();
-        *s = fir_flow.bits_new(SET_COUNT);
+        fir_flow.bits mut* own s = fir_flow.bits_new_made(SET_COUNT);
         fir_flow.bits_fill(s);
         assert(fir_flow.bits_get(s, SET_COUNT - 1));
         fir_flow.bits_drop_made(move(s));

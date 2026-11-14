@@ -27,10 +27,11 @@ string[1] PRELUDE = {
 
 // Parses the FIR module `text` against PRELUDE in `e`, which must stay open while `g` reads the
 // symbols, and adds function `k` of the module to `g` with the work `works[k]`. Gives the
-// module, which the caller frees.
-fn graph_of(lower_env.env mut* e, string@ text, u64@ works, summary.graph mut* g) fir.module {
-    fir.module m = pass_env.parse(e, PRELUDE[..], text);
-    add_each(g, &m, works);
+// module in an allocation of its own, which the caller ends through fir.module_drop_made.
+fn graph_of(lower_env.env mut* e, string@ text, u64@ works, summary.graph mut* g)
+    fir.module mut* own {
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], text);
+    add_each(g, m, works);
     return m;
 }
 
@@ -98,8 +99,7 @@ fn expect_order(string@ text, string want) void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = pass_env.parse(e, PRELUDE[..], text);
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], text);
     defer fir.module_drop_made(move(m));
     u64 mut i = 0;
     while (i < m->funcs.len) {
@@ -406,8 +406,7 @@ fn a_call_through_a_value_adds_no_edge() void {
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
     u64[2] works = {1, 1};
-    fir.module mut* own m = fir.module_make();
-    *m = graph_of(e, VALUE[..], works[..], g);
+    fir.module mut* own m = graph_of(e, VALUE[..], works[..], g);
     defer fir.module_drop_made(move(m));
     summary.order(g);
     assert(same(components_of(g, &b), "main.via | main.target"));
@@ -424,8 +423,7 @@ fn an_extern_call_adds_no_node_and_no_edge() void {
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
     u64[1] works = {1};
-    fir.module mut* own m = fir.module_make();
-    *m = graph_of(e, EXTERN[..], works[..], g);
+    fir.module mut* own m = graph_of(e, EXTERN[..], works[..], g);
     defer fir.module_drop_made(move(m));
     summary.order(g);
     assert(summary.node_count(g) == 1);
@@ -444,8 +442,7 @@ fn a_call_of_a_function_outside_the_graph_adds_no_edge() void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = pass_env.parse(e, PRELUDE[..], CYCLE[..]);
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], CYCLE[..]);
     defer fir.module_drop_made(move(m));
     summary.add(g, fir.module_function_at(m, 0), 1);
     summary.add(g, fir.module_function_at(m, 2), 1);
@@ -464,8 +461,7 @@ fn two_calls_of_one_callee_are_one_dependency() void {
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
     u64[2] works = {1, 1};
-    fir.module mut* own m = fir.module_make();
-    *m = graph_of(e, TWICE[..], works[..], g);
+    fir.module mut* own m = graph_of(e, TWICE[..], works[..], g);
     defer fir.module_drop_made(move(m));
     summary.order(g);
     assert(same(components_of(g, &b), "*main.twice main.once"));
@@ -479,8 +475,7 @@ fn a_self_call_is_found_among_other_calls() void {
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
     u64[4] works = {1, 1, 1, 1};
-    fir.module mut* own m = fir.module_make();
-    *m = graph_of(e, TWO_CYCLES[..], works[..], g);
+    fir.module mut* own m = graph_of(e, TWO_CYCLES[..], works[..], g);
     defer fir.module_drop_made(move(m));
     summary.order(g);
     assert(!node_at(g, 0).calls_itself);
@@ -496,8 +491,7 @@ fn a_second_order_gives_the_same_components_and_takes_new_nodes() void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = pass_env.parse(e, PRELUDE[..], CYCLE[..]);
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], CYCLE[..]);
     defer fir.module_drop_made(move(m));
     summary.add(g, fir.module_function_at(m, 0), 1);
     summary.add(g, fir.module_function_at(m, 1), 1);
@@ -541,8 +535,7 @@ fn a_long_chain_is_ordered_by_the_walk_of_its_own_stack() void {
     defer lower_env.drop_made(move(e));
     u64 n = 2000;
     string[1] lines = {chain_text(n, &text)};
-    fir.module mut* own m = fir.module_make();
-    *m = pass_env.parse(e, PRELUDE[..], lines[..]);
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], lines[..]);
     defer fir.module_drop_made(move(m));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
@@ -569,9 +562,9 @@ fn a_long_chain_is_ordered_by_the_walk_of_its_own_stack() void {
 
 // Parses CYCLE with the works 5 (`ping`), 7 (`pong`) and 3 (`leaf`) and solves it against
 // `limit`.
-fn solve_cycle(lower_env.env mut* e, summary.graph mut* g, u64 limit) fir.module {
+fn solve_cycle(lower_env.env mut* e, summary.graph mut* g, u64 limit) fir.module mut* own {
     u64[3] works = {5, 7, 3};
-    fir.module m = graph_of(e, CYCLE[..], works[..], g);
+    fir.module mut* own m = graph_of(e, CYCLE[..], works[..], g);
     summary.solve(g, limit);
     return m;
 }
@@ -586,8 +579,7 @@ fn each_analysis_charges_its_work_to_its_component() void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = solve_cycle(e, g, summary.WORK_LIMIT);
+    fir.module mut* own m = solve_cycle(e, g, summary.WORK_LIMIT);
     defer fir.module_drop_made(move(m));
     summary.component leaf = summary.component_at(g, 0);
     summary.component loop = summary.component_at(g, 1);
@@ -602,8 +594,7 @@ fn the_work_passes_the_limit_only_when_it_is_greater() void {
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
     // at the limit
-    fir.module mut* own m = fir.module_make();
-    *m = solve_cycle(e, g, 12);
+    fir.module mut* own m = solve_cycle(e, g, 12);
     defer fir.module_drop_made(move(m));
     assert(!summary.component_at(g, 1).over);
     assert(!summary.component_at(g, 0).over);
@@ -631,8 +622,7 @@ fn a_component_over_its_limit_leaves_the_next_one_alone() void {
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
     u64[4] works = {2, 3, 5, 7};
-    fir.module mut* own m = fir.module_make();
-    *m = graph_of(e, TWO_CYCLES[..], works[..], g);
+    fir.module mut* own m = graph_of(e, TWO_CYCLES[..], works[..], g);
     defer fir.module_drop_made(move(m));
     summary.solve(g, 7);
     assert(!summary.component_at(g, 0).over && summary.component_at(g, 0).work == 7);
@@ -655,8 +645,7 @@ fn a_component_of_no_work_passes_no_limit() void {
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
     u64[1] works = {0};
-    fir.module mut* own m = fir.module_make();
-    *m = graph_of(e, ONE[..], works[..], g);
+    fir.module mut* own m = graph_of(e, ONE[..], works[..], g);
     defer fir.module_drop_made(move(m));
     summary.solve(g, 0);
     assert(summary.component_at(g, 0).work == 0);
@@ -676,8 +665,7 @@ fn a_sum_that_passes_the_largest_u64_stays_at_it() void {
     defer summary.drop_made(move(g));
     u64 most = 18446744073709551615;
     u64[3] works = {most, most - 1, 2};
-    fir.module mut* own m = fir.module_make();
-    *m = graph_of(e, CYCLE[..], works[..], g);
+    fir.module mut* own m = graph_of(e, CYCLE[..], works[..], g);
     defer fir.module_drop_made(move(m));
     summary.solve(g, summary.WORK_LIMIT);
     assert(summary.component_at(g, 1).work == most);
@@ -719,9 +707,9 @@ fn lines_of(summary.graph* g, u64 n, strbuf.str_buf mut* out) string {
 
 // Parses CYCLE into `g` with the work 1 for each function and orders it: component 0 is `leaf`
 // (node 2), and component 1 is `ping` (node 0) and `pong` (node 1).
-fn ordered_cycle(lower_env.env mut* e, summary.graph mut* g) fir.module {
+fn ordered_cycle(lower_env.env mut* e, summary.graph mut* g) fir.module mut* own {
     u64[3] works = {1, 1, 1};
-    fir.module m = graph_of(e, CYCLE[..], works[..], g);
+    fir.module mut* own m = graph_of(e, CYCLE[..], works[..], g);
     summary.order(g);
     assert(summary.member(g, 0, 0) == 2);
     assert(summary.member(g, 1, 0) == 0 && summary.member(g, 1, 1) == 1);
@@ -755,8 +743,7 @@ fn must_lines_start_present_and_only_go() void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = ordered_cycle(e, g);
+    fir.module mut* own m = ordered_cycle(e, g);
     defer fir.module_drop_made(move(m));
     // the start takes the must lines and no may line
     summary.line[4] begin = {KEEP_1, EMPTY_1, EMPTY_0, KEPT_2};
@@ -786,8 +773,7 @@ fn may_lines_start_absent_and_only_come() void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = ordered_cycle(e, g);
+    fir.module mut* own m = ordered_cycle(e, g);
     defer fir.module_drop_made(move(m));
     summary.line[1] none = {};
     summary.start(g, 1, none[..0]);
@@ -811,8 +797,7 @@ fn a_member_of_no_cycle_takes_what_its_pass_finds() void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = ordered_cycle(e, g);
+    fir.module mut* own m = ordered_cycle(e, g);
     defer fir.module_drop_made(move(m));
     // `leaf` takes a must line that no start gave, in the order of compare, and each line once
     summary.line[4] found = {KEEP_1, EMPTY_0, KEEP_1, KEPT_2};
@@ -837,8 +822,7 @@ fn the_rounds_end_after_a_round_that_changes_no_member() void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = ordered_cycle(e, g);
+    fir.module mut* own m = ordered_cycle(e, g);
     defer fir.module_drop_made(move(m));
     summary.line[2] begin = {EMPTY_0, EMPTY_1};
     summary.start(g, 0, begin[..]);
@@ -878,8 +862,7 @@ fn past_the_limit_each_must_line_is_absent() void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = ordered_cycle(e, g);
+    fir.module mut* own m = ordered_cycle(e, g);
     defer fir.module_drop_made(move(m));
     // must lines alone: the safe value of a may line is present, which V1, with no may kind,
     // cannot give (spec/ownership-design.md 8.1)
@@ -913,8 +896,7 @@ fn a_component_of_no_cycle_past_its_limit_loses_its_must_lines() void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = ordered_cycle(e, g);
+    fir.module mut* own m = ordered_cycle(e, g);
     defer fir.module_drop_made(move(m));
     summary.line[1] found = {EMPTY_0};
     assert(summary.give(g, 0, 2, found[..], 11, 10));
@@ -932,8 +914,7 @@ fn the_lines_of_a_member_do_not_borrow_the_storage_of_the_caller() void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = ordered_cycle(e, g);
+    fir.module mut* own m = ordered_cycle(e, g);
     defer fir.module_drop_made(move(m));
     strbuf.append(&text, "(*_3).4");
     summary.line[1] found = {summary.line{summary.kind.k_empty, strbuf.view(&text)}};
@@ -998,9 +979,9 @@ fn wide_safe(strbuf.str_buf mut* out) string {
 
 // Parses PARAMS into `g` with the work 1 for each function and orders it: component 0 is `pair`
 // (node 0) and `wide` (node 1), and component 1 is `none` (node 2).
-fn ordered_params(lower_env.env mut* e, summary.graph mut* g) fir.module {
+fn ordered_params(lower_env.env mut* e, summary.graph mut* g) fir.module mut* own {
     u64[3] works = {1, 1, 1};
-    fir.module m = graph_of(e, PARAMS[..], works[..], g);
+    fir.module mut* own m = graph_of(e, PARAMS[..], works[..], g);
     summary.order(g);
     assert(summary.component_count(g) == 2);
     assert(summary.member(g, 0, 0) == 0 && summary.member(g, 0, 1) == 1);
@@ -1013,8 +994,7 @@ fn add_counts_the_parameters_of_each_function() void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = ordered_params(e, g);
+    fir.module mut* own m = ordered_params(e, g);
     defer fir.module_drop_made(move(m));
     assert(node_at(g, 0).params == 2);
     assert(node_at(g, 1).params == 11);
@@ -1032,8 +1012,7 @@ fn past_the_limit_each_may_line_is_present_and_each_must_line_absent() void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = ordered_params(e, g);
+    fir.module mut* own m = ordered_params(e, g);
     defer fir.module_drop_made(move(m));
     summary.line[2] begin = {EMPTY_0, KEPT_2};
     summary.start(g, 0, begin[..]);
@@ -1063,8 +1042,7 @@ fn a_component_at_its_limit_keeps_what_it_found() void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = ordered_params(e, g);
+    fir.module mut* own m = ordered_params(e, g);
     defer fir.module_drop_made(move(m));
     summary.line[1] must = {EMPTY_1};
     assert(summary.give(g, 1, 2, must[..], 4, 4));
@@ -1079,8 +1057,7 @@ fn solve_past_the_limit_writes_the_safe_value_into_the_table() void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = ordered_params(e, g);
+    fir.module mut* own m = ordered_params(e, g);
     defer fir.module_drop_made(move(m));
     // a limit of 0: each component of work 1 passes it
     summary.solve(g, 0);
@@ -1117,8 +1094,7 @@ fn solve_gives_no_line_in_v1_and_one_round_to_each_component() void {
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
     u64[4] works = {2, 3, 5, 7};
-    fir.module mut* own m = fir.module_make();
-    *m = graph_of(e, TWO_CYCLES[..], works[..], g);
+    fir.module mut* own m = graph_of(e, TWO_CYCLES[..], works[..], g);
     defer fir.module_drop_made(move(m));
     summary.solve(g, summary.WORK_LIMIT);
     assert(same(components_of(g, &b), "*main.low | *main.up main.down | main.top"));
@@ -1143,8 +1119,7 @@ fn solve_starts_from_no_line() void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = ordered_cycle(e, g);
+    fir.module mut* own m = ordered_cycle(e, g);
     defer fir.module_drop_made(move(m));
     summary.line[2] found = {EMPTY_0, KEEP_1};
     assert(summary.give(g, 0, 2, found[..], 1, summary.WORK_LIMIT));
@@ -1163,8 +1138,7 @@ fn collect_puts_each_node_with_a_line_in_byte_order_of_the_symbol() void {
     defer lower_env.drop_made(move(e));
     summary.graph mut* own g = summary.make();
     defer summary.drop_made(move(g));
-    fir.module mut* own m = fir.module_make();
-    *m = ordered_cycle(e, g);
+    fir.module mut* own m = ordered_cycle(e, g);
     defer fir.module_drop_made(move(m));
     summary.line[2] pong_lines = {KEEP_2, EMPTY_1};
     summary.line[1] leaf_lines = {RESULT_1};

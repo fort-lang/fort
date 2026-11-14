@@ -1276,7 +1276,7 @@ came here.
   `own` pointer no call changes, and `drop_made` moves the value out, dels the allocation and
   drops the value (`scope.make` and `scope.drop_made` in `check_stmt.check_block`,
   `containers.pool_make` and `pool_drop_made` in `driver.run_cc`, `driver.compile_entry`). A `make`
-  that fills the value stores into its fresh `new` (`prover.context_make`, `fir_parse.parser_make`):
+  that fills the value stores into its fresh `new` (`prover.context_make`, `fir_parse.parser_create_made`):
   the pass knows the owners of the allocation empty after a `new`, and a store after the call of
   a `make` is the overwrite error of D17.11, because the pass reads no callee.
   Order: the deferred statements run from the last, so write the `del`s first and the drops last

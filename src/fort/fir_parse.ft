@@ -538,12 +538,16 @@ fn parser_drop(fir_parser mut p) void {
     strbuf.drop(move(p.msg));
 }
 
-// A zero parser in an allocation of its own, for a function that lends the parser to calls.
-fn parser_make() fir_parser mut* own {
-    return new(fir_parser);
+// The parser of parser_create in an allocation of its own, which the caller ends through
+// parser_drop_made.
+fn parser_create_made(session.session mut* s, string file, string src, prelude pre)
+    fir_parser mut* own {
+    fir_parser mut* own p = new(fir_parser);
+    *p = parser_create(s, file, src, pre);
+    return p;
 }
 
-// Ends a parser of parser_make that the caller moves in.
+// Ends a parser of parser_create_made that the caller moves in.
 fn parser_drop_made(fir_parser mut* own p) void {
     fir_parser kept = move(*p);
     del(p);
@@ -2214,6 +2218,14 @@ fn parse_module(session.session mut* s, string file, string text, prelude pre) f
     return m;
 }
 
+// The module of parse_module in an allocation of its own, which the caller ends through
+// fir.module_drop_made.
+fn parse_made(session.session mut* s, string file, string text, prelude pre) fir.module mut* own {
+    fir.module mut* own m = new(fir.module);
+    parse_into(s, file, text, pre, m);
+    return m;
+}
+
 // Parses `text` into `m`, for parse_module and for a caller that holds the module in an
 // allocation. The parser is a local here, so that no deferred call of parse_module comes after
 // the move of its result.
@@ -2221,8 +2233,8 @@ fn parse_into(session.session mut* s, string file, string text, prelude pre, fir
     void {
     pos_vec mut bodies = pos_vec{};
     defer del(bodies.items);
-    // `new` and not parser_make: the pass knows the owners of a fresh `new` empty, so the store of
-    // parser_create passes the overwrite check.
+    // `new`: the pass knows the owners of a fresh `new` empty, so the store of parser_create passes
+    // the overwrite check.
     fir_parser mut* own p = new(fir_parser);
     defer parser_drop_made(move(p));
     *p = parser_create(s, file, text, pre);

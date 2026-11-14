@@ -63,9 +63,10 @@ fn effects_text(fir_verify.effects* e, u32 blocks, strbuf.str_buf mut* out) void
     }
 }
 
-// Parses the lines `text` against PRELUDE. The module stays valid until the caller frees it.
-fn parse(lower_env.env mut* e, string@ text) fir.module {
-    return pass_env.parse(e, PRELUDE[..], text);
+// Parses the lines `text` against PRELUDE into an allocation of its own, which the caller ends
+// through fir.module_drop_made.
+fn parse(lower_env.env mut* e, string@ text) fir.module mut* own {
+    return pass_env.parse_made(e, PRELUDE[..], text);
 }
 
 // Holds the effects of the only function of `text` against `want`.
@@ -94,8 +95,7 @@ fn expect_effects_of(lower_env.env mut* e, string@ text, string@ want_parts) voi
     defer del(got.data);
     // `m` lives in an allocation, so that the leak rule proves its end: no call changes the
     // pointer, and drop_made holds each release once.
-    fir.module mut* own m = fir.module_make();
-    *m = parse(e, text);
+    fir.module mut* own m = parse(e, text);
     defer fir.module_drop_made(move(m));
     fir.func* f = fir.module_function_at(m, 0);
     // `ef` ends in a block of its own, so that its `del`s come after the last call of its exit.
@@ -350,8 +350,7 @@ fn the_sets_equal_the_effects_applied_in_order() void {
 // The rule and the position of the violation of the only function of `text`, as
 // `V<rule> bb<b> <position>`, or `none`.
 fn verdict(lower_env.env mut* e, string@ text, strbuf.str_buf mut* out) void {
-    fir.module mut* own m = fir.module_make();
-    *m = parse(e, text);
+    fir.module mut* own m = parse(e, text);
     defer fir.module_drop_made(move(m));
     fir_verify.violation mut v = fir_verify.violation{};
     strbuf.clear(out);
