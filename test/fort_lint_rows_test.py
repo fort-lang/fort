@@ -1211,6 +1211,162 @@ class Rules(unittest.TestCase):
             self.assertTrue(tail.startswith(message), tail)
             self.assertTrue(tail.endswith("(D9.8)"), tail)
 
+    def test_a_citation_that_a_line_end_cuts_inside_its_callee_is_reported(self):
+        # A citation holds its callee on one line (D9.8, "The lint"). Each body calls
+        # `maker.good`, and a line end stands inside the callee of its row. In a group, the group
+        # does not close on its line, so the text does not read as a citation. With no group, the
+        # reader takes the name before the line end, and the body does not call that name.
+        cannot = "starts a citation that the lint cannot read, "
+        rows = (
+            ("the gives: of (maker.\n// good).", cannot + "'the gives: of (maker.': "),
+            ("the writes: of (maker.\n// good).", cannot + "'the writes: of (maker.': "),
+            ("the gives: of ((maker.\n// good)).", cannot + "'the gives: of ((maker.': "),
+            ("the gives: of ( maker .\n// good ).", cannot + "'the gives: of (': "),
+            ("the gives: of (\n// maker.good).", cannot + "'the gives: of (': "),
+            ("the gives: of (maker.good\n// ).", cannot + "'the gives: of (maker.good': "),
+            ("the gives: of maker.\n// good.",
+             "cites the gives: of 'maker', which its body does not call: a line end stands "
+             "inside the callee 'maker.good', and a citation holds its callee on one line (D9.8)"),
+            ("the writes: of maker.\n// good.",
+             "cites the writes: of 'maker', which its body does not call: a line end stands "
+             "inside the callee 'maker.good', and a citation holds its callee on one line (D9.8)"),
+        )
+        def module(texts):
+            text = "import extern;\nimport maker;\n"
+            lines = []
+            for row in texts:
+                lines.append(text.count("\n") + 2)
+                text += ("\n// A row of text: %s\nfn f%d() u64 {\n    return maker.good();\n}\n"
+                         % (row, lines[-1]))
+            return text, lines
+        text, lines = module([row for row, _ in rows])
+        expected = [("user.ft", line, "a call row of fn 'f%d' %s" % (line, message))
+                    for line, (_, message) in zip(lines, rows)]
+        self.assertEqual(len(expected), 8)
+        self.check({"maker.ft": self.MAKER, "user.ft": text}, expected)
+        # The same citations on one line read, and the row of `maker.good` holds each word.
+        joined = [re.sub(r"\s+", "", row.split(" of ", 1)[1].replace("// ", ""))
+                  for row, _ in rows]
+        self.assertEqual(joined, ["(maker.good)."] * 2 + ["((maker.good))."]
+                         + ["(maker.good)."] * 3 + ["maker.good."] * 2)
+        whole = ["%s %s" % (row.split(" of ", 1)[0] + " of", cut)
+                 for (row, _), cut in zip(rows, joined)]
+        self.check({"maker.ft": self.MAKER, "user.ft": module(whole)[0]}, [])
+        # A tab in a group is a control character and no space: the text does not read.
+        tab, lines = module(["the gives: of (maker.\tgood)."])
+        self.check({"maker.ft": self.MAKER, "user.ft": tab}, [
+            ("user.ft", lines[0], cannot + "'the gives: of (maker.': ")])
+
+    # The characters that are white space or no visible text in UTF-8: a no-break space, an
+    # ideographic space, a next line, a zero width space, a line separator, a paragraph
+    # separator, a combining mark with no base, the 4 Hangul fillers and the blank Braille
+    # pattern. A mark on a letter and a letter beside a blank one are text.
+    NO_TEXT = ("\u00a0", "\u3000", "\u0085", "\u200b", "\u2028", "\u2029", "\u0301",
+               "\u115f", "\u1160", "\u3164", "\uffa0", "\u2800")
+
+    def test_a_row_line_whose_text_is_only_unicode_space_does_not_stand(self):
+        # The text of a `// gives:` or `// writes:` line is UTF-8 (D2.1). A line whose text after
+        # the word is only such characters holds no text, so the lint reports it as a line with
+        # no text. A letter of 2 or 3 bytes is text, also with a last byte 0xa0 or 0x85.
+        head = "import extern;\n\ni64 mut count = 0;\n\n"
+        body = "fn at() i64* {\n    return &count;\n}\n"
+        for space in self.NO_TEXT:
+            for rows in ("// gives: %s\n", "// gives:%s\n", "// gives: %s \n",
+                         "// gives: %s%s\n"):
+                with self.subTest(space=hex(ord(space)), rows=rows):
+                    text = head + rows.replace("%s", space) + body
+                    self.check({"gives.ft": text}, [
+                        ("gives.ft", lines_of(text, "fn at(")[0], self.GIVES % "at")])
+        for letters in ("\u00e0", "\u0105", "\u4e2d", "x\u00a0", "\u00a0x", "\u200bx",
+                        "e\u0301", "\u3164x", "\u2800x"):
+            with self.subTest(letters=letters):
+                self.check({"gives.ft": head + "// gives: %s\n" % letters + body}, [])
+        # A citation reads the same line, for `gives:` and for `writes:`.
+        for word in ("gives", "writes"):
+            maker = ("import extern;\n\n// %s: 4 zero bytes.\nfn make() u64 {\n"
+                     "    return 4;\n}\n" % word)
+            user = ("import extern;\nimport maker;\n\n" + ROW
+                    + "extern fn labs(i64 v) i64;\n\n"
+                    "// C call labs: the %s: of maker.make states 4 bytes.\n"
+                    "fn use() i64 {\n    return labs(cast(maker.make(), i64));\n}\n" % word)
+            self.check({"maker.ft": maker, "user.ft": user}, [])
+            for space in self.NO_TEXT:
+                with self.subTest(word=word, space=hex(ord(space))):
+                    bare = maker.replace("4 zero bytes.", space)
+                    self.check({"maker.ft": bare, "user.ft": user}, [
+                        ("user.ft", lines_of(user, "// C call labs")[0],
+                         "the row of 'maker.make' has no line '// %s: ...' (D9.8)" % word)])
+
+    def test_the_row_of_a_function_stands_above_its_fn_and_not_above_its_name(self):
+        # The row of a function is the `//` lines directly above the line of its `fn`. A function
+        # whose name stands on the line after `fn` keeps that row, for its `// gives:` line and
+        # for each citation of its row.
+        head = "import extern;\n\ni64 mut count = 0;\n\n"
+        gives = "// gives: the global count, which no function of C names.\n"
+        body = "fn\nat() i64* {\n    return &count;\n}\n"
+        self.check({"gives.ft": head + gives + body}, [])
+        between = head + "fn\n" + gives + body.split("\n", 1)[1]
+        self.check({"gives.ft": between}, [
+            ("gives.ft", lines_of(between, "at() i64*")[0], self.GIVES % "at")])
+        for word in ("gives", "writes"):
+            with self.subTest(word=word):
+                maker = ("import extern;\n\n// %s: 4 zero bytes.\nfn\n    make() u64 {\n"
+                         "    return 4;\n}\n" % word)
+                user = ("import extern;\nimport maker;\n\n" + ROW
+                        + "extern fn labs(i64 v) i64;\n\n"
+                        "// C call labs: the %s: of maker.make states 4 bytes.\n"
+                        "fn use() i64 {\n    return labs(cast(maker.make(), i64));\n}\n" % word)
+                self.check({"maker.ft": maker, "user.ft": user}, [])
+
+    def test_the_row_of_a_function_that_is_second_on_its_line_holds_no_word(self):
+        # The `// gives:` line and the `// writes:` line of a row stand for the first item of
+        # the line below it only. A citation of either word of a function that is second on its
+        # line is a problem, and the message says why. The call rows above a line stand for
+        # each function of that line (function_row_problems).
+        for word in ("gives", "writes"):
+            maker = ("import extern;\n\n// %s: 4 zero bytes.\n"
+                     "fn other() u64 { return 1; } fn make() u64 { return 4; }\n" % word)
+            user = ("import extern;\nimport maker;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                    "// C call labs: the %s: of maker.%%s states 4 bytes.\n"
+                    "fn use() i64 {\n    return labs(cast(maker.%%s(), i64));\n}\n" % word)
+            with self.subTest(word=word):
+                self.check({"maker.ft": maker, "user.ft": user % ("other", "other")}, [])
+                output = self.check({"maker.ft": maker, "user.ft": user % ("make", "make")}, [
+                    ("user.ft", lines_of(user, "// C call labs")[0],
+                     "a call row of fn 'use' cites the %s: of 'maker.make', and the row of "
+                     "'maker.make' has no line '// %s: ...': 'maker.make' stands after another "
+                     "item on its line, and only the first item of a line has a row (D9.8)"
+                     % (word, word))])
+                self.assertEqual(output.count("stands after another item"), 1)
+                # The message of a function that is first on its line says no such thing.
+                alone = maker.replace("// %s: 4 zero bytes.\n" % word, "").replace(
+                    "fn other() u64 { return 1; } ", "")
+                output = self.check({"maker.ft": alone, "user.ft": user % ("make", "make")}, [
+                    ("user.ft", lines_of(user, "// C call labs")[0],
+                     "the row of 'maker.make' has no line '// %s: ...' (D9.8)" % word)])
+                self.assertNotIn("stands after another item", output)
+        # Two functions on one line share the call rows above it: each counts its own calls.
+        shared = ("import extern;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                  "// C call labs: no pointer argument.\n"
+                  "fn one() i64 { return labs(1); } fn two() i64 { return labs(2); }\n")
+        self.check({"shared.ft": shared}, [])
+
+    def test_a_row_reads_the_byte_columns_of_the_index_after_a_letter_of_2_bytes(self):
+        # A column of the index is a byte column (D20.3), and the lint reads each file as
+        # Latin-1, so one character of the text is one byte. A letter of 2 bytes before a call
+        # on its line moves no call: the call row and the citation find the calls of the body.
+        maker = ("import extern;\n\n// gives: 4 zero bytes.\nfn make() u64 {\n"
+                 "    return 4;\n}\n")
+        user = ("import extern;\nimport maker;\n\n" + ROW + "extern fn labs(i64 v) i64;\n\n"
+                "// C call labs: the gives: of maker.make states 4 bytes.\n"
+                "fn use() i64 {\n    string s = \"\u00e9\"; "
+                "return labs(cast(maker.make(), i64) + cast(s.len, i64));\n}\n")
+        self.check({"maker.ft": maker, "user.ft": user}, [])
+        other = user.replace("maker.make states", "maker.other states")
+        self.check({"maker.ft": maker, "user.ft": other}, [
+            ("user.ft", lines_of(user, "// C call labs")[0],
+             "cites the gives: of 'maker.other', which its body does not call")])
+
     # A file with one byte that is no UTF-8 text, as (name, bytes, line, byte column, byte). 0xe9
     # is the `é` of Latin-1 and needs a continuation byte in UTF-8; 0xff and 0xc0 start no
     # sequence; 0x80 continues no sequence; 0xc3 at the end of the file has no continuation
@@ -1245,7 +1401,7 @@ class Rules(unittest.TestCase):
     )
 
     def no_utf8_line(self, name, line, col, byte):
-        return ("%s:%d:%d: byte 0x%02x is no UTF-8 text: fort source is UTF-8 (D2.1)"
+        return ("%s:%d:%d: byte 0x%02X is no UTF-8 text: fort source is UTF-8 (D2.1)"
                 % (name, line, col, byte))
 
     def closure_line(self, name, data, line, col, byte):
@@ -1273,7 +1429,7 @@ class Rules(unittest.TestCase):
                     data.decode("utf-8")
                 output = self.check({name: data}, [
                     (name, 1, "fort could not check this closure: %s:%d:" % (name, line)),
-                    (name, line, "byte 0x%02x is no UTF-8 text" % byte)])
+                    (name, line, "byte 0x%02X is no UTF-8 text" % byte)])
                 self.assertNotIn("Traceback", output)
                 self.assertNotIn("UnicodeDecodeError", output)
                 self.assertEqual(output.splitlines()[0],
@@ -1287,7 +1443,7 @@ class Rules(unittest.TestCase):
         expected = []
         for name, data, line, col, byte in self.NO_UTF8:
             expected.append((name, 1, "fort could not check this closure: %s:%d:" % (name, line)))
-            expected.append((name, line, "byte 0x%02x is no UTF-8 text" % byte))
+            expected.append((name, line, "byte 0x%02X is no UTF-8 text" % byte))
         output = self.check(files, expected)
         self.assertNotIn("Traceback", output)
         self.assertIn("fort_lint: 24 problem(s) in 12 of 13 file(s)", output)
@@ -1312,11 +1468,11 @@ class Rules(unittest.TestCase):
         output = self.check({"other/bad.ft": text, "test/lang/run/ffi/001_bad.ft": text}, [
             ("other/bad.ft", 1, "fort could not check this closure: other/bad.ft:3:7: "
              "invalid UTF-8 sequence at byte 0xE9"),
-            ("other/bad.ft", 3, "byte 0xe9 is no UTF-8 text"),
+            ("other/bad.ft", 3, "byte 0xE9 is no UTF-8 text"),
             ("other/bad.ft", 3, "line is 108 columns"),
             ("test/lang/run/ffi/001_bad.ft", 1, "fort could not check this closure: "
              "test/lang/run/ffi/001_bad.ft:3:7: invalid UTF-8 sequence at byte 0xE9"),
-            ("test/lang/run/ffi/001_bad.ft", 3, "byte 0xe9 is no UTF-8 text")])
+            ("test/lang/run/ffi/001_bad.ft", 3, "byte 0xE9 is no UTF-8 text")])
         self.assertNotIn("Traceback", output)
         # The same file with the letter `e` for the byte gets the checks of the names and of
         # the rows, and a file of test/lang/run gets the checks of D9.8.
@@ -1327,6 +1483,18 @@ class Rules(unittest.TestCase):
             ("other/bad.ft", 8, "extern 'labs' has no declaration row"),
             ("test/lang/run/ffi/001_bad.ft", 8, "extern 'labs' has no declaration row")])
         self.assertNotIn("Traceback", output)
+
+    def test_the_lint_spells_the_byte_as_the_compiler_does(self):
+        # The lint and the compiler name one byte in one spelling: `0x` and 2 hex digits in
+        # capitals. Each byte below has a letter among its hex digits.
+        for byte in (0xE9, 0xFF, 0xAB, 0xC0):
+            with self.subTest(byte=hex(byte)):
+                data = b"// caf" + bytes([byte]) + b"\nfn one() i64 {\n    return 1;\n}\n"
+                output = self.check_raw({"bad.ft": data})
+                compiler = re.findall(r"invalid UTF-8 sequence at byte (0x[0-9A-Fa-f]{2})", output)
+                spelled = re.findall(r"byte (0x[0-9A-Fa-f]{2}) is no UTF-8 text", output)
+                self.assertEqual((compiler, spelled), (["0x%02X" % byte], ["0x%02X" % byte]),
+                                 output)
 
     def test_a_module_of_a_directory_test_reads_a_main_that_is_no_utf8(self):
         # A module of a directory test takes the `--cfg` options of the main.ft beside it. A
@@ -1341,7 +1509,7 @@ class Rules(unittest.TestCase):
         output = self.check(files, [
             ("test/lang/run/modules/keyed/main.ft", 1, "fort could not check this closure: "
              "test/lang/run/modules/keyed/main.ft:3:7: invalid UTF-8 sequence at byte 0xE9"),
-            ("test/lang/run/modules/keyed/main.ft", 3, "byte 0xe9 is no UTF-8 text")])
+            ("test/lang/run/modules/keyed/main.ft", 3, "byte 0xE9 is no UTF-8 text")])
         self.assertNotIn("Traceback", output)
         with tempfile.TemporaryDirectory() as out:
             root = os.path.realpath(out)
@@ -2095,7 +2263,9 @@ class Parts(unittest.TestCase):
                     continue
                 name = None
                 if callee.name_at >= 0:
-                    name = fort_lint.IDENTIFIER.match(code, callee.name_at).group(0)
+                    # The characters of a name from `name_at`: a mutant that gives the offset of a
+                    # number fails the assertion below and raises no error.
+                    name = re.match(r"[A-Za-z0-9_]*", code[callee.name_at:]).group(0)
                 self.assertEqual((callee.text, callee.groups, callee.name, name), want)
                 self.assertEqual(re.sub(r"\s+", "", code[callee.begin:callee.end]), callee.text)
         self.assertEqual(len(cases), 61)
@@ -2224,12 +2394,18 @@ class Parts(unittest.TestCase):
             ("(c ? a : b)", None), ("if", None), ("(return)", None), ("(alloc]", None),
             ("0", None), ("(0)", None), ("((0))", None), ("(0x)", None), ("(4x)", None),
             ("( 0 )", None), ("(07.x)", None), ("(_0)", "_0"), ("(a0.b1)", "a0.b1"),
+            # A citation holds its callee on one line, also in a group.
+            ("(maker.\ngood)", None), ("(\ngood)", None), ("((good)\n)", None),
+            ("maker.\ngood", "maker"), ("(maker.good)\n", "maker.good"),
+            # Each other control character in a group is no white space of a callee.
+            ("(maker.\tgood)", None), ("(\x0cgood)", None), ("(good\x0b)", None),
+            ("(good\x85)", None), ("( good )", "good"),
         )
         for text, want in cases:
             with self.subTest(text=text):
                 self.assertEqual(fort_lint.cited_callee(text, 0), want)
                 self.assertEqual(fort_lint.cited_callee("of " + text, 3), want)
-        self.assertEqual(len(cases), 42)
+        self.assertEqual(len(cases), 52)
 
     def test_an_offset_that_starts_no_name_is_the_callee_of_no_call(self):
         fort_lint = lint_module()
@@ -2395,27 +2571,47 @@ class Parts(unittest.TestCase):
         self.assertFalse(fort_lint.rows_only("test/fort/lang_test.ft"))
         self.assertFalse(fort_lint.rows_only("std/rt.ft"))
 
+    def test_text_is_a_character_that_is_no_space_mark_or_blank(self):
+        # holds_text reads the Latin-1 text of a row as UTF-8. Each case is (text, want).
+        fort_lint = lint_module()
+        cases = (("x", True), ("\u00e9", True), ("\u4e2d", True), ("e\u0301", True),
+                 ("\U0001f600", True), (".", True), ("\ufffd", True), ("\u3164x", True),
+                 ("", False), (" ", False), ("\t", False), ("\u00a0", False),
+                 ("\u3000", False), ("\u0085", False), ("\u200b", False), ("\u2028", False),
+                 ("\u2029", False), ("\u0301", False), ("\u0301\u0301", False),
+                 ("\u115f", False), ("\u1160", False), ("\u3164", False), ("\uffa0", False),
+                 ("\u2800", False), ("\ufeff", False), ("\x01", False),
+                 (" \u00a0\u200b\u2800 ", False))
+        for text, want in cases:
+            with self.subTest(text=text):
+                latin = text.encode("utf-8").decode("latin-1")
+                self.assertEqual(fort_lint.holds_text(latin), want)
+        # A byte that is no UTF-8 text is a character of U+FFFD, which is text.
+        self.assertTrue(fort_lint.holds_text("\xe9"))
+        self.assertEqual(len(cases), 27)
+
     def test_the_text_of_a_file_is_its_utf8_text_or_a_problem(self):
         # The reader of a file gives its text and no problem, or the text with U+FFFD for each
         # byte that is no UTF-8 text and the problem of the first one: its line, its byte
-        # column and the byte. A line end of the text is `\n`, as a read in text mode gives it.
+        # column and the byte. A line of the text ends at `\n` only, as a line of the compiler
+        # does (D2.1): the text keeps a `\r` alone and gives `\r\n` as `\n`.
         fort_lint = lint_module()
-        message = "byte 0x%02x is no UTF-8 text: fort source is UTF-8 (D2.1)"
+        message = "byte 0x%02X is no UTF-8 text: fort source is UTF-8 (D2.1)"
         cases = (
             (b"", "", None),
             (b"fn f() void {}\n", "fn f() void {}\n", None),
             ("// é中\U0001f600\n".encode("utf-8"), "// é中\U0001f600\n", None),
-            (b"a\r\nb\rc\n", "a\nb\nc\n", None),
+            (b"a\r\nb\rc\n", "a\nb\rc\n", None),
             (b"\xff", "\ufffd", (1, 1, message % 0xff)),
             (b"ab\xe9cd\n", "ab\ufffdcd\n", (1, 3, message % 0xe9)),
             (b"a\nb\n\n  \x80\xff\n", "a\nb\n\n  \ufffd\ufffd\n", (4, 3, message % 0x80)),
             (b"a\r\n\xc3", "a\n\ufffd", (2, 1, message % 0xc3)),
             (b"a\n\xc3\xa9\xc3(\n", "a\né\ufffd(\n", (2, 3, message % 0xc3)),
             (b"\n\n\xf0\x9f\x98\n", "\n\n\ufffd\n", (3, 1, message % 0xf0)),
-            # The line of the problem counts `\n` only: a `\r` alone starts a line of the text
+            # The line of the problem counts `\n` only: a `\r` alone starts no line of the text
             # and no line of the problem, and the column counts from the last `\n`.
-            (b"a\rb\xe9\n", "a\nb\ufffd\n", (1, 4, message % 0xe9)),
-            (b"a\nb\rc\r\xe9\n", "a\nb\nc\n\ufffd\n", (2, 5, message % 0xe9)),
+            (b"a\rb\xe9\n", "a\rb\ufffd\n", (1, 4, message % 0xe9)),
+            (b"a\nb\rc\r\xe9\n", "a\nb\rc\r\ufffd\n", (2, 5, message % 0xe9)),
             # The column counts the 3 bytes of a byte order mark.
             (b"\xef\xbb\xbf\xff\n", "\ufeff\ufffd\n", (1, 4, message % 0xff)),
             (b"\xef\xbb\xbfab\n\xe9\n", "\ufeffab\n\ufffd\n", (2, 1, message % 0xe9)),
@@ -2736,7 +2932,8 @@ class Names(unittest.TestCase):
                                          (VFORK_NAMES, TWO_RETURNS, "One thread"),
                                          (RETURN_NAMES, RETURNS_ONCE, "Calls from C")):
             for name in names:
-                found = fort_lint.refused_declaration_problems("extern fn %s() void;\n" % name)
+                found = fort_lint.refused_declaration_problems(b"extern fn %s() void;\n"
+                                                               % name.encode())
                 self.assertEqual(found, [(1, 11, "extern '%s': %s, and no row makes this "
                                           "declaration legal (D9.8, \"%s\")"
                                           % (name, reason, paragraph))])
@@ -2796,9 +2993,10 @@ class Names(unittest.TestCase):
     def test_a_longer_name_is_no_listed_name(self):
         # The lint reports the 15 names and no other: a reviewer reads the row of each other
         # declaration. `makecontext` returns one time, so the list does not hold it (D9.8).
+        # A C symbol keeps its case, so a name in capitals is another name.
         for name in ("__setjmp", "setjmp2", "_setjmp2", "clone_range", "clone33", "my_vfork",
                      "longjmper", "__longjmp", "_sigsetjmp", "pthread_create_np",
-                     "makecontext", "getcontext_np"):
+                     "makecontext", "getcontext_np", "SETJMP", "VFORK", "Longjmp"):
             self.check({"near.ft": declared(name)}, [])
         # `fork` has the type that the runtime declares (D9.8: one type for one symbol).
         self.check({"near.ft": declared("fork").replace("(i64 v) i64", "() i32")}, [])
@@ -2817,9 +3015,65 @@ class Names(unittest.TestCase):
                  # so the name at character 28 stands at byte 30.
                  ("string s = \"éé\"; extern fn setjmp(i64 v) i64;", (1, 30)))
         for text, where in cases:
-            self.assertEqual(fort_lint.refused_declaration_problems(text), [where + (message,)],
-                             text)
+            self.assertEqual(fort_lint.refused_declaration_problems(text.encode("utf-8")),
+                             [where + (message,)], text)
         self.assertEqual(len(cases), 7)
+
+    def test_the_column_counts_the_bytes_of_the_file(self):
+        # The check reads the bytes of the file: a byte that is no UTF-8 text is one byte of the
+        # column, and no character of 3 bytes in its place (D2.1, D20.3). A line ends at `\n`
+        # only, as the lexer counts lines: a lone `\r` is white space, or a byte of a comment,
+        # so a declaration after it in a comment is no declaration.
+        fort_lint = lint_module()
+        cases = ((b"string s = \"\xe9\"; extern fn setjmp(i64 v) i64;", [(1, 27)]),
+                 (b"string s = \"\xe9\xff\xc3\"; extern fn setjmp(i64 v) i64;", [(1, 29)]),
+                 (b"// \xe9\r\nstring s = \"\xe9\"; extern fn setjmp(i64 v) i64;", [(2, 27)]),
+                 (b"// \xe9\rextern fn setjmp(i64 v) i64;", []),
+                 (b"// x\rextern fn setjmp(i64 v) i64;\n", []),
+                 (b"// x\r// C: setjmp.\nextern fn setjmp(i64 v) i64;\n", [(2, 11)]),
+                 (b"import extern; i64 X = 1;\r extern fn setjmp(i64 v) i64;\n", [(1, 38)]),
+                 (b"i64 X = 1;\rextern\rfn\rsetjmp(i64 v) i64;\n", [(1, 22)]),
+                 ("// \u00e9\u4e2d\nstring s = \"\u4e2d\"; extern fn setjmp(i64 v) i64;"
+                  .encode("utf-8"), [(2, 29)]))
+        for data, where in cases:
+            with self.subTest(data=data):
+                found = fort_lint.refused_declaration_problems(data)
+                self.assertEqual([problem[:2] for problem in found], where)
+        # The lint gives the same column over a file, beside the problem of the byte.
+        output = self.check_raw({"bad.ft": cases[0][0] + b"\n"})
+        self.assertIn("bad.ft:1:27: extern 'setjmp': ", output)
+        self.assertIn("bad.ft:1:13: byte 0xE9 is no UTF-8 text", output)
+
+    def test_a_lone_cr_ends_no_line_of_a_row(self):
+        # Each read of a source file counts `\n` only as a line end, as the compiler does (D2.1).
+        # A lone `\r` in code above a declaration moves no line of the index, so the row of the
+        # declaration and the call row of the function stand where the index puts their names.
+        row = ROW.encode()
+        text = (b"import extern;\n\ni64 X = 1;\r i64 Y = 2;\n\n" + row
+                + b"extern fn labs(i64 v) i64;\n\n// C call labs: no pointer.\n"
+                b"fn one() i64 {\n    return labs(X + Y);\n}\n")
+        self.check({"cr.ft": text}, [])
+        self.check({"cr.ft": text.replace(b"// C call labs: no pointer.\n", b"")}, [
+            ("cr.ft", 10, "fn 'one' has 1 call(s) of 'labs' and no call row")])
+        # A `// C:` line after a lone `\r` in a comment is a part of that comment, and no row.
+        hidden = b"import extern;\n\n// x\r" + row + b"extern fn labs(i64 v) i64;\n"
+        self.check({"hidden.ft": hidden}, [("hidden.ft", 6, "has no declaration row")])
+
+    def test_a_lone_cr_ends_no_line_of_the_check(self):
+        # The probes of the review, through the whole lint: the compiler counts `\n` only as a
+        # line end (D2.1), so the problem stands where the compiler puts the name, and a
+        # declaration after a lone `\r` in a comment is no declaration.
+        head = b"import extern;\n\n"
+        hidden = head + ROW.encode() + b"// x\rextern fn setjmp(i64 v) i64;\n"
+        output = self.check_raw({"hidden.ft": hidden})
+        self.assertNotIn("extern 'setjmp': ", output)
+        same = b"import extern; i64 X = 1;\r extern fn setjmp(i64 v) i64;\n"
+        output = self.check_raw({"same.ft": same})
+        self.assertIn("same.ft:1:38: extern 'setjmp': " + RETURNS_ONCE, output)
+        after = head + b"// x\r" + ROW.replace("labs", "setjmp").encode() + \
+            b"extern fn setjmp(i64 v) i64;\n"
+        output = self.check_raw({"after.ft": after})
+        self.assertIn("after.ft:6:11: extern 'setjmp': " + RETURNS_ONCE, output)
 
     def test_text_that_is_no_declaration_gives_no_problem(self):
         fort_lint = lint_module()
@@ -2830,7 +3084,8 @@ class Names(unittest.TestCase):
                  "extern fnx setjmp(i64 v) i64;", "externfn setjmp(i64 v) i64;",
                  "extern fn (setjmp)(i64 v) i64;", "setjmp(env);", "extern setjmp(i64 v) i64;")
         for text in cases:
-            self.assertEqual(fort_lint.refused_declaration_problems(text), [], text)
+            self.assertEqual(fort_lint.refused_declaration_problems(text.encode("utf-8")), [],
+                             text)
         self.assertEqual(len(cases), 14)
 
 
