@@ -8,8 +8,8 @@ The rows of D9.8: each `extern fn` of a trusted module has a declaration row, th
 each function of a trusted module count each call of an `extern fn`, of a boundary function and
 through a function value, and a name of a boundary function goes only to C (row_problems).
 A call row that cites `the gives: of <callee>` or `the writes: of <callee>` names a callee that
-the body calls, a fort function of a trusted module whose row holds a line with that word
-(citation_problems). Text that starts a citation and that the lint cannot read as one is a
+the body calls, a fort function of a trusted module whose row holds a line that starts with `// `
+and then that word (citation_problems). Text that starts a citation and that the lint cannot read as one is a
 problem too, and its message names that text. A function that is no boundary function gives no
 `mut` global whose type reaches a byte pointer to a call of C (mut_global_to_c).
 
@@ -21,7 +21,9 @@ it holds text: `// `, the word, white space and text, on one line. The lint does
 1 or rule 2 of "Storage of C" (D9.8). A reviewer reads the reason of the line against these 2
 rules. The row of a function is the `//` lines directly above the line of its `fn`. It is the
 row of the first item of that line. A function that stands after another item on its line has no
-row, so one line does not stand for 2 functions. The reach is the one of a boundary function,
+`// gives:` line and no `// writes:` line. A call row still stands for each function of its line,
+a second function too. The text after the word is UTF-8, and a space, a control character and a
+format character are no text (NO_TEXT). The reach is the one of a boundary function,
 with each pointer, each span and each string in the place of a byte pointer
 (Rows.gives_storage). So an owner, a `string[2]` and a struct with a pointer field at any depth
 ask for the line. A function type with a pointer in it asks for the line too. The lint reads the
@@ -93,6 +95,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 
 # Pair each source group with the search roots that resolve its imports.
@@ -568,7 +571,7 @@ def source_text(data):
         at = error.start
         line = data.count(b"\n", 0, at) + 1
         col = at - data.rfind(b"\n", 0, at)
-        problem = (line, col, "byte 0x%02x is no UTF-8 text: fort source is UTF-8 (D2.1)"
+        problem = (line, col, "byte 0x%02X is no UTF-8 text: fort source is UTF-8 (D2.1)"
                    % data[at])
         text = data.decode("utf-8", errors="replace")
     return text.replace("\r\n", "\n").replace("\r", "\n"), problem
@@ -1516,7 +1519,8 @@ def function_row_problems(rows, path, source, record, calls, values=()):
 # A citation in a call row of the word of the row of another trusted function (D9.8 rule 3):
 # `the gives: of rt.alloc` or `the writes: of rt.decimal_text`. A sentence can start with `The`.
 # One space stands between the words, and `the` and its word stand on one line. A line wrap can
-# take the place of the space after the colon and of the space after `of`. The callee follows.
+# take the place of the space after the colon and of the space after `of`. The callee follows,
+# on one line (cited_callee).
 CITATION = re.compile(r"[Tt]he (gives|writes):[ \n]of[ \n]")
 # Text that starts a citation: `the gives:`, `the gives of` and `gives: of`, and the same with
 # `writes`, in each case. White space and quote characters can stand between the words, as in
@@ -1539,10 +1543,11 @@ def cited_callee(text, at):
     space, or None when no callee stands there. A citation names the callee as the body spells
     it, so `call_callee` reads it as it reads the callee of a call: `rt.alloc`, `(rt.alloc)` and
     `(( rt . alloc ))` name `rt.alloc`. A keyword, a number and a group that holds no one name
-    are no callee."""
+    are no callee. A citation holds its callee on one line, so a group with a line end in it is
+    no callee: `(maker.` and then `good)` on the next line."""
     if text[at:at + 1] == "(":
         close = matching_close(text, at)
-        if close < 0:
+        if close < 0 or "\n" in text[at:close]:
             return None
         spelled = text[at:close + 1]
     else:
@@ -1590,7 +1595,8 @@ def citation_problems(rows, source, record, called, externs):
     """The problems of the citations in the call rows of one function of a trusted module: each
     cited callee is called in the body (`called` maps the callee as the body spells it to the key
     of its declaration), it is a fort function of a trusted module, and the row of that function,
-    its `//` lines directly above it, holds a line that starts with the cited word (D9.8 rule 3).
+    its `//` lines directly above it, holds a line that starts with `// ` and then the cited word
+    (D9.8 rule 3).
     `externs` holds each `extern fn` that the body calls, as the body spells it: the citation
     form names no extern, and the message says so. Text that starts a citation and does not
     read as one is a problem: the lint reads each citation or reports it."""
@@ -1639,28 +1645,61 @@ def citation_problems(rows, source, record, called, externs):
                              "(%s)" % (record["name"], word, callee, ROWS)))
             continue
         if not cited_word_stands(rows, key, word):
+            cited = rows.source(key[0])
+            second = cited is not None and not first_item(cited, cited.offset(key[1], key[2]))[1]
+            later = ("" if not second else ": '%s' stands after another item on its line, and "
+                     "only the first item of a line has a row" % callee)
             problems.append((line, 1, "a call row of fn '%s' cites the %s of '%s', and the row "
-                             "of '%s' has no line '// %s ...' (%s)"
-                             % (record["name"], word, callee, callee, word, ROWS)))
+                             "of '%s' has no line '// %s ...'%s (%s)"
+                             % (record["name"], word, callee, callee, word, later, ROWS)))
     return problems
 
 
+def first_item(source, at):
+    """The offset of the `fn` of the function whose name stands at `at` of `source`, or `at`
+    with no `fn` before it, and whether the function is the first item of the line of that
+    offset."""
+    start = keyword_before(source.code, at, "fn")
+    first = start if start >= 0 else at
+    return first, not source.code[source.code.rfind("\n", 0, first) + 1:first].strip()
+
+
+# The Unicode categories of the characters that are no text of a row line: a space, a line
+# separator, a paragraph separator, a control character and a format character.
+NO_TEXT = ("Zs", "Zl", "Zp", "Cc", "Cf")
+
+
+def holds_text(text):
+    """Whether `text`, a part of a line of a row as Source reads it, holds a character whose
+    Unicode category is not in NO_TEXT. The file is UTF-8 (D2.1), so this function reads the
+    text as UTF-8: U+00A0, U+3000, U+0085 and U+200B are no text."""
+    letters = text.encode("latin-1").decode("utf-8", errors="replace")
+    return any(unicodedata.category(letter) not in NO_TEXT for letter in letters)
+
+
 def cited_word_stands(rows, key, word):
-    """Whether the row of the fort function declared at `key` holds a line of `word`: `// `,
-    the word, white space and text, on one line. The row is the `//` lines directly above the
-    line of its `fn`, and it is the row of the first item of that line. A function that stands
-    after another item on its line has no row."""
+    """Whether the row of the fort function declared at `key` holds a line of `word`: `// ` and
+    then the word, white space and text, on one line (holds_text). The row is the `//` lines
+    directly above the line of its `fn`, and it is the row of the first item of that line. A
+    function that stands after another item on its line has no such row. A call row is no such
+    row: the call rows above a line stand for each function of that line, a second function
+    too (function_row_problems)."""
     path, line, col = key
     source = rows.source(path)
     if source is None:
         return False
-    at = source.offset(line, col)
-    start = keyword_before(source.code, at, "fn")
-    first = start if start >= 0 else at
-    if source.code[source.code.rfind("\n", 0, first) + 1:first].strip():
+    first, alone = first_item(source, source.offset(line, col))
+    if not alone:
         return False
     stated = re.compile(r"// %s\s+\S" % re.escape(word))
-    return any(stated.match(text) for _, text in comment_run(source, source.line_of(first)))
+    for number, text in comment_run(source, source.line_of(first)):
+        found = stated.match(text)
+        # The run strips each line, and a strip of Latin-1 text takes the bytes 0xa0 and 0x85.
+        # So the text after the word comes from the line of the file.
+        whole = source.lines[number - 1].lstrip()
+        if found is not None and holds_text(whole[found.end() - 1:]):
+            return True
+    return False
 
 
 def result_type(source, record, body_open):
@@ -1891,8 +1930,9 @@ REFUSED_NAMES = (
 EXTERN_NAME = re.compile(r"(?<![A-Za-z0-9_])extern\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)")
 
 
-def refused_declaration_problems(text):
-    """The problems of each `extern fn` of `text` whose name is in a list of REFUSED_NAMES.
+def refused_declaration_problems(data):
+    """The problems of each `extern fn` of the bytes `data` of one file whose name is in a list
+    of REFUSED_NAMES.
 
     No row makes such a declaration legal, so the check reads no row. It reads the text and no
     index: the index holds no record of a declaration in a branch of a `$if` that the compile
@@ -1900,8 +1940,10 @@ def refused_declaration_problems(text):
     module that is not trusted. A comment and a literal hold no declaration
     (blank_comments_and_literals). A fort function with a listed name is no C function. The
     problem stands at the name, and its column is a byte column, as a column of the index is
-    (D20.3).
+    (D20.3). The check reads the bytes as Latin-1, so one character is one byte, also after a
+    byte that is no UTF-8 text. A line ends at `\n`, at `\r\n` and at `\r`, as in source_text.
     """
+    text = data.decode("latin-1").replace("\r\n", "\n").replace("\r", "\n")
     if "extern" not in text:
         return []
     code = blank_comments_and_literals(text)
@@ -1914,7 +1956,7 @@ def refused_declaration_problems(text):
             at = found.start(1)
             start = code.rfind("\n", 0, at) + 1
             line = code.count("\n", 0, at) + 1
-            col = len(text[start:at].encode("utf-8")) + 1
+            col = at - start + 1
             problems.append((line, col, "extern '%s': %s, and no row makes this declaration "
                              "legal (%s, \"%s\")" % (name, reason, ROWS, paragraph)))
     return problems
@@ -2044,16 +2086,17 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
     entries = []
     for path, includes in files:
         relative = os.path.relpath(str(path), str(root))
-        text, no_utf8 = source_text(Path(path).read_bytes())
+        data = Path(path).read_bytes()
+        text, no_utf8 = source_text(data)
         # A run judges a file only when its roots and its options agree, so the pair is its key.
         given = (tuple(includes), lang_options(root, relative))
-        entries.append((relative, given, real_path(root, relative, cache), text, no_utf8))
+        entries.append((relative, given, real_path(root, relative, cache), text, no_utf8, data))
     reports = [None] * len(entries)
     runs = 0
     for indexes, buckets, diagnostics, error in std_documents(fort, root, entries, cache, target):
         runs += 1
         for index in indexes:
-            relative, _, path, text, _ = entries[index]
+            relative, _, path, text, _, _ = entries[index]
             if error is not None:
                 reports[index] = [(1, 1, error)]
                 continue
@@ -2062,7 +2105,7 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
                                            module_segments(relative), not rows_only(relative))
             rows = Rows(root, buckets, cache, std_roots, memo)
             reports[index].extend(row_problems(rows, path, records))
-    for index, (relative, given, _, _, _) in enumerate(entries):
+    for index, (relative, given, _, _, _, _) in enumerate(entries):
         if reports[index] is not None:
             continue
         includes, options = given
@@ -2096,14 +2139,14 @@ def lint_files(fort, root, files, std_dir=None, target="linux"):
                                            not rows_only(entries[other][0]))
             reports[other].extend(row_problems(rows, entries[other][2], records or []))
     lines = []
-    for index, (relative, _, _, text, no_utf8) in enumerate(entries):
+    for index, (relative, _, _, text, no_utf8, data) in enumerate(entries):
         problems = [] if rows_only(relative) else text_problems(relative, text, root)
         if no_utf8 is not None:
             # Each file of the run gets this check, a file of ROWS_ONLY too.
             problems.append(no_utf8)
         problems += reports[index]
         # Each file of the run gets this check, a file of ROWS_ONLY too.
-        problems += refused_declaration_problems(text)
+        problems += refused_declaration_problems(data)
         problems.sort(key=lambda problem: (problem[0], problem[1]))
         lines.append(
             ["%s:%d:%d: %s" % (relative, line, col, message) for line, col, message in problems]
