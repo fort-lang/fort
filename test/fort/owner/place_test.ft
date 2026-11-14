@@ -13,6 +13,7 @@
 //| steps ok
 //| operands ok
 //| leaving ok
+//| unaddressed ok
 /// Checks the helpers of owner.place that rule (b) of D17.21 reads: the owners in fixed storage of
 /// a local and below a place, the local keys of a path and the rank of a key, the number of an
 /// owner in a type, the owners that a read in fixed storage reads, the parts of a place, the count
@@ -655,7 +656,7 @@ fn the_address_of_a_whole_store_is_marked_and_turns_stale() void {
 // ends the freshness of `_1`, the local of its place, and the store through `_7` that of `_2`; a
 // store through `_9`, which is no such address, ends none.
 fn expect_fresh(place.survey* c, fir.func* f) void {
-    fir_flow.bits mut fresh = fir_flow.bits_new(fir.local_count(f));
+    fir_flow.bits mut fresh = fir_flow.bits_new(place.fresh_count(f));
     defer del(fresh.words);
     fir_flow.bits_fill(&fresh);
     place.apply_fresh_reads(c, fir.block_statement(f, 0, 0), &fresh);
@@ -1050,6 +1051,74 @@ fn a_path_leaves_its_object_at_a_deref_or_a_header() void {
     println("leaving ok");
 }
 
+// The locals of the unaddressed bits: an aggregate result, an owning pointer `x` and a fixed array
+// `a` of owners. The temporaries take an address through `x`, a slice of `a` and an address of
+// `x`, in that order.
+string[13] UNADDRESSED = {
+    "fn main.u1() -> pair {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2 (a): i32 mut* own[2];",
+    "    let _3: i32 mut* own*;",
+    "    let _4: i32 mut*;",
+    "    let _5: i32 mut* own@;",
+    "    bb0: {",
+    "        _4 = addr mut((*_1));",
+    "        _5 = slice(_2, const u64 0, const u64 2);",
+    "        _3 = addr(_1);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// The fresh set holds the unaddressed bit of each local after the bit of its freshness. The entry
+// sets it for each local but an aggregate `_0`, the storage of the caller. An `addr`, or a slice
+// of a fixed array, that names fixed storage of a local ends the bit. An address through the
+// pointer in the local keeps it. Only a place in fixed storage of a local reads the bit, and a
+// null set holds none.
+fn the_unaddressed_bits_follow_the_addresses_of_fixed_storage() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own m = pass_env.parse_made(e, PRELUDE[..], UNADDRESSED[..]);
+    defer fir.module_drop_made(move(m));
+    fir.func mut* f = &m->funcs.items[0];
+    u32 count = fir.local_count(f);
+    assert(count == 6 && place.fresh_count(f) == 2 * count);
+    fir_flow.bits mut* own fresh = fir_flow.bits_make();
+    *fresh = fir_flow.bits_new(place.fresh_count(f));
+    defer fir_flow.bits_drop_made(move(fresh));
+    fir_flow.bits mut* own stale = fir_flow.bits_make();
+    *stale = fir_flow.bits_new(count);
+    defer fir_flow.bits_drop_made(move(stale));
+    place.survey mut* own c = survey_of(f);
+    defer place.drop_made(move(c));
+    place.set_unaddressed(f, fresh);
+    for (u32 mut n = 0; n < count; n++) {
+        assert(!fir_flow.bits_get(fresh, n));
+        assert(fir_flow.bits_get(fresh, count + n) == (n != 0));
+    }
+    place.path x = place.trace(c, place_of(f, 1, ""), stale);
+    place.path through = place.trace(c, place_of(f, 1, "*"), stale);
+    place.path result = place.trace(c, place_of(f, 0, ".0"), stale);
+    assert(place.is_unaddressed(c, x, fresh) && !place.is_unaddressed(c, through, fresh));
+    assert(!place.is_unaddressed(c, result, fresh));
+    // a null set has no local, as for is_through_fresh
+    assert(!place.is_unaddressed(c, x, null));
+    // the address through the pointer in `_1` names no byte of `_1`
+    place.apply_fresh_reads(c, fir.block_statement(f, 0, 0), fresh);
+    assert(fir_flow.bits_get(fresh, count + 1) && fir_flow.bits_get(fresh, count + 2));
+    // the slice of the fixed array `_2` names its storage
+    place.apply_fresh_reads(c, fir.block_statement(f, 0, 1), fresh);
+    assert(fir_flow.bits_get(fresh, count + 1) && !fir_flow.bits_get(fresh, count + 2));
+    // the address of `_1` names its storage
+    place.apply_fresh_reads(c, fir.block_statement(f, 0, 2), fresh);
+    assert(!fir_flow.bits_get(fresh, count + 1) && !place.is_unaddressed(c, x, fresh));
+    // the bits of the freshness stay apart: no statement here made a local fresh
+    for (u32 mut n = 0; n < count; n++) {
+        assert(!fir_flow.bits_get(fresh, n));
+    }
+    println("unaddressed ok");
+}
+
 fn main() i32 {
     the_owners_follow_the_order_of_the_type();
     the_keys_of_a_path_count_and_rank_their_locals();
@@ -1063,5 +1132,6 @@ fn main() i32 {
     a_step_gives_its_type_and_its_member();
     a_terminator_gives_its_operands_in_order();
     a_path_leaves_its_object_at_a_deref_or_a_header();
+    the_unaddressed_bits_follow_the_addresses_of_fixed_storage();
     return 0;
 }

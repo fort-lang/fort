@@ -8,15 +8,14 @@
 //| do not apply 6: a span in a field, a global or an element moves into a local first (form 5)
 //| do not apply 60: no `new` takes an `own` span or an `own` string as its type
 //| swap: programs 75, pass 65, known failures 10
-//| return the value: programs 14, pass 7, known failures 7
+//| return the value: programs 14, pass 9, known failures 5
 //| hoist the call: programs 21, pass 16, known failures 5
 //| drop_made: programs 5, pass 5, known failures 0
 //| del(s, T_drop): programs 50, pass 40, known failures 10
 //| T_drop(move(x)): programs 69, pass 60, known failures 9
 //| regrow(move(s), n): programs 50, pass 40, known failures 10
-//| pass 233, known failures 51
-//| class A 48: the last release is a call, and the place is a memory local or a field of one
-//| class B 3: the declaration of a memory local after a call reports an overwrite
+//| pass 235, known failures 49
+//| class A 49: the last release is a call, and the place is a memory local or a field of one
 /// The form corpus: each form of the form catalogue (D17.11, spec/ownership-design.md 16) in each
 /// storage class and for each type that the form can name. FORMS, CLASSES and SHAPES hold the three
 /// lists. The test writes one program for each cell of their product. A cell passes when its
@@ -29,7 +28,7 @@
 //
 // The counts of the product, which the first line of the output holds:
 //   539 cells: 7 forms x 11 storage classes x 7 types
-//   284 cells have a program: 233 pass, and KNOWN lists 51
+//   284 cells have a program: 235 pass, and KNOWN lists 49
 //   255 cells do not apply, each for the reason that reason_of gives (REASONS)
 //
 // The test takes two optional arguments for a person. `list` prints each cell that an owner rule
@@ -197,8 +196,10 @@ string[6] REASONS = {
 };
 
 // The reason of REASONS for each form, a row, in each storage class, a column in the order of
-// CLASSES. The catalogue does not say which storage classes a form can name. Each row takes each
-// class in which the text of its form gives a legal program.
+// CLASSES. The catalogue does not say which storage classes a form can name. Each row takes the
+// classes whose place the text of its form can name. A cell that reason 1 or 2 removes can still
+// have a legal program. There, a plain store of the value into the place can compile with no
+// error. Such a store is no form of the catalogue, so the cell has no program here.
 //
 // `return the value`: a declaration holds the result, so the row has the local and the memory
 // local. A store of the result into another place is form 1. An argument is no storage class.
@@ -783,9 +784,8 @@ struct defect {
 }
 
 // The classes of defect of the rows of KNOWN. A row of a new class gets a new letter here.
-defect[2] DEFECTS = {
+defect[1] DEFECTS = {
     defect{"A", "the last release is a call, and the place is a memory local or a field of one"},
-    defect{"B", "the declaration of a memory local after a call reports an overwrite"},
 };
 
 // A cell that fails: the letter of its class of defect, then its form, its storage class and its
@@ -803,13 +803,14 @@ struct known {
 // The count of the rows of KNOWN. A fix of the compiler removes rows and lowers this count. No
 // change adds a row for a cell that had a program before it: a new failure of such a cell is a
 // defect of that change.
-u64 KNOWN_COUNT = 51;
+u64 KNOWN_COUNT = 49;
 
 // Class A: the last statement that releases the value is a call: `T_drop(move(x))`, or
-// `del(s, T_drop)`, which calls the drop. A call kills each fact about a memory local (D17.11,
-// kill rule 5), so the exit does not prove the place empty.
-// Class B: a call comes before the declaration of the memory local, or it is its initial value.
-// The declaration then reports a store over a value that can be live.
+// `del(s, T_drop)`, which calls the drop. A call after the address of the memory local kills each
+// fact about the local (D17.11, kill rule 5). So the exit does not prove the place empty. A call
+// before that address keeps the facts, because no path to the call takes the address (spec/fir.md
+// 11, Fresh). So the declaration of form 2 passes, and the cell of an `own` span of owners fails
+// only at its exit.
 //
 // The run of each of these programs gives no event of an error kind and ends with status 0.
 // run_one holds that: a cell whose run fails is red, and no row of KNOWN excuses it.
@@ -834,8 +835,6 @@ known[KNOWN_COUNT] KNOWN = {
           "92:5: leak: cannot prove 'w.f[0]' is empty at this exit"},
     known{"A", "swap", "field of a memory local", "own span of owners", "error",
           "92:5: leak: cannot prove 'w.f' is empty at this exit"},
-    known{"B", "return the value", "memory local", "own pointer", "error",
-          "74:21: overwriting owned value: cannot prove 'x' is empty here"},
     known{"A", "return the value", "memory local", "struct with one owner", "error",
           "77:5: leak: cannot prove 'x.data' is empty at this exit"},
     known{"A", "return the value", "memory local", "struct with 2 owners", "error",
@@ -844,10 +843,8 @@ known[KNOWN_COUNT] KNOWN = {
           "77:5: leak: cannot prove 'x.b.data' is empty at this exit"},
     known{"A", "return the value", "memory local", "fixed array of owners", "error",
           "77:5: leak: cannot prove 'x[0]' is empty at this exit"},
-    known{"B", "return the value", "memory local", "own span of owners", "error",
-          "74:22: overwriting owned value: cannot prove 'x' is empty here"},
-    known{"B", "return the value", "memory local", "string", "error",
-          "74:20: overwriting owned value: cannot prove 'x' is empty here"},
+    known{"A", "return the value", "memory local", "own span of owners", "error",
+          "77:5: leak: cannot prove 'x' is empty at this exit"},
     known{"A", "hoist the call", "memory local", "struct with one owner", "error",
           "80:5: leak: cannot prove 'w.f.data' is empty at this exit"},
     known{"A", "hoist the call", "memory local", "struct with 2 owners", "error",
@@ -970,7 +967,7 @@ struct counts {
     u64[7] programs;
     u64[7] passes;
     u64[7] failures;
-    u64[2] classes;
+    u64[1] classes;
     u64 unlisted;
     u64 stale;
     u64 unsafe;
