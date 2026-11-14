@@ -608,14 +608,12 @@ fn advance(lexer mut* lx) void {
     if (c == BYTE_LF) {
         lx->line += 1;
         lx->col = 1;
+        // A newline ends the tokens a resync may drop: what stands before it was
+        // lexed on a line already past. A lone `\r` is whitespace or a byte of a
+        // comment (D2.1), so it ends no line, for the count and for resync alike.
+        lx->line_base = lx->out->len;
     } else {
         lx->col += 1;
-    }
-    // Either line break ends the tokens a resync may drop: what stands before it was
-    // lexed on a line already past. A lone `\r` is whitespace like any other, so
-    // it ends a line here without numbering one.
-    if (c == BYTE_LF || c == BYTE_CR) {
-        lx->line_base = lx->out->len;
     }
     lx->pos += 1;
 }
@@ -1353,7 +1351,7 @@ fn lex_token(lexer mut* lx) bool {
 // No token spans lines, so resync drops tokens added since the line began.
 fn resync(lexer mut* lx) void {
     tokvec_truncate(lx->out, lx->line_base);
-    while (!at_end(lx) && peek(lx) != BYTE_LF && peek(lx) != BYTE_CR) {
+    while (!at_end(lx) && peek(lx) != BYTE_LF) {
         advance(lx);
     }
     if (!at_end(lx)) {
