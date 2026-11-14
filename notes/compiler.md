@@ -2136,7 +2136,7 @@ error, exit 139 is SIGSEGV, and exit 124 is the limit of 20 s.
   today, and the item will. `no plan`: no guard holds it and no planned item closes it. `no
   undefined state`: the reference gives the emitted form no precondition, or the emitter has 0
   sites.
-- **The planned work items** are seven, and this tree implements none of them. `spec/decisions.md`
+- **The planned work items** are six, and this tree implements none of them. `spec/decisions.md`
   holds the rule of each of the first four. The null check: a dereference of a null pointer is the
   runtime error `null dereference`, and a call of a null function pointer is the runtime error `null
   call` (D10.5, D10.6, D3.10). Dead storage: the runtime never gives the storage of a `del` to
@@ -2146,23 +2146,23 @@ error, exit 139 is SIGSEGV, and exit 124 is the limit of 20 s.
   removes a check (D10.6, D14.1). The trusted premise that names the options of the builder: a build
   with one of these options is outside the guarantee, as a trusted module is. Case 4 of D10.7 names
   `--std-dir` and `--use std=<path>`; the rule for `-Xcc`, `--cc` and `-l` is a ruling and not yet a
-  decision. The test of the runtime table: a compile step or a test compares each part of each row
-  of `runtime_sig.ft` that the emitters call with the definition in `std/rt.ft`, where rule V7 does
-  not (E48); it is a ruling and not a decision. A reserved first segment `llvm` of a module path: no
-  module path starts with the segment `llvm` (E49); it is a change of D9.2 that waits for the user.
-  The zero bytes of a local when its declaration runs (D10.1) were an eighth item; the tree
-  implements them since 7a1d42fc, so the rows of that item are guarded now.
+  decision. A reserved first segment `llvm` of a module path: no module path starts with the segment
+  `llvm` (E49); it is a change of D9.2 that waits for the user. The zero bytes of a local when its
+  declaration runs (D10.1) were an eighth item; the tree implements them since 7a1d42fc, so the rows
+  of that item are guarded now. The test of the runtime table was one more item; the test
+  `runtime-table` and the check of each call implement it, so row E48 is guarded now.
 - **The methods.** `mutation-measured`: a mutant of the compiler removed the property and the test
-  `ir-flags` (`test/ir_flags_test.py`) went red. `probed`: a program was compiled and run, or the
-  test `ir-flags` counted the corpus, and the row quotes the result. `read`: the code was read and
-  nothing ran. Use a `read` row as an argument, not as a test.
+  `ir-flags` (`test/ir_flags_test.py`) went red. For E48, a mutant of the table of the runtime
+  entries, of `std/rt.ft` or of a call site made the test `runtime-table`
+  (`test/runtime_table_test.py`) or a test of the corpus go red. `probed`: a program was compiled
+  and run, or the test `ir-flags` counted the corpus, and the row quotes the result. `read`: the
+  code was read and nothing ran. Use a `read` row as an argument, not as a test.
 - **The rows: 76.** 50 for the emitter, 23 for `std/rt.ft`, 3 for the back end line.
-- **By state.** `guarded`: 46. Closed by a planned work item: 10. `no plan`: 0. `no undefined
-  state`: 20. The rows of each item: the null check 4; dead storage 2; frame storage 2; the removal
-  of `--no-bounds-check` 1; the trusted premise that names the options of the builder 1; the test of
-  the runtime table 1; a reserved first segment `llvm` of a module path 1. E19 names three items, so
-  these seven counts add up to 12.
-- **By method.** `mutation-measured`: 4. `probed`: 48. `read`: 24.
+- **By state.** `guarded`: 47. Closed by a planned work item: 9. `no plan`: 0. `no undefined state`:
+  20. The rows of each item: the null check 4; dead storage 2; frame storage 2; the removal of
+  `--no-bounds-check` 1; the trusted premise that names the options of the builder 1; a reserved
+  first segment `llvm` of a module path 1. E19 names three items, so these six counts add up to 11.
+- **By method.** `mutation-measured`: 5. `probed`: 47. `read`: 24.
 - **The rows with no plan: 0.** The census found 4 rows with no guard and no planned work item. One
   was E41, the copy of two places that overlap in part: the emitter wrote `llvm.memcpy` for it, and
   it writes `llvm.memmove` now (D6.3, D19.3). E11: a `load` of a padding byte that no `store` wrote:
@@ -2284,8 +2284,8 @@ fn main() i32 {
 
 ### 9.3 The rows of the emitter
 
-- **E01. A `load` or a `store` through a null pointer.** Sites: `gen_load` `gen.ft:1017` and
-  `gen_store` `gen.ft:1029`, 1 site each. Precondition: "Any memory access must be done through a
+- **E01. A `load` or a `store` through a null pointer.** Sites: `gen_load` `gen.ft:1029` and
+  `gen_store` `gen.ft:1041`, 1 site each. Precondition: "Any memory access must be done through a
   pointer value associated with an address range of the memory access, otherwise the behavior is
   undefined." No function carries `null_pointer_is_valid`, so the address 0 is in no range. Guard:
   none in this tree. D10.5 and D10.6 make the dereference of a null pointer the runtime error `null
@@ -2308,8 +2308,8 @@ fn main() i32 {
   " ", n)`: the checked mode prints `7 10` and the release mode prints `0 10`. State: closed by
   frame storage. Method: probed.
 - **E04. `getelementptr inbounds`, array form and element form: an index or a span outside the
-  object.** Sites: `gen_gep_array` `gen.ft:1082` and `gen_gep_element` `gen.ft:1095`, which write
-  the one text `getelementptr inbounds` of `gep_begin`, `gen.ft:1073`. Precondition: with `inbounds`
+  object.** Sites: `gen_gep_array` `gen.ft:1094` and `gen_gep_element` `gen.ft:1107`, which write
+  the one text `getelementptr inbounds` of `gep_begin`, `gen.ft:1085`. Precondition: with `inbounds`
   the base and the result must be in bounds of one allocated object, or the result is poison, and an
   access through poison is undefined. Guard: `chk_bounds` before each index (`fir_lower.ft:1689`)
   and `chk_span` before each span expression (`fir_lower.ft:1741`). `term_removable` (`fir.ft:1728`)
@@ -2330,7 +2330,7 @@ fn main() i32 {
   99` and exits 0 with the option. State: closed by the removal of `--no-bounds-check`. Method:
   probed.
 - **E06. `getelementptr inbounds` on a null base: `&p->f`, and an index through a null pointer to an
-  array.** Sites: `gen_gep_field` `gen.ft:1106` and `gen_gep_array` (E04). Precondition: "the only
+  array.** Sites: `gen_gep_field` `gen.ft:1118` and `gen_gep_array` (E04). Precondition: "the only
   pointer in bounds of the null pointer in the default address space is the null pointer itself", so
   the address of a field at an offset above 0 is poison. No load is necessary. Guard: none in this
   tree. D10.6 makes each evaluation of a place through a null pointer the runtime error `null
@@ -2344,8 +2344,8 @@ fn main() i32 {
   is sufficient". So the instruction has no undefined state of its own. The access after it is E02
   or E03. State: no undefined state. Method: read.
 - **E08. The alignment of a `load`, a `store`, an `alloca`, a global, a copy and a fill.** Sites: 12
-  texts of `align`: `gen.ft:1022`, `gen.ft:1035`, `gen.ft:1143`, `gen.ft:1147`, `gen.ft:1160`,
-  `gen.ft:1592`, `gen.ft:1808`, `fir_llvm.ft:306`, `gen_data.ft:103`, `gen_data.ft:147`,
+  texts of `align`: `gen.ft:1034`, `gen.ft:1047`, `gen.ft:1155`, `gen.ft:1159`, `gen.ft:1172`,
+  `gen.ft:1603`, `gen.ft:1841`, `fir_llvm.ft:306`, `gen_data.ft:103`, `gen_data.ft:147`,
   `gen_data.ft:436` and `gen_data.ft:452`. Precondition: "Overestimating the alignment results in
   undefined behavior." Guard: each number is `type_alignof` of the type of the place
   (`types.ft:1307`). Each object has that alignment or more: an `alloca` and a global carry the same
@@ -2390,12 +2390,12 @@ fn main() i32 {
   `llvm.memset` over `%x.1` before the two field stores, and both modes print `the padding byte is
   0`. State: guarded. Method: probed.
 - **E12. A `bool` place that holds a byte other than 0 or 1.** Sites: a `bool` in memory is an `i8`;
-  a read is `load i8` and `trunc` to `i1` (`gen.ft:1052`), and a write is `zext` (`gen.ft:1062`).
+  a read is `load i8` and `trunc` to `i1` (`gen.ft:1064`), and a write is `zext` (`gen.ft:1074`).
   The emitter writes no `load i1` and no range metadata, so each byte is a defined value: D3.3 says
   that a load gives the low bit of the byte. The test `ir-flags` holds 0 `load i1` and 0 metadata
   attachments. Evidence: through `cast(&two, bool*)` the byte 2 reads `false` and the byte 3 reads
   `true`, in both modes: the low bit decides. State: no undefined state. Method: probed.
-- **E13. A `switch` on an enum value outside its set.** Sites: `switch`, `gen.ft:1200`.
+- **E13. A `switch` on an enum value outside its set.** Sites: `switch`, `gen.ft:1212`.
   Precondition: none in the reference: a value with no case goes to the default label. The risk is a
   default label that holds `unreachable`. Guard: the default label of a `switch` with no `default`
   is the block of `fail_enum` (`chk_enum`, `fir_lower.ft:1250`), which no build mode removes
@@ -2426,7 +2426,7 @@ fn main() i32 {
   pthread_create(i64 v) i64;` the lint prints a problem that starts with `extern 'pthread_create': a
   fort program has one thread`, and it exits 1. State: guarded. Method: probed.
 - **E16. An indirect `call` through a null function pointer.** Sites: `gen_call_sig` with `pointer`
-  set, `gen.ft:1463`. Precondition: the callee must be a function. Guard: none in this tree. D3.10
+  set, `gen.ft:1475`. Precondition: the callee must be a function. Guard: none in this tree. D3.10
   and D10.6 make the call the runtime error `null call` in both modes, in a later change. Evidence:
   `hook h = {}; println(h.f(1));` for a `struct hook { fn (i32) i32 f; }` exits 139 in both modes.
   State: closed by the null check. Method: probed.
@@ -2440,16 +2440,16 @@ fn main() i32 {
   hook*)` for a `u64 bits` is the error `a cast adds the pointer fn () void at byte 0`. State:
   guarded. Method: probed.
 - **E18. A direct `call`: the signature of the call and of the definition.** Sites: 8 texts of
-  `call`. `gen_call_sig`, `gen.ft:1463`, writes each call of a fort function, of an `extern` and of
+  `call`. `gen_call_sig`, `gen.ft:1475`, writes each call of a fort function, of an `extern` and of
   a function pointer. 2 texts write a call of a runtime entry (E48), and 5 write a call of an
   intrinsic (E34, E41, E42, E43, E28). Precondition: the type and the calling convention of a call
-  match the callee. Guard: one function, `signature_of` (`gen.ft:1374`), gives the text of the call
+  match the callee. Guard: one function, `signature_of` (`gen.ft:1386`), gives the text of the call
   (`fir_llvm.ft:1028`), of the definition (`fir_llvm.ft:1537`), of the two declarations
-  (`gen_data.ft:464`, `gen_data.ft:529`) and of `main` (`gen.ft:1621`). The emitter writes no
+  (`gen_data.ft:464`, `gen_data.ft:529`) and of `main` (`gen.ft:1632`). The emitter writes no
   calling convention keyword, so each side has the default one: the test `ir-flags` holds the
   permitted words of a `declare`, a `define` and a `call` line (E44). State: guarded. Method: read.
 - **E19. The `sret` pointer of a call that returns an aggregate.** Sites: 4 texts of `sret`:
-  `gen.ft:1414`, `gen.ft:1510`, `gen.ft:1609`, `gen_data.ft:487`. Precondition: "This pointer must
+  `gen.ft:1426`, `gen.ft:1521`, `gen.ft:1620`, `gen_data.ft:487`. Precondition: "This pointer must
   be guaranteed by the caller to be valid: loads and stores to the structure may be assumed by the
   callee not to trap and to be properly aligned." Guard: none when the destination is a place behind
   a pointer: the caller passes that address. Evidence: `*h.p = make(7);` with a null `two mut* p`
@@ -2514,7 +2514,7 @@ fn main() i32 {
   `inrange`, `nnan`, `ninf`, `nsz`, `arcp`, `contract`, `afn`, `reassoc` and `fast`. State: no
   undefined state. Method: probed.
 - **E28. A float to an integer.** Sites: `llvm.fptosi.sat` and `llvm.fptoui.sat`: the name
-  (`gen.ft:1759`, `gen.ft:1761`), the call (`fir_llvm.ft:1758`) and the declaration
+  (`gen.ft:1792`, `gen.ft:1794`), the call (`fir_llvm.ft:1758`) and the declaration
   (`gen_data.ft:575`). A plain `fptosi` or `fptoui` is poison when "the value cannot fit"; the
   emitter writes 0 of them and the test `ir-flags` holds 0. The saturating intrinsic has no
   precondition (D3.14). Evidence: `cast(1e300, i32)`, `cast(nan, i32)`, `cast(inf, u8)` and
@@ -2522,7 +2522,7 @@ fn main() i32 {
   state. Method: probed.
 - **E29. The float instructions and the integer to float conversions.** Sites: `fadd`, `fsub`,
   `fmul`, `fdiv` (`fir_llvm.ft:809`, `fir_llvm.ft:811`, `fir_llvm.ft:813`, `fir_llvm.ft:815`),
-  `fneg` (`fir_llvm.ft:1085`), `fcmp` (`gen.ft:958`), `fptrunc`, `fpext` (`fir_llvm.ft:1737`,
+  `fneg` (`fir_llvm.ft:1085`), `fcmp` (`gen.ft:970`), `fptrunc`, `fpext` (`fir_llvm.ft:1737`,
   `fir_llvm.ft:1739`), `sitofp`, `uitofp` (`fir_llvm.ft:1743`, `fir_llvm.ft:1745`). Precondition: no
   operand is undefined: `fdiv` by 0 gives an infinity or a NaN, and `sitofp` rounds. Each
   instruction assumes the default floating-point environment: "Running LLVM code in an environment
@@ -2531,7 +2531,7 @@ fn main() i32 {
   module (E20). The build line can change the environment (B03). Probes that ran: `1.0 / zero`
   prints `inf`, `cast(18446744073709551615, f32)` prints `1.8446744e+19`, and the product of the
   smallest normal `f64` and 0.5 is above 0. State: guarded. Method: read.
-- **E30. A pointer comparison, and a pointer to an integer.** Sites: `icmp`, `gen.ft:942`, and
+- **E30. A pointer comparison, and a pointer to an integer.** Sites: `icmp`, `gen.ft:954`, and
   `ptrtoint`, `fir_llvm.ft:1700`. Precondition: none: `icmp` compares the two addresses, and
   `ptrtoint` gives the address. fort has `==` and `!=` on pointers only: `a < f` for two `i32*` is
   the error `'<' takes ordered operands, not i32*` (`check.ft:2333`). D10.7 ("The number of an
@@ -2553,7 +2553,7 @@ fn main() i32 {
   hidden pointer places in a third; each one is a compile error. A legal cast still gives two places
   that overlap in part, whose copy has a defined result (E41), and a view of the padding, which
   holds 0 (E11). State: guarded. Method: probed.
-- **E33. `unreachable` after the call of a failure entry.** Sites: `fail_block`, `gen.ft:1697`, and
+- **E33. `unreachable` after the call of a failure entry.** Sites: `fail_block`, `gen.ft:1730`, and
   `fail_call`, `fir_llvm.ft:1394`. Precondition: `unreachable` "has no defined semantics", so
   control must not reach it. Why control does not: the line before it is a call of one of the 10
   failure entries of `std.rt` (`fail_overflow`, `fail_shift`, `fail_div_zero`, `fail_div_overflow`,
@@ -2590,12 +2590,12 @@ fn main() i32 {
   no effect is undefined. Evidence: a mutant that adds `mustprogress` to the group 0 turns the test
   `ir-flags` red. `while (true) { }` runs until the limit of 20 s in both modes. State: no undefined
   state. Method: mutation-measured.
-- **E39. `alloca`: the size of the frame and the end of the stack.** Sites: 3: `gen.ft:1590`,
-  `gen.ft:1806`, `fir_llvm.ft:304`. Precondition: "The operation itself is undefined if there is
+- **E39. `alloca`: the size of the frame and the end of the stack.** Sites: 3: `gen.ft:1601`,
+  `gen.ft:1839`, `fir_llvm.ft:304`. Precondition: "The operation itself is undefined if there is
   insufficient stack space for the allocation." Guard: each definition carries
   `"probe-stack"="inline-asm"` (`gen_data.ft:23`; D10.8), so a frame above one page touches each
   page, and the guard page ends the program. D10.7 names this memory fault as a defined result. The
-  ctest `stack_depth` holds the probes (`CMakeLists.txt:839`). Evidence: a frame of 64 MB whose
+  ctest `stack_depth` holds the probes (`CMakeLists.txt:848`). Evidence: a frame of 64 MB whose
   first write goes to the far end exits 139 (SIGSEGV) in both modes. Limit: the reference has no
   exception for a probed stack. The guard is a property of the two targets, not of the IR. State:
   guarded. Method: probed.
@@ -2611,11 +2611,11 @@ fn main() i32 {
   one `alloca` for `x`. State: no undefined state. Method: probed.
 - **E41. The copy intrinsic: two places that overlap in part.** Sites: the copy intrinsic is the one
   intrinsic that copies an aggregate. It is `llvm.memmove`, and the emitter has 1 text of its name,
-  `COPY_INTRINSIC` (`gen.ft:28`). 2 sites write that name: 1 call, in `gen_memmove` (`gen.ft:1142`),
+  `COPY_INTRINSIC` (`gen.ft:29`). 2 sites write that name: 1 call, in `gen_memmove` (`gen.ft:1154`),
   and 1 declaration (`gen_data.ft:559`). `gen_memmove` has 1 caller, `copy_to` (`fir_llvm.ft:528`),
   and `copy_to` has 2 callers (`fir_llvm.ft:650`, `fir_llvm.ft:666`). `llvm.memcpy` has 0 sites:
-  `grep -n 'llvm\.memcpy' src/fort/*.ft` gives 2 lines, and both are comment lines (`gen.ft:26`,
-  `gen.ft:27`). Precondition: none for an overlap: `llvm.memmove` "allows the two memory locations
+  `grep -n 'llvm\.memcpy' src/fort/*.ft` gives 2 lines, and both are comment lines (`gen.ft:27`,
+  `gen.ft:28`). Precondition: none for an overlap: `llvm.memmove` "allows the two memory locations
   to overlap", and its declaration has no `noalias` (`gen_data.ft:560`). For `llvm.memcpy` the
   source and the destination "must either be equal or non-overlapping", and the emitter writes 0
   `llvm.memcpy` (D6.3, D19.3). Two places of one type are equal or apart. A cast to a pointee of the
@@ -2629,7 +2629,7 @@ fn main() i32 {
   through the `sret` result of a call (`x.w = get(cast(&x, lo*));`) prints the right array in both
   modes too. State: no undefined state. Method: mutation-measured.
 - **E42. The copy intrinsic and `llvm.memset`: the length, the alignment, the volatile flag.**
-  Sites: the copy intrinsic of E41, `gen.ft:1143`, and `gen.ft:1160`. `memset_at` writes each
+  Sites: the copy intrinsic of E41, `gen.ft:1155`, and `gen.ft:1172`. `memset_at` writes each
   `llvm.memset` of the translator. It has 6 call sites: `place_zero` and `live_zero`
   (`fir_llvm.ft:500`, `fir_llvm.ft:514`), `hold` (`fir_llvm.ft:652`), `write_held`
   (`fir_llvm.ft:662`), `regrow_value` (`fir_llvm.ft:997`) and `aggregate_into` (`fir_llvm.ft:1146`).
@@ -2667,51 +2667,63 @@ fn main() i32 {
   removes the assumption that a function with a C name is the C function, and the string attributes
   select code. A call carries the group 3 or no group; the test `ir-flags` holds that. State: no
   undefined state. Method: read.
-- **E46. `zeroext` and `signext`.** Sites: `gen.ft:629`, `gen.ft:631`. Precondition: the caller
+- **E46. `zeroext` and `signext`.** Sites: `gen.ft:641`, `gen.ft:643`. Precondition: the caller
   extends a parameter and the callee extends a result, as the target ABI says; the two sides must
   agree. Guard: `signature_of` gives both sides one text (E18). For a C function the declaration is
   trusted (E20). State: guarded. Method: read.
 - **E47. `dso_local`, `private`, `unnamed_addr`, `external`, `zeroinitializer`, `null`.** Sites: the
   lines of a global and of a definition, for example `gen_data.ft:99`, `gen_data.ft:428` and
-  `gen.ft:1499`. The constant `@.words.N` of each `regrow` holds the byte offsets of the owner words
+  `gen.ft:1510`. The constant `@.words.N` of each `regrow` holds the byte offsets of the owner words
   of an element (`gen_data.ft:153`). None gives a program an undefined state. The test `ir-flags`
   holds each global line at one of 5 forms. `unnamed_addr` makes the address of a constant
   unspecified (E30). `dso_local` is a promise to the linker: a symbol that another shared object
   defines breaks the link and not the run. State: no undefined state. Method: read.
 - **E48. A `call` of a runtime entry: the signature of the call and of `std/rt.ft`.** Sites:
-  `gen_call_rt` (`gen.ft:1659`) and `gen_call_rt_value` (`gen.ft:1669`), from 10 call sites: the
+  `gen_call_rt` (`gen.ft:1691`) and `gen_call_rt_value` (`gen.ft:1702`), from 10 call sites: the
   allocation (`fir_llvm.ft:914`), the release (`fir_llvm.ft:1231`), the failure entry of a check
-  (`fir_llvm.ft:1393`), the fail block (`gen.ft:1696`), the 3 calls of `regrow` (`fir_llvm.ft:981`,
-  `fir_llvm.ft:991`, `fir_llvm.ft:995`) and the 3 calls of the emitted `main` (`gen.ft:1603`,
-  `gen.ft:1610`, `gen.ft:1633`). Precondition: as E18. `signature_of` does not write these calls.
+  (`fir_llvm.ft:1393`), the fail block (`gen.ft:1729`), the 3 calls of `regrow` (`fir_llvm.ft:981`,
+  `fir_llvm.ft:991`, `fir_llvm.ft:995`) and the 3 calls of the emitted `main` (`gen.ft:1614`,
+  `gen.ft:1621`, `gen.ft:1644`). Precondition: as E18. `signature_of` does not write these calls.
   The call takes its name and its result type from a row of the table of `runtime_sig.ft`
-  (`rt_sig_of`, `runtime_sig.ft:160`) and its argument types from the call site. The definition
-  takes its text from the fort function of `std/rt.ft`. The emitters can call 17 entries of the
-  table: `grep -o 'rt_entry\.rt_[a-z_0-9]*' src/fort/fir_llvm.ft src/fort/gen.ft`, unique, less
-  `rt_none`. Guard: partial. Rule V7 of the verifier (`runtime_holds`, `fir_verify.ft:192`;
-  `entry_fits`, `fir_verify.ft:211`; called at `gen_fir.ft:138`) reads the declaration in
-  `std/rt.ft` of the entry of each `check` and `fail` that the build mode keeps, at each compile. It
-  compares the count of its parameters with the count of the reported operands plus 3, and the type
-  of each reported operand. So V7 holds the operands of the 10 check entries: `fail_bounds`,
-  `fail_span`, `fail_overflow`, `fail_shift`, `fail_div_zero`, `fail_div_overflow`,
-  `fail_alloc_count`, `fail_enum`, `assert_fail` and `panic`. The gap: V7 does not compare the types
-  of the 3 location parameters (the file, the line and the column) and the result type of these 10,
-  and it compares nothing of the 7 other entries: `alloc`, `free`, `args_init`, `args`, `flush_all`,
-  `regrow` and `regrow_move`. No test compares these with `std/rt.ft`: a test of `test/fort` runs in
-  a temporary directory and cannot open the file, and `bootstrap0/test/runtime_sig_test.c` compares
-  the table of the C compiler. `fir_terminator_test.ft` and `runtime_sig_test.ft` compare rows with
-  signatures that a person wrote. The rows are the same for each program, so no fort source changes
-  them. Evidence: in review, a `std/rt.ft` whose `fail_bounds` takes `u64 index` gives the compile
-  error "the runtime `std.rt` has no entry `fail_bounds` with the parameters that `cmp` needs". One
-  whose `fail_bounds` takes `u64 line` builds, and the program prints the runtime error and exits
-  134. Probes that ran: clang 18.1.3 and `opt -passes=verify` refuse a module whose call names a
-  function that the module does not hold (`use of undefined value`). Both accept a call with the
-  argument types `(i32, i32)` of a function that the module defines with `(i64)`. So a wrong name in
-  a row stops the build, and a wrong type in a row does not. State: closed by the test of the
-  runtime table. Method: probed.
+  (`rt_sig_of`, `runtime_sig.ft:160`), and the call site writes its arguments. The definition takes
+  its text from the fort function of `std/rt.ft`. The emitters can call 17 entries of the table:
+  `grep -o 'rt_entry\.rt_[a-z_0-9]*' src/fort/fir_llvm.ft src/fort/gen.ft`, unique, less `rt_none`.
+  Guard: two parts. `rt_call_check` (`gen.ft:1671`) runs before each call of a runtime entry. It
+  panics when the count of the arguments, the form of one argument (its type and its extension
+  attribute) or the type of a named result differs from the row, so the row is the one source of
+  each call. The test `runtime-table` (`test/runtime_table_test.py`) finds the entries that the
+  emitters can call as the command above does, and compares the row of each one with the definition
+  in `std/rt.ft`: the name, each parameter form in order (the 3 location parameters included), the
+  count of the parameters, the result form and the `noreturn` state. The definition must be a fort
+  `fn` with a body, not an `extern fn` and with no `...`, so the call and the definition have the
+  default calling convention (E18). The test fails on an entry with no row, with no definition or
+  with two definitions, on a type that it cannot read, on a module of `src` other than the 2
+  emitters that imports `runtime_sig`, and on an `rt_entry_of(` outside `runtime_sig.ft`. The field
+  `noreturn` of a row gives the definition the attribute group 8 and nothing else
+  (`rt_name_noreturn`, `runtime_sig.ft:283`). The emitter writes `unreachable` after each call of a
+  check entry, and the test holds that each row with `noreturn` names a `noreturn` definition. The
+  test reads the texts of the tree and not the `std` of a build: a build with `--std-dir` is outside
+  the guarantee (B03). Rule V7 of the verifier (`runtime_holds`, `fir_verify.ft:192`; `entry_fits`,
+  `fir_verify.ft:211`; called at `gen_fir.ft:138`) also reads, at each compile, the declaration in
+  `std/rt.ft` of the entry of each `check` and `fail` that the build mode keeps, and compares the
+  count of its parameters and the type of each reported operand. Evidence: the test compares 17
+  entries. Each of the 7 rows of `tools/mutations/runtime_table.json` changes one part of one
+  signature: the name in the row and in `std/rt.ft`, a parameter type in the row, a location type in
+  `std/rt.ft` (`u64 line` in `fail_bounds`), the result type in the row and in `std/rt.ft`, and the
+  `noreturn` state. Each one turns the test red: `python3 tools/mutate.py
+  tools/mutations/runtime_table.json --runner 'bash -c'` gives 7 `caught`. Of the 6 rows of
+  `tools/mutations/runtime_calls.json`, 5 change the type of one argument or of one result at a call
+  site, and 1 removes the panic of `rt_call_check`: 6 `caught` on a darwin host. The pinned compiler
+  `bootstrap-2` builds the suites that lower each call site, so the mutated emitter runs in the
+  test: each of the 5 type rows makes `rt_call_check` panic in a suite, and the removed panic makes
+  `gen_rt_call_check_panic_test.ft` exit 0. Each of the 6 logs holds a `FAIL` line. Earlier probes:
+  clang 18.1.3 and `opt -passes=verify` refuse a module whose call names a function that the module
+  does not hold (`use of undefined value`). Both accept a call with the argument types `(i32, i32)`
+  of a function that the module defines with `(i64)`. So without the check, a wrong type at a call
+  site would build. State: guarded. Method: mutation-measured.
 - **E49. The name of a fort function or of a fort global with the prefix `llvm.`.** Sites:
-  `gen_symbol` joins the module path, a dot and the name (`gen.ft:680`), and `gen_symbol_ref` writes
-  the result in quotes (`gen.ft:698`). So each function and each global of a module whose path
+  `gen_symbol` joins the module path, a dot and the name (`gen.ft:692`), and `gen_symbol_ref` writes
+  the result in quotes (`gen.ft:710`). So each function and each global of a module whose path
   starts with the segment `llvm` gets a name such as `@"llvm.assume"`. Precondition: "This prefix is
   reserved in LLVM for intrinsic names; thus, function names may not begin with this prefix." The
   reference also gives a global with one of 4 names a meaning of its own: `llvm.used`,
@@ -2805,7 +2817,7 @@ the operation relies on.
   compiler calls it for `del` of an owner and for the old storage of `regrow` after `regrow_move`,
   and an owner comes from `new` or from a trusted module: a cast never adds `own` (`check.ft:4227`),
   a copy of an owner needs `move` (`check.ft:1722`), and `del` writes null into the owner
-  (`gen_zero_owner`, `gen.ft:1705`). Evidence: `del(p); del(p);` exits 0 in both modes; `box mut b =
+  (`gen_zero_owner`, `gen.ft:1738`). Evidence: `del(p); del(p);` exits 0 in both modes; `box mut b =
   a;` for a struct with an owner is the error `copying an owning value requires 'move'`; a `mut`
   cast of a struct of two owners to a struct of two plain pointers is the error `a 'mut' cast hides
   the pointer i32 mut* own at byte 0`; `rt.free(null)` in a module that is not trusted is the error
@@ -2853,10 +2865,10 @@ the operation relies on.
 - **R20. A direct system call.** Sites: 0. Each system call goes through a function of the C
   library. The emitter writes no inline assembly, and the test `ir-flags` holds 0 `asm`. State: no
   undefined state. Method: probed.
-- **R21. The start-up code.** Sites: the emitted `main` (`gen_main`, `gen.ft:1581`) and `args_init`
+- **R21. The start-up code.** Sites: the emitted `main` (`gen_main`, `gen.ft:1592`) and `args_init`
   (`std/rt.ft:1095`). The start files of the C library call `main(argc, argv)`. The emitted `main`
   calls `std.rt.args_init`, `std.rt.args`, the `main` of the program and `std.rt.flush_all`, and
-  returns the status with the mask 255 (`gen.ft:1635`). C behavior: `argv[0]` to `argv[argc - 1]`
+  returns the status with the mask 255 (`gen.ft:1646`). C behavior: `argv[0]` to `argv[argc - 1]`
   point to strings with a NUL, and the return from `main` calls `exit` (C11 5.1.2.2.1, 5.1.2.2.3).
   Guard: no module can call `args_init` (`check.ft:2681`). Evidence: `rt.args_init(1, null)` in a
   program is the error `'std.rt.args_init' belongs to the start of the program`. State: guarded.

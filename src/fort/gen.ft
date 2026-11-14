@@ -10,6 +10,7 @@ import fort.modules;
 import fort.prim;
 import fort.runtime_sig;
 import fort.session;
+import std.str;
 import std.strbuf;
 import fort.types;
 
@@ -119,10 +120,12 @@ struct gen_place {
 }
 
 // The argument text of one call, built left to right so that a call of any
-// arity needs no fixed bound.
+// arity needs no fixed bound. `forms` holds the IR form of each argument, one line each: its type
+// and its extension attribute. rt_call_check holds it against the row of a runtime entry.
 struct gen_args {
     strbuf.str_buf text;
     u64 count;
+    strbuf.str_buf forms;
 }
 
 // The build mode and selected target the module is emitted in, and the path of each function.
@@ -329,6 +332,7 @@ fn gen_args_init() gen_args {
 // Frees an argument list that the caller moves in.
 fn gen_args_drop(gen_args mut a) void {
     strbuf.drop(move(a.text));
+    strbuf.drop(move(a.forms));
 }
 
 // An empty argument list in an allocation of its own, for a function that lends the list to calls.
@@ -344,16 +348,24 @@ fn gen_args_drop_made(gen_args mut* own p) void {
 }
 
 // Appends `<ty> <val>`. The _ext form inserts the parameter attribute, as in `i8 zeroext 10`. An
-// empty `attr` means no attribute. bootstrap0/src/gen.h uses NULL for this case.
+// empty `attr` means no attribute. bootstrap0/src/gen.h uses NULL for this case. The form line of
+// the argument takes the type and the attribute, but not an `sret(...)` attribute: a row of
+// runtime_sig.ft writes the hidden result pointer as a plain `ptr`.
 fn gen_args_add_ext(gen_args mut* a, gen_val v, string attr) void {
     if (a->count > 0) {
         strbuf.append(&a->text, ", ");
     }
     strbuf.append(&a->text, v.ty);
+    strbuf.append(&a->forms, v.ty);
     if (attr.len > 0) {
         strbuf.push(&a->text, ' ');
         strbuf.append(&a->text, attr);
+        if (!str.starts_with(attr, "sret(")) {
+            strbuf.push(&a->forms, ' ');
+            strbuf.append(&a->forms, attr);
+        }
     }
+    strbuf.push(&a->forms, '\n');
     strbuf.push(&a->text, ' ');
     strbuf.append(&a->text, v.val);
     a->count += 1;
@@ -1492,8 +1504,7 @@ fn gen_define(emitter mut* g, ast.sym* fn_sym, signature* s, string@ names) void
     if (names.len != s->params.len) {
         panic("gen.gen_define: one name for each parameter");
     }
-    runtime_sig.rt_entry rt = runtime_sig.rt_entry_of(gen_symbol(g, fn_sym));
-    bool rt_noreturn = rt != runtime_sig.rt_entry.rt_none && runtime_sig.rt_entry_noreturn(rt);
+    bool rt_noreturn = runtime_sig.rt_name_noreturn(gen_symbol(g, fn_sym));
     string callee = gen_symbol_ref(g, fn_sym);
     definition_begin(g);
     strbuf.append(&g->funcs, "define dso_local ");
@@ -1652,9 +1663,30 @@ fn call_rt_tail(emitter mut* g, runtime_sig.rt_entry rt, gen_args* args) void {
     gen_ins_end(g);
 }
 
+// Panics unless the arguments of a call of the runtime entry `rt` are those of its row in
+// runtime_sig.ft: the count, then the form of each argument as ir_param_text spells it. A named
+// result `ret` must be the result of the row as ir_result_text spells it; an empty `ret` names
+// none. So the row is the one source of each call of a runtime entry, and
+// test/runtime_table_test.py holds each row against its definition in std/rt.ft.
+fn rt_call_check(runtime_sig.rt_entry rt, gen_args* args, string ret) void {
+    strbuf.str_buf mut want = strbuf.create();
+    defer del(want.data);
+    u64 count = runtime_sig.rt_entry_param_count(rt);
+    for (u64 mut i = 0; i < count; i++) {
+        strbuf.append(&want, runtime_sig.ir_param_text(runtime_sig.rt_entry_param(rt, i)));
+        strbuf.push(&want, '\n');
+    }
+    bool result_fits = ret.len == 0
+        || ret == runtime_sig.ir_result_text(runtime_sig.rt_entry_result(rt));
+    if (args->count != count || strbuf.view(&args->forms) != strbuf.view(&want) || !result_fits) {
+        panic("gen.rt_call_check: a call of a runtime entry differs from its row");
+    }
+}
+
 // A call to a runtime entry point, which the module defines; this
 // form emits no result.
 fn gen_call_rt(emitter mut* g, runtime_sig.rt_entry rt, gen_args* args) void {
+    rt_call_check(rt, args, "");
     gen_ins(g);
     gen_text_append(g, "call ");
     gen_text_append(g, runtime_sig.ir_result_text(runtime_sig.rt_entry_result(rt)));
@@ -1665,6 +1697,7 @@ fn gen_call_rt(emitter mut* g, runtime_sig.rt_entry rt, gen_args* args) void {
 // The same, naming the result.
 fn gen_call_rt_value(emitter mut* g, runtime_sig.rt_entry rt, string ret,
                              gen_args* args) gen_val {
+    rt_call_check(rt, args, ret);
     gen_val r = gen_temp(g, ret);
     gen_text_append(g, "call ");
     gen_text_append(g, runtime_sig.ir_result_text(runtime_sig.rt_entry_result(rt)));

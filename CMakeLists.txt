@@ -398,6 +398,15 @@ set_tests_properties(drop-fields PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# Each runtime entry that src/fort/fir_llvm.ft and src/fort/gen.ft call has the signature of its
+# definition in std/rt.ft: the name, each parameter type, the result type and the noreturn state
+# (census row E48 of notes/compiler.md 9). A text scan with a control tree; it needs no compiler.
+add_test(NAME runtime-table
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/runtime_table_test.py" --root "${CMAKE_SOURCE_DIR}")
+set_tests_properties(runtime-table PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # ---- the language server -------------------------------------------------------
 # fort_lsp is src/lsp compiled by the production compiler. It stands at the
 # build root. The C-started source chain builds that compiler for the native

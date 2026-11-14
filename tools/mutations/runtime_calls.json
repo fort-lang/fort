@@ -1,0 +1,88 @@
+{
+  "comment": [
+    "The call sites of the runtime entries, census row E48 of notes/compiler.md 9. A call takes its",
+    "name and its result from the row of rt_sig_of in src/fort/runtime_sig.ft, and each call site",
+    "writes its arguments; rt_call_check of src/fort/gen.ft panics when the count or the form of an",
+    "argument, or the type of a named result, differs from the row. Rows E48-call-* change the type",
+    "of one argument or of one result at a call site: the line of the location, the size of `alloc`,",
+    "the count of `args_init`, the sign flag of `regrow` and the result of `alloc`. Row",
+    "E48-call-check-removed removes the panic. The first stage runs 5 suites of test/fort, and the",
+    "pinned compiler bootstrap-2 builds them: each suite compiles the mutated gen.ft and fir_llvm.ft",
+    "from source, but the compiler is no mutant. The suites lower each mutated call site in the",
+    "process of the test: gen_ir_test (the location), fir_llvm_call_test (`alloc`, `args_init`),",
+    "gen_function_test (`args_init`), fir_llvm_regrow_test (`regrow`) and the panic test of",
+    "rt_call_check. So rt_call_check panics when the test runs, and run_tests.py prints a `FAIL`",
+    "line; with the removed panic, the panic test exits 0 and fails. A mutant compiler panics while",
+    "it compiles a test, which run_tests.py reports as ERROR and no failed test. The first stage",
+    "needs the bootstrap chain (FORT_ENABLE_BOOTSTRAP0) and the standard root that the chain",
+    "assembles for HEAD. The build fails when the pinned compiler is absent, so the run stops with",
+    "\"the baseline does not build\" and catches no row. The second stage runs the same suites with",
+    "the mutant compiler, and the third the programs of test/lang whose name holds `regrow`. The",
+    "table runs on a darwin host with --runner 'bash -c'; ZERO_AR_DATE=1 keeps the md5 guard. The",
+    "md5 guard reads the product compiler that the build links."
+  ],
+  "sources": [
+    "src/fort/gen.ft",
+    "src/fort/fir_llvm.ft"
+  ],
+  "binary": "build/Darwin/debug/fort",
+  "build": "ZERO_AR_DATE=1 ninja -C build/Darwin/debug fort && test -x build/Darwin/debug/bootstrap/bootstrap-2/fort",
+  "stages": [
+    {
+      "name": "the emitter suites, built by the last pinned compiler",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Darwin/debug/bootstrap/bootstrap-2/fort --std-dir build/Darwin/debug/bootstrap/head/std --cc /opt/homebrew/bin/clang --target arm64-apple-macosx11.0.0 --timeout 1500 -v -j 6 gen_rt_call_check fir_llvm_regrow_test gen_ir_test fir_llvm_call_test gen_function_test"
+    },
+    {
+      "name": "the emitter suites",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std --cc /opt/homebrew/bin/clang --target arm64-apple-macosx11.0.0 --opt /opt/homebrew/bin/opt --verify-ir -v -j 10 gen_rt_call_check fir_llvm_regrow_test gen_ir_test fir_llvm_call_test gen_function_test"
+    },
+    {
+      "name": "the regrow programs",
+      "command": "python3 test/lang/run_tests.py --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std --cc /opt/homebrew/bin/clang --target arm64-apple-macosx11.0.0 --opt /opt/homebrew/bin/opt --verify-ir -j 10 --xfail test/lang/xfail.txt regrow"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "E48-call-location",
+      "file": "src/fort/gen.ft",
+      "what": "the line of each location is an i64, and each row gives i32",
+      "old": "    gen_args_add(args, gen_const_unsigned(g, \"i32\", cast(at.line, u64)));",
+      "new": "    gen_args_add(args, gen_const_unsigned(g, \"i64\", cast(at.line, u64)));"
+    },
+    {
+      "decision": "E48-call-alloc-size",
+      "file": "src/fort/fir_llvm.ft",
+      "what": "the size of an element of `alloc` is an i32, and the row gives i64",
+      "old": "    gen.gen_args_add(args, gen.gen_const_unsigned(t->g, \"i64\", size));",
+      "new": "    gen.gen_args_add(args, gen.gen_const_unsigned(t->g, \"i32\", size));"
+    },
+    {
+      "decision": "E48-call-args-init",
+      "file": "src/fort/gen.ft",
+      "what": "the count of the arguments of `args_init` is an i64, and the row gives i32",
+      "old": "        gen_args_add(init_args, gen_literal(g, \"i32\", \"%argc\"));",
+      "new": "        gen_args_add(init_args, gen_literal(g, \"i64\", \"%argc\"));"
+    },
+    {
+      "decision": "E48-call-regrow-sign",
+      "file": "src/fort/fir_llvm.ft",
+      "what": "the sign flag of `regrow` is an i8, and the row gives `i1 zeroext`",
+      "old": "gen.gen_literal(g, \"i1\", is_signed), \"zeroext\");",
+      "new": "gen.gen_literal(g, \"i8\", is_signed), \"zeroext\");"
+    },
+    {
+      "decision": "E48-call-alloc-result",
+      "file": "src/fort/fir_llvm.ft",
+      "what": "the result of `alloc` is named as an i64, and the row gives ptr",
+      "old": "    return gen.gen_call_rt_value(t->g, runtime_sig.rt_entry.rt_alloc, \"ptr\", args);",
+      "new": "    return gen.gen_call_rt_value(t->g, runtime_sig.rt_entry.rt_alloc, \"i64\", args);"
+    },
+    {
+      "decision": "E48-call-check-removed",
+      "file": "src/fort/gen.ft",
+      "what": "rt_call_check lets a call that differs from its row pass",
+      "old": "    if (args->count != count || strbuf.view(&args->forms) != strbuf.view(&want) || !result_fits) {",
+      "new": "    if (false) {"
+    }
+  ]
+}
