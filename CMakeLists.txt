@@ -570,6 +570,15 @@ set_tests_properties(fir-run PROPERTIES
     PROCESSORS ${FORT_LANG_JOBS}
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
+# Hold the two rules of test/fir_run_test.py that accept a difference between the two runs: the
+# memory fault at dead storage (D10.9 rule 2) and a pinned difference. The test builds no program.
+add_test(NAME fir_run_rules_selftest
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/fir_run_rules_test.py"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(fir_run_rules_selftest PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # The product language test uses the current compiler and standard library.
 # It verifies each module that the compiler emits.
 set(FORT_LANG_COMMAND

@@ -7,7 +7,7 @@
 /// Checks the text that the FIR translator writes for `move` and `del` (spec/fir.md 12.1, 12.2,
 /// toolchain.md 6 items 17 and 18): the load, the zeroing and then the destination store of a
 /// pointer; the `%tmp` intermediate of a span; no zeroing of a temporary; and the load, the call
-/// of `std.rt.free` and the zeroing of `del`.
+/// of `std.rt.release` and the zeroing of `del`.
 import fort.fir;
 import fort.fir_llvm;
 import llvm_env;
@@ -221,8 +221,10 @@ fn a_copy_through_a_pointer_into_the_result() void {
 
 // ---- deletes ------------------------------------------------------------------------------------
 
-// `del(move p)` of a pointer: the load, the call of `std.rt.free`, `store ptr null`; of a span:
-// the load of field 0, the call, and a 16-byte `llvm.memset` (toolchain.md 6 item 17).
+// `del(move p)` of a pointer: the load, the call of `std.rt.release`, `store ptr null`; of a
+// span: the load of field 0, the call, and a 16-byte `llvm.memset` (toolchain.md 6 item 17). The
+// call gives the file, the line and the column of the `del`, where the runtime error `invalid
+// release` stands (D10.9 rule 4).
 fn a_delete_frees_and_zeroes() void {
     llvm_env.env mut* own e = llvm_env.make();
     defer llvm_env.drop_made(move(e));
@@ -231,7 +233,7 @@ fn a_delete_frees_and_zeroes() void {
         "  %p.0 = alloca ptr, align 8",
         "  store ptr %p.in, ptr %p.0, align 8",
         "  %t0 = load ptr, ptr %p.0, align 8",
-        "  call void @\"std.rt.free\"(ptr %t0)",
+        "  call void @\"std.rt.release\"(ptr %t0, ptr @.file.0, i32 18, i32 5)",
         "  store ptr null, ptr %p.0, align 8",
     };
     llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "dp", pass_env.CHECKED), dp[..]);
@@ -239,7 +241,7 @@ fn a_delete_frees_and_zeroes() void {
         "entry:",
         "  %t0 = getelementptr inbounds %fort.span, ptr %s.in, i32 0, i32 0",
         "  %t1 = load ptr, ptr %t0, align 8",
-        "  call void @\"std.rt.free\"(ptr %t1)",
+        "  call void @\"std.rt.release\"(ptr %t1, ptr @.file.0, i32 21, i32 5)",
         "  call void @llvm.memset.p0.i64(ptr align 8 %s.in, i8 0, i64 16, i1 false)",
     };
     llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "ds", pass_env.CHECKED), ds[..]);
@@ -251,7 +253,7 @@ fn a_delete_frees_and_zeroes() void {
         "  %t0 = load ptr, ptr %h.0, align 8",
         "  %t1 = getelementptr inbounds %struct.main.holder, ptr %t0, i32 0, i32 0",
         "  %t2 = load ptr, ptr %t1, align 8",
-        "  call void @\"std.rt.free\"(ptr %t2)",
+        "  call void @\"std.rt.release\"(ptr %t2, ptr @.file.0, i32 30, i32 5)",
         "  store ptr null, ptr %t1, align 8",
     };
     llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "df", pass_env.CHECKED), df[..]);
@@ -266,7 +268,7 @@ fn a_delete_of_a_temporary_zeroes_nothing() void {
     string[3] dt = {
         "entry:",
         "  %t0 = call ptr @\"std.rt.alloc\"(i64 1, i64 1, ptr @.file.0, i32 24, i32 9)",
-        "  call void @\"std.rt.free\"(ptr %t0)",
+        "  call void @\"std.rt.release\"(ptr %t0, ptr @.file.0, i32 24, i32 5)",
     };
     llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "dt", pass_env.CHECKED), dt[..]);
     string[14] dts = {
@@ -283,7 +285,7 @@ fn a_delete_of_a_temporary_zeroes_nothing() void {
         "  store i64 %t0, ptr %t4, align 8",
         "  %t5 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0",
         "  %t6 = load ptr, ptr %t5, align 8",
-        "  call void @\"std.rt.free\"(ptr %t6)",
+        "  call void @\"std.rt.release\"(ptr %t6, ptr @.file.0, i32 27, i32 5)",
     };
     llvm_env.expect(e, llvm_env.lowered(e, MOVES[..], "dts", pass_env.CHECKED), dts[..]);
 }
@@ -428,7 +430,7 @@ fn a_temporary_is_never_zeroed() void {
         "",
         "L2:",
         "  %t3 = load ptr, ptr %tmp0, align 8",
-        "  call void @\"std.rt.free\"(ptr %t3)",
+        "  call void @\"std.rt.release\"(ptr %t3, ptr @.file.0, i32 1, i32 1)",
     };
     llvm_env.expect(e, llvm_env.translate(e, slotdel), freed[..]);
 }

@@ -1,0 +1,103 @@
+//! run
+//! link: ffi/heap_calls.c
+//! stdout:
+//| huge: true true true true true true
+//| memory after 16 huge blocks: true
+// The release of a huge block, which has a mapping of its own, gives its storage back to the
+// system and keeps the mapping: the allocator takes the access to the whole mapping away
+// (`mprotect` with PROT_NONE) and then tells the system to drop its pages (`madvise`), with no
+// call between the two and no `munmap` (stdlib.md 2.16). The test reads the two calls of a
+// release, and it reads the memory that the process holds: after 16 blocks of 4 GiB, each with
+// a store into each page of its first 4 MiB, one live at a time, the process holds less than
+// 12 MiB more than before. A process that keeps the pages of each dead block holds 64 MiB
+// more. The system counts the pages of a range with no access against the process on Linux and
+// not on macOS, so the memory holds the `madvise` on Linux, and the order of the calls holds
+// it on each system.
+// D10.9
+import extern;
+
+// The kinds of a call in test/lang/ffi/heap_calls.c: a munmap, an mprotect that takes each
+// access away, and an madvise.
+i32 UNMAP = 2;
+i32 NO_ACCESS = 4;
+i32 ADVISE = 5;
+
+// The smallest huge block, and the bytes of it that the test stores into.
+u64 HUGE = 4294967296;
+u64 USED = 4194304;
+
+// C: heap_calls_count, test/lang/ffi/heap_calls.c, which gives the calls of one kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_count(i32 kind) u64;
+// C: heap_calls_order, test/lang/ffi/heap_calls.c, which gives the number of the last call of
+// one kind among the calls of each kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_order(i32 kind) u64;
+// C: heap_calls_address, test/lang/ffi/heap_calls.c, which gives the address of the last call
+// of one kind as a number.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_address(i32 kind) u64;
+// C: heap_calls_bytes, test/lang/ffi/heap_calls.c, which gives the length of the last call of
+// one kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_bytes(i32 kind) u64;
+// C: heap_calls_resident, test/lang/ffi/heap_calls.c, which gives the memory that the process
+// holds now, in bytes.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_resident() u64;
+
+// Stores into each page of the first USED bytes of `block`: a page has 4096 bytes or more on
+// each target.
+fn fill(u8 mut@ block) void {
+    for (u64 mut at = 0; at < USED; at += 4096) {
+        block[at] = 1;
+    }
+}
+
+// One huge block. Its release makes 1 call of each kind and no munmap, and the range of the
+// two calls is the whole mapping.
+// C call heap_calls_count x6: no pointer argument.
+// C call heap_calls_order x2: no pointer argument.
+// C call heap_calls_address x2: no pointer argument.
+// C call heap_calls_bytes x2: no pointer argument.
+fn huge() void {
+    u8 mut@ own block = new(u8, HUGE);
+    fill(block);
+    u64 start = cast(&block[0], u64);
+    u64 unmaps = heap_calls_count(UNMAP);
+    u64 no_access = heap_calls_count(NO_ACCESS);
+    u64 advise = heap_calls_count(ADVISE);
+    del(block);
+    bool follows = heap_calls_order(ADVISE) == heap_calls_order(NO_ACCESS) + 1;
+    bool same = heap_calls_address(NO_ACCESS) == start && heap_calls_bytes(NO_ACCESS) == HUGE;
+    println("huge: ", heap_calls_count(NO_ACCESS) - no_access == 1, " ",
+            heap_calls_count(ADVISE) - advise == 1, " ", follows, " ", same, " ",
+            heap_calls_address(ADVISE) == start && heap_calls_bytes(ADVISE) == HUGE, " ",
+            heap_calls_count(UNMAP) == unmaps);
+}
+
+// Takes and releases `rounds` huge blocks, one live at a time, with a store into each page of
+// the first USED bytes. Returns whether the process then holds less than 3 times USED more than
+// before.
+// C call heap_calls_resident x2: no pointer argument.
+fn memory_stays(u64 rounds) bool {
+    u64 before = heap_calls_resident();
+    for (u64 mut i = 0; i < rounds; i += 1) {
+        u8 mut@ own block = new(u8, HUGE);
+        fill(block);
+        del(block);
+    }
+    u64 after = heap_calls_resident();
+    return after < before + 3 * USED;
+}
+
+fn main() i32 {
+    huge();
+    println("memory after 16 huge blocks: ", memory_stays(16));
+    return 0;
+}

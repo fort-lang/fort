@@ -171,8 +171,9 @@ import binding's name for a local even though D7.9 permits it.
 | Module          | Imports                                     | Purpose                          |
 |-----------------|---------------------------------------------|----------------------------------|
 | `std.libc`      | none                                        | libc `extern`s, flags, errno     |
-| `std.rt`        | `libc`, `strbuf`                            | the runtime itself (section 3)   |
-| `std.mem`       | `libc`                                      | copy, fill and compare bytes     |
+| `std.heap`      | `libc`                                      | the allocator of the runtime     |
+| `std.rt`        | `heap`, `libc`, `strbuf`                    | the runtime itself (section 3)   |
+| `std.mem`       | `heap`, `libc`                              | copy, fill and compare bytes     |
 | `std.str`       | `libc`, `mem`                               | compare, search, classify, parse |
 | `std.sys`       | `libc`, `rt`, `str`, `strbuf`               | exit, args, errno, env, run      |
 | `std.strbuf`    | `mem`                                       | growable text and byte buffer    |
@@ -338,6 +339,24 @@ extern fn getenv(char* name) char*;
 extern fn exit(i32 code) noreturn;
 extern fn abort() noreturn;
 
+// <sys/mman.h>: what the allocator of the runtime uses (2.16). MAP_ANON is 0x1000 and
+// MADV_DISCARD is 5 (MADV_FREE) in std/darwin/libc.ft. `map_range` is the first 2^32 bytes of a
+// mapping: no caller of mmap maps fewer bytes.
+i32 PROT_NONE = 0;
+i32 PROT_READ = 1;
+i32 PROT_WRITE = 2;
+i32 MAP_PRIVATE = 2;
+i32 MAP_ANON = 0x20;
+i32 MADV_DISCARD = 4;                        // MADV_DONTNEED
+u64 MAP_RANGE_WORDS = 536870912;
+struct map_range {
+    u64[MAP_RANGE_WORDS] words;
+}
+extern fn mmap(void* addr, u64 len, i32 prot, i32 flags, i32 fd, i64 offset) map_range mut*;
+extern fn munmap(void* addr, u64 len) i32;
+extern fn mprotect(void* addr, u64 len, i32 prot) i32;
+extern fn madvise(void* addr, u64 len, i32 advice) i32;
+
 // <fcntl.h>, <unistd.h>
 extern fn open(char* path, i32 flags, ...) i32;
 extern fn read(i32 fd, u8 mut* buf, u64 n) i64;
@@ -432,8 +451,10 @@ A C library function is declared here and nowhere else (since 2026-09-25). The c
 those functions call `realpath`, `access`, `getcwd`, `strerror`, `mkdtemp`, `mkdir`, `chmod`,
 `symlink`, `mkfifo`, `umask`, `unlink`, `unlinkat`, `rmdir`, `rename`, `readlink`, `opendir`,
 `fdopendir`, `readdir`, `closedir`, `dup`, `dup2`, `getpid`, `raise`, `setenv`, `unsetenv`,
-`fork`, `execvp`, `waitpid`, `pipe`, `fcntl`, `_exit`, `strtod`, `strtof`, `snprintf` and
-`calloc`. `test/fort/support/heap.ft` is the one suite module that declares and calls C itself.
+`fork`, `execvp`, `waitpid`, `pipe`, `fcntl`, `_exit`, `strtod`, `strtof` and `snprintf`. No suite
+module of `test/fort` declares a C function. `test/fort/heap_full_test.ft` and
+`test/fort/heap_segments_test.ft` are the two suite modules that write `import extern;`: each
+calls `std.heap.drop`, a boundary function (2.16, D9.8).
 `_NSGetExecutablePath` stays in the Mac `std.os`: it is dyld's, not the C library's.
 
 Semantics are those of the C functions. Each buffer parameter says what C means by it (1.4):
@@ -449,9 +470,15 @@ the `own` is erased at the boundary and states C's convention. The pair is not i
 with `new` and `del` (D10.3): `free` releases what `malloc` and `calloc` gave, and a `del` of that
 storage is the runtime error `invalid release` (D10.9). The pair exists for storage that fort code
 gives to C.
-`calloc` returns zeroed storage for `n` items of `size` bytes, or null. The `std.rt` of 2026-11-11
-allocates with it, since `new` promises zeroed memory (D10.2), and the runtime gets its own
-allocator in a later change (D10.9, `toolchain.md` 5.1); `isatty` answers
+`calloc` returns zeroed storage for `n` items of `size` bytes, or null. No module of the library
+calls `malloc`, `calloc` or `free`: the runtime has its own allocator, `std.heap` (2.16, D10.9).
+`mmap`, `munmap`, `mprotect` and `madvise` are here for that allocator, and no other module calls
+them. A call that changes a mapping can take the bytes of dead storage away or give its range to
+another object, so the audit row of each of the four asks for a call row that says why the range
+holds no dead storage, or that the runtime gives dead storage back (D10.9 rule 6). `mmap` gives a
+`map_range mut*`, a struct of 2^32 bytes, because the pointee of the result of an extern lies
+inside its storage (A7 of `ownership-design.md` 5.1): each caller maps 2^32 bytes or more and
+tests the result against the address -1 before another use. `isatty` answers
 D11.5's question about a descriptor and is asked once per buffer, and once more at the first
 output after `io.close` or `io.dup2` resets the buffer (`toolchain.md` 5.3).
 `__errno_location` returns `i32 mut*` because C returns `int*`, whose target is mutable: `std.rt`
@@ -527,10 +554,11 @@ fn can_allocate(u64 size) bool
 - `fill`: sets every byte of `dst` to `v`. Ownership: none.
 - `equal`: `true` when the lengths are equal and the bytes match; two empty spans are equal
   whatever their pointers. Ownership: none.
-- `can_allocate`: asks `calloc(3)` for `size` bytes and frees the block at once. Returns `false`
-  with the errno of `calloc` when it gives null. `new` stops the process where `calloc` gives null
-  (D10.2), so a caller that must see the refusal of a large size asks here first, as the
-  interpreter of `--fir-run` does for a region of 1 MiB or more. Ownership: none.
+- `can_allocate`: reports whether `new` gives `size` bytes now. It is a call of `heap.can_take`
+  (2.16): the allocator of the runtime has the address range, and the system gives the storage.
+  It gives no storage to an allocation, but it can map a new segment, as `heap.can_take` does. `new` stops the process with `out of memory` where this function
+  returns `false` (D10.2, D10.9), so a caller that must see the refusal of a large size asks here
+  first, as the interpreter of `--fir-run` does for a region of 1 MiB or more. Ownership: none.
 
 Only `u8` spans are covered: a span cast never changes the element size (D3.14), so other
 element types are copied with a loop, as `std.vec` does, or through `libc.memmove` on `.ptr`
@@ -1257,12 +1285,11 @@ importers inside the library, and everything else in it is an implementation det
 Its names are mangled like any module's (`std.rt.flush`, D9.7); the compiler knows them, because
 a builtin lowers to a call of one (D12.2), and calls them like any other fort function.
 
-Its allocation entry point answers `void mut* own`. `toolchain.md` 5.1 is the list of entry
-points the compiler holds (D12.2) and it declares the signature; `alloc` carries out the mark
-`libc.calloc` gives it (2.2). A caller that calls `alloc` directly therefore owns storage it may
-write, and casts to a typed pointer to write through it, a cast that adds no `mut` (D3.11,
-D3.14). A caller that only reads drops the mark on the way (D5.4), which is also how every
-result reaches `free`, whose parameter is `void* own`.
+Its allocation entry point answers `void mut*`, storage of `std.heap.take` (2.16), with no `own`:
+`take` gives a plain pointer, and no cast adds the mark (D3.14). `toolchain.md` 5.1 is the list of
+entry points the compiler holds (D12.2) and it declares the signature. No cast gives a type to a
+`void*` (D3.14), so a caller that calls `alloc` directly gives the result only to C, to `release`
+or to `free`, whose parameter is `void*`; the compiler types the result of a `new` itself.
 
 ### 2.12 The float text of `std.rt`
 
@@ -1575,6 +1602,142 @@ sha256.update(&s, cast("ab", u8@));
 sha256.update(&s, cast("c", u8@));
 u8[32] same = sha256.finish(&s);            // the same 32 bytes as d
 ```
+
+### 2.16 `std.heap`
+
+The allocator of the runtime (D10.3, D10.9). `std.rt` imports it, so each import closure holds it
+(D9.10), and the compiled code reaches it through `std.rt.alloc` and `std.rt.release`
+(`toolchain.md` 5.1). The module is the same on both targets and imports `std.libc`. It takes
+address ranges and storage from the system with `mmap`, `mprotect` and `madvise`, and it calls no
+allocator of C. One thread uses it, so it has no lock.
+
+```fort
+u64 LIMIT_BYTES = 140737488355328;
+
+fn take(u64 size) void mut*
+fn drop(void* p) bool
+fn can_take(u64 size) bool
+fn live_bytes() u64
+fn kept_bytes(u64 size) u64
+```
+
+- `take`: gives the storage of a new allocation of `size` bytes, or of 1 byte when `size` is 0.
+  The storage holds zero bytes and starts at a multiple of 16. No byte of it is a byte of an
+  earlier allocation, live or dead (D10.9 rule 1). Returns null when `size` is above
+  `LIMIT_BYTES` (2^47), when the allocator has no address range left, or when the system refuses
+  the storage. `std.rt.alloc` reports each null as the runtime error `out of memory` (D10.9
+  rule 5).
+- `drop`: releases the allocation that starts at `p` and returns `true`. Returns `false`, and
+  changes nothing, when no live allocation of `take` starts at `p`: `p` is null, an address inside
+  an allocation, an address of dead storage, or an address that `take` did not give.
+  `std.rt.release` reports a `false` for a `p` that is not null as the runtime error `invalid
+  release` (D10.9 rule 4). `drop` reads no byte at `p`: it tests the address against the state of
+  the allocator. Its parameter is a `void*`, so it is a boundary function (D9.8). The test reads
+  the address and not the allocation that the pointer came from. Two small allocations can stand
+  side by side, so the address one after the last byte of one is the start of the next, and a
+  `del` of an owner of that address releases the next allocation. Only an owner that a trusted
+  module forges (D9.8), or a store through one of the routes below, gives such an address to
+  `del`: no other rule of the language makes an owner of it (D3.14).
+- `can_take`: reports whether `take(size)` gives storage now. It gives no storage to an
+  allocation, and `live_bytes` does not change. For a large size, and for a small size that the
+  open chunk does not hold, the probe needs the chunks that `take` needs: it can map a new
+  segment, which stays and is the current segment after the probe, as after a `take`. The probe
+  gives the range access and takes the access away again. For a huge size the probe maps the size
+  and unmaps it again.
+- `live_bytes`: the bytes of the live allocations of `take`. An allocation counts with the bytes
+  that the allocator keeps for it: `take` adds them and `drop` subtracts them. Storage that C code
+  allocated (`malloc`, `calloc`) does not count. The leak probes of `test/fort` read this count.
+- `kept_bytes`: the bytes that the allocator keeps for an allocation of `size` bytes: `size`
+  rounded up to 16 bytes and at least 16, or rounded up to 2 MiB when `size` is above 2,048,000
+  bytes. `size` is at most `LIMIT_BYTES`.
+
+A program uses `new` and `del`. A module that calls `take` gets a `void mut*`, which no cast gives
+a type to (D3.14), and only a trusted module names `drop` (D9.8). These two rules do not close the
+allocator to a module outside the trusted set. D9.6 exports each module-level name, and no rule
+limits a name of `std.heap` to the trusted set. So such a module can call each of the 25 other
+functions of `std.heap` (`room`, `seal` and `drop_huge` among them), and it can store into each
+of the 7 `mut` globals (`segments`, `segment_count`, `current`, `open_segment`, `bump`, `live`
+and `holes`). Each such call or store can give the storage of a live or a dead allocation to a
+later allocation, or take the access to live storage away. So each such route breaks rule 1 and
+rule 2 of D10.9, and the guarantee of D10.7 for a module outside the trusted set does not hold
+for a program that takes one. A later decision closes the routes with a rule of visibility. No
+file of the repository outside `std/heap.ft` calls one of the 25 functions or names one of the 7
+globals.
+
+**Address ranges.** A segment is one mapping of 2^32 bytes (4 GiB) that nothing can access at
+first. A chunk is 2 MiB of a segment, a unit is 16 KiB and a granule is 16 bytes. The allocator
+has three kinds of allocation:
+- A small allocation has at most 2,048,000 bytes. It takes granules of the open chunk at a bump
+  pointer, which only moves up. When the open chunk has too few granules left, the allocator
+  closes it and opens the next chunk.
+- A large allocation is larger and has fewer than 2048 chunks. It takes whole chunks at the
+  frontier of the current segment, which only moves up. When the current segment has too few
+  chunks left, the allocator maps a new segment, and the rest of the old one takes no later
+  large allocation.
+- A huge allocation has 2048 chunks or more. It takes a mapping of its own.
+
+No operation moves a bump pointer or a frontier down, the allocator maps no range at a fixed
+address, and it unmaps no mapping that an allocation used: the mapping of a dead huge allocation
+stays. So the address range of a released allocation takes no later object of the allocator or
+of the system while the process runs (D10.9 rule 1). The allocator holds at most 32768 mappings,
+its segments and its live huge allocations: when each record is in use, a huge allocation and an
+allocation that needs a new segment get no storage, and `can_take` gives `false` for them. The
+first `new` of a process needs an address range of 4 GiB, and the runtime makes that `new` for the
+arguments of `main`, before `main` runs. A process whose address-space limit is lower, or whose
+system refuses that mapping, stops there with `out of memory` (D10.9 rule 5).
+
+**State.** The state stands in the globals of the module, in the first unit of each segment (one
+word for each chunk) and in the first 3 units of each small chunk (the start and the end of each
+live allocation, as bits). None stands in the storage of an allocation. So a store through a
+view of dead storage changes no state of the allocator (D10.9 rule 1), and `drop` needs no byte
+at its argument.
+
+**Give-back.** A release gives dead storage back to the system where it can. It takes the access
+to the range away (`mprotect`) and then tells the system to drop the pages (`madvise`). The order
+is fixed: a page that the system drops while a read can still reach it reads as zero bytes,
+which is no result of D10.9 rule 2. A read of storage that went back stops the program with a
+memory fault, and dead storage that did not go back keeps the bytes that it held last. A large
+and a huge allocation go back at their release. Small allocations go back in whole units: when 8
+more units of a chunk hold no live allocation than its last give-back left, and as a whole chunk
+when a closed chunk holds no live allocation. A unit of the open chunk above the bump pointer
+never goes back, because a later allocation takes it. The system can refuse to take the access
+away. The allocator then tells the system to drop no page, and the storage stays as it is. A
+refused call can take the access away from the first part of its range, and a read there stops
+the program with a memory fault. Both are results of rule 2. A small chunk whose give-back the
+system refused keeps no state that the allocator reads again.
+
+**Holes.** A hole is a run of units that went back between two units that the program can
+access. The system keeps map entries for each hole and limits the entries of one process
+(`vm.max_map_count` of Linux, 65,530 by default). So the allocator keeps at most 8192 holes: a
+give-back that makes one more hole does not run, and its storage stays as it is. A give-back
+that makes no new hole, because its units stand beside a hole, runs at the limit too.
+
+At the limit the allocator does not tell the system to drop the pages of such storage either.
+The program can still read the storage, and on Linux a page that the system drops while the
+program can read it reads as zero bytes (`MADV_DONTNEED`), a third result that rule 2 forbids.
+So the memory of the process grows at the limit. Each release whose give-back would make a new
+hole keeps the pages that the program stored into, up to `kept_bytes(size)` bytes for each such
+allocation and up to 2 MiB for each such small chunk, until the process ends. The growth has no
+other bound than the address range. `test/lang/run/stdlib/184` measures it: 16 releases of 4 MiB,
+each with a store into each page, keep 14 to 18 times 4 MiB at the limit and less than 3 times
+4 MiB below it.
+
+**Map entries.** A segment costs at most 4 map entries, a huge allocation 1, live or dead, and a
+hole 2. So the allocator adds at most 4 entries for each segment and each huge mapping, and 2 for
+each of at most 8192 holes. The address range holds at most 32768 mappings of 4 GiB or more, so
+the bound is 4 × 32768 + 2 × 8192 = 147,456 entries, above the 65,530 of Linux. The limit of the
+holes holds only the last term: segments add entries past it. When the process has no map entry
+left, the system refuses the call that needs one (ENOMEM). A refused `mmap` or `mprotect` for
+new storage is the runtime error `out of memory` (D10.9 rule 5), and a refused give-back leaves
+the storage as it is (rule 2).
+
+**Commit charge.** Linux charges a range of a private mapping against its commit limit when the
+allocator gives the range write access. After the program stored into the mapping, the charge of
+the range stays when the range goes back: `mprotect` with `PROT_NONE` and `madvise` do not give it
+back. So the charge of a process grows with each range that it used in the run, live or dead.
+Under `vm.overcommit_memory = 2` the system refuses the access to new storage when the charge
+reaches its limit (`CommitLimit`), and that `new` is the runtime error `out of memory` (D10.9
+rule 5). Under the default mode 0 the charge has no such limit.
 
 ## 3. The runtime surface the library relies on
 

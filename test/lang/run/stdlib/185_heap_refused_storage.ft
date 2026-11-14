@@ -1,0 +1,229 @@
+//! run
+//! link: ffi/heap_calls.c
+//! stdout:
+//| large: true true true true
+//| small: true true true
+//| probe: true true true true
+//| probe, first call refused: true true true true
+//| probe, second call refused: true true true true
+//| segment: true true true true true
+//| huge probe: true true true
+//| map refused: true true true true
+// The system can refuse each call that gives storage to the allocator of the runtime: the
+// `mmap` of a segment or of a huge block, and the `mprotect` that gives access to chunks or to
+// the top table of a new segment. `take` then gives null and `can_take` gives false, and the
+// allocator keeps its state: the live bytes do not change, the next `take` gets the range that
+// the refused call named, and a segment whose top table got no access leaves the process again
+// (`munmap` of the whole mapping, before an allocation took storage of it). A probe makes its
+// range accessible and takes the access away again, and the probe of a huge size maps the size
+// and unmaps it again (stdlib.md 2.16). The C file of the test refuses the calls: no test can
+// make the system refuse one call at a chosen place.
+// D9.8, D10.9
+import extern;
+import std.heap;
+
+// The kinds of a call in test/lang/ffi/heap_calls.c.
+i32 MAP = 1;
+i32 UNMAP = 2;
+i32 ACCESS = 3;
+i32 NO_ACCESS = 4;
+
+u64 CHUNK = 2097152;
+u64 LARGE = 4194304;
+// The largest small block takes a new small chunk in each case.
+u64 SMALL_CHUNK = 2048000;
+// The bytes of a segment, and the largest large block: 2047 chunks, which only a segment with
+// no allocation holds.
+u64 SEGMENT = 4294967296;
+u64 ALMOST = 4292870144;
+
+// C: heap_calls_count, test/lang/ffi/heap_calls.c, which gives the calls of one kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_count(i32 kind) u64;
+// C: heap_calls_order, test/lang/ffi/heap_calls.c, which gives the number of the last call of
+// one kind among the calls of each kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_order(i32 kind) u64;
+// C: heap_calls_address, test/lang/ffi/heap_calls.c, which gives the address of the last call
+// of one kind as a number; for mmap, its result.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_address(i32 kind) u64;
+// C: heap_calls_bytes, test/lang/ffi/heap_calls.c, which gives the length of the last call of
+// one kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_bytes(i32 kind) u64;
+// C: heap_calls_refuse, test/lang/ffi/heap_calls.c, which makes call `nth` of one kind fail
+// with ENOMEM, counted from the next call. A refused call changes no mapping when `part` is 0.
+// gives: nothing. writes: no fort storage. keeps: no pointer. calls: no fort function.
+// frees: nothing.
+extern fn heap_calls_refuse(i32 kind, u64 nth, u64 part) void;
+// C: heap_calls_byte, test/lang/ffi/heap_calls.c, which gives the byte at an address, or -1
+// when nothing can access the address. The system reads the byte for write(2), so no memory
+// fault stops the program.
+// gives: an int64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_byte(u64 address) i64;
+
+// C call heap_calls_count: no pointer argument.
+fn count(i32 kind) u64 {
+    return heap_calls_count(kind);
+}
+
+// C call heap_calls_order: no pointer argument.
+fn order(i32 kind) u64 {
+    return heap_calls_order(kind);
+}
+
+// C call heap_calls_address: no pointer argument.
+fn address(i32 kind) u64 {
+    return heap_calls_address(kind);
+}
+
+// C call heap_calls_bytes: no pointer argument.
+fn bytes(i32 kind) u64 {
+    return heap_calls_bytes(kind);
+}
+
+// Makes the next call of `kind` fail.
+// C call heap_calls_refuse: no pointer argument.
+fn refuse(i32 kind) void {
+    heap_calls_refuse(kind, 1, 0);
+}
+
+// The byte at `at`, or -1 when nothing can access it.
+// C call heap_calls_byte: the argument is a number, an address at the frontier of a segment,
+// where no allocation has storage. C gives it to write(2), and the system reads the byte or
+// refuses the address.
+fn byte(u64 at) i64 {
+    return heap_calls_byte(at);
+}
+
+// The system refuses the access to the 2 chunks of a large block: `take` gives null and the
+// live bytes stay. The next `take` gets the range of the refused call.
+// C call heap.drop: got, the address that heap.take gave in this function. drop tests the
+// address against the records of the allocator and reads no byte at it.
+fn large() void {
+    u64 live = heap.live_bytes();
+    refuse(ACCESS);
+    void mut* refused = heap.take(LARGE);
+    u64 want = address(ACCESS);
+    bool same_live = heap.live_bytes() == live;
+    void mut* got = heap.take(LARGE);
+    println("large: ", refused == null, " ", same_live, " ", cast(got, u64) == want, " ",
+            got != null && heap.drop(got));
+}
+
+// The system refuses the access to a new small chunk: `take` gives null, and the open chunk
+// stays open, so the next small block comes with no call to the system.
+// C call heap.drop: next, the address that heap.take gave in this function. drop reads no
+// byte at it.
+fn small() void {
+    refuse(ACCESS);
+    void mut* refused = heap.take(SMALL_CHUNK);
+    u64 calls = count(ACCESS);
+    void mut* next = heap.take(16);
+    println("small: ", refused == null, " ", next != null && count(ACCESS) == calls, " ",
+            next != null && heap.drop(next));
+}
+
+// A probe of a large size gives access to its range and takes it away again: 2 calls for the
+// same range with no call between them, and nothing can access the range after the probe.
+fn probe() void {
+    u64 live = heap.live_bytes();
+    u64 access = count(ACCESS);
+    u64 no_access = count(NO_ACCESS);
+    bool can = heap.can_take(LARGE);
+    bool pair = count(ACCESS) == access + 1 && count(NO_ACCESS) == no_access + 1
+                && order(NO_ACCESS) == order(ACCESS) + 1
+                && address(NO_ACCESS) == address(ACCESS)
+                && bytes(ACCESS) == LARGE && bytes(NO_ACCESS) == LARGE;
+    println("probe: ", can, " ", pair, " ", byte(address(ACCESS)) == -1, " ",
+            heap.live_bytes() == live);
+}
+
+// The system refuses the storage of a probe: the probe gives false and makes no second call,
+// for a large size and for a small size that needs a new chunk.
+fn probe_first_refused() void {
+    u64 no_access = count(NO_ACCESS);
+    refuse(ACCESS);
+    bool large = heap.can_take(LARGE);
+    u64 at = address(ACCESS);
+    refuse(ACCESS);
+    bool small = heap.can_take(SMALL_CHUNK);
+    println("probe, first call refused: ", !large, " ", !small, " ",
+            count(NO_ACCESS) == no_access, " ", byte(at) == -1);
+}
+
+// The system gives the storage of a probe and refuses to take the access away again: the probe
+// gives false. The program can then access the range, which holds zero bytes and no
+// allocation, and the next `take` gets it.
+// C call heap.drop: got, the address that heap.take gave in this function. drop reads no byte
+// at it.
+fn probe_second_refused() void {
+    refuse(NO_ACCESS);
+    bool can = heap.can_take(LARGE);
+    u64 at = address(NO_ACCESS);
+    i64 seen = byte(at);
+    void mut* got = heap.take(LARGE);
+    println("probe, second call refused: ", !can, " ", seen == 0, " ", cast(got, u64) == at,
+            " ", got != null && heap.drop(got));
+}
+
+// A block of 2047 chunks needs a new segment. The system gives the mapping and refuses the
+// access to its top table: the allocator unmaps the whole mapping, and `take` gives null. The
+// next `take` maps a segment again, and its storage starts at the second chunk of that segment.
+// C call heap.drop: got, the address that heap.take gave in this function. drop reads no byte
+// at it.
+fn segment() void {
+    u64 maps = count(MAP);
+    u64 unmaps = count(UNMAP);
+    refuse(ACCESS);
+    void mut* refused = heap.take(ALMOST);
+    bool mapped = count(MAP) == maps + 1 && bytes(MAP) == SEGMENT;
+    bool unmapped = count(UNMAP) == unmaps + 1 && address(UNMAP) == address(MAP)
+                    && bytes(UNMAP) == SEGMENT;
+    void mut* got = heap.take(ALMOST);
+    bool again = count(MAP) == maps + 2 && count(UNMAP) == unmaps + 1;
+    println("segment: ", refused == null, " ", mapped, " ", unmapped, " ",
+            again && cast(got, u64) == address(MAP) + CHUNK, " ", got != null && heap.drop(got));
+}
+
+// The probe of a huge size maps the size and unmaps the same range again.
+fn huge_probe() void {
+    u64 maps = count(MAP);
+    u64 unmaps = count(UNMAP);
+    bool can = heap.can_take(SEGMENT);
+    println("huge probe: ", can, " ", count(MAP) == maps + 1 && count(UNMAP) == unmaps + 1, " ",
+            address(UNMAP) == address(MAP) && bytes(MAP) == SEGMENT && bytes(UNMAP) == SEGMENT);
+}
+
+// The system refuses a mapping: a huge block and a block that needs a new segment get null,
+// the probe of a huge size gives false, and no call unmaps a range.
+fn map_refused() void {
+    u64 live = heap.live_bytes();
+    u64 unmaps = count(UNMAP);
+    refuse(MAP);
+    void mut* huge = heap.take(SEGMENT);
+    refuse(MAP);
+    bool can = heap.can_take(SEGMENT);
+    refuse(MAP);
+    void mut* almost = heap.take(ALMOST);
+    println("map refused: ", huge == null, " ", !can, " ", almost == null, " ",
+            count(UNMAP) == unmaps && heap.live_bytes() == live);
+}
+
+fn main() i32 {
+    large();
+    small();
+    probe();
+    probe_first_refused();
+    probe_second_refused();
+    segment();
+    huge_probe();
+    map_refused();
+    return 0;
+}

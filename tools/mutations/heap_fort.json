@@ -1,0 +1,375 @@
+{
+  "comment": [
+    "The table of std.heap, the allocator of the runtime (std/heap.ft), for the rules of D10.9.",
+    "A row name gives the rule of D10.9 that the row breaks: rule 1 is no reuse of dead",
+    "storage, rule 2 the result of a read of dead storage, rule 4 `invalid release`, rule 5",
+    "`out of memory` and rule 6 the range of a call that changes a mapping, with the limit of",
+    "the holes that the give-back makes. A std module is",
+    "not part of the build of a test program, so the md5 guard reads the copy of the module in",
+    "the standard root of the debug preset, and the build copies it there itself. The compiler",
+    "binary keeps the allocator that its build gave it. The first stage runs the run tests of",
+    "the release rule in test/lang, and the second the module tests of the allocator in",
+    "test/fort. The table runs in the VM with the default runner after `tools/vm configure`",
+    "and `tools/vm build`."
+  ],
+  "sources": [
+    "std/heap.ft"
+  ],
+  "binary": "build/Linux/debug/std/heap.ft",
+  "build": "cmake -E copy std/heap.ft build/Linux/debug/std/heap.ft",
+  "stages": [
+    {
+      "name": "the run tests of the release rule",
+      "command": "python3 test/lang/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --cc /usr/bin/clang --target x86_64-linux-gnu --timeout 600 run/pointers/01 run/pointers/02 run/errors/04 run/errors/05 run/stdlib/087 run/stdlib/157 run/stdlib/18"
+    },
+    {
+      "name": "the module tests of the allocator",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 heap_test heap_segments_test heap_full_test heap_holes_test"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D10.9-1-reuse",
+      "file": "std/heap.ft",
+      "what": "the next allocation takes the storage of the newest allocation when a `del` released it",
+      "old": "    h->words[chunk_word + CHUNK_LIVE] = left;\n    if (left == 0 && !is_open) {",
+      "new": "    h->words[chunk_word + CHUNK_LIVE] = left;\n    if (is_open && last + 1 == bump) {\n        bump = first;\n    }\n    if (left == 0 && !is_open) {"
+    },
+    {
+      "decision": "D10.9-1-frontier",
+      "file": "std/heap.ft",
+      "what": "the frontier stays, so each large allocation and each small chunk takes the same chunks",
+      "old": "    g->frontier = first + count;\n    return first;",
+      "new": "    return first;"
+    },
+    {
+      "decision": "D10.9-1-bump",
+      "file": "std/heap.ft",
+      "what": "the next small allocation starts at the last granule of the one before it",
+      "old": "    bump = last + 1;\n    live += granules << GRANULE_BYTES_SHIFT;",
+      "new": "    bump = last;\n    live += granules << GRANULE_BYTES_SHIFT;"
+    },
+    {
+      "decision": "D10.9-2-seal",
+      "file": "std/heap.ft",
+      "what": "a give-back drops the pages of dead storage that a read can still reach, so the read gives zero bytes",
+      "old": "    if (libc.mprotect(cast(&h->words[at], void*), len, libc.PROT_NONE) != 0) {\n        return false;\n    }\n    libc.madvise(",
+      "new": "    libc.madvise("
+    },
+    {
+      "decision": "D10.9-2-huge",
+      "file": "std/heap.ft",
+      "what": "the give-back of a huge allocation drops pages that a read can still reach",
+      "old": "    if (libc.mprotect(cast(g->base, void*), g->bytes, libc.PROT_NONE) == 0) {\n        libc.madvise(cast(g->base, void*), g->bytes, libc.MADV_DISCARD);\n    }\n",
+      "new": "    libc.madvise(cast(g->base, void*), g->bytes, libc.MADV_DISCARD);\n"
+    },
+    {
+      "decision": "D10.9-4-live-bit",
+      "file": "std/heap.ft",
+      "what": "`drop` does not test the live bit of a small allocation: an address inside an allocation and the start of a dead one release",
+      "old": "    if ((h->words[start_at] & start_bit) == 0) {\n        return false;\n    }\n    h->words[start_at] &= ~start_bit;",
+      "new": "    h->words[start_at] &= ~start_bit;"
+    },
+    {
+      "decision": "D10.9-4-granule",
+      "file": "std/heap.ft",
+      "what": "an address inside the first granule of a small allocation releases it",
+      "old": "    if (word != TABLE_SMALL || (in_chunk & GRANULE_BYTES_MASK) != 0) {",
+      "new": "    if (word != TABLE_SMALL) {"
+    },
+    {
+      "decision": "D10.9-4-large-inner",
+      "file": "std/heap.ft",
+      "what": "an address inside the first chunk of a large allocation releases it",
+      "old": "        if (in_chunk != 0) {\n            return false;\n        }\n        drop_large(",
+      "new": "        drop_large("
+    },
+    {
+      "decision": "D10.9-4-large-later",
+      "file": "std/heap.ft",
+      "what": "the start of a later chunk of a large allocation releases that chunk",
+      "old": "        h->words[chunk] = TABLE_LATER;",
+      "new": "        h->words[chunk] = TABLE_FIRST;"
+    },
+    {
+      "decision": "D10.9-4-large-twice",
+      "file": "std/heap.ft",
+      "what": "a released large allocation keeps its table words, so a second `drop` releases it again",
+      "old": "        g->base->words[chunk] = word;\n        chunk += 1;",
+      "new": "        chunk += 1;"
+    },
+    {
+      "decision": "D10.9-4-old-segment",
+      "file": "std/heap.ft",
+      "what": "`drop` looks at the newest mapping only, so an allocation of an older one never releases",
+      "old": "        if (offset >= g->bytes) {\n            continue;\n        }",
+      "new": "        if (offset >= g->bytes) {\n            return false;\n        }"
+    },
+    {
+      "decision": "D10.9-4-huge-inner",
+      "file": "std/heap.ft",
+      "what": "an address inside a huge allocation releases it",
+      "old": "        if (offset != 0) {\n            return false;\n        }\n        drop_huge(s);",
+      "new": "        drop_huge(s);"
+    },
+    {
+      "decision": "D10.9-4-huge-twice",
+      "file": "std/heap.ft",
+      "what": "a released huge allocation keeps its record, so a second `drop` releases it again",
+      "old": "    g->base = null;\n    g->bytes = 0;\n",
+      "new": ""
+    },
+    {
+      "decision": "D10.9-4-chunk-gone",
+      "file": "std/heap.ft",
+      "what": "a small chunk that went back keeps its table word, so a `drop` of an address in it reads state that nothing can access",
+      "old": "    h->words[chunk] = TABLE_NONE;\n    if (holes + made >= joined) {",
+      "new": "    if (holes + made >= joined) {"
+    },
+    {
+      "decision": "D10.9-5-limit",
+      "file": "std/heap.ft",
+      "what": "`take` rounds a size above the limit up, which is an integer overflow and no `out of memory`",
+      "old": "fn take(u64 size) void mut* {\n    if (size > LIMIT_BYTES) {\n        return null;\n    }\n",
+      "new": "fn take(u64 size) void mut* {\n"
+    },
+    {
+      "decision": "D10.9-5-limit-probe",
+      "file": "std/heap.ft",
+      "what": "`can_take` rounds a size above the limit up, which is an integer overflow and no refusal",
+      "old": "fn can_take(u64 size) bool {\n    if (size > LIMIT_BYTES) {\n        return false;\n    }\n",
+      "new": "fn can_take(u64 size) bool {\n"
+    },
+    {
+      "decision": "D10.9-5-map-failed",
+      "file": "std/heap.ft",
+      "what": "a mapping that the system refused is the storage of an allocation",
+      "old": "    if (cast(r, u64) == MAP_FAILED) {\n        return null;\n    }\n    return r;",
+      "new": "    return r;"
+    },
+    {
+      "decision": "D10.9-5-segment-full",
+      "file": "std/heap.ft",
+      "what": "a large allocation takes one chunk more than its segment has left",
+      "old": "        if (count <= SEGMENT_CHUNKS - g->frontier) {",
+      "new": "        if (count <= SEGMENT_CHUNKS - g->frontier + 1) {"
+    },
+    {
+      "decision": "D10.9-5-segment-size",
+      "file": "std/heap.ft",
+      "what": "an allocation of each chunk of a segment asks a segment for it, which holds one fewer",
+      "old": "    if (count < SEGMENT_CHUNKS) {\n        return take_large(count);",
+      "new": "    if (count <= SEGMENT_CHUNKS) {\n        return take_large(count);"
+    },
+    {
+      "decision": "D10.9-6-live-unit",
+      "file": "std/heap.ft",
+      "what": "a give-back takes a unit that holds a live allocation",
+      "old": "    if (h->words[chunk_word + UNIT_COUNTS + unit] != 0) {\n        return false;\n    }\n    u64 given",
+      "new": "    u64 given"
+    },
+    {
+      "decision": "D10.9-6-state-units",
+      "file": "std/heap.ft",
+      "what": "a give-back takes the units that hold the state of a small chunk with live allocations",
+      "old": "    u64 mut unit = STATE_UNITS;\n    while (unit < limit) {",
+      "new": "    u64 mut unit = 0;\n    while (unit < limit) {"
+    },
+    {
+      "decision": "D10.9-6-open-chunk",
+      "file": "std/heap.ft",
+      "what": "the open chunk goes back when its last allocation dies, and the next allocation takes storage of it",
+      "old": "    if (left == 0 && !is_open) {",
+      "new": "    if (left == 0) {"
+    },
+    {
+      "decision": "D10.9-6-hole-limit",
+      "file": "std/heap.ft",
+      "what": "a give-back makes hole 8193",
+      "old": "    if (makes_hole && holes >= HOLE_LIMIT) {\n        return false;\n    }",
+      "new": "    if (makes_hole && holes > HOLE_LIMIT) {\n        return false;\n    }"
+    },
+    {
+      "decision": "D10.9-6-hole-limit-value",
+      "file": "std/heap.ft",
+      "what": "the give-back that makes hole 8192 does not run",
+      "old": "u64 HOLE_LIMIT = 8192;",
+      "new": "u64 HOLE_LIMIT = 8191;"
+    },
+    {
+      "decision": "D10.9-6-hole-join",
+      "file": "std/heap.ft",
+      "what": "at the limit, a give-back that makes no new hole does not run",
+      "old": "    if (makes_hole && holes >= HOLE_LIMIT) {\n        return false;\n    }",
+      "new": "    if (holes >= HOLE_LIMIT) {\n        return false;\n    }"
+    },
+    {
+      "decision": "D10.9-6-hole-count",
+      "file": "std/heap.ft",
+      "what": "the allocator does not count the hole of a give-back",
+      "old": "    if (makes_hole) {\n        holes += 1;\n",
+      "new": "    if (makes_hole) {\n        holes += 0;\n"
+    },
+    {
+      "decision": "D10.9-6-hole-joined",
+      "file": "std/heap.ft",
+      "what": "a give-back that joins two holes keeps the count of the holes",
+      "old": "        // The run joins the hole before it and the hole after it.\n        holes -= 1;\n",
+      "new": "        // The run joins the hole before it and the hole after it.\n        holes -= 0;\n"
+    },
+    {
+      "decision": "D10.9-6-kept-word",
+      "file": "std/heap.ft",
+      "what": "a dead large allocation whose storage stays gets the table word of a range that nothing can access",
+      "old": "    u64 mut word = TABLE_KEPT;",
+      "new": "    u64 mut word = TABLE_NONE;"
+    },
+    {
+      "decision": "D10.9-6-chunk-limit",
+      "file": "std/heap.ft",
+      "what": "the give-back of a small chunk makes hole 8193",
+      "old": "    if (made > joined && holes >= HOLE_LIMIT) {\n        return;\n    }",
+      "new": "    if (made > joined && holes > HOLE_LIMIT) {\n        return;\n    }"
+    },
+    {
+      "decision": "D10.9-6-chunk-count",
+      "file": "std/heap.ft",
+      "what": "the allocator does not count the hole of a small chunk that goes back",
+      "old": "        holes = holes + made - joined;",
+      "new": "        holes = holes - joined;"
+    },
+    {
+      "decision": "D10.9-6-chunk-joined",
+      "file": "std/heap.ft",
+      "what": "the give-back of a small chunk does not count the hole inside the chunk, so it does not run at the limit",
+      "old": "        if (is_given && !in_hole) {\n            joined += 1;\n        }",
+      "new": "        if (is_given && !in_hole) {\n            joined += 0;\n        }"
+    },
+    {
+      "decision": "D10.9-6-chunk-before",
+      "file": "std/heap.ft",
+      "what": "the give-back of a small chunk after a hole counts a new hole",
+      "old": "    u64 made = before ? 0 : 1;",
+      "new": "    u64 made = 1;"
+    },
+    {
+      "decision": "D10.9-6-chunk-after",
+      "file": "std/heap.ft",
+      "what": "the give-back of a small chunk before a hole counts a new hole, so it does not run at the limit",
+      "old": "    if (after && !in_hole) {\n        joined += 1;\n    }",
+      "new": "    if (after && !in_hole) {\n        joined += 0;\n    }"
+    },
+    {
+      "decision": "D10.9-6-hole-first-unit",
+      "file": "std/heap.ft",
+      "what": "the first allocation unit of a segment stands after a hole",
+      "old": "    return first > CHUNK_UNITS && !accessible(g->base, first - 1);",
+      "new": "    return !accessible(g->base, first - 1);"
+    },
+    {
+      "decision": "D10.9-6-hole-frontier",
+      "file": "std/heap.ft",
+      "what": "the last allocation unit below the frontier stands before a hole",
+      "old": "    return end < (g->frontier << CHUNK_UNITS_SHIFT) && !accessible(g->base, end);",
+      "new": "    return !accessible(g->base, end);"
+    },
+    {
+      "decision": "D10.9-6-chunk-holes-zero",
+      "file": "std/heap.ft",
+      "what": "the give-back of a small chunk sets the count of the holes to 0",
+      "old": "    if (holes + made >= joined) {\n        holes = holes + made - joined;\n    } else {\n        holes = 0;\n    }",
+      "new": "    holes = 0;"
+    },
+    {
+      "decision": "D10.9-1-unmap-huge",
+      "file": "std/heap.ft",
+      "what": "the release of a huge allocation unmaps its mapping, so a later mapping can take its address range",
+      "old": "    if (libc.mprotect(cast(g->base, void*), g->bytes, libc.PROT_NONE) == 0) {\n        libc.madvise(cast(g->base, void*), g->bytes, libc.MADV_DISCARD);\n    }\n",
+      "new": "    libc.munmap(cast(g->base, void*), g->bytes);\n"
+    },
+    {
+      "decision": "D10.9-2-seal-advise",
+      "file": "std/heap.ft",
+      "what": "a give-back of units or of a large allocation tells the system to drop no page, so the process keeps the pages of dead storage",
+      "old": "    libc.madvise(cast(&h->words[at], void*), len, libc.MADV_DISCARD);\n    return true;",
+      "new": "    return true;"
+    },
+    {
+      "decision": "D10.9-2-huge-advise",
+      "file": "std/heap.ft",
+      "what": "the release of a huge allocation tells the system to drop no page, so the process keeps the pages of dead storage",
+      "old": "    if (libc.mprotect(cast(g->base, void*), g->bytes, libc.PROT_NONE) == 0) {\n        libc.madvise(cast(g->base, void*), g->bytes, libc.MADV_DISCARD);\n    }\n",
+      "new": "    libc.mprotect(cast(g->base, void*), g->bytes, libc.PROT_NONE);\n"
+    },
+    {
+      "decision": "D10.9-4-chunk-kept",
+      "file": "std/heap.ft",
+      "what": "a small chunk whose give-back the system refused stays a small chunk, so a later `drop` reads state that nothing can access",
+      "old": "    if (!seal(h, first, end)) {\n        h->words[chunk] = TABLE_KEPT;\n        return;\n",
+      "new": "    if (!seal(h, first, end)) {\n        return;\n"
+    },
+    {
+      "decision": "D10.9-5-claim-refused",
+      "file": "std/heap.ft",
+      "what": "a claim whose storage the system refused moves the frontier, so the program gets storage that it cannot access",
+      "old": "    if (libc.mprotect(cast(&h->words[first << CHUNK_WORDS_SHIFT], void*),\n                      count << CHUNK_BYTES_SHIFT, libc.PROT_READ | libc.PROT_WRITE) != 0) {\n        return 0;\n    }\n",
+      "new": "    libc.mprotect(cast(&h->words[first << CHUNK_WORDS_SHIFT], void*),\n                  count << CHUNK_BYTES_SHIFT, libc.PROT_READ | libc.PROT_WRITE);\n"
+    },
+    {
+      "decision": "D10.9-5-table-refused",
+      "file": "std/heap.ft",
+      "what": "a new segment whose top table the system refused becomes the current segment, so the allocator writes a table that nothing can access",
+      "old": "    if (libc.mprotect(cast(r, void*), ONE << UNIT_BYTES_SHIFT,\n                      libc.PROT_READ | libc.PROT_WRITE) != 0) {\n        libc.munmap(cast(r, void*), SEGMENT_BYTES);\n        return false;\n    }\n",
+      "new": "    libc.mprotect(cast(r, void*), ONE << UNIT_BYTES_SHIFT, libc.PROT_READ | libc.PROT_WRITE);\n"
+    },
+    {
+      "decision": "D10.9-5-segment-leak",
+      "file": "std/heap.ft",
+      "what": "a new segment whose top table the system refused keeps its mapping, so its address range stays taken for the rest of the run",
+      "old": "        libc.munmap(cast(r, void*), SEGMENT_BYTES);\n        return false;\n",
+      "new": "        return false;\n"
+    },
+    {
+      "decision": "D10.9-5-probe-leak",
+      "file": "std/heap.ft",
+      "what": "the probe of a huge size keeps the mapping that it made, so its address range stays taken for the rest of the run",
+      "old": "    libc.munmap(cast(r, void*), bytes);\n    return true;\n",
+      "new": "    return true;\n"
+    },
+    {
+      "decision": "D10.9-5-record-limit",
+      "file": "std/heap.ft",
+      "what": "a new segment takes a record when each record is in use",
+      "old": "    if (segment_count == SEGMENTS) {\n        return false;\n    }\n    libc.map_range mut* r = map_bytes(SEGMENT_BYTES, libc.PROT_NONE);\n",
+      "new": "    libc.map_range mut* r = map_bytes(SEGMENT_BYTES, libc.PROT_NONE);\n"
+    },
+    {
+      "decision": "D10.9-5-record-limit-huge",
+      "file": "std/heap.ft",
+      "what": "a huge allocation takes a record when each record is in use",
+      "old": "    if (segment_count == SEGMENTS) {\n        return null;\n    }\n    u64 bytes = count << CHUNK_BYTES_SHIFT;\n",
+      "new": "    u64 bytes = count << CHUNK_BYTES_SHIFT;\n"
+    },
+    {
+      "decision": "D10.9-5-record-limit-probe",
+      "file": "std/heap.ft",
+      "what": "the probe of a huge size gives true when each record is in use",
+      "old": "    if (segment_count == SEGMENTS) {\n        return false;\n    }\n    u64 bytes = count << CHUNK_BYTES_SHIFT;\n",
+      "new": "    u64 bytes = count << CHUNK_BYTES_SHIFT;\n"
+    },
+    {
+      "decision": "D10.9-6-probe-keeps-access",
+      "file": "std/heap.ft",
+      "what": "the probe of a large size leaves the access to its range, so the program can access storage that no allocation holds",
+      "old": "    return libc.mprotect(cast(&h->words[at], void*), len, libc.PROT_NONE) == 0;\n",
+      "new": "    return true;\n"
+    },
+    {
+      "decision": "D10.9-6-probe-result",
+      "file": "std/heap.ft",
+      "what": "the probe of a large size gives true when the system refuses to take the access away again",
+      "old": "    return libc.mprotect(cast(&h->words[at], void*), len, libc.PROT_NONE) == 0;\n",
+      "new": "    libc.mprotect(cast(&h->words[at], void*), len, libc.PROT_NONE);\n    return true;\n"
+    }
+  ]
+}

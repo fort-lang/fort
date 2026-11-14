@@ -12,8 +12,8 @@ import std.mem;
 // libc.malloc returns void mut* own, storage of no type the caller may write,
 // and libc.free takes void* own, which the result reaches by dropping the mut
 // (D3.11, D5.4). The own is erased at the boundary and states C's convention
-// (D17.13), so the pair is interchangeable with new and del (D10.3,
-// stdlib.md 2.2).
+// (D17.13). The pair is not interchangeable with new and del: the runtime has
+// its own allocator (D10.3, D10.9, stdlib.md 2.2).
 
 // bcopy(3) copies bytes through a `void*`. No cast gives a type to a `void*`
 // (D3.14), so the test gives the block of malloc to C as it is.
@@ -28,8 +28,8 @@ extern fn bcopy(void* source, void mut* destination, u64 n) void;
 // 3). The length hello.len, 5, fits both.
 // C call bcopy: block, the 32 bytes that malloc gave (rule 3), and cast(&back, void mut*), which
 // keeps the bound of back, one u8[5], 5 bytes (rule 2). The length 5 fits both.
-// C call libc.free: cast(move(slot), void* own), the owner that new gave, which free takes (D10.3,
-// A3); free reads no byte of it.
+// C call libc.free x2: move(block), the allocation that malloc gave in this function, or null on
+// the first path (rule 3).
 // C call libc.memcpy: dst[..].ptr and src[..].ptr keep the bounds of their spans, 8 bytes each
 // (rule 2), and the length 8 fits both. The two arrays do not overlap.
 fn main() i32 {
@@ -37,7 +37,7 @@ fn main() i32 {
     // bcopy writes the block and copies it back into a fixed array.
     void mut* own block = libc.malloc(32);
     if (block == null) {
-        del(block);
+        libc.free(move(block));
         return 1;
     }
     u8@ hello = cast("hello", u8@);
@@ -45,18 +45,17 @@ fn main() i32 {
     u8[5] mut back = {};
     bcopy(block, cast(&back, void mut*), 5);
     println(block != null, " ", cast(back[..], string));
-    // del releases what malloc returned, frees by the pointer alone, and
-    // empties the lvalue (D10.3, D17.9, stdlib.md 3).
-    del(block);
+    // libc.free releases what malloc returned. The own lvalue must be moved
+    // into the own parameter (D6.11) and is left null afterwards (D17.6).
+    libc.free(move(block));
     println(block == null);
 
-    // The other direction: libc.free releases what new returned. The own
-    // lvalue must be moved into the own parameter (D6.11) and is left null
-    // afterwards (D17.6).
+    // del releases what new returned, frees by the pointer alone, and empties
+    // the lvalue (D10.3, D17.9, stdlib.md 3).
     i64 mut* own slot = new(i64);
     *slot = 42;
     println(slot != null, " ", *slot);
-    libc.free(cast(move(slot), void* own));
+    del(slot);
     println(slot == null);
 
     // memcpy counts bytes, so it takes u8 mut* and u8* and a span's .ptr

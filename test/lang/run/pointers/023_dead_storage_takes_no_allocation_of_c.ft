@@ -1,0 +1,109 @@
+//! run
+//! stdout:
+//| small 0
+//| large 0
+//| huge 0
+//| blocks of C 100000
+// The runtime never gives dead storage to an allocation of C (D10.9 rule 1): it keeps the address
+// range of each released allocation. The program releases a small, a large and a huge allocation
+// of `new`. The small one has a live neighbour on each side, so its storage stays with the
+// runtime. The large and the huge one go back to the system, which keeps their address ranges.
+// Then C allocates 100,000 blocks of 5 sizes, from 16 bytes to 64 MiB, and keeps up to 64 live
+// at a time. The program counts the blocks of C that share a byte with each dead range: 0.
+// D10.3, D10.9
+import extern;
+import std.libc;
+
+// A dead range: its first byte and the byte after its last.
+struct range {
+    u64 first;
+    u64 end;
+}
+
+struct slot {
+    void mut* own block;
+}
+
+// The size of block `i` of C: 16 bytes, 4 KiB, 64 KiB, 4 MiB and 64 MiB, the last two less
+// often, so the run needs little storage.
+fn size_of(u64 i) u64 {
+    if (i % 1000 == 999) {
+        return 67108864;
+    }
+    if (i % 100 == 99) {
+        return 4194304;
+    }
+    if (i % 3 == 0) {
+        return 65536;
+    }
+    if (i % 3 == 1) {
+        return 4096;
+    }
+    return 16;
+}
+
+// Whether the `size` bytes at `at` share a byte with `dead`.
+fn meets(u64 at, u64 size, range dead) bool {
+    return at < dead.end && dead.first < at + size;
+}
+
+fn of(u8@ bytes) range {
+    range r = {.first = cast(&bytes[0], u64), .end = cast(&bytes[0], u64) + bytes.len};
+    return r;
+}
+
+// C call libc.malloc: no pointer argument; C gives a new allocation or null.
+// C call libc.free x2: move(row[at].block), an allocation that libc.malloc gave in this
+// function, or null (D9.8 rule 3).
+fn main() i32 {
+    u8 mut@ own before = new(u8, 16);
+    u8 mut@ own small = new(u8, 16);
+    u8 mut@ own after = new(u8, 16);
+    u8 mut@ own large = new(u8, 4194304);
+    u8 mut@ own huge = new(u8, 4294967296);
+    small[0] = 7;
+    large[0] = 7;
+    huge[0] = 7;
+    range[3] mut dead = {};
+    dead[0] = of(small);
+    dead[1] = of(large);
+    dead[2] = of(huge);
+    del(small);
+    del(large);
+    del(huge);
+
+    u64[3] mut hits = {};
+    u64 mut made = 0;
+    slot mut@ own row = new(slot, 64);
+    for (u64 mut i = 0; i < 100000; i += 1) {
+        u64 at = i % row.len;
+        u64 size = size_of(i);
+        void mut* own got = libc.malloc(size);
+        libc.free(move(row[at].block));
+        // The move left null in the slot, so this del releases nothing (D17.9). The overwrite
+        // check reads it as the proof that the slot is empty (D17.11).
+        del(row[at].block);
+        row[at].block = move(got);
+        if (row[at].block == null) {
+            continue;
+        }
+        made += 1;
+        u64 address = cast(row[at].block, u64);
+        for (u64 mut d = 0; d < 3; d += 1) {
+            if (meets(address, size, dead[d])) {
+                hits[d] += 1;
+            }
+        }
+    }
+    for (u64 mut at = 0; at < row.len; at += 1) {
+        libc.free(move(row[at].block));
+    }
+    println("small ", hits[0]);
+    println("large ", hits[1]);
+    println("huge ", hits[2]);
+    println("blocks of C ", made);
+    del(row);
+    del(before);
+    del(after);
+    return 0;
+}

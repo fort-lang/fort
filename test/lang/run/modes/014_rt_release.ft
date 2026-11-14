@@ -109,7 +109,9 @@ fn start(string s) char* {
 // one u8[32] (rule 2). The length n, 32, fits both.
 // C call bcopy x2: cast(&seen, void*) or cast(&seen, void mut*), the 32 bytes of seen (rule 2), and
 // block, the 32 bytes that rt.alloc gave (rule 3); the length n, 32, fits both.
-// C call rt.free: move(block), the allocation that rt.alloc gave, which free takes (A3).
+// C call rt.release: block, the block that rt.alloc gave in this function and that no call
+// released before; release tests the address and reads no byte of it. &"modes.ft"[0] is a
+// literal with its NUL (rule 4).
 fn main(string@ argv) i32 {
     i64 i64_min = -9223372036854775808;
     u64 u64_max = 18446744073709551615;
@@ -165,12 +167,12 @@ fn main(string@ argv) i32 {
     string zero = {};
     both_eq(zero, "");
 
-    // alloc still zeroes its block and still never answers null. free still
-    // releases what alloc made (D10.2, D10.3). The result is void mut* own in
+    // alloc still zeroes its block and still never answers null. release still
+    // releases what alloc made (D10.2, D10.3). The result is void mut* in
     // this mode as in the other, so bcopy writes the block through it
     // (D3.11, toolchain.md 5.1).
     u64 n = 32;
-    void mut* own block = rt.alloc(1, n, &"modes.ft"[0], 1, 1);
+    void mut* block = rt.alloc(1, n, &"modes.ft"[0], 1, 1);
     u8[32] mut seen = {};
     bool zeroed = bcmp(block, cast(&seen, void*), n) == 0;
     seen[n - 1] = 5;
@@ -178,7 +180,7 @@ fn main(string@ argv) i32 {
     seen[n - 1] = 0;
     bcopy(block, cast(&seen, void mut*), n);
     println(block != null, " ", zeroed, " ", seen[n - 1] == 5);
-    rt.free(move(block));
+    rt.release(block, &"modes.ft"[0], 1, 1);
 
     // args answers with the span main was given. Only the main that the
     // compiler emits calls args_init (D6.9).

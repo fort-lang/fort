@@ -1,0 +1,38 @@
+//! run
+//! abort
+//! link: ffi/oracle.c
+//! stderr: ft:34:5: runtime error: invalid release
+//! stdout:
+//| before
+// A second `del` of an allocation whose chunk went back to the system with the state of the
+// chunk is the runtime error `invalid release`, and no memory fault (D10.9 rule 4). A block of
+// 2048000 bytes fills one small chunk of the allocator. The second block takes a new chunk, so
+// the chunk of the first block takes no later allocation. The `del` of the first block then
+// gives the whole chunk back, also the part that held the state of the allocator for it. The
+// second `del` reads no byte of the chunk: the table of the allocator says that the chunk holds
+// no allocation.
+// D10.3, D10.6, D10.9
+import extern;
+
+// C: oracle_pass, test/lang/ffi/oracle.c.
+// gives: p itself, which is no new allocation; this declaration says `own` to make a second
+// owner of one allocation. writes: nothing. keeps: no pointer. calls: no fort function.
+// frees: nothing.
+extern fn oracle_pass(u8* p) u8 mut* own;
+
+// C call oracle_pass: &first[0], the first of the 2048000 bytes that new gave in this function
+// (D9.8 rule 3); C reads no byte.
+fn main() i32 {
+    u8 mut@ own first = new(u8, 2048000);
+    u8 mut@ own second = new(u8, 2048000);
+    u8 mut* own copy = oracle_pass(&first[0]);
+    first[0] = 7;
+    second[0] = 9;
+    del(first);
+    println("before");
+    // The copy holds the address of the first byte of a chunk that nothing can access.
+    del(copy);
+    println("after ", second[0]);
+    del(second);
+    return 0;
+}

@@ -357,6 +357,24 @@ bullet at a time and without a rewrite.
   `prover.drop` stands in src/fort/owner/prover.ft for the same reason: at 87e1a668 only the heap
   probe of test/fort/owner/prover_test.ft caught a deletion of `del(p->inners)` or
   `del(p->uses)` from `prover.free`.
+- **A read of dead storage has two legal results, so a test pins the one that the allocator
+  gives for its size (D10.9 rule 2).** `run/pointers/015` reads a small dead view at once and
+  pins the old bytes. `run/pointers/018`, `020` and `022` pin the memory fault after the
+  give-back, with `//! signal: SEGV` and `//! signal-macos: BUS` and an empty stdout, because a
+  fault flushes no buffer (D11.5). A module test cannot survive a fault, so
+  `test/fort/heap_holes_test.ft` gives the dead range to `io.write`: the system call returns an
+  error for a range with no access and writes the bytes of a range that stayed (rule 6).
+  `test/fir_run_test.py` accepts a memory fault of the binary where the interpreter reports
+  `use after release` (`stops_at_dead_storage`) and the directive of the program expects the
+  signal: the output of the binary is then a start of the output of the interpreter. To compare
+  addresses, a test keeps `cast(p, u64)` from before
+  the `del`: 100,000 later allocations give 0 equal addresses in `run/pointers/015`.
+  `test/fort/heap_walk_test.ft` holds rule 1 for a whole run of mixed sizes: it records the start
+  and the kept bytes of each of its 30,136 blocks, sorts the records, and compares the end of
+  each block with the start of the next one. A comparison with the live blocks alone misses a
+  block that takes dead storage. A second `del` of storage that went back must be `invalid
+  release` and no fault: `run/errors/048` and `049` hold that, and `049` is the one run test of
+  the release rule that fails when a small chunk that went back keeps its table word.
 
 ## 4. fort module tests
 
@@ -543,6 +561,13 @@ bullet at a time and without a rewrite.
   with nothing kept. The early sample of the session, documents and store probes of `test/lsp` moved
   from round 3 to round 20: with nothing kept, the live view rose under glibc 2.39 until round 7,
   and the store probe read 4480 to 4928 bytes at round 3, above its bound.
+  **Since the runtime has its own allocator (D10.9), the live view is `std.heap.live_bytes()`,
+  and it is exact on both targets.** `test/fort/support/heap.ft` declares no C function and has
+  no `$if` block. A `new` adds the bytes that `std.heap.kept_bytes` gives for its size, and a
+  `del` takes them out at once. So a round that keeps nothing moves the view by 0 from the first
+  round, and no cache of an allocator fills. The numbers above that name `mallinfo2`, the thread
+  cache and the rise of the first rounds describe the allocator of glibc, which the runtime used
+  before. The view does not count storage of `malloc` or of `calloc`.
   On macOS the address of a buffer is no view of the heap: the allocator serves a block from a
   per-CPU magazine, so `heap.ADDRESS_IS_A_VIEW` in `test/fort/support/heap.ft` was false there,
   `fir_env.address_moved` answered 0, and each probe that sampled an address asserted on it only
@@ -705,6 +730,12 @@ bullet at a time and without a rewrite.
   `--events`, so each run has `--fir-events`: the comparison of stderr leaves the event lines out,
   and only the programs of `EXPECTED_EVENTS`, each with its ownership defect, may make an event.
   A new program that leaks makes the test fail; fix the program or list it with its defect.
+  One program differs and is pinned (`PINNED_DIFFERENCES`): `run/errors/052` forges an owner of
+  the address after the last byte of an allocation, and the two runs report its `invalid
+  release` at two `del`s. The script holds the stdout and the end of the stderr of each run, and
+  `test/fir_run_rules_test.py` (ctest `fir_run_rules_selftest`) holds both rules of acceptance
+  with no build. A program whose C files act before `main` (a constructor) calls C first in
+  `main`, so that the interpreter reports it as `outside` (`run/errors/059`).
 - **The suite of fir.shadow derives each report from the design** (`test/fort/fir/shadow_test.ft`).
   Each event of `spec/ownership-design.md` 3.4 has a run that makes it and a run at its boundary
   that makes none: the first and the last byte of an allocation and of an owner word, a span of
@@ -1706,8 +1737,8 @@ bullet at a time and without a rewrite.
   text, and the count of the index (the records, and the brackets of a call through a value) is
   the authority: a callee that the text counts lower is an error. Each target lints its own
   `$if` branches and
-  `std/<target>`, so the CI job `lint` of macOS checks the rows of `std/darwin` and of the Darwin
-  block of `test/fort/support/heap.ft`. In the VM a wrapper script that adds
+  `std/<target>`, so the CI job `lint` of macOS checks the rows of `std/darwin`. In the VM a
+  wrapper script that adds
   `--target arm64-apple-macosx11.0.0` to the compiler, with `--std-dir` set to the output of
   `tools/assemble_std.sh darwin` and `--target darwin`, lints the Darwin side.
   A module of `src/fort` takes `-I src`, because it imports its siblings as `fort.<path>` from

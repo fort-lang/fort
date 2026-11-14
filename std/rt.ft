@@ -3,6 +3,7 @@
 // Runtime failure paths must not trigger another checked operation.
 // DECIMAL_MAX and HEX_MAX have no spare bytes. Keep their sizes with their formatter widths.
 // buffer_append flushes or bypasses a full buffer before copying bytes.
+import std.heap;
 import std.libc;
 import std.str;
 import std.strbuf;
@@ -954,37 +955,64 @@ fn assert_fail(char* text, char* file, u32 line, u32 col) noreturn {
 
 // ---- allocation -------------------------------------------------------------
 
-// Return zeroed storage. Allocate one byte when the requested size is zero.
-// Report product overflow or allocation failure at the caller's position.
-// gives: a new allocation of calloc of elem_size * count zero bytes, or of 1 zero byte when that
-// product is 0, that free frees (A3); never null, because a failure ends the process (D9.8 rule 3).
+// Return zeroed storage of the allocator of the runtime (std.heap). Allocate one byte when the
+// requested size is zero. Report product overflow or allocation failure at the caller's position.
+// gives: a new allocation of heap.take of elem_size * count zero bytes, or of 1 zero byte when
+// that product is 0, that release and free release (A3); never null, because a failure ends the
+// process (D9.8 rule 3). The result has no `own`: no cast adds the mark (D3.14), and the
+// compiler types the result of a `new` itself.
 // C call fail_runtime x2: file and its NUL are parameter sources (D9.8 rule 1), so alloc is a
 // boundary function, and each caller gives a file name with its NUL: the code that the compiler
 // emits (A8), or a trusted module by its row.
 // The runtime holds the block as an allocation (D10.9), so it is no storage of C, and only
-// rt.free releases it, which takes the owner.
-// C call libc.calloc: no pointer argument; C gives a new allocation of size bytes or null.
-fn alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) void mut* own {
+// release and free release it.
+fn alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) void mut* {
     if (elem_size != 0 && count > U64_MAX / elem_size) {
         fail_runtime(file, line, col, "allocation size overflow");
     }
-    u64 mut size = elem_size * count;
-    if (size == 0) {
-        size = 1;
-    }
-    void mut* own p = libc.calloc(1, size);
+    void mut* p = heap.take(elem_size * count);
     if (p == null) {
         fail_runtime(file, line, col, "out of memory");
     }
     return p;
 }
 
-// Release storage from alloc. A null pointer does nothing.
-// C call libc.free: p is a parameter source (D9.8 rule 1), so free is a boundary function, and
-// each caller gives an owner, an allocation of alloc or null (A3): the code that the compiler
-// emits, or a trusted module by its row.
-fn free(void* own p) void {
-    libc.free(move(p));
+// Release the allocation of alloc that starts at p, for the `del` at the position. A null pointer
+// does nothing. A pointer that starts no live allocation of alloc is the runtime error `invalid
+// release` (D10.9 rule 4): an address inside an allocation, dead storage, storage of C, a local
+// or a global.
+// C call heap.drop: p is a parameter source (D9.8 rule 1), so release is a boundary function,
+// and each caller gives a pointer or null: the code that the compiler emits (A8), or a trusted
+// module by its row. heap.drop reads no byte at p: it tests the address.
+// C call fail_runtime: file and its NUL are parameter sources (rule 1), which each caller gives
+// as for p: a file name with its NUL.
+fn release(void* p, char* file, u32 line, u32 col) void {
+    if (p == null) {
+        return;
+    }
+    if (!heap.drop(p)) {
+        fail_runtime(file, line, col, "invalid release");
+    }
+}
+
+// The file name of an `invalid release` that free reports.
+string RUNTIME_FILE = "<runtime>";
+
+// Release the allocation of alloc that starts at p, as release does, with no position of a `del`:
+// an `invalid release` stands at `<runtime>:0:0`. The compiler that builds this one emits a call
+// of free for a `del`, and the code that this compiler emits calls release.
+// C call heap.drop: p is a parameter source (D9.8 rule 1), so free is a boundary function, and
+// each caller gives a pointer or null: the code that the compiler emits, or a trusted module by
+// its row. heap.drop reads no byte at p: it tests the address.
+// C call fail_runtime: &RUNTIME_FILE[0] keeps the bound of the string (D9.8 rule 2), and its NUL
+// is the NUL of the literal that initializes the constant (rule 4).
+fn free(void* p) void {
+    if (p == null) {
+        return;
+    }
+    if (!heap.drop(p)) {
+        fail_runtime(&RUNTIME_FILE[0], 0, 0, "invalid release");
+    }
 }
 
 // ---- strings ----------------------------------------------------------------

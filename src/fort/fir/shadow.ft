@@ -168,7 +168,7 @@ struct event_vec {
 
 /// The shadow state of one run, which reports its events only with `reporting`. `sym` and `at` name
 /// the item that runs, and `exit_at` is the exit location of a statement that the expansion of a
-/// deferred statement made, or the empty range. The items of `quiet`, the `std.rt.free` that a
+/// deferred statement made, or the empty range. The items of `quiet`, the `std.rt.release` that a
 /// `del` calls, end with no test, so the test at the end of the `del` counts. `value` is the tag of
 /// the last value that a load gave or an rvalue made, and `place` the tag of the last address. The
 /// `nargs` arguments of the extern that runs have the values `arg_values` and the tags `args`. A
@@ -250,6 +250,36 @@ fn has_dead(range_vec* v, u64 addr, u64 len) bool {
     for (u64 mut i = 0; i < v->len; i++) {
         range* r = &v->items[i];
         if (!r->live && r->base < addr +% len && addr < r->base + r->size) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Whether a released allocation overlaps the `len` bytes at `addr`. Each access to dead storage
+// asks, and a run can make many. The allocations stand in the order of their bases and no two
+// overlap, so only the last one whose base is at most `addr`, and those after it, can hold a byte
+// of the access.
+fn has_released(state* sh, u64 addr, u64 len) bool {
+    u64 mut lo = 0;
+    u64 mut hi = sh->allocations.len;
+    while (lo < hi) {
+        u64 mid = lo + (hi - lo) / 2;
+        if (sh->allocations.items[mid].base <= addr) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo > 0) {
+        lo -= 1;
+    }
+    for (u64 mut i = lo; i < sh->allocations.len; i++) {
+        range* r = &sh->allocations.items[i];
+        if (r->base >= addr +% len) {
+            return false;
+        }
+        if (!r->live && addr < r->base + r->size) {
             return true;
         }
     }
@@ -503,13 +533,14 @@ fn vacate(state mut* sh, u64 addr, u64 n) void {
 }
 
 /// A `del` of the value `p` with the tag `value` from the slot at `addr`, before it frees `p`. A
-/// null does nothing (D17.9).
-fn free_through(state mut* sh, u64 addr, u64 p) void {
+/// null does nothing (D17.9). `foreign` says that `p` starts an allocation that the runtime did
+/// not make, an allocation of C: a `del` releases no such allocation (D10.9 rule 4).
+fn free_through(state mut* sh, u64 addr, u64 p, bool foreign) void {
     u64 a = find_allocation(sh, p);
     u64 i = find_slot(&sh->slots, addr);
     if (p == 0) {
         return;
-    } else if (a == NONE) {
+    } else if (a == NONE || foreign) {
         report(sh, event_kind.ev_invalid_release, sh->value);
     } else if (!sh->allocations.items[a].live) {
         report(sh, event_kind.ev_double_release, sh->value);
@@ -661,7 +692,7 @@ fn access(state mut* sh, u64 addr, u64 len, bool found, bool low) void {
         return;
     } else if (low && p.f.kind == tag_kind.tg_moved) {
         report(sh, event_kind.ev_use_after_move, p);
-    } else if (!low && has_dead(&sh->allocations, addr, len)) {
+    } else if (!low && has_released(sh, addr, len)) {
         report(sh, event_kind.ev_use_after_release, p);
     } else if (!low && has_dead(&sh->ended, addr, len)) {
         report(sh, event_kind.ev_use_after_scope, p);

@@ -1,0 +1,178 @@
+//! run
+//! link: ffi/heap_calls.c
+//! stdout:
+//| large: true true true true true
+//| chunk: true true true true true
+//| units: true true true true
+//| memory after 24 large blocks: true
+//| memory after 64 small blocks: true
+// The release of a large block and of small blocks gives the storage back to the system: the
+// allocator takes the access to the dead units away (`mprotect` with PROT_NONE) and then tells
+// the system to drop their pages (`madvise`), for the same range and with no call between the
+// two (stdlib.md 2.16). The test reads the two calls of each release, and it reads the memory
+// that the process holds: after 24 blocks of 4 MiB and after 64 blocks of 1 MiB, each with a
+// store into each page, one live at a time, the process holds less than 3 blocks more than
+// before. A process that keeps the pages of each dead block holds each block. The system
+// counts the pages of a range with no access against the process on Linux and not on macOS, so
+// the memory holds the `madvise` on Linux, and the order of the calls holds it on each system.
+// D10.9
+import extern;
+
+// The kinds of a call in test/lang/ffi/heap_calls.c: an mprotect that takes each access away,
+// and an madvise.
+i32 NO_ACCESS = 4;
+i32 ADVISE = 5;
+
+u64 UNIT = 16384;
+u64 CHUNK = 2097152;
+u64 LARGE = 4194304;
+u64 SMALL = 1048576;
+// The largest small block takes the whole storage of one small chunk.
+u64 SMALL_CHUNK = 2048000;
+
+// C: heap_calls_count, test/lang/ffi/heap_calls.c, which gives the calls of one kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_count(i32 kind) u64;
+// C: heap_calls_order, test/lang/ffi/heap_calls.c, which gives the number of the last call of
+// one kind among the calls of each kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_order(i32 kind) u64;
+// C: heap_calls_address, test/lang/ffi/heap_calls.c, which gives the address of the last call
+// of one kind as a number.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_address(i32 kind) u64;
+// C: heap_calls_bytes, test/lang/ffi/heap_calls.c, which gives the length of the last call of
+// one kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_bytes(i32 kind) u64;
+// C: heap_calls_resident, test/lang/ffi/heap_calls.c, which gives the memory that the process
+// holds now, in bytes.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_resident() u64;
+
+// The calls of one kind at one time.
+struct calls {
+    u64 no_access;
+    u64 advise;
+}
+
+// C call heap_calls_count x2: no pointer argument.
+fn calls_now() calls {
+    calls now = {.no_access = heap_calls_count(NO_ACCESS), .advise = heap_calls_count(ADVISE)};
+    return now;
+}
+
+// Whether the last madvise is the call after the last mprotect that takes access away, for the
+// same range.
+// C call heap_calls_order x2: no pointer argument.
+// C call heap_calls_address x2: no pointer argument.
+// C call heap_calls_bytes x2: no pointer argument.
+fn advise_follows() bool {
+    return heap_calls_order(ADVISE) == heap_calls_order(NO_ACCESS) + 1
+           && heap_calls_address(ADVISE) == heap_calls_address(NO_ACCESS)
+           && heap_calls_bytes(ADVISE) == heap_calls_bytes(NO_ACCESS);
+}
+
+// Stores into each page of `block`: a page has 4096 bytes or more on each target.
+fn fill(u8 mut@ block) void {
+    for (u64 mut at = 0; at < block.len; at += 4096) {
+        block[at] = 1;
+    }
+}
+
+// One large block of 2 chunks. Its release makes 1 call of each kind, and the range of the two
+// calls is the whole block.
+// C call heap_calls_address: no pointer argument.
+// C call heap_calls_bytes: no pointer argument.
+fn large() void {
+    u8 mut@ own block = new(u8, LARGE);
+    fill(block);
+    u64 start = cast(&block[0], u64);
+    calls before = calls_now();
+    del(block);
+    calls after = calls_now();
+    println("large: ", after.no_access - before.no_access == 1, " ",
+            after.advise - before.advise == 1, " ", advise_follows(), " ",
+            heap_calls_address(ADVISE) == start, " ", heap_calls_bytes(ADVISE) == LARGE);
+}
+
+// A small chunk whose one block dies after the chunk closed goes back as a whole, with the 3
+// units of its state: 1 call of each kind for the 2 MiB of the chunk.
+// C call heap_calls_address: no pointer argument.
+// C call heap_calls_bytes: no pointer argument.
+fn chunk() void {
+    u8 mut@ own first = new(u8, SMALL_CHUNK);
+    // the next block of this size takes a new small chunk and closes the chunk of `first`
+    u8 mut@ own second = new(u8, SMALL_CHUNK);
+    fill(first);
+    u64 start = cast(&first[0], u64);
+    calls before = calls_now();
+    del(first);
+    calls after = calls_now();
+    println("chunk: ", after.no_access - before.no_access == 1, " ",
+            after.advise - before.advise == 1, " ", advise_follows(), " ",
+            heap_calls_address(ADVISE) == start - 3 * UNIT, " ",
+            heap_calls_bytes(ADVISE) == CHUNK);
+    del(second);
+}
+
+struct slot {
+    u8 mut@ own bytes;
+}
+
+// 32 small blocks of 2 units side by side in the open chunk, and 1 more block after them that
+// stays live, so the chunk stays open and does not go back as a whole. The release of the 32
+// blocks gives runs of units back: each run makes 1 call of each kind, and the last run is a
+// whole count of units inside the blocks.
+// C call heap_calls_address x2: no pointer argument.
+// C call heap_calls_bytes x2: no pointer argument.
+fn units() void {
+    slot mut@ own row = new(slot, 32);
+    for (u64 mut i = 0; i < 32; i += 1) {
+        del(row[i].bytes);
+        row[i].bytes = new(u8, 2 * UNIT);
+        fill(row[i].bytes);
+    }
+    u8 mut@ own keeper = new(u8, 2 * UNIT);
+    u64 start = cast(&row[0].bytes[0], u64);
+    calls before = calls_now();
+    for (u64 mut i = 0; i < 32; i += 1) {
+        del(row[i].bytes);
+    }
+    calls after = calls_now();
+    u64 runs = after.no_access - before.no_access;
+    bool inside = heap_calls_address(ADVISE) >= start
+                  && heap_calls_address(ADVISE) + heap_calls_bytes(ADVISE) <= start + 64 * UNIT;
+    println("units: ", runs >= 1, " ", after.advise - before.advise == runs, " ",
+            advise_follows() && inside, " ", heap_calls_bytes(ADVISE) % UNIT == 0);
+    del(keeper);
+    del(row);
+}
+
+// Takes and releases `rounds` blocks of `size` bytes, one live at a time, with a store into
+// each page. Returns whether the process then holds less than 3 blocks more than before.
+// C call heap_calls_resident x2: no pointer argument.
+fn memory_stays(u64 rounds, u64 size) bool {
+    u64 before = heap_calls_resident();
+    for (u64 mut i = 0; i < rounds; i += 1) {
+        u8 mut@ own block = new(u8, size);
+        fill(block);
+        del(block);
+    }
+    u64 after = heap_calls_resident();
+    return after < before + 3 * size;
+}
+
+fn main() i32 {
+    large();
+    chunk();
+    units();
+    println("memory after 24 large blocks: ", memory_stays(24, LARGE));
+    println("memory after 64 small blocks: ", memory_stays(64, SMALL));
+    return 0;
+}
