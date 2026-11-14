@@ -1342,8 +1342,9 @@ came here.
     signedness, as `fir_llvm.bound_value` makes it.
   - A failed check calls the runtime entry of its kind with its reported operands and the file, the
     line and the column of its terminator, `alloc<T>(n)` calls `std.rt.alloc` with the location of
-    its statement, and `del` calls `std.rt.free` and then zeroes its place (`spec/fir.md` 12.2,
-    12.4). So the message of a runtime error is the message of `std.rt`, byte for byte.
+    its statement, and `del` calls `std.rt.release` with its pointer and the location of its
+    statement and then zeroes its place (`spec/fir.md` 12.2, 12.4). So the message of a runtime
+    error is the message of `std.rt`, byte for byte.
   - An extern of the list of `spec/ownership-design.md` 3.2 runs in `call_model`, from `std.rt` or
     from the program: `exit`, `abort`, `write`, `calloc`, `free`, `isatty`, `strlen`, `memcpy`,
     `memmove`, `memcmp`, `__errno_location`, `__error`, `strtod` and `strtof` with a null end
@@ -1352,6 +1353,17 @@ came here.
     form, and each function with no body, ends the run as `outside`. A `calloc` that the C
     library of the compiler refuses gives the program null, as a native `calloc` does. The errno
     of the compiler goes to the errno of the run only after a call that sets it.
+  - The run does not run the allocator `std.heap`: its `mmap` is no extern of the list. `run_heap`
+    models `take`, `drop`, `is_start`, `can_take` and `live_bytes`, which it finds by symbol
+    (`HEAP_NAMES`).
+    `take` makes a region of the kind `rk_heap`, and `drop` changes its kind to `rk_dead`. A dead
+    region keeps its entry and its bytes while the run lasts: an access to it reads or changes
+    the bytes that it held last, and the shadow reports `use after release` (D10.9 rule 2). A
+    `calloc` makes a region of the kind `rk_c`, which only the `free` of C ends. The start test of
+    `drop` (`is_start`) reads the kind, so a `del` of an allocation of C and a `free` of an
+    allocation of the runtime both fail. The result of a modelled function derives from its
+    argument, as the result of an extern does (D10.7). A function of `std.heap` with no model
+    runs its body, and the run ends as `outside` when that body reaches `mmap`.
   - The shadow state `fir.shadow` (`src/fort/fir/shadow.ft`) observes each run, with or without
     `--fir-events`, and changes no outcome. The interpreter calls it at each access (`reach`),
     load, store, move zeroing (`zero_bytes`), `del`, `live`, `dead`, frame push and pop, `calloc`,
@@ -1363,7 +1375,7 @@ came here.
     or a `del` of an owner slot puts the owner in transit and the next typed store of an owning
     word (`settle`) takes it, so a transfer keeps the count; the test at the end of each statement
     and terminator ends the owners still in transit and reports a count of 0 as a `leak`. A
-    `return` tests with `_0` in transit, and the items of the `std.rt.free` that a `del` calls
+    `return` tests with `_0` in transit, and the items of the `std.rt.release` that a `del` calls
     test nothing, so an owner inside a freed object leaks at the `del`.
   - The test of `leak at exit` (`test_exit`) tags an allocation as of a cycle or not. It counts,
     for each live allocation that no global reaches, the owner slots inside such allocations that
@@ -1465,7 +1477,7 @@ came here.
   and an argument of the variadic tail none. The move did
   not change the direct path's text: `tools/ir_snapshot.sh` of `main` and of the branch gave an
   empty `diff -r` over 427 run tests in three modes. The calls that the translator makes itself,
-  `std.rt.alloc`, `std.rt.free` and the failure entries, still come from the rows of
+  `std.rt.alloc`, `std.rt.release` and the failure entries, still come from the rows of
   `runtime_sig`, as the direct path's did. `gen.function_begin`, `gen.function_end` and
   `gen.gen_main` stand in `gen`, because `fir_llvm` must not import the module that writes a
   program: `gen_fir` calls the translator, and a circular import is an error (D9.5).
@@ -1510,8 +1522,9 @@ came here.
   pass keeps needs its entry (review round 2 of T-255: a pass that kept shift checks under
   `--release` passed the verifier and called a missing `fail_shift`). Only a test with a stub
   `std.rt`, or an old `--std-dir`, meets the second, the third or the fourth. The compiler tests
-  no other `std.rt` function: `alloc`, `free`, `args_init`, `args` and `flush_all` are assumed, so
-  `del(p)` under `--release` with an empty `std.rt` writes a call to an undefined `std.rt.free`.
+  no other `std.rt` function: `alloc`, `release`, `args_init`, `args` and `flush_all` are assumed,
+  so `del(p)` under `--release` with an empty `std.rt` writes a call to an undefined
+  `std.rt.release`.
   Until T-255 the direct path (`gen_stmt.ft`, `gen_expr.ft`) wrote both. On T-253's tree and on
   414d8b7c, `--fir-stats` gave `lowered N of N` over `test/lang`, `src/fort`, `src/lsp` and `std`
   in the three modes, so no program of the corpus took the direct path, and T-255's
@@ -1578,18 +1591,20 @@ came here.
   `rv_regrow`, which rule V6 reads. A change that makes a `switch` over `fir.rvalue_kind` exhaustive
   in `owner/` gives `rv_regrow` the arm of each other rvalue: `alias.add_rvalue` borrows the origins
   of its operands, and `place.is_fresh_new` is false for it. `fir_llvm.regrow_value` calls
-  `std.rt.regrow`, `std.rt.regrow_move` and `std.rt.free`, and gives `regrow_move` the private
+  `std.rt.regrow`, `std.rt.regrow_move` and `std.rt.release` with the position of the `regrow`,
+  and gives `regrow_move` the private
   constant `@.words.N`, which holds the offsets of `fir.owner_word_at`. `gen.gen_words_ref` gives
   one name for each `regrow` site and joins no two by content (D19.5), and `gen_data.emit_data`
   writes the constants after the enum tables. So a site stores no offset:
   `test/fort/fir_llvm_regrow_test.ft` counts 0 such stores and 3 constants for 3 sites of 2
-  tables. `fir.interpreter` calls `std.rt.regrow` and `std.rt.free` and moves the elements and
+  tables. `fir.interpreter` calls `std.rt.regrow` and `std.rt.release` and moves the elements and
   their owners itself (`regrow_back`, `move_owners`), because the shadow gives each owner slot of
   the new storage its owner there. `move_owners` and `std.rt.regrow_move` are two implementations of
   one move, and `test/fir_run_test.py` holds the two equal on each program that it runs. The
-  interpreter makes its operand test in `regrow_from`, before the call of the entry:
-  `passes_count_tests` repeats the first three tests of D12.2, so `invalid release` comes before
-  `out of memory` (`test/fir/run/013_regrow_released.fir`).
+  entry makes the operand test with `std.heap.is_start`, which the interpreter models, so the run
+  writes the same `invalid release` line as a build. `regrow_from` repeats the first three tests of
+  D12.2 (`passes_count_tests`) only to report the event of the refused release first, and
+  `invalid release` comes before `out of memory` (`test/fir/run/013_regrow_released.fir`).
 - **A vacate ends each fact below the owner that it vacates** (the kill at a vacate, `spec/fir.md`
   11, Kill). Before, `del` and `move` had a gen rule only, so `top[0].sub = regrow(move(top), 2)`
   compiled and stored an owner into released storage, and `p->next = move(p)` compiled and made a
@@ -1618,20 +1633,65 @@ came here.
 ## 7. The runtime and the standard library
 
 - **`std.rt.regrow` takes the pointer and the length of the span, and no span** (D12.2,
-  `spec/toolchain.md` 5.1). The entry makes the tests in the order of D12.2. A null pointer with a
-  length that is not 0 is `invalid release`. The test of a pointer that is not null and starts no
-  live allocation needs the allocator of the runtime (D10.9): the change that adds the allocator
-  adds that test before the call of `alloc` in the body. Until then such a pointer goes to the
-  `free` of C, and a view of dead storage can give one: `q = &s[0]`, then `s = regrow(move(s), 2)`,
-  then `regrow(move(q->data), 3)`. So "the zero value or a memory fault" of D12.2 holds only with
-  that allocator, as for `del`. The tests `180` to `184` of `test/lang/run/stdlib` call `regrow` and
-  `regrow_move` directly, and they hold the order of the tests and the zero stores of `regrow_move`.
+  `spec/toolchain.md` 5.1). The entry makes the tests in the order of D12.2. Its operand test is
+  `heap.is_start`, the test of `drop` with no release (D10.9 rule 4): a zero span passes, and a null
+  pointer with a length that is not 0, or a pointer that starts no live allocation, is `invalid
+  release`. A view of dead storage gives no such pointer: after `q = &s[0]` and `s = regrow(move(s),
+  2)`, the owner slot `q->data` holds the zero value, because `regrow` stores it into each owner
+  slot of each old element (D12.2). So `regrow(move(q->data), 3)` gets the zero span and new
+  storage, and no error. Only an owner that a trusted module forges gives such a pointer:
+  `run/errors/068` holds a forged span owner whose `.ptr` is byte 16 of an allocation. The compiled
+  code calls `std.rt.release` for the old storage after `regrow_move`. The tests `181` to `185` of
+  `test/lang/run/stdlib` call `regrow` and `regrow_move` directly, and they hold the order of the
+  tests and the zero stores of `regrow_move`.
 
 - **Extern declarations keep allocator failure calls** (T-149).
   Apple clang `-O1` removes a `calloc` and matching `free` when the caller reads
   no storage, even with `#3 nobuiltin` at the call site. The emitter adds
   `nobuiltin` to each extern declaration on both targets.
   Check the optimized entry function for `call ptr @calloc` in the OOM fixtures.
+  A `new` calls no `calloc` since the runtime has its own allocator (`std.heap`, below). The
+  attribute stays for a program that calls `libc.calloc` or `libc.malloc` itself.
+
+- **The allocator of the runtime is `std.heap`, and no byte of an allocation holds its state**
+  (D10.3, D10.9, `stdlib.md` 2.16). `std.rt.alloc` calls `heap.take`, and `std.rt.release` calls
+  `heap.drop` and reports `invalid release` for a `false`. The invariants, each with the test
+  that holds it in `tools/mutations/heap_fort.json`:
+  - **No address comes twice.** A bump pointer and a frontier only move up, no `mmap` has a fixed
+    address, and no `munmap` takes a range that an allocation used. `munmap` has two callers:
+    `add_segment` after a failed `mprotect` of the table and `can_map`, whose probe mapping no
+    allocation used. A dead huge allocation keeps its mapping with no access.
+  - **The state stands outside the allocations.** It stands in the globals of the module, in the
+    first unit of each segment and in the first 3 units of each small chunk. So a store through
+    a view of dead storage changes no state, and `drop` reads no byte at its argument. `drop`
+    tests the address against the records of the mappings, then against the table word of the
+    chunk, then against the live bit of the granule. A small chunk that goes back gets the table
+    word of a chunk with no allocation. So a later `drop` of an address in it reads no state of
+    the chunk, which nothing can access then (`run/errors/057_invalid_release_chunk_went_back`).
+  - **Give-back takes the access away first.** `mprotect(PROT_NONE)` comes before `madvise`. In
+    the other order a read between the two calls gets zero bytes, which is no result of D10.9
+    rule 2. `MADV_DISCARD` is `MADV_DONTNEED` on Linux and `MADV_FREE` on Darwin.
+  - **The holes have a limit.** A range with no access between two ranges with access costs
+    kernel map entries, and Linux limits them (`vm.max_map_count`, 65,530 by default). `holes`
+    counts them, and a give-back that makes one more than `HOLE_LIMIT` (8192) does not run.
+    Such storage keeps its pages too: a `madvise` with no `mprotect` before it makes a later read
+    give zero bytes on Linux, which rule 2 forbids (`stdlib.md` 2.16 states the growth).
+  - **A refused call changes no record.** A refused `mprotect` or `mmap` for new storage gives
+    null (`out of memory`) and moves no frontier. A refused give-back drops no page. A small chunk
+    whose give-back the system refused gets the table word `TABLE_KEPT`, because a refused call
+    can take the access to its state away: no later `drop` reads that state. The C file
+    `test/lang/ffi/heap_calls.c` refuses a chosen call in the tests `run/stdlib/190` and `191`
+    and `run/errors/064` to `067`.
+  A segment is exactly 2^32 bytes, the size of `libc.map_range`: the pointee of the result of an
+  extern lies inside its storage (A7), so `mmap` cannot give a pointer to a struct that is larger
+  than the mapping. One reservation of 2^46 bytes was the first design; it cost 61 to 80 ms in
+  each process on macOS, so each segment is a mapping of its own. A module that imports
+  `std.heap` can call each of its 26 functions other than the 6 of `stdlib.md` 2.16, and it can
+  store into each of its 7 `mut` globals: a call of `heap.room` or a store into `heap.bump`
+  breaks rule 1, and a call of `heap.seal` breaks rule 2. No rule of the language refuses such a
+  call or store yet (`stdlib.md` 2.16).
+  `std.rt.free(p)` stays beside `release`: the compiler of `tools/bootstrap.ref` emits a call of
+  `free` with one argument for a `del`. Remove `free` when the pinned compiler emits `release`.
 
 - **Mac std.net uses Darwin's 16-byte IPv4 address** (T-145).
   `test/lang/ffi/sockaddr.c` holds the length, family, port and address offsets at 0, 1, 2 and 4.
@@ -1663,8 +1723,10 @@ came here.
   `git grep -nE 'libc\.[a-z_0-9]+\(|str\.from_cstr\(|^\s*extern fn' -- src/fort` finds nothing.
   A suite of `test/fort` makes its files with `os.set_mode`, `os.make_symlink`, `os.make_fifo`
   and `os.set_umask`, moves a descriptor with `io.dup` and `io.dup2`, and removes a variable with
-  `sys.unset_env`. `test/fort/support/heap.ft` is the one module there that declares and calls C,
-  for the heap counters of glibc and Darwin, and it starts with `import extern;`. A suite text
+  `sys.unset_env`. No suite module there declares a C function: `test/fort/support/heap.ft`
+  reads `std.heap.live_bytes` for the leak probes. `test/fort/heap_full_test.ft` and
+  `test/fort/heap_segments_test.ft` are the two suite modules that start with `import extern;`,
+  each for calls of `std.heap.drop`, a boundary function (D9.8). A suite text
   that a test compiles is a program and not a suite module: it declares or calls C when it starts
   with `check_env.TRUST`, `import extern; ` with no newline, so each item keeps its line.
 
@@ -1705,8 +1767,11 @@ came here.
   a build directory and could not be checked out on another machine.
 - **Writing a library module against C** (`stdlib.md` 1.4, D13.4): a span is not a pointer, so
   `cast(u8 mut@ own, void* own)` is rejected (D3.14 lists pointer-to-pointer, not span-to-pointer).
-  The `libc.free(cast(move(p), void* own))` idiom of `stdlib.md` 2.2 therefore applies to a
-  `T mut* own` from `new(T)` or `libc.malloc`; a `T mut@ own` from `new(T, n)` is released with
+  A value of `libc.malloc` or `libc.calloc` is released with `libc.free(move(p))` (`stdlib.md`
+  2.2), and a value of `new` with `del` only. The runtime has its own allocator, so a `libc.free`
+  of a value of `new` gives the allocator of C an address that it did not give, and a `del` of a
+  value of `malloc` is the runtime error `invalid release` (D10.3, D10.9). A `T mut@ own` from
+  `new(T, n)` is released with
   `del`, and what crosses to C is its `.ptr`, a view. A byte buffer crosses with no cast at all,
   since T-086 gave the six byte functions `u8*` and `u8 mut*`: write
   `libc.read(fd, buf.ptr, buf.len)` for a `u8 mut@ buf`, and keep the cast only where the types

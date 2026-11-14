@@ -1,0 +1,205 @@
+//! run
+//! link: ffi/heap_calls.c
+//! stdout:
+//| large: 7 9 true false true
+//| large, first chunk: -1 9 true false true
+//| huge: 7 9 true false true
+//| chunk: 0 7 true false
+//| chunk, state: -1 7 true false
+//| units: true true
+//| advise refused: -1 true true
+// The system can refuse a give-back. When it refuses to take the access to dead storage away
+// (`mprotect` with PROT_NONE), the allocator of the runtime tells the system to drop no page:
+// the storage stays as it is, and a read of it gives the bytes that it held last (D10.9 rule
+// 2). A refused call can change the first part of its range, and a read of that part stops
+// with a memory fault, which rule 2 allows too. The release still counts: the live bytes go
+// down, and a second release of the address gives false (rule 4). A small chunk whose
+// give-back the system refused takes no later read of its state: a refused call can take the
+// access to the state away, and a second release of its block still gives false. When the
+// system refuses to drop the pages (`madvise`), nothing can access the storage, and the
+// allocator goes on. The C file of the test refuses the calls and reads each byte of dead
+// storage through write(2), so no memory fault stops the test.
+// D9.8, D10.9
+import extern;
+import std.heap;
+
+// The kinds of a call in test/lang/ffi/heap_calls.c.
+i32 UNMAP = 2;
+i32 NO_ACCESS = 4;
+i32 ADVISE = 5;
+
+u64 UNIT = 16384;
+u64 CHUNK = 2097152;
+u64 LARGE = 4194304;
+u64 HUGE = 4294967296;
+// The largest small block takes the whole storage of one small chunk.
+u64 SMALL_CHUNK = 2048000;
+
+// C: heap_calls_count, test/lang/ffi/heap_calls.c, which gives the calls of one kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_count(i32 kind) u64;
+// C: heap_calls_refused, test/lang/ffi/heap_calls.c, which gives the calls that the file
+// refused.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_refused() u64;
+// C: heap_calls_refuse, test/lang/ffi/heap_calls.c, which makes call `nth` of one kind fail
+// with ENOMEM, counted from the next call. A refused mprotect first changes `part` bytes at the
+// start of its range, as the system does when it stops between two map entries.
+// gives: nothing. writes: no fort storage. keeps: no pointer. calls: no fort function.
+// frees: nothing.
+extern fn heap_calls_refuse(i32 kind, u64 nth, u64 part) void;
+// C: heap_calls_byte, test/lang/ffi/heap_calls.c, which gives the byte at an address, or -1
+// when nothing can access the address. The system reads the byte for write(2), so no memory
+// fault stops the program.
+// gives: an int64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_byte(u64 address) i64;
+
+// C call heap_calls_count: no pointer argument.
+fn count(i32 kind) u64 {
+    return heap_calls_count(kind);
+}
+
+// C call heap_calls_refused: no pointer argument.
+fn refused() u64 {
+    return heap_calls_refused();
+}
+
+// Makes the next call of `kind` fail. A refused mprotect first changes `part` bytes.
+// C call heap_calls_refuse: no pointer argument.
+fn refuse(i32 kind, u64 part) void {
+    heap_calls_refuse(kind, 1, part);
+}
+
+// The byte at `at`, or -1 when nothing can access it.
+// C call heap_calls_byte: the argument is a number, the address of a byte of dead storage or
+// of the state of a chunk. C gives it to write(2), and the system reads the byte or refuses
+// the address: no code of the process reads dead storage (D10.9 rule 6).
+fn byte(u64 at) i64 {
+    return heap_calls_byte(at);
+}
+
+// A large block of 2 chunks whose give-back the system refuses. The refused call changes
+// `part` bytes first. Prints the first byte and the last byte of the dead block, whether the
+// allocator made no madvise, the result of a second release, and whether the live bytes went
+// down by the block.
+// C call heap.drop: start, the address of the block that `new` gave in this function and that
+// `del` released (D9.8 rule 2). drop reads no byte at it, so the dead storage takes no access.
+fn large(string name, u64 part) void {
+    u8 mut@ own block = new(u8, LARGE);
+    block[0] = 7;
+    block[LARGE - 1] = 9;
+    void* start = cast(&block[0], void*);
+    u64 at = cast(&block[0], u64);
+    u64 advise = count(ADVISE);
+    u64 live = heap.live_bytes();
+    refuse(NO_ACCESS, part);
+    del(block);
+    println(name, ": ", byte(at), " ", byte(at + LARGE - 1), " ", count(ADVISE) == advise, " ",
+            heap.drop(start), " ", live - heap.live_bytes() == LARGE);
+}
+
+// A huge block whose give-back the system refuses: the mapping stays, with its bytes.
+// C call heap.drop: start, the address of the block that `new` gave in this function and that
+// `del` released (D9.8 rule 2). drop reads no byte at it, so the dead storage takes no access.
+fn huge() void {
+    u8 mut@ own block = new(u8, HUGE);
+    block[0] = 7;
+    block[HUGE - 1] = 9;
+    void* start = cast(&block[0], void*);
+    u64 at = cast(&block[0], u64);
+    u64 calls = count(ADVISE) + count(UNMAP);
+    u64 live = heap.live_bytes();
+    refuse(NO_ACCESS, 0);
+    del(block);
+    println("huge: ", byte(at), " ", byte(at + HUGE - 1), " ",
+            count(ADVISE) + count(UNMAP) == calls, " ", heap.drop(start), " ",
+            live - heap.live_bytes() == HUGE);
+}
+
+// A closed small chunk whose one block dies goes back as a whole, and the system refuses it.
+// The refused call changes `part` bytes first: 3 units are the state of the chunk. Prints the
+// first byte of the state and of the dead block, whether the allocator made no madvise, and
+// the result of a second release. The second release and the close of the chunk after it read
+// no state of the chunk that stayed.
+// C call heap.drop: start, the address of the block that `new` gave in this function and that
+// `del` released (D9.8 rule 2). drop reads no byte at it, so the dead storage takes no access.
+fn chunk(string name, u64 part) void {
+    u8 mut@ own first = new(u8, SMALL_CHUNK);
+    // the next block of this size takes a new small chunk and closes the chunk of `first`
+    u8 mut@ own second = new(u8, SMALL_CHUNK);
+    first[0] = 7;
+    void* start = cast(&first[0], void*);
+    u64 at = cast(&first[0], u64);
+    u64 advise = count(ADVISE);
+    refuse(NO_ACCESS, part);
+    del(first);
+    bool no_advise = count(ADVISE) == advise;
+    i64 state = byte(at - 3 * UNIT);
+    i64 kept = byte(at);
+    bool again = heap.drop(start);
+    // the release of `second` and the next chunk give the chunk of `second` back: the
+    // give-back reads the table word of the chunk before it, the chunk that stayed
+    del(second);
+    u8 mut@ own third = new(u8, SMALL_CHUNK);
+    third[0] = 1;
+    del(third);
+    println(name, ": ", state, " ", kept, " ", no_advise, " ", again);
+}
+
+struct slot {
+    u8 mut@ own bytes;
+}
+
+// 32 small blocks of 2 units side by side in the open chunk, and 1 more block that stays live.
+// The release of the blocks gives runs of units back, and the system refuses the first run:
+// that run gets no madvise, and each later run gets one.
+fn units() void {
+    slot mut@ own row = new(slot, 32);
+    for (u64 mut i = 0; i < 32; i += 1) {
+        del(row[i].bytes);
+        row[i].bytes = new(u8, 2 * UNIT);
+        row[i].bytes[0] = 7;
+    }
+    u8 mut@ own keeper = new(u8, 2 * UNIT);
+    u64 no_access = count(NO_ACCESS);
+    u64 advise = count(ADVISE);
+    u64 before = refused();
+    refuse(NO_ACCESS, 0);
+    for (u64 mut i = 0; i < 32; i += 1) {
+        del(row[i].bytes);
+    }
+    u64 runs = count(NO_ACCESS) - no_access;
+    println("units: ", refused() == before + 1, " ",
+            runs >= 2 && count(ADVISE) - advise == runs - 1);
+    del(keeper);
+    del(row);
+}
+
+// The system takes the access to a dead large block away and refuses to drop its pages:
+// nothing can access the block, and a second release gives false.
+// C call heap.drop: start, the address of the block that `new` gave in this function and that
+// `del` released (D9.8 rule 2). drop reads no byte at it, so the dead storage takes no access.
+fn advise_refused() void {
+    u8 mut@ own block = new(u8, LARGE);
+    block[0] = 7;
+    void* start = cast(&block[0], void*);
+    u64 at = cast(&block[0], u64);
+    u64 before = refused();
+    refuse(ADVISE, 0);
+    del(block);
+    println("advise refused: ", byte(at), " ", refused() == before + 1, " ", !heap.drop(start));
+}
+
+fn main() i32 {
+    large("large", 0);
+    large("large, first chunk", CHUNK);
+    huge();
+    chunk("chunk", 0);
+    chunk("chunk, state", 3 * UNIT);
+    units();
+    advise_refused();
+    return 0;
+}

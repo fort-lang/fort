@@ -1,0 +1,47 @@
+//! run
+//! link: ffi/oracle.c
+//! stdout:
+//| 7 9
+//| 8 9 1
+//| 8 0
+// C code that a trusted module calls can get a view of dead storage, and an access of C code to
+// it has the results of rule 2 (D10.9 rule 6). The program releases a small allocation with a
+// live neighbour on each side, so its storage stays with the runtime. A read of C code with no
+// system call gives the bytes that the storage held last. A write of C code changes only the
+// dead storage: a later read gives the new byte, and the later allocation of the same size gets
+// other storage and its own zero bytes. test/lang/run/pointers/025 holds the memory fault.
+// D9.8, D10.3, D10.9
+import extern;
+
+// C: oracle_read, test/lang/ffi/oracle.c.
+// gives: the byte at p, no pointer. reads: 1 byte at p. writes: nothing. keeps: no pointer.
+// calls: no fort function. frees: nothing.
+extern fn oracle_read(u8* p) u8;
+// C: oracle_write, test/lang/ffi/oracle.c.
+// gives: nothing. writes: 1 byte at p. keeps: no pointer. calls: no fort function. frees:
+// nothing.
+extern fn oracle_write(u8 mut* p, u8 value) void;
+
+// C call oracle_read x5: &view[0] or &view[3], one byte of a view of 4 bytes, or &later[0], one
+// byte of a live allocation of 4 bytes (D9.8 rule 2). The view is dead storage after the del,
+// and rule 6 of D10.9 gives the result of the access of C.
+// C call oracle_write: &view[0], one byte of the view of 4 bytes (rule 2).
+fn main() i32 {
+    u8 mut@ own before = new(u8, 4);
+    u8 mut@ own block = new(u8, 4);
+    u8 mut@ own after = new(u8, 4);
+    block[0] = 7;
+    block[3] = 9;
+    u8 mut@ view = block;
+    del(block);
+    println(oracle_read(&view[0]), " ", oracle_read(&view[3]));
+    oracle_write(&view[0], 8);
+    u8 mut@ own later = new(u8, 4);
+    later[3] = 1;
+    println(oracle_read(&view[0]), " ", oracle_read(&view[3]), " ", later[3]);
+    println(view[0], " ", oracle_read(&later[0]));
+    del(later);
+    del(before);
+    del(after);
+    return 0;
+}

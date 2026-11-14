@@ -570,6 +570,15 @@ set_tests_properties(fir-run PROPERTIES
     PROCESSORS ${FORT_LANG_JOBS}
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
+# Hold the two rules of test/fir_run_test.py that accept a difference between the two runs: the
+# memory fault at dead storage (D10.9 rule 2) and a pinned difference. The test builds no program.
+add_test(NAME fir_run_rules_selftest
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/fir_run_rules_test.py"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(fir_run_rules_selftest PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # The product language test uses the current compiler and standard library.
 # It verifies each module that the compiler emits.
 set(FORT_LANG_COMMAND
@@ -669,11 +678,16 @@ set_tests_properties(library-compiler PROPERTIES
     LABELS "fort;libraries"
     FIXTURES_SETUP fort_libraries
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+# heap_layout_test.ft links the C file test/lang/ffi/heap_calls.c, which stands in for mmap. A
+# test with a `link:` file builds its entry with `-c` and links the object with the C file. With
+# `--use` that object holds the entry unit alone, and the link of the C file finds no code of the
+# libraries, so this run leaves the test out. The shards of fort-modules run it.
 add_test(NAME fort-modules-libraries
     COMMAND ${FORT_MODULE_TEST_COMMAND}
             --use "std=${FORT_LIBRARY_WORK}/std.flib"
             --use "fort=${FORT_LIBRARY_WORK}/fort.flib"
-            --cache-dir "${FORT_LIBRARY_WORK}/cache")
+            --cache-dir "${FORT_LIBRARY_WORK}/cache"
+            --exclude-exact heap_layout_test.ft)
 set_tests_properties(fort-modules-libraries PROPERTIES
     LABELS "fort;libraries"
     FIXTURES_REQUIRED fort_libraries

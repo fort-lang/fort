@@ -1,0 +1,89 @@
+//! run
+//! link: ffi/heap_calls.c
+//! stdout:
+//| first probe: true true true true
+//| second probe: true true
+//| take: true true true
+//| small probe: true true true
+// `can_take` gives no storage to an allocation, and it can map a segment. A probe for a size
+// that the current segment does not hold maps a new segment of 4 GiB of address range, as the
+// `take` does, and the segment stays: the probe makes no `munmap`, a second probe of the size
+// maps nothing, and the next `take` of the size gets the second chunk of the segment that the
+// probe mapped. A probe for a small size that the open chunk does not hold maps a segment too
+// when the current segment has no chunk left (stdlib.md 2.16). The live bytes do not change in
+// a probe. The C file of the test counts the calls of the allocator.
+// D9.8, D10.9
+import extern;
+import std.heap;
+
+// The kinds of a call in test/lang/ffi/heap_calls.c.
+i32 MAP = 1;
+i32 UNMAP = 2;
+
+u64 CHUNK = 2097152;
+// The largest small block takes a new small chunk in each case.
+u64 SMALL_CHUNK = 2048000;
+// The bytes of a segment, and the largest large block: 2047 chunks, which only a segment with
+// no allocation holds.
+u64 SEGMENT = 4294967296;
+u64 ALMOST = 4292870144;
+
+// C: heap_calls_count, test/lang/ffi/heap_calls.c, which gives the calls of one kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_count(i32 kind) u64;
+// C: heap_calls_address, test/lang/ffi/heap_calls.c, which gives the address of the last call
+// of one kind as a number; for mmap, its result.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_address(i32 kind) u64;
+// C: heap_calls_bytes, test/lang/ffi/heap_calls.c, which gives the length of the last call of
+// one kind.
+// gives: a uint64_t and no pointer. writes: no fort storage. keeps: no pointer. calls: no fort
+// function. frees: nothing.
+extern fn heap_calls_bytes(i32 kind) u64;
+
+// C call heap_calls_count: no pointer argument.
+fn count(i32 kind) u64 {
+    return heap_calls_count(kind);
+}
+
+// C call heap_calls_address: no pointer argument.
+fn address(i32 kind) u64 {
+    return heap_calls_address(kind);
+}
+
+// C call heap_calls_bytes: no pointer argument.
+fn bytes(i32 kind) u64 {
+    return heap_calls_bytes(kind);
+}
+
+// C call heap.drop: got, the address that heap.take gave in this function. drop tests the
+// address against the records of the allocator and reads no byte at it.
+fn main() i32 {
+    // The first segment of the process holds the blocks of the runtime, so it has fewer than
+    // 2047 chunks left.
+    u64 live = heap.live_bytes();
+    u64 maps = count(MAP);
+    u64 unmaps = count(UNMAP);
+    bool first = heap.can_take(ALMOST);
+    u64 segment = address(MAP);
+    println("first probe: ", first, " ", count(MAP) == maps + 1 && bytes(MAP) == SEGMENT, " ",
+            count(UNMAP) == unmaps, " ", heap.live_bytes() == live);
+
+    bool second = heap.can_take(ALMOST);
+    println("second probe: ", second, " ", count(MAP) == maps + 1 && count(UNMAP) == unmaps);
+
+    void mut* got = heap.take(ALMOST);
+    println("take: ", count(MAP) == maps + 1, " ", cast(got, u64) == segment + CHUNK, " ",
+            got != null && heap.drop(got));
+
+    // The segment of the probe has no chunk left after the block of 2047 chunks, and the open
+    // chunk does not hold the largest small block.
+    u64 before = heap.live_bytes();
+    bool small = heap.can_take(SMALL_CHUNK);
+    println("small probe: ", small, " ",
+            count(MAP) == maps + 2 && bytes(MAP) == SEGMENT && count(UNMAP) == unmaps, " ",
+            heap.live_bytes() == before);
+    return 0;
+}

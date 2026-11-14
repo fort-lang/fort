@@ -4,8 +4,10 @@
 //| 5
 //| 0 true true
 import extern;
-// Allocation has no header, so `new`/`del` and C `malloc`/`free` are
-// interchangeable, and memory from C is owned when its extern says so (D10.3, D17.13).
+// The runtime has its own allocator, so `new`/`del` and C `calloc`/`free` are not
+// interchangeable (D10.3, D10.9). Memory from C is owned when its extern says so (D17.13), and
+// the C function that takes the owner as `own` releases it. `del` releases an allocation of
+// `new`. run/errors/052 holds the `del` of storage of C, which is `invalid release`.
 // `del` of an already emptied operand frees once, since `del` leaves the zero
 // value behind and a null pointer or a zero span is a no-op (D17.9).
 //
@@ -19,21 +21,21 @@ import extern;
 // writes: no fort storage. keeps: no pointer. calls: no fort function. frees: nothing.
 extern fn calloc(u64 count, u64 size) void mut* own;
 // C: free, ISO C11 7.22.3.3, free(3).
-// frees: p, an allocation that malloc or calloc gave, or that new gave (D10.3), which the `own`
-// moves to C; nothing for null. gives: no pointer. writes: no storage that fort code still holds.
-// keeps: no pointer. calls: no fort function.
+// frees: p, an allocation that malloc or calloc gave, which the `own` moves to C; nothing for
+// null. gives: no pointer. writes: no storage that fort code still holds. keeps: no pointer.
+// calls: no fort function.
 extern fn free(void* own p) void;
 
 // C call calloc: no pointer argument.
-// C call free: cast(new(i32), void* own), a new allocation of new, which free takes (D10.3); free
-// reads no byte of it.
+// C call free: move(from_c), the allocation that calloc gave in this function, or null (D9.8 rule
+// 3).
 fn main() i32 {
     void mut* own from_c = calloc(1, sizeof(i32));
     bool got = from_c != null;
-    del(from_c);                              // the same allocator as free
+    free(move(from_c));                       // C releases what C allocated
     println(got, " ", from_c == null);
 
-    free(cast(new(i32), void* own));          // C frees what new allocated
+    del(new(i32));                            // del releases what new allocated
     del(new(u8, 4));                          // an own rvalue may be del'ed (D17.8)
     u8 mut@ own bytes = new(u8, 5);
     println(bytes.len);

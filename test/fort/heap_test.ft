@@ -3,45 +3,22 @@
 //! stdout:
 //| ok
 /// The live view of support/heap.ft: how far it moves when the program holds
-/// and frees small blocks and a block above the mmap threshold of glibc.
+/// and releases blocks at the edges of the sizes of the allocator of the
+/// runtime. The view is exact, so each assertion holds one number on each
+/// target.
 import heap;
 
-// The small block is below the size that glibc serves from its thread cache,
-// and the large block is above the 128 KB at which glibc serves a block by
-// mmap at the start of a program.
+// The allocator keeps a multiple of 16 bytes for an allocation of at most
+// 2048000 bytes, and at least 16 bytes. Above that size it keeps a multiple of
+// 2 MiB (std.heap.kept_bytes).
+u64 GRANULE = 16;
+u64 SMALL_MOST = 2048000;
+u64 CHUNK = 2097152;
+
+// The size of the block of the nested rounds, and the count of the blocks
+// that the program holds at once.
 u64 SMALL = 64;
-u64 LARGE = 262144;
-
-// The count of small blocks that the program holds at once.
 u64 NEST = 16;
-
-// glibc rounds an mmap block up to a page: 262144 bytes and a 16-byte header
-// took 266240 bytes. A heap block of the same size took 262160 bytes.
-u64 PAGE = 4096;
-
-$if ($cfg(target_os) == "macos") {
-    // The enumerator of macOS reports each block at its requested size here.
-    u64 SMALL_HELD = 64;
-    bool CACHE_HIDES_SMALL = false;
-} else {
-    // glibc adds an 8-byte header to a 64-byte block and rounds to 16 bytes.
-    u64 SMALL_HELD = 80;
-    // The thread cache of glibc holds a freed small block, and mallinfo2
-    // counts that block as in use. A new small block that comes from the cache
-    // does not move the view, and a small block that goes into the cache does
-    // not move it back. How many of NEST frees move the view back depends on
-    // what the cache held before. glibc 2.39 moved it back for 10 or 11 of 16
-    // frees on a first pass and for all 16 on a later pass. glibc 2.43 moved it
-    // back for none.
-    bool CACHE_HIDES_SMALL = true;
-}
-
-// The least that NEST held small blocks move the view on a first pass: half
-// of their requested bytes. Measured on a first pass: 1024 on macOS, 1280
-// under glibc 2.39 and 1200 under glibc 2.43. A later pass under glibc 2.43
-// read 0, because the cache then served every block, so the program makes
-// one pass only.
-u64 NEST_HELD_LEAST = 512;
 
 // How far the view went up from `before` to `after`. It must not go down.
 fn rise(u64 before, u64 after) u64 {
@@ -49,62 +26,76 @@ fn rise(u64 before, u64 after) u64 {
     return after - before;
 }
 
-// A large block moves the view by at least its size and by at most a page
-// more, through mmap (`hblkhd`) or out of the heap (`uordblks`). The mmap
-// block read 266240, which is LARGE + PAGE, so with 4 KB pages the upper
-// bound is exact and has no margin.
-fn large_held_moves(u64 moved) bool {
-    return moved >= LARGE && moved <= LARGE + PAGE;
-}
-
-// Holds a large block and frees it. The view goes back to where it was.
-fn large_round() void {
+// Holds a block of `size` bytes and releases it. Returns how far the block
+// moved the view while the program held it. The release takes the view back
+// to where it was.
+fn held(u64 size) u64 {
     u64 before = heap.live_view();
-    u8 mut@ own large = new(u8, LARGE);
-    u64 held = heap.live_view();
-    del(large);
-    u64 after = heap.live_view();
-    assert(large_held_moves(rise(before, held)));
-    assert(after == before);
+    u8 mut@ own block = new(u8, size);
+    u64 during = heap.live_view();
+    del(block);
+    assert(heap.live_view() == before);
+    return rise(before, during);
 }
 
 // Holds `depth` small blocks at once, one in each frame, and checks the view
-// in the deepest frame.
+// in each frame: each block that the program holds is in the count.
 fn hold_nested(u64 depth, u64 before) void {
     u8 mut@ own block = new(u8, SMALL);
+    assert(rise(before, heap.live_view()) == (NEST - depth + 1) * SMALL);
     if (depth > 1) {
         hold_nested(depth - 1, before);
-    } else {
-        assert(rise(before, heap.live_view()) >= NEST_HELD_LEAST);
     }
+    assert(rise(before, heap.live_view()) == (NEST - depth + 1) * SMALL);
     del(block);
+    assert(rise(before, heap.live_view()) == (NEST - depth) * SMALL);
 }
 
-fn the_live_view_moves_by_the_bytes_of_each_block() void {
-    // Under glibc 2.43 the view went up by 768 bytes at the first free of the
-    // program. This first block keeps that step out of the measurement.
-    u8 mut@ own first = new(u8, SMALL);
-    del(first);
+fn a_block_moves_the_view_by_the_bytes_that_the_allocator_keeps() void {
+    // an allocation of 0 bytes is an allocation, and it counts as the smallest one
+    assert(held(0) == GRANULE);
+    assert(held(1) == GRANULE);
+    assert(held(GRANULE) == GRANULE);
+    assert(held(GRANULE + 1) == 2 * GRANULE);
+    assert(held(SMALL) == SMALL);
+    assert(held(SMALL_MOST - GRANULE + 1) == SMALL_MOST);
+    assert(held(SMALL_MOST) == SMALL_MOST);
+    // the first size that takes whole chunks
+    assert(held(SMALL_MOST + 1) == CHUNK);
+    assert(held(CHUNK) == CHUNK);
+    assert(held(CHUNK + 1) == 2 * CHUNK);
+}
+
+fn the_view_counts_each_block_that_the_program_holds() void {
     u64 before = heap.live_view();
     hold_nested(NEST, before);
-    u64 after = heap.live_view();
-    // The frees do not take the view below where it was, and on macOS they
-    // take it back exactly.
-    u64 kept = rise(before, after);
-    assert(kept <= NEST * SMALL_HELD);
-    assert(CACHE_HIDES_SMALL || kept == 0);
-    // The first large block is the first mmap block of the program, so the
-    // view counts it through `hblkhd` on Linux. Its release raises the mmap
-    // threshold of glibc, so the second large block comes out of the heap and
-    // the view counts it through `uordblks`. A view that leaves out one field
-    // reads 0 for one of the two rounds.
-    large_round();
-    large_round();
-    assert(heap.live_view() == after);
+    assert(heap.live_view() == before);
+    // a second pass reads the same numbers: no cache of the allocator hides a block
+    hold_nested(NEST, before);
+    assert(heap.live_view() == before);
+}
+
+// A block that a round keeps moves the view by its bytes in each round, which
+// is what a leak probe holds.
+fn a_kept_block_moves_the_view_in_each_round() void {
+    u64 before = heap.live_view();
+    u8 mut@ own first = new(u8, SMALL);
+    u64 one = heap.live_view();
+    u8 mut@ own second = new(u8, SMALL);
+    u64 two = heap.live_view();
+    assert(rise(before, one) == SMALL);
+    assert(rise(one, two) == SMALL);
+    assert(heap.distance(before, two) == 2 * SMALL);
+    assert(heap.distance(two, before) == 2 * SMALL);
+    del(second);
+    del(first);
+    assert(heap.distance(before, heap.live_view()) == 0);
 }
 
 fn main() i32 {
-    the_live_view_moves_by_the_bytes_of_each_block();
+    a_block_moves_the_view_by_the_bytes_that_the_allocator_keeps();
+    the_view_counts_each_block_that_the_program_holds();
+    a_kept_block_moves_the_view_in_each_round();
     println("ok");
     return 0;
 }

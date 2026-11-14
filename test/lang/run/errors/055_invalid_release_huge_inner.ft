@@ -1,0 +1,30 @@
+//! run
+//! abort
+//! link: ffi/oracle.c
+//! stderr: ft:26:5: runtime error: invalid release
+//! stdout:
+//| before
+// An allocation of 4 GiB takes a mapping of its own. A `del` of a pointer into it is the runtime
+// error `invalid release`: byte 2097152 has the alignment of each start that the allocator
+// gives, and it is 2 MiB inside the allocation (D10.9 rule 4). The program writes one byte of
+// the allocation, so the run needs little storage.
+// D10.3, D10.6, D10.9
+import extern;
+
+// C: oracle_pass, test/lang/ffi/oracle.c.
+// gives: p itself, which is no new allocation; this declaration says `own` to make an owner that
+// starts no allocation. writes: nothing. keeps: no pointer. calls: no fort function.
+// frees: nothing.
+extern fn oracle_pass(u8* p) u8 mut* own;
+
+// C call oracle_pass: &block[2097152] keeps the bound of block from that element, 4292870144
+// bytes (D9.8 rule 2); C reads no byte.
+fn main() i32 {
+    u8 mut@ own block = new(u8, 4294967296);
+    u8 mut* own inner = oracle_pass(&block[2097152]);
+    println("before");
+    del(inner);
+    println("after ", block[2097152]);
+    del(block);
+    return 0;
+}

@@ -1,0 +1,248 @@
+//! run
+//! stdout:
+//| ok
+/// The limit of the holes of the allocator of the runtime (std.heap). A hole is a range that
+/// the allocator gave back to the system between two ranges that the program can access. A
+/// give-back that makes one more hole than 8192 does not run: the dead storage then stays as it
+/// is, and a read of it gives the bytes that it held last (D10.9 rule 2). A give-back that makes
+/// no new hole runs at the limit too. The test stores 1 byte or 2 bytes into 23 blocks and no
+/// byte into each other block, so the run needs little storage.
+import std.io;
+
+// A large block takes whole chunks of 2 MiB, so each block of this size is one chunk, and the
+// blocks of one segment stand side by side.
+u64 BLOCK = 2097152;
+
+// The largest small block takes the whole storage of one small chunk.
+u64 SMALL_CHUNK = 2048000;
+
+// The limit of the allocator, and the count of the large blocks: 2 for each hole, and 15 for
+// the steps at the limit.
+u64 HOLES = 8192;
+u64 BLOCKS = 16399;
+
+// The count and the bytes of the small blocks that stand side by side in one small chunk.
+u64 ROW = 32;
+u64 ROW_BYTES = 32768;
+
+// What `seen` returns for storage that nothing can access.
+i64 GONE = -1;
+
+struct block {
+    u8 mut@ own bytes;
+}
+
+// The two ends of a pipe.
+struct pipe_ends {
+    i32 read_end;
+    i32 write_end;
+}
+
+fn open_pipe() pipe_ends {
+    pipe_ends mut ends = {};
+    assert(io.pipe(&ends.read_end, &ends.write_end));
+    return ends;
+}
+
+// Returns the first byte of `view`, or GONE when nothing can access it. No fort code reads the
+// byte: io.write gives the address to write(2), and the system reads the byte. For dead storage
+// the system reads the byte that the storage held last, or it refuses the address and the write
+// fails, so no memory fault stops the test (D10.9 rule 6).
+fn seen(pipe_ends ends, u8@ view) i64 {
+    if (io.write(ends.write_end, view[0..1]) != 1) {
+        return GONE;
+    }
+    u8[1] mut got = {};
+    assert(io.read(ends.read_end, got[..]) == 1);
+    return cast(got[0], i64);
+}
+
+// Stores a mark into the first byte of block `i`.
+fn mark(block mut@ blocks, u64 i, u8 value) void {
+    blocks[i].bytes[0] = value;
+}
+
+// Releases block `i` and returns what a read of its first byte gives after the release.
+fn release(pipe_ends ends, block mut@ blocks, u64 i) i64 {
+    u8@ view = blocks[i].bytes;
+    del(blocks[i].bytes);
+    return seen(ends, view);
+}
+
+// The blocks stand side by side, and each block with an odd number dies between two live
+// blocks, so each release makes one hole. Release 8192 is the last one that goes back to the
+// system. The process made no hole before: it released no storage.
+fn the_storage_of_a_release_goes_back_until_the_limit(pipe_ends ends, block mut@ blocks) void {
+    mark(blocks, 1, 7);
+    mark(blocks, 2 * HOLES - 1, 7);
+    mark(blocks, 2 * HOLES + 1, 7);
+    mark(blocks, 2 * HOLES + 3, 7);
+    blocks[2 * HOLES + 3].bytes[BLOCK - 1] = 9;
+    for (u64 mut n = 1; n <= HOLES; n += 1) {
+        assert(release(ends, blocks, 2 * n - 1) == GONE);
+    }
+    // the limit: the storage of each later release stays, with the bytes that it held last
+    u8@ kept = blocks[2 * HOLES + 3].bytes;
+    assert(release(ends, blocks, 2 * HOLES + 1) == 7);
+    assert(release(ends, blocks, 2 * HOLES + 3) == 7);
+    assert(kept[0] == 7 && kept[BLOCK - 1] == 9);
+}
+
+// A dead block that stayed is storage that the program can access. So the release of the block
+// between two of them makes a new hole, and it stays at the limit too.
+fn a_block_between_two_blocks_that_stayed_stays(pipe_ends ends, block mut@ blocks) void {
+    mark(blocks, 2 * HOLES + 2, 5);
+    assert(release(ends, blocks, 2 * HOLES + 2) == 5);
+}
+
+// The release of the block between two holes makes no new hole: its give-back runs at the
+// limit, and the two holes become one. Then the allocator is 1 hole below the limit, so the
+// next release between two live blocks goes back, and the release after it stays.
+fn a_release_that_joins_two_holes_goes_back_at_the_limit(pipe_ends ends,
+                                                        block mut@ blocks) void {
+    mark(blocks, 2, 3);
+    assert(release(ends, blocks, 2) == GONE);
+    mark(blocks, 2 * HOLES + 5, 3);
+    assert(release(ends, blocks, 2 * HOLES + 5) == GONE);
+    mark(blocks, 2 * HOLES + 7, 3);
+    assert(release(ends, blocks, 2 * HOLES + 7) == 3);
+}
+
+// A small chunk whose last live block dies after the chunk closed goes back as a whole. At the
+// limit it stays. One hole below the limit it goes back, and the allocator counts its hole: the
+// next release between two live blocks stays. The function returns a live block in the chunk
+// after the two chunks.
+fn a_small_chunk_stays_at_the_limit_and_goes_back_below_it(pipe_ends ends,
+                                                          block mut@ blocks) u8 mut@ own {
+    // each block takes a new small chunk and closes the chunk of the block before it
+    u8 mut@ own first = new(u8, SMALL_CHUNK);
+    u8 mut@ own second = new(u8, SMALL_CHUNK);
+    first[0] = 11;
+    u8@ first_view = first;
+    del(first);
+    assert(seen(ends, first_view) == 11);
+
+    // block 4 stands between two holes: its release takes the count 1 below the limit
+    mark(blocks, 4, 3);
+    assert(release(ends, blocks, 4) == GONE);
+    u8 mut@ own last = new(u8, SMALL_CHUNK);
+    second[0] = 13;
+    u8@ second_view = second;
+    del(second);
+    assert(seen(ends, second_view) == GONE);
+    // the chunk of `first` stayed, and it keeps its bytes
+    assert(seen(ends, first_view) == 11);
+    mark(blocks, 2 * HOLES + 9, 3);
+    assert(release(ends, blocks, 2 * HOLES + 9) == 3);
+    return last;
+}
+
+// A small chunk after a hole goes back as a whole at the limit, because its give-back makes no
+// new hole: the chunk joins the hole before it. When the chunk holds a hole too, the two holes
+// become one, and the count goes 1 below the limit. `last` is the one block of the chunk after
+// the chunk that went back.
+fn a_small_chunk_goes_back_at_the_limit_when_it_makes_no_hole(pipe_ends ends, block mut@ blocks,
+                                                             u8 mut@ own last) void {
+    // a new small chunk, which closes the chunk of `last`, with a block that stays live. The
+    // chunk of `last` joins the hole before it, and the count stays at the limit.
+    u8 mut@ own keeper = new(u8, 64);
+    keeper[0] = 17;
+    last[0] = 23;
+    u8@ last_view = last;
+    del(last);
+    assert(seen(ends, last_view) == GONE);
+
+    // block 6 stands between two holes: its release takes the count 1 below the limit
+    mark(blocks, 6, 3);
+    assert(release(ends, blocks, 6) == GONE);
+
+    // a row of blocks side by side in the chunk of `keeper`
+    block mut@ own row = new(block, ROW);
+    for (u64 mut i = 0; i < ROW; i += 1) {
+        del(row[i].bytes);
+        row[i].bytes = new(u8, ROW_BYTES);
+    }
+    mark(row, 1, 19);
+    u8@ row_view = row[1].bytes;
+    for (u64 mut i = 0; i < ROW; i += 1) {
+        del(row[i].bytes);
+    }
+    // the storage of the row went back: the hole that takes the count to the limit
+    assert(seen(ends, row_view) == GONE);
+    assert(seen(ends, keeper) == 17);
+    del(row);
+
+    // the next block closes the chunk, and the release of `keeper` gives the chunk back: the
+    // hole before the chunk and the hole of the row become one
+    u8 mut@ own closer = new(u8, SMALL_CHUNK);
+    closer[0] = 29;
+    u8@ keeper_view = keeper;
+    del(keeper);
+    assert(seen(ends, keeper_view) == GONE);
+    // so the count is 1 below the limit, and the storage of `closer` goes back: it stands
+    // between the state of its chunk and the storage that no block used
+    u8@ closer_view = closer;
+    del(closer);
+    assert(seen(ends, closer_view) == GONE);
+}
+
+// A small chunk before a hole goes back as a whole at the limit, because its give-back makes
+// no new hole: the chunk joins the hole after it.
+fn a_small_chunk_before_a_hole_goes_back_at_the_limit(pipe_ends ends) void {
+    // 4 blocks in 4 new small chunks. The first block closes the chunk before it, which has no
+    // live block: it joins the hole before it, and the count goes 1 below the limit.
+    u8 mut@ own first = new(u8, SMALL_CHUNK);
+    u8 mut@ own second = new(u8, SMALL_CHUNK);
+    u8 mut@ own third = new(u8, SMALL_CHUNK);
+    u8 mut@ own fourth = new(u8, SMALL_CHUNK);
+    // the chunk of `third` stands between two live chunks: it takes the count to the limit
+    third[0] = 31;
+    u8@ third_view = third;
+    del(third);
+    assert(seen(ends, third_view) == GONE);
+    // the chunk of `second` stands between a live chunk and that hole
+    second[0] = 37;
+    u8@ second_view = second;
+    del(second);
+    assert(seen(ends, second_view) == GONE);
+    // the chunk of `first` joins the hole before it and the hole after it: the count goes 1
+    // below the limit, so the storage of `fourth` goes back
+    del(first);
+    fourth[0] = 41;
+    u8@ fourth_view = fourth;
+    del(fourth);
+    assert(seen(ends, fourth_view) == GONE);
+}
+
+// The count of the holes is at the limit after the steps above: after a release between two
+// holes, one release between two live blocks goes back, and the release after it stays.
+fn the_count_of_the_holes_is_at_the_limit(pipe_ends ends, block mut@ blocks) void {
+    mark(blocks, 8, 3);
+    assert(release(ends, blocks, 8) == GONE);
+    mark(blocks, 2 * HOLES + 11, 3);
+    assert(release(ends, blocks, 2 * HOLES + 11) == GONE);
+    mark(blocks, 2 * HOLES + 13, 3);
+    assert(release(ends, blocks, 2 * HOLES + 13) == 3);
+}
+
+fn main() i32 {
+    pipe_ends ends = open_pipe();
+    block mut@ own blocks = new(block, BLOCKS);
+    for (u64 mut i = 0; i < BLOCKS; i += 1) {
+        del(blocks[i].bytes);
+        blocks[i].bytes = new(u8, BLOCK);
+    }
+    the_storage_of_a_release_goes_back_until_the_limit(ends, blocks);
+    a_block_between_two_blocks_that_stayed_stays(ends, blocks);
+    a_release_that_joins_two_holes_goes_back_at_the_limit(ends, blocks);
+    u8 mut@ own last = a_small_chunk_stays_at_the_limit_and_goes_back_below_it(ends, blocks);
+    a_small_chunk_goes_back_at_the_limit_when_it_makes_no_hole(ends, blocks, move(last));
+    a_small_chunk_before_a_hole_goes_back_at_the_limit(ends);
+    the_count_of_the_holes_is_at_the_limit(ends, blocks);
+    for (u64 mut i = 0; i < BLOCKS; i += 1) {
+        del(blocks[i].bytes);
+    }
+    del(blocks);
+    println("ok");
+    return 0;
+}

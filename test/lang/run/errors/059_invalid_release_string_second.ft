@@ -1,0 +1,45 @@
+//! run
+//! abort
+//! link: ffi/oracle.c
+//! stderr: ft:41:5: runtime error: invalid release
+//! stdout:
+//| before
+// A `del` of a `string own` tests the `.ptr` of the string (D10.9 rule 4). A trusted module
+// forges a second owner of a string here: the two words of its header stand in a local, and a
+// pointer from C gives them the type of a struct with a `string own`. The `del` of the first
+// owner releases the allocation, and a string of the same length stands between the two: its
+// storage is not the dead storage (rule 1). So the `del` of the forged owner is the runtime
+// error `invalid release`, and it does not release the later string.
+// D10.3, D10.6, D10.9
+import extern;
+import std.str;
+
+struct holder {
+    string own text;
+}
+
+// The two words of a string header.
+struct words {
+    u64 ptr;
+    u64 len;
+}
+
+// C: oracle_pass, test/lang/ffi/oracle.c.
+// gives: p itself, which is no new allocation; this declaration gives the storage the type of a
+// struct with a `string own`, to make a second owner of one allocation. writes: nothing. keeps:
+// no pointer. calls: no fort function. frees: nothing.
+extern fn oracle_pass(words* p) holder mut*;
+
+// C call oracle_pass: &raw, the address of a local, one words (D9.8 rule 2); C reads no byte.
+fn main() i32 {
+    string own first = str.dup("a string of 32 bytes, with a NUL");
+    words mut raw = {.ptr = cast(&first[0], u64), .len = first.len};
+    holder mut* forged = oracle_pass(&raw);
+    del(first);
+    string own later = str.dup("a string of 32 bytes, with a NUL");
+    println("before");
+    del(forged->text);
+    println("after ", later);
+    del(later);
+    return 0;
+}

@@ -68,7 +68,6 @@ fn want(runtime_sig.rt_entry rt, string text) void {
 
 fn the_allocation_and_comparison_entry_points_are_the_ones_of_5_1() void {
     want(runtime_sig.rt_entry.rt_alloc, "ptr @\"std.rt.alloc\"(i64, i64, ptr, i32, i32)");
-    want(runtime_sig.rt_entry.rt_free, "void @\"std.rt.free\"(ptr)");
     // `regrow` takes the old pointer, the old length, the element size, the count, the sign of
     // the count type and the source position (D12.2). `regrow_move` takes three spans, each the
     // address of a `%fort.span`, and the element size.
@@ -78,6 +77,8 @@ fn the_allocation_and_comparison_entry_points_are_the_ones_of_5_1() void {
          "void @\"std.rt.regrow_move\"(ptr, ptr, i64, ptr)");
     assert(runtime_sig.rt_entry_of("std.rt.regrow") == runtime_sig.rt_entry.rt_regrow);
     assert(runtime_sig.rt_entry_of("std.rt.regrow_move") == runtime_sig.rt_entry.rt_regrow_move);
+    // a `del` gives its position, for the runtime error `invalid release` (D10.9 rule 4)
+    want(runtime_sig.rt_entry.rt_release, "void @\"std.rt.release\"(ptr, ptr, i32, i32)");
     // `str_eq` answers a fort `bool`, which is `i1` as a value and `i8` only in memory. A
     // narrow result carries its extension attribute on both sides of the call.
     want(runtime_sig.rt_entry.rt_str_eq,
@@ -178,6 +179,11 @@ fn every_entry_point_is_found_by_its_own_mangled_name() void {
     // std.rt keeps fail_overwrite for the pinned compiler, and no check calls it, so it is an
     // ordinary fort function and no entry point (D17.11).
     assert(runtime_sig.rt_entry_of("std.rt.fail_overwrite") == runtime_sig.rt_entry.rt_none);
+    // `std.rt.free` stays in std.rt for a compiler of the bootstrap chain that calls it. This
+    // compiler calls `std.rt.release` for a `del` and for the old storage of a `regrow`, so the
+    // name `free` is no entry point of it.
+    assert(runtime_sig.rt_entry_of("std.rt.release") == runtime_sig.rt_entry.rt_release);
+    assert(runtime_sig.rt_entry_of("std.rt.free") == runtime_sig.rt_entry.rt_none);
     assert(runtime_sig.RT_ENTRY_COUNT == 29);
 }
 
@@ -185,10 +191,11 @@ fn an_arity_is_read_off_the_row_and_the_row_ends_at_its_first_gap() void {
     // The list ends at the first ir_none, so an arity is never a number kept
     // beside the row.
     assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_flush_all) == 0);
-    assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_free) == 1);
+    assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_args) == 1);
     assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_print_str) == 2);
     assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_print_enum) == 3);
     assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_panic) == 4);
+    assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_release) == 4);
     assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_alloc) == 5);
     assert(runtime_sig.rt_entry_param_count(runtime_sig.rt_entry.rt_fail_span) == 6);
     // The widest runtime entry.

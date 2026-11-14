@@ -1,0 +1,47 @@
+//! run
+//! abort
+//! link: ffi/oracle.c
+//! stderr: ft:43:5: runtime error: invalid release
+//! stdout:
+//| before
+// A second `del` of an allocation whose storage went back to the system is the runtime error
+// `invalid release`, and no memory fault (D10.9 rule 4). The program releases 32 blocks of 32
+// KiB that stand side by side, so the storage of block 1 goes back, as in
+// run/pointers/020_dead_small_read_faults.ft: a read of that storage stops the program. The
+// allocator keeps no state in dead storage (rule 1). So it knows from its own state that no live
+// allocation starts at the address, and it reads no byte there.
+// D10.3, D10.6, D10.9
+import extern;
+
+struct block {
+    u8 mut@ own bytes;
+}
+
+// C: oracle_pass, test/lang/ffi/oracle.c.
+// gives: p itself, which is no new allocation; this declaration says `own` to make a second
+// owner of one allocation. writes: nothing. keeps: no pointer. calls: no fort function.
+// frees: nothing.
+extern fn oracle_pass(u8* p) u8 mut* own;
+
+fn count() u64 {
+    return 32;
+}
+
+// C call oracle_pass: &blocks[1].bytes[0], the first of the 32768 bytes that new gave in this
+// function (D9.8 rule 3); C reads no byte.
+fn main() i32 {
+    block mut@ own blocks = new(block, count());
+    for (u64 mut i = 0; i < count(); i += 1) {
+        del(blocks[i].bytes);
+        blocks[i].bytes = new(u8, 32768);
+    }
+    u8 mut* own copy = oracle_pass(&blocks[1].bytes[0]);
+    for (u64 mut i = 0; i < count(); i += 1) {
+        del(blocks[i].bytes);
+    }
+    println("before");
+    del(copy);
+    println("after");
+    del(blocks);
+    return 0;
+}

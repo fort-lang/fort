@@ -11,11 +11,25 @@ is no case of the oracle. For each other program the script builds the program i
 mode with the same flags, and runs it with the same arguments and stdin. The two must give the
 same stdout, the same stderr and the same status.
 
-With `--events` the interpreter also reports the ownership events of each run (`--fir-events`,
-spec/ownership-design.md 3.4). The comparison of stderr leaves the event lines out, and the script
-prints the count of the programs that run with no event and each program with its events. A
-correct program makes no event, so each program with events must stand in EXPECTED_EVENTS with
-its defect and the exact lines of its events, and each program there must make them when it runs.
+One difference is no difference (spec/ownership-design.md 17, row 5; D10.9 rule 2). An access to
+dead storage gives the value that the storage held last, or the program stops with a memory
+fault. The interpreter keeps the bytes of dead storage and reports the access as the event `use
+after release`. So the script accepts a checked build that stops with SIGSEGV or SIGBUS under 3
+conditions. The directive of the program expects that signal (`//! signal:`). The interpreter
+reports that event. The stdout and the stderr of the checked build are each a start of those of
+the interpreter: a memory fault flushes no buffered output. The script does not hold the access
+at which the fault comes: the lang test of the program pins the signal and the output before it.
+
+One program differs and the difference is pinned (PINNED_DIFFERENCES): its two runs report one
+defect at two statements. For such a program the script holds the stdout and the end of the
+stderr of each run against the pinned texts, so a change of one run fails the script.
+
+The interpreter always reports the ownership events of each run (`--fir-events`,
+spec/ownership-design.md 3.4), and the comparison of stderr leaves the event lines out. With
+`--events` the script prints the count of the programs that run with no event and each program
+with its events. A correct program makes no event, so each program with events must stand in
+EXPECTED_EVENTS with its defect and the exact lines of its events, and each program there must
+make them when it runs.
 
 The script prints each program that differs, the count of the programs that run, of those that
 are outside and of those that differ, the count of the outside programs for each function, and
@@ -30,6 +44,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import sys
 import tempfile
 import time
@@ -47,48 +62,230 @@ OUTSIDE_RE = re.compile(
 )
 # A line of `fort --fir-run --fir-events` for an ownership event of the run.
 EVENT_RE = re.compile(rb"^fort: event [^\n]*\n?", re.MULTILINE)
+# The start of the event line of an access to dead storage, and the two signals of a memory fault
+# (D10.9).
+DEAD_ACCESS = "fort: event use after release "
+MEMORY_FAULTS = (-signal.SIGSEGV, -signal.SIGBUS)
+# The names of those signals in a `//! signal:` directive.
+FAULT_NAMES = ("SEGV", "BUS")
 # The programs of the corpus that make an event: each with its ownership defect and the lines of
 # its events, in the order of the run, as
-# `"programs/<name>.ft": ("<defect>", ["fort: event leak in <function> at <line>:<col>"])`.
-# Four programs make one, and they are one program at four levels. It reads a scalar local of
-# the loop run before through a kept pointer, between the zero bytes of the declaration and the
-# initializer (D10.1). No program reads those bytes with no kept pointer, because the checker
-# asks for an initializer. The program takes the loop route. On the other route, a pointer to a
-# local of a call that returned, the builds give different output until frame storage is in the
-# compiler (D10.9), so the program does not take it. The access is a `use after scope` of D10.9,
-# which the interpreter reports as `forged` until each entry of a block gives its local new
-# storage (spec/ownership-design.md 3.4).
+# `"programs/<name>.ft": ("<defect>", ["leak in @.<function> at <line>:<col>"])`. A line stands
+# without its start `fort: event `, and `@` stands for the module of the program, the name of its
+# file without `.ft`. The programs that hold the release rules of D10.9 stand here: each one
+# releases storage that is no live allocation of the runtime, or reaches dead storage, and that is
+# its defect.
+# The four programs of `run/declarations/002` to `005` stand here too, and they are one program
+# at four levels. It reads a scalar local of the loop run before through a kept
+# pointer, between the zero bytes of the declaration and the initializer (D10.1). No program
+# reads those bytes with no kept pointer, because the checker asks for an initializer. The
+# program takes the loop route. On the other route, a pointer to a local of a call that
+# returned, the builds give different output until frame storage is in the compiler (D10.9), so
+# the program does not take it. The access is a `use after scope` of D10.9, which the
+# interpreter reports as `forged` until each entry of a block gives its local new storage
+# (spec/ownership-design.md 3.4).
 STALE_SCALAR = "a read of a scalar local of the loop run before through a kept pointer"
-EXPECTED_EVENTS = {
+EVENT_TABLE = {
     "run/declarations/002_scalar_zero_bytes.ft": (
         STALE_SCALAR,
         [
-            "fort: event forged in 002_scalar_zero_bytes.peek at 31:12"
-            " through frame 002_scalar_zero_bytes.integer _5"
+            "forged in @.peek at 31:12 through frame @.integer _5",
         ],
     ),
     "run/declarations/003_scalar_zero_bytes_o0.ft": (
         STALE_SCALAR,
         [
-            "fort: event forged in 003_scalar_zero_bytes_o0.peek at 32:12"
-            " through frame 003_scalar_zero_bytes_o0.integer _5"
+            "forged in @.peek at 32:12 through frame @.integer _5",
         ],
     ),
     "run/declarations/004_scalar_zero_bytes_o2.ft": (
         STALE_SCALAR,
         [
-            "fort: event forged in 004_scalar_zero_bytes_o2.peek at 32:12"
-            " through frame 004_scalar_zero_bytes_o2.integer _5"
+            "forged in @.peek at 32:12 through frame @.integer _5",
         ],
     ),
     "run/declarations/005_scalar_zero_bytes_release.ft": (
         STALE_SCALAR,
         [
-            "fort: event forged in 005_scalar_zero_bytes_release.peek at 32:12"
-            " through frame 005_scalar_zero_bytes_release.integer _5"
+            "forged in @.peek at 32:12 through frame @.integer _5",
+        ],
+    ),
+    "run/errors/048_invalid_release_inner_pointer.ft": (
+        "a del of an address inside an allocation",
+        [
+            "invalid release in @.main at 27:5",
+        ],
+    ),
+    "run/errors/049_invalid_release_inner_border.ft": (
+        "a del of the address of byte 16 of an allocation of 64 bytes",
+        [
+            "invalid release in @.main at 25:5",
+        ],
+    ),
+    "run/errors/050_invalid_release_second.ft": (
+        "a second del of one allocation",
+        [
+            "duplicate owner in @.main at 23:35",
+            "double release in @.main at 30:5 through owner @.main _2",
+        ],
+    ),
+    "run/errors/051_invalid_release_stack_address.ft": (
+        "a del of the address of a local",
+        [
+            "invalid release in @.main at 23:5",
+        ],
+    ),
+    "run/errors/052_invalid_release_storage_of_c.ft": (
+        "a del of an allocation of C",
+        [
+            "invalid release in @.main at 19:5 through owner @.main _1",
+        ],
+    ),
+    "run/errors/053_invalid_release_large_inner.ft": (
+        "a del of an address inside a large allocation",
+        [
+            "invalid release in @.main at 25:5",
+        ],
+    ),
+    "run/errors/055_invalid_release_huge_inner.ft": (
+        "a del of an address inside an allocation with a mapping of its own",
+        [
+            "invalid release in @.main at 26:5",
+        ],
+    ),
+    "run/errors/056_invalid_release_storage_went_back.ft": (
+        "a second del of an allocation whose storage went back to the system",
+        [
+            "duplicate owner in @.main at 38:35",
+            "double release in @.main at 43:5 through owner @.main _3",
+        ],
+    ),
+    "run/errors/057_invalid_release_chunk_went_back.ft": (
+        "a second del of an allocation whose chunk went back to the system",
+        [
+            "duplicate owner in @.main at 28:35",
+            "double release in @.main at 34:5 through owner @.main _3",
+        ],
+    ),
+    "run/errors/058_invalid_release_span_inner.ft": (
+        "a del of a span owner whose pointer is an address inside an allocation",
+        [
+            "invalid release in @.main at 38:5 through owner @.main _1",
+        ],
+    ),
+    "run/errors/059_invalid_release_string_second.ft": (
+        "a second del of the storage of one string",
+        [
+            "double release in @.main at 41:5 through owner @.main _1",
+        ],
+    ),
+    "run/errors/060_invalid_release_after_the_last_byte.ft": (
+        "a del of the address after the last byte of an allocation",
+        [
+            "invalid release in @.main at 35:5",
+        ],
+    ),
+    "run/errors/061_invalid_release_global.ft": (
+        "a del of the address of a global",
+        [
+            "invalid release in @.main at 24:5",
+        ],
+    ),
+    "run/errors/062_invalid_release_string_literal.ft": (
+        "a del of the bytes of a string literal",
+        [
+            "invalid release in @.main at 25:5",
+        ],
+    ),
+    "run/errors/068_regrow_invalid_release.ft": (
+        "a regrow of a span owner whose pointer is an address inside an allocation",
+        [
+            "invalid release in @.main at 44:21 through owner @.main _1",
+        ],
+    ),
+    "run/pointers/015_dead_view_keeps_its_bytes.ft": (
+        "reads through a view of a dead allocation",
+        [
+            "use after release in @.main at 38:29 through owner @.main _2",
+            "use after release in @.main at 38:43 through owner @.main _2",
+            "use after release in @.main at 54:29 through owner @.main _2",
+            "use after release in @.main at 54:43 through owner @.main _2",
+        ],
+    ),
+    "run/pointers/016_dead_owner_slot_through_a_call.ft": (
+        "a callee stores an owner into a dead allocation",
+        [
+            "use after release in @.fill_ptr at 18:5 through owner @.main _2",
+            "use after release in @.fill_ptr at 18:5",
+            "use after release in @.fill_ptr at 19:13 through owner @.main _2",
+            "leak at exit in @.main at 47:5",
+        ],
+    ),
+    "run/pointers/017_dead_owner_slot_store.ft": (
+        "a store of an owner into a dead allocation",
+        [
+            "use after release in @.main at 19:5 through owner @.main _2",
+            "use after release in @.main at 19:5",
+            "use after release in @.main at 20:13 through owner @.main _2",
+            "leak at exit in @.main at 30:5",
+        ],
+    ),
+    "run/pointers/018_dead_large_read_faults.ft": (
+        "a read of a dead large allocation",
+        [
+            "use after release in @.main at 18:19 through owner @.main _1",
+        ],
+    ),
+    "run/pointers/019_dead_large_write_faults.ft": (
+        "a write into a dead large allocation",
+        [
+            "use after release in @.main at 16:19 through owner @.main _1",
+        ],
+    ),
+    "run/pointers/020_dead_small_read_faults.ft": (
+        "a read of a dead allocation whose storage went back to the system",
+        [
+            "use after release in @.main at 34:19",
+        ],
+    ),
+    "run/pointers/022_dead_huge_read_faults.ft": (
+        "a read of a dead allocation with a mapping of its own",
+        [
+            "use after release in @.main at 19:19 through owner @.main _1",
         ],
     ),
 }
+
+
+def event_lines(path, lines):
+    """Return `lines` of EVENT_TABLE for the program `path` as the interpreter writes them."""
+    module = pathlib.PurePath(path).stem
+    return ["fort: event " + line.replace("@", module) for line in lines]
+
+
+# EVENT_TABLE with each line as the interpreter writes it.
+EXPECTED_EVENTS = {
+    path: (defect, event_lines(path, lines)) for path, (defect, lines) in EVENT_TABLE.items()
+}
+# The programs whose two runs differ, each with the reason, then the stdout and the end of the
+# stderr of the interpreter, then those of the checked build. The two runs end with the same
+# status.
+#
+# 060: a pointer to the address after the last byte of an allocation, made an owner by C. The
+# allocator puts no header and no gap between 2 small blocks, so that address is the start of the
+# next block when the program took one. The checked build compares addresses only: the first del
+# releases the next block, and the del of the owner of that block is the invalid release. The
+# interpreter keeps the allocation of each pointer, so it reports the first del. Each run reports
+# the defect as `invalid release` and gives no dead storage to another object. A module with no
+# `import extern;` cannot write this program (spec/ownership-design.md 3.5).
+PINNED_DIFFERENCES = {
+    "run/errors/060_invalid_release_after_the_last_byte.ft": (
+        "the address after the last byte of a block is the start of the next block",
+        (b"before\n", b".ft:35:5: runtime error: invalid release\n"),
+        (b"before\nafter the first del: 16\n", b".ft:37:5: runtime error: invalid release\n"),
+    ),
+}
+
 # The longest run of a program under the interpreter in a debug build in the Linux VM was 70 s
 # (run/stdlib/095_rt_round_trip_floats.ft), so a program gets more time than the corpus gives.
 TIMEOUT = 300.0
@@ -103,7 +300,7 @@ def parse_args(argv):
     parser.add_argument("--target", required=True, help="the target triple")
     parser.add_argument("--timeout", type=float, default=TIMEOUT)
     parser.add_argument("-j", type=int, default=os.cpu_count() or 1, help="programs in parallel")
-    parser.add_argument("--events", action="store_true", help="run with --fir-events")
+    parser.add_argument("--events", action="store_true", help="hold the events of the runs")
     return parser.parse_args(argv)
 
 
@@ -116,8 +313,7 @@ def interpret(args, test, workdir):
     """Run `test` under `fort --fir-run`; return the process."""
     env = run_tests.child_env(workdir, args.target)
     argv = [args.fort, "--std-dir", args.std_dir, "--target", args.target, "--fir-run"]
-    if args.events:
-        argv.append("--fir-events")
+    argv.append("--fir-events")
     argv += checked_flags(test.flags) + [test.entry, "--"] + test.args
     return run_tests.run_process(argv, LANG, env, args.timeout, test.stdin)
 
@@ -152,6 +348,33 @@ def describe(proc):
     )
 
 
+def stops_at_dead_storage(test, want, events, got_stdout, got_stderr, want_stderr):
+    """Whether the memory fault of the checked build `want` of `test` is a result that D10.9
+    rule 2 permits. The directive of `test` expects a memory fault, the interpreter marks an
+    access to dead storage, and the output of the checked build is a start of the output of the
+    interpreter. The function does not hold the access at which the fault comes."""
+    if want.returncode not in MEMORY_FAULTS:
+        return False
+    if test.signal_name not in FAULT_NAMES:
+        return False
+    if not any(event.startswith(DEAD_ACCESS) for event in events):
+        return False
+    return got_stdout.startswith(want.stdout) and got_stderr.startswith(want_stderr)
+
+
+def holds_pinned(pinned, got, got_stderr, want, want_stderr):
+    """Whether the run `got` of the interpreter and the checked build `want` give the texts of
+    `pinned`, a row of PINNED_DIFFERENCES, and end with the same status."""
+    _, (got_out, got_end), (want_out, want_end) = pinned
+    return (
+        got.returncode == want.returncode
+        and got.stdout == got_out
+        and got_stderr.endswith(got_end)
+        and want.stdout == want_out
+        and want_stderr.endswith(want_end)
+    )
+
+
 def compare(args, test):
     """Return (verdict, detail, events) for `test`: `run`, `outside` with the function, or
     `differ`, and the event lines of the run, which the comparison of stderr leaves out."""
@@ -170,6 +393,14 @@ def compare(args, test):
             return "differ", "%s: %s" % (test.path, problem), events
         want_stderr = run_tests.drop_qemu_notice(want.stderr)
         got_stderr = EVENT_RE.sub(b"", run_tests.drop_qemu_notice(got.stderr))
+        pinned = PINNED_DIFFERENCES.get(test.path)
+        if pinned:
+            if holds_pinned(pinned, got, got_stderr, want, want_stderr):
+                return "run", "", events
+            detail = "%s: the runs do not give the pinned texts: interpreter %s; checked build %s"
+            return "differ", detail % (test.path, describe(got), describe(want)), events
+        if stops_at_dead_storage(test, want, events, got.stdout, got_stderr, want_stderr):
+            return "run", "", events
         if (got.returncode, got.stdout, got_stderr) != (want.returncode, want.stdout, want_stderr):
             return "differ", "%s: interpreter %s; checked build %s" % (
                 test.path,
@@ -218,6 +449,8 @@ def main(argv=None):
         "fir_run_test: outside by function: "
         + ", ".join("%s %d" % (name, n) for name, n in sorted(outside.items()))
     )
+    for path in sorted(set(PINNED_DIFFERENCES) & {t.path for t in selected}):
+        print("PINNED %s: %s" % (path, PINNED_DIFFERENCES[path][0]))
     if args.events:
         print(
             "fir_run_test: %d programs run with no event, %d with events"
