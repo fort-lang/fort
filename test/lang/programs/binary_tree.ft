@@ -17,7 +17,7 @@
 // An owning binary search tree keyed by string (D17): each node owns its two
 // subtrees, and every traversal borrows. `del` is shallow (D17.7), so `remove`
 // moves the children out of a node before it frees that node. `main` removes
-// each key before its deferred `del` of the root, which is then null. Insert,
+// each key before its deferred tree_drop_made, which then finds the root null. Insert,
 // lookup, min, max, height, an in-order walk, and deletion of a node with zero,
 // one and two children.
 struct tnode {
@@ -30,6 +30,22 @@ struct tnode {
 struct tree {
     tnode mut* own root;
     u64 count;
+}
+
+// Frees the subtrees of a node that the caller moves in.
+fn tnode_drop(tnode mut n) void {
+    tnode_drop_made(move(n.left));
+    tnode_drop_made(move(n.right));
+}
+
+// Ends a subtree that the caller moves in, or nothing for null.
+fn tnode_drop_made(tnode mut* own p) void {
+    if (p == null) {
+        return;
+    }
+    tnode v = move(*p);
+    del(p);
+    tnode_drop(move(v));
 }
 
 fn compare(string a, string b) i32 {
@@ -69,12 +85,16 @@ fn insert(tnode mut* own here, string key, i64 value, u64 mut* count) tnode mut*
     i32 order = compare(key, node->key);
     if (order < 0) {
         tnode mut* own left = insert(move(node->left), key, value, count);
-        del(node->left);
-        node->left = move(left);
+        tnode mut* own nv = move(left);
+        tnode mut* own old = move(node->left);
+        node->left = move(nv);
+        tnode_drop_made(move(old));
     } else if (order > 0) {
         tnode mut* own right = insert(move(node->right), key, value, count);
-        del(node->right);
-        node->right = move(right);
+        tnode mut* own nv = move(right);
+        tnode mut* own old = move(node->right);
+        node->right = move(nv);
+        tnode_drop_made(move(old));
     } else {
         node->value = value;
     }
@@ -135,25 +155,29 @@ fn inorder(tnode* here) void {
     inorder(here->right);
 }
 
-// The smallest key of a subtree, unhooked and handed back to the caller.
-fn take_min(tnode mut* own here, tnode mut* own mut* out) tnode mut* own {
+// A subtree split in two: the node of its smallest key, unhooked, and the rest.
+struct split {
+    tnode mut* own rest;
+    tnode mut* own min;
+}
+
+// Splits a subtree. It returns both parts (D17.11 form 2), so that the caller holds the smallest
+// node in a local that is not memory.
+fn take_min(tnode mut* own here) split {
     tnode mut* own mut node = move(here);
     if (node->left == null) {
         tnode mut* own right = move(node->right);
-        del(*out);
-        *out = move(node);
-        return move(right);
+        return split{move(right), move(node)};
     }
-    tnode mut* own left = take_min(move(node->left), out);
-    del(node->left);
-    node->left = move(left);
-    return move(node);
+    split mut taken = take_min(move(node->left));
+    tnode mut* own nv = move(taken.rest);
+    tnode mut* own old = move(node->left);
+    node->left = move(nv);
+    tnode_drop_made(move(old));
+    return split{move(node), move(taken.min)};
 }
 
 fn remove(tnode mut* own here, string key, bool mut* removed) tnode mut* own {
-    // Declared before the first call, which can write this local through its address.
-    tnode mut* own mut successor = null;
-    defer del(successor);
     if (here == null) {
         del(here);
         return null;
@@ -162,14 +186,18 @@ fn remove(tnode mut* own here, string key, bool mut* removed) tnode mut* own {
     i32 order = compare(key, node->key);
     if (order < 0) {
         tnode mut* own left = remove(move(node->left), key, removed);
-        del(node->left);
-        node->left = move(left);
+        tnode mut* own nv = move(left);
+        tnode mut* own old = move(node->left);
+        node->left = move(nv);
+        tnode_drop_made(move(old));
         return move(node);
     }
     if (order > 0) {
         tnode mut* own right = remove(move(node->right), key, removed);
-        del(node->right);
-        node->right = move(right);
+        tnode mut* own nv = move(right);
+        tnode mut* own old = move(node->right);
+        node->right = move(nv);
+        tnode_drop_made(move(old));
         return move(node);
     }
     *removed = true;
@@ -188,26 +216,35 @@ fn remove(tnode mut* own here, string key, bool mut* removed) tnode mut* own {
     tnode mut* own kept_left = move(node->left);
     tnode mut* own subtree = move(node->right);
     del(node);
-    tnode mut* own right = take_min(move(subtree), &successor);
-    tnode mut* own heir = move(successor);
-    del(heir->left);
-    heir->left = move(kept_left);
-    del(heir->right);
-    heir->right = move(right);
+    split mut taken = take_min(move(subtree));
+    tnode mut* own right = move(taken.rest);
+    tnode mut* own heir = move(taken.min);
+    tnode mut* own nv = move(kept_left);
+    tnode mut* own old = move(heir->left);
+    heir->left = move(nv);
+    tnode_drop_made(move(old));
+    tnode mut* own nv_right = move(right);
+    tnode mut* own old_right = move(heir->right);
+    heir->right = move(nv_right);
+    tnode_drop_made(move(old_right));
     return move(heir);
 }
 
 fn insert_into(tree mut* t, string key, i64 value) void {
     tnode mut* own root = insert(move(t->root), key, value, &t->count);
-    del(t->root);
-    t->root = move(root);
+    tnode mut* own nv = move(root);
+    tnode mut* own old = move(t->root);
+    t->root = move(nv);
+    tnode_drop_made(move(old));
 }
 
 fn remove_from(tree mut* t, string key) bool {
     bool mut removed = false;
     tnode mut* own root = remove(move(t->root), key, &removed);
-    del(t->root);
-    t->root = move(root);
+    tnode mut* own nv = move(root);
+    tnode mut* own old = move(t->root);
+    t->root = move(nv);
+    tnode_drop_made(move(old));
     if (removed) {
         t->count--;
     }
@@ -220,6 +257,21 @@ fn show(string name, tree* t) void {
     println(" (", t->count, ")");
 }
 
+// Frees the nodes of a tree that the caller moves in.
+fn tree_drop(tree mut t) void {
+    tnode_drop_made(move(t.root));
+}
+
+// Ends a tree in an allocation that the caller moves in, or nothing for null.
+fn tree_drop_made(tree mut* own p) void {
+    if (p == null) {
+        return;
+    }
+    tree v = move(*p);
+    del(p);
+    tree_drop(move(v));
+}
+
 // A read through a pointer: the owner is no local owner here (D17.21).
 fn root_of(tree* t) tnode* {
     return t->root;
@@ -228,36 +280,36 @@ fn root_of(tree* t) tnode* {
 string[9] KEYS = {"mike", "delta", "tango", "alpha", "kilo", "romeo", "zulu", "bravo", "sierra"};
 
 fn main() i32 {
-    tree mut t = {};
-    defer del(t.root);
+    tree mut* own t = new(tree);
+    defer tree_drop_made(move(t));
     for (u64 mut i = 0; i < KEYS.len; i++) {
-        insert_into(&t, KEYS[i], cast(i, i64) + 1);
+        insert_into(t, KEYS[i], cast(i, i64) + 1);
     }
-    show("built", &t);
-    println("height=", height(root_of(&t)), " min=", min_key(root_of(&t)),
-            " max=", max_key(root_of(&t)));
+    show("built", t);
+    println("height=", height(root_of(t)), " min=", min_key(root_of(t)),
+            " max=", max_key(root_of(t)));
 
     i64 mut v = 0;
-    println("kilo=", lookup(root_of(&t), "kilo", &v), " ", v);
-    println("yankee=", lookup(root_of(&t), "yankee", &v));
+    println("kilo=", lookup(root_of(t), "kilo", &v), " ", v);
+    println("yankee=", lookup(root_of(t), "yankee", &v));
 
-    insert_into(&t, "kilo", 100);
-    lookup(root_of(&t), "kilo", &v);
-    println("replaced kilo=", v, " count=", t.count);
+    insert_into(t, "kilo", 100);
+    lookup(root_of(t), "kilo", &v);
+    println("replaced kilo=", v, " count=", t->count);
 
-    println("rm zulu=", remove_from(&t, "zulu"));
-    show("no leaf", &t);
-    println("rm romeo=", remove_from(&t, "romeo"));
-    show("no one-child", &t);
-    println("rm mike=", remove_from(&t, "mike"));
-    show("no root", &t);
-    println("rm yankee=", remove_from(&t, "yankee"), " count=", t.count);
+    println("rm zulu=", remove_from(t, "zulu"));
+    show("no leaf", t);
+    println("rm romeo=", remove_from(t, "romeo"));
+    show("no one-child", t);
+    println("rm mike=", remove_from(t, "mike"));
+    show("no root", t);
+    println("rm yankee=", remove_from(t, "yankee"), " count=", t->count);
 
-    println("min=", min_key(root_of(&t)), " max=", max_key(root_of(&t)),
-            " height=", height(root_of(&t)));
+    println("min=", min_key(root_of(t)), " max=", max_key(root_of(t)),
+            " height=", height(root_of(t)));
     for (u64 mut i = 0; i < KEYS.len; i++) {
-        remove_from(&t, KEYS[i]);
+        remove_from(t, KEYS[i]);
     }
-    println("emptied count=", t.count, " root=", t.root == null);
+    println("emptied count=", t->count, " root=", t->root == null);
     return 0;
 }

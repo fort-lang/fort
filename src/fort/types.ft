@@ -160,15 +160,31 @@ fn table_drop(table mut tt) void {
         node mut* own t = move(tt.last);
         node mut* own before = move(t->made_before);
         del(t->params);
-        if (t->layout != null) {
-            del(t->layout->fields);
+        layout mut* own l = move(t->layout);
+        if (l != null) {
+            del(l->fields);
+            del(l);
         }
-        del(t->layout);
         del(t);
         tt.last = move(before);
     }
     del(tt.nodes);
     del(tt.index);
+}
+
+// Frees the fields of a layout that the caller moves in.
+fn layout_drop(layout mut l) void {
+    del(l.fields);
+}
+
+// Ends a layout in an allocation that the caller moves in, or nothing for null.
+fn layout_drop_made(layout mut* own p) void {
+    if (p == null) {
+        return;
+    }
+    layout v = move(*p);
+    del(p);
+    layout_drop(move(v));
 }
 
 // An empty table in an allocation of its own, for a function that lends the table to calls.
@@ -574,8 +590,10 @@ fn nominal(table mut* tt, type_kind kind, string name, u64 decl) node* {
     t->name = name;
     t->decl = decl;
     if (kind == type_kind.k_struct) {
-        del(t->layout);
-        t->layout = new(layout);
+        layout mut* own nv = new(layout);
+        layout mut* own old = move(t->layout);
+        t->layout = move(nv);
+        layout_drop_made(move(old));
         t->layout->state = layout_state.l_unresolved;
         t->layout->align = 1;
     }
