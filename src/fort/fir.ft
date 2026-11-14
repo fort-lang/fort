@@ -190,7 +190,7 @@ fn func_drop(func mut f) void {
     del(f.arms.items);
     u64 mut i = 0;
     while (i < f.blocks.len) {
-        del(f.blocks.items[i].statements.items);
+        block_drop(move(f.blocks.items[i]));
         i += 1;
     }
     del(f.blocks.items);
@@ -1850,6 +1850,11 @@ struct block {
     bool terminated;
 }
 
+// Frees a block that the caller moves in: its statements.
+fn block_drop(block mut b) void {
+    del(b.statements.items);
+}
+
 // `items[..len]` holds the blocks of one function in number order.
 struct block_vec {
     block mut@ own items;
@@ -1863,14 +1868,7 @@ fn blocks_reserve(block_vec mut* v) void {
         return;
     }
     u64 cap = grown_capacity(v->items.len, "fir.blocks_reserve: capacity overflow");
-    block mut@ own bigger = new(block, cap);
-    u64 mut i = 0;
-    while (i < v->len) {
-        bigger[i] = move(v->items[i]);
-        i += 1;
-    }
-    del(v->items);
-    v->items = move(bigger);
+    v->items = regrow(move(v->items), cap);
 }
 
 /// Adds an empty block and returns its number. Blocks are numbered from 0 in creation order.
@@ -2105,16 +2103,12 @@ fn module_add_function(module mut* m, func f) void {
     func_vec mut* v = &m->funcs;
     if (v->len >= v->items.len) {
         u64 cap = grown_capacity(v->items.len, "fir.module_add_function: capacity overflow");
-        func mut@ own bigger = new(func, cap);
-        u64 mut i = 0;
-        while (i < v->len) {
-            bigger[i] = move(v->items[i]);
-            i += 1;
-        }
-        del(v->items);
-        v->items = move(bigger);
+        v->items = regrow(move(v->items), cap);
     }
-    v->items[v->len] = move(f);
+    func mut* q = &v->items[v->len];
+    func old = move(*q);
+    *q = move(f);
+    func_drop(move(old));
     v->len += 1;
 }
 

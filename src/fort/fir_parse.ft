@@ -321,6 +321,8 @@ fn scan_string(scanner mut* sc) bool {
     u32 col = sc->col;
     lexer.tok_vec mut* own one = lexer.tokvec_make();
     defer lexer.tokvec_drop_made(move(one));
+    strbuf.str_buf buf = strbuf.create();
+    strbuf.str_buf msg = strbuf.create();
     lexer.lexer mut* own lx = new(lexer.lexer);
     defer lexer.drop_made(move(lx));
     *lx = lexer.lexer{
@@ -331,8 +333,8 @@ fn scan_string(scanner mut* sc) bool {
         .line = sc->line,
         .col = sc->col,
         .out = one,
-        .buf = strbuf.create(),
-        .msg = strbuf.create(),
+        .buf = move(buf),
+        .msg = move(msg),
     };
     if (!lexer.lex_string(lx)) {
         sc->clean = false;
@@ -445,9 +447,10 @@ fn scan_one(scanner mut* sc) void {
 /// diagnostic, and the tokenizer continues at the next byte; a malformed integer or string is one
 /// diagnostic too. Returns true when no diagnostic was reported.
 fn tokenize(session.session mut* s, string file, string src, ftok_vec mut* out) bool {
+    strbuf.str_buf msg = strbuf.create();
     scanner mut* own sc = new(scanner);
     defer scanner_drop_made(move(sc));
-    *sc = scanner{s, file, src, 0, 1, 1, out, strbuf.create(), true};
+    *sc = scanner{s, file, src, 0, 1, 1, out, move(msg), true};
     // the tokens of one file share the diagnostics of that file, as the lexer's do
     diag.begin_file(session.diags(s));
     while (true) {
@@ -920,6 +923,8 @@ fn parse_type_text(fir_parser mut* p, string text, diag.loc at) types.node* {
 fn parse_type_tree(fir_parser mut* p, string text, diag.loc at, u64 before) ast.node mut* {
     lexer.tok_vec mut* own toks = lexer.tokvec_make();
     defer lexer.tokvec_drop_made(move(toks));
+    strbuf.str_buf buf = strbuf.create();
+    strbuf.str_buf msg = strbuf.create();
     lexer.lexer mut* own lx = new(lexer.lexer);
     defer lexer.drop_made(move(lx));
     *lx = lexer.lexer{
@@ -929,23 +934,26 @@ fn parse_type_tree(fir_parser mut* p, string text, diag.loc at, u64 before) ast.
         .line = at.line,
         .col = at.col,
         .out = toks,
-        .buf = strbuf.create(),
-        .msg = strbuf.create(),
+        .buf = move(buf),
+        .msg = move(msg),
     };
     bool lexed = lexer.lex_all(lx);
     if (!lexed) {
         return null;
     }
+    u64 ntoks = lexer.tokvec_count(toks);
+    diag.loc none = diag.loc_make(p->file, 0, 0);
+    strbuf.str_buf pmsg = strbuf.create();
     parser.parser mut* own pp = new(parser.parser);
     defer parser.drop_made(move(pp));
     *pp = parser.parser{
         .sess = p->sess,
         .file = p->file,
         .toks = toks,
-        .ntoks = lexer.tokvec_count(toks),
+        .ntoks = ntoks,
         .arena = &p->arena,
-        .last = diag.loc_make(p->file, 0, 0),
-        .msg = strbuf.create(),
+        .last = none,
+        .msg = move(pmsg),
     };
     ast.node mut* n = parser.parse_type(pp, false);
     bool rest = parser.kind(pp) != lexer.tok_kind.eof;
@@ -2084,7 +2092,10 @@ fn parse_header(fir_parser mut* p, header mut* h) bool {
 // Makes the function of the header `h`, with the name of each parameter that has no symbol. A
 // name that differs from the name of the parameter's symbol is an error.
 fn function_of(fir_parser mut* p, header* h, fir.func mut* out) bool {
-    *out = fir.func_new(&p->pre.ck->types, h->sym, h->ty);
+    fir.func made = fir.func_new(&p->pre.ck->types, h->sym, h->ty);
+    fir.func old = move(*out);
+    *out = move(made);
+    fir.func_drop(move(old));
     u32 mut i = 0;
     while (i < h->count) {
         string name = h->names[cast(i, u64)];

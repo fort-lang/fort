@@ -313,6 +313,19 @@ fn module_entry(check.checker* ck, string owner, string name) ast.sym* {
     return null;
 }
 
+// Frees a region that the caller moves in: its bytes.
+fn region_drop(region mut r) void {
+    del(r.bytes);
+}
+
+// Frees a routine that the caller moves in: its lowered function and its offsets.
+fn routine_drop(routine mut r) void {
+    if (r.lowered != null) {
+        fir.func_drop_made(move(r.lowered));
+    }
+    del(r.offsets);
+}
+
 /// Releases every vector of `it`.
 fn free(machine mut* it) void {
     drop(move(*it));
@@ -323,19 +336,11 @@ fn free(machine mut* it) void {
 // shadow state. No part of it reads the checker or the module that the machine points to.
 fn drop(machine mut it) void {
     for (u64 mut i = 0; i < it.regions.len; i++) {
-        del(it.regions.items[i].bytes);
+        region_drop(move(it.regions.items[i]));
     }
     del(it.regions.items);
     for (u64 mut i = 0; i < it.routines.len; i++) {
-        routine mut* r = &it.routines.items[i];
-        if (r->lowered != null) {
-            // `del` is shallow: the function moves out whole, and its vectors go after it.
-            fir.func mut* own lowered = move(r->lowered);
-            fir.func kept = move(*lowered);
-            del(lowered);
-            fir.func_drop(move(kept));
-        }
-        del(r->offsets);
+        routine_drop(move(it.routines.items[i]));
     }
     del(it.routines.items);
     del(it.frames.items);
@@ -509,14 +514,13 @@ fn make_region(machine mut* it, region_kind kind, u64 size, bool readonly) u64 {
     region_vec mut* v = &it->regions;
     if (v->len == v->items.len) {
         u64 cap = fir.grown_capacity(v->items.len, "fir.interpreter: region capacity overflow");
-        region mut@ own bigger = new(region, cap);
-        for (u64 mut i = 0; i < v->len; i++) {
-            bigger[i] = move(v->items[i]);
-        }
-        del(v->items);
-        v->items = move(bigger);
+        v->items = regrow(move(v->items), cap);
     }
-    v->items[v->len] = region{base, size, move(bytes), kind, true, readonly, 0};
+    region nv = region{base, size, move(bytes), kind, true, readonly, 0};
+    region mut* q = &v->items[v->len];
+    region old = move(*q);
+    *q = move(nv);
+    region_drop(move(old));
     v->len += 1;
     it->next = base + room + REGION_GAP;
     return base;
@@ -726,7 +730,9 @@ fn write_bytes(machine mut* it, u64 addr, u8@ from) void {
 // state keeps the ranges that it needs itself.
 fn kill_region(machine mut* it, u64 i) void {
     region_vec mut* v = &it->regions;
-    del(v->items[i].bytes);
+    // The entry stays for region_at, so only its bytes move out.
+    u8 mut@ own bytes = move(v->items[i].bytes);
+    del(bytes);
     v->items[i].live = false;
     it->hit = NONE;
     if (i + 1 == v->len) {
@@ -741,7 +747,11 @@ fn kill_region(machine mut* it, u64 i) void {
     for (u64 mut k = 0; k < v->len; k++) {
         if (v->items[k].live) {
             if (kept != k) {
-                v->items[kept] = move(v->items[k]);
+                region nv = move(v->items[k]);
+                region mut* q = &v->items[kept];
+                region old = move(*q);
+                *q = move(nv);
+                region_drop(move(old));
             }
             kept += 1;
         }
@@ -820,14 +830,12 @@ fn find_routine(machine mut* it, ast.sym* s) u64 {
     routine_vec mut* v = &it->routines;
     if (v->len == v->items.len) {
         u64 cap = fir.grown_capacity(v->items.len, "fir.interpreter: routine capacity overflow");
-        routine mut@ own bigger = new(routine, cap);
-        for (u64 mut i = 0; i < v->len; i++) {
-            bigger[i] = move(v->items[i]);
-        }
-        del(v->items);
-        v->items = move(bigger);
+        v->items = regrow(move(v->items), cap);
     }
-    v->items[v->len] = move(r);
+    routine mut* q = &v->items[v->len];
+    routine old = move(*q);
+    *q = move(r);
+    routine_drop(move(old));
     v->len += 1;
     put_key(&it->syms, cast(s, u64), v->len - 1);
     return v->len - 1;
