@@ -40,7 +40,9 @@ bullet at a time and without a rewrite.
   tests of `--check` over the fixture `test/mutate/strict_table.json`, and `drop-fields`
   (`test/drop_fields_test.py`: no function of src/fort, src/lsp, std, test/fort, test/lsp or
   test/library dels the storage below a field or an element of a span whose type has a value drop,
-  with a control tree);
+  with a control tree), and `runtime-table` (`test/runtime_table_test.py`: each runtime entry that
+  `fir_llvm.ft` and `gen.ft` call has the name, the parameter types, the result type and the
+  `noreturn` state of its definition in `std/rt.ft`, with a control tree; census row E48);
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fir-run`,
   `library-interface`, `library-artifact`, `library-use`, `library-cache`, `fixpoint`,
   `leak-sites`, `ir-flags` (6 below), `tty`, `stack_depth` and `lsp-binary`; bootstrap0 has none,
