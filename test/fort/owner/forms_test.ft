@@ -1,21 +1,21 @@
 //! run
 //! flags: -I ../../src -I support
 //! stdout:
-//| cells 539: programs 234, wait for `regrow` 77, do not apply 228
+//| cells 539: programs 284, do not apply 255
 //| do not apply 63: the result goes into a declaration: another place takes it by form 1
 //| do not apply 56: the literal goes into new storage: a new local or a fresh `new`
 //| do not apply 70: the form names a pointer local `p` and the place `*p`
 //| do not apply 6: a span in a field, a global or an element moves into a local first (form 5)
-//| do not apply 33: no `new` takes an `own` span or an `own` string as its type
+//| do not apply 60: no `new` takes an `own` span or an `own` string as its type
 //| swap: programs 75, pass 65, known failures 10
 //| return the value: programs 14, pass 7, known failures 7
 //| hoist the call: programs 21, pass 16, known failures 5
 //| drop_made: programs 5, pass 5, known failures 0
 //| del(s, T_drop): programs 50, pass 40, known failures 10
 //| T_drop(move(x)): programs 69, pass 60, known failures 9
-//| regrow(move(s), n): waits for `regrow`
-//| pass 193, known failures 41
-//| class A 38: the last release is a call, and the place is a memory local or a field of one
+//| regrow(move(s), n): programs 50, pass 40, known failures 10
+//| pass 233, known failures 51
+//| class A 48: the last release is a call, and the place is a memory local or a field of one
 //| class B 3: the declaration of a memory local after a call reports an overwrite
 /// The form corpus: each form of the form catalogue (D17.11, spec/ownership-design.md 16) in each
 /// storage class and for each type that the form can name. FORMS, CLASSES and SHAPES hold the three
@@ -29,9 +29,8 @@
 //
 // The counts of the product, which the first line of the output holds:
 //   539 cells: 7 forms x 11 storage classes x 7 types
-//   234 cells have a program: 193 pass, and KNOWN lists 41
-//    77 cells wait for `regrow`, which the compiler does not have
-//   228 cells do not apply, each for the reason that reason_of gives (REASONS)
+//   284 cells have a program: 233 pass, and KNOWN lists 51
+//   255 cells do not apply, each for the reason that reason_of gives (REASONS)
 //
 // The test takes two optional arguments for a person. `list` prints each cell that an owner rule
 // rejects as a row of KNOWN. `dump <form> <class> <type>` prints the program of the cell at these
@@ -57,10 +56,9 @@ import std.strbuf;
 
 // ---- the three lists ---------------------------------------------------------------------------
 
-// A form of the catalogue. `waits` names what the compiler lacks for the form, or it is empty.
+// A form of the catalogue.
 struct form {
     string name;
-    string waits;
 }
 
 u64 FORM_SWAP = 0;
@@ -69,16 +67,17 @@ u64 FORM_HOIST = 2;
 u64 FORM_DROP_MADE = 3;
 u64 FORM_DEL_SPAN = 4;
 u64 FORM_DROP = 5;
+u64 FORM_REGROW = 6;
 
 // The 7 forms, in the order of the catalogue.
 form[7] FORMS = {
-    form{"swap", ""},
-    form{"return the value", ""},
-    form{"hoist the call", ""},
-    form{"drop_made", ""},
-    form{"del(s, T_drop)", ""},
-    form{"T_drop(move(x))", ""},
-    form{"regrow(move(s), n)", "regrow"},
+    form{"swap"},
+    form{"return the value"},
+    form{"hoist the call"},
+    form{"drop_made"},
+    form{"del(s, T_drop)"},
+    form{"T_drop(move(x))"},
+    form{"regrow(move(s), n)"},
 };
 
 // A storage class: where the place `P` of a cell is. A program is `decls`, then `head`, `setup`,
@@ -207,6 +206,8 @@ string[6] REASONS = {
 // `new`. A store of the literal into a place that holds a value is form 1.
 // `drop_made`: the text of the form names the pointer local `p`, so the row has the place `*p`.
 // `T_drop(move(x))`: the row has each class, and each cell drops the place with no local between.
+// `regrow(move(s), n)`: the row has each class, as the row of `del(s, T_drop)` has. The place
+// holds a span of `T`, and the example of the catalogue regrows a field in place.
 u8[77] APPLIES = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // swap
     0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, // return the value
@@ -229,8 +230,8 @@ fn moves_first(u64 k) bool {
 // applies. Reasons 4 and 5 read the type.
 //
 // Reason 5: form 4 allocates one `T`, and an element of an `own` span needs a `new` of its
-// element type. Form 5 allocates a span of `T`. Its place holds an `own` span, which is no
-// element of a span.
+// element type. Forms 5 and 7 allocate a span of `T`. Their place holds an `own` span, which is
+// no element of a span.
 // Reason 4: the drop statement of a span of owners is form 5. So form 6 for that type has no
 // direct drop in a place that moves_first names.
 fn reason_of(u64 f, u64 k, u64 t) u64 {
@@ -239,10 +240,11 @@ fn reason_of(u64 f, u64 k, u64 t) u64 {
         return listed;
     }
     bool element = k == CLASS_SPAN_ELEMENT;
-    if ((f == FORM_DROP_MADE || f == FORM_DEL_SPAN || element) && !SHAPES[t].allocates) {
+    bool spans = f == FORM_DEL_SPAN || f == FORM_REGROW;
+    if ((f == FORM_DROP_MADE || spans || element) && !SHAPES[t].allocates) {
         return 5;
     }
-    if (f == FORM_DEL_SPAN && element) {
+    if (spans && element) {
         return 5;
     }
     if (f == FORM_DROP && t == SHAPE_SPAN && moves_first(k)) {
@@ -387,6 +389,16 @@ string[9] HOIST_NEW = {
     "}",
 };
 
+// Form 7 at the place `#P`: the count is a local, as `cap` is in the example of the catalogue,
+// and the result goes back into the place. The span of SPANS has 2 elements, so the first
+// `regrow` gives it 2 new elements, and the second gives it as many elements as it has (D12.2).
+string[4] REGROW = {
+    "    {",
+    "        u64 n = 4;",
+    "        #P = regrow(move(#P), n);",
+    "    }",
+};
+
 // Form 4, in the words of the catalogue. The object takes its value by a swap at `*p`.
 string[13] DROP_MADE = {
     "fn drop_made(#T mut* own p) void {",
@@ -404,8 +416,8 @@ string[13] DROP_MADE = {
     "}",
 };
 
-// The span of form 5 for the element type `#T`: `spans` gives a span of 2 elements whose second
-// element holds a value by a swap at `*q`, and `spans_drop` is its value drop.
+// The span of forms 5 and 7 for the element type `#T`: `spans` gives a span of 2 elements whose
+// second element holds a value by a swap at `*q`, and `spans_drop` is its value drop.
 string[10] SPANS = {
     "fn spans() #T mut@ own {",
     "    #T mut@ own s = new(#T, 2);",
@@ -420,7 +432,7 @@ string[10] SPANS = {
 };
 
 // The type `T` of a program: the type `of`, or the span `own` of it when `spans`. The second is
-// the type of the place of form 5, whose drop statement is `del(x, T_drop)`.
+// the type of the place of forms 5 and 7, whose drop statement is `del(x, T_drop)`.
 struct value {
     shape* of;
     bool spans;
@@ -443,7 +455,8 @@ fn write_drop(strbuf.str_buf mut* b, value* v, string name) void {
 
 // Appends `text` for the type `v` and the place `place`. `#T` is the type, and `#Z` is its value
 // with no owner. `#M` is a call that makes a value, and `#N` is the name of the value drop. `#P`
-// is the place, `#S` is a swap at the place, and `#Q` is the swap of SWAP_AT. `#[name]` and
+// is the place, `#S` is a swap at the place, `#Q` is the swap of SWAP_AT, and `#G` is the regrow
+// of REGROW at the place. `#[name]` and
 // `#<name>` are the statement that drops the place `name`, and `#D` drops the place of the cell.
 // `#O` moves the value of the place into a local and drops the local. `#H` opens `main` and `#R`
 // closes it. `#W` declares the struct `wrap` with a field `f` of the type.
@@ -480,6 +493,8 @@ fn expand(strbuf.str_buf mut* b, string text, value* v, string place) void {
             expand_lines(b, SWAP[..], v, place);
         } else if (key == 'Q') {
             expand_lines(b, SWAP_AT[..], v, place);
+        } else if (key == 'G') {
+            expand_lines(b, REGROW[..], v, place);
         } else if (key == 'D') {
             write_drop(b, v, place);
         } else if (key == 'H') {
@@ -517,17 +532,15 @@ fn expand_lines(strbuf.str_buf mut* b, string@ lines, value* v, string place) vo
     }
 }
 
-// Appends the program of the storage class `k` for the type `v`, with `swaps` swaps at the place
-// after its setup. `direct` ends the place with the direct drop of the class. The local `x` of
-// the class `local` then has a read before that drop, as the example of form 6 has.
-fn write_class(strbuf.str_buf mut* b, u64 k, value* v, u64 swaps, bool direct) void {
+// Appends the program of the storage class `k` for the type `v`, with the statements `steps` at
+// the place after its setup. `direct` ends the place with the direct drop of the class. The local
+// `x` of the class `local` then has a read before that drop, as the example of form 6 has.
+fn write_class(strbuf.str_buf mut* b, u64 k, value* v, string steps, bool direct) void {
     storage* c = &CLASSES[k];
     expand(b, c->decls, v, c->place);
     expand(b, c->head, v, c->place);
     expand(b, c->setup, v, c->place);
-    for (u64 mut n = 0; n < swaps; n++) {
-        expand(b, "#S\n", v, c->place);
-    }
+    expand(b, steps, v, c->place);
     if (direct && k == CLASS_LOCAL) {
         strbuf.append(b, "    ");
         strbuf.append(b, v->of->read);
@@ -546,14 +559,15 @@ fn write_class(strbuf.str_buf mut* b, u64 k, value* v, u64 swaps, bool direct) v
 // `t`. The cell applies.
 //
 // Form 1 has 2 swaps after the setup, so a swap meets a value that a swap stored. Form 5 is the
-// program of the class for a span, whose teardown is `del(s, T_drop)`. Form 6 is the program of
-// the class with its direct drop.
+// program of the class for a span, whose teardown is `del(s, T_drop)`. Form 7 is that program
+// with 2 regrows after the setup, so a `regrow` meets a value that a `regrow` stored. Form 6 is
+// the program of the class with its direct drop.
 fn write_cell(strbuf.str_buf mut* b, u64 f, u64 k, u64 t) void {
     strbuf.clear(b);
     run_env.join(b, PRELUDE[..]);
     value mut v = value{&SHAPES[t], false};
     if (f == FORM_SWAP) {
-        write_class(b, k, &v, 2, false);
+        write_class(b, k, &v, "#S\n#S\n", false);
     } else if (f == FORM_RETURN && k == CLASS_MEMORY_LOCAL) {
         expand_lines(b, RETURN_MEMORY[..], &v, "");
         strbuf.push(b, '\n');
@@ -561,9 +575,9 @@ fn write_cell(strbuf.str_buf mut* b, u64 f, u64 k, u64 t) void {
         expand_lines(b, RETURN[..], &v, "");
         strbuf.push(b, '\n');
     } else if (f == FORM_HOIST && k == CLASS_LOCAL) {
-        write_class(b, CLASS_LOCAL_FIELD, &v, 0, false);
+        write_class(b, CLASS_LOCAL_FIELD, &v, "", false);
     } else if (f == FORM_HOIST && k == CLASS_MEMORY_LOCAL) {
-        write_class(b, CLASS_MEMORY_FIELD, &v, 0, false);
+        write_class(b, CLASS_MEMORY_FIELD, &v, "", false);
     } else if (f == FORM_HOIST && k == CLASS_POINTER) {
         expand_lines(b, HOIST_NEW[..], &v, "");
         strbuf.push(b, '\n');
@@ -574,9 +588,14 @@ fn write_cell(strbuf.str_buf mut* b, u64 f, u64 k, u64 t) void {
         expand_lines(b, SPANS[..], &v, "*q");
         strbuf.push(b, '\n');
         v.spans = true;
-        write_class(b, k, &v, 0, false);
+        write_class(b, k, &v, "", false);
     } else if (f == FORM_DROP) {
-        write_class(b, k, &v, 0, true);
+        write_class(b, k, &v, "", true);
+    } else if (f == FORM_REGROW) {
+        expand_lines(b, SPANS[..], &v, "*q");
+        strbuf.push(b, '\n');
+        v.spans = true;
+        write_class(b, k, &v, "#G\n#G\n", false);
     } else {
         panic("forms_test.write_cell: the cell has no program");
     }
@@ -788,8 +807,9 @@ struct known {
 }
 
 // The count of the rows of KNOWN. A fix of the compiler removes rows and lowers this count. No
-// change adds a row: a new failing cell is a defect of that change.
-u64 KNOWN_COUNT = 41;
+// change adds a row for a cell that had a program before it: a new failure of such a cell is a
+// defect of that change.
+u64 KNOWN_COUNT = 51;
 
 // Class A: the last statement that releases the value is a call: `T_drop(move(x))`, or
 // `del(s, T_drop)`, which calls the drop. A call kills each fact about a memory local (D17.11,
@@ -882,6 +902,26 @@ known[KNOWN_COUNT] KNOWN = {
           "79:5: leak: cannot prove 'w.f.b.data' is empty at this exit"},
     known{"A", "T_drop(move(x))", "field of a memory local", "fixed array of owners", "error",
           "79:5: leak: cannot prove 'w.f[0]' is empty at this exit"},
+    known{"A", "regrow(move(s), n)", "memory local", "own pointer", "error",
+          "103:5: leak: cannot prove 'x' is empty at this exit"},
+    known{"A", "regrow(move(s), n)", "memory local", "struct with one owner", "error",
+          "103:5: leak: cannot prove 'x' is empty at this exit"},
+    known{"A", "regrow(move(s), n)", "memory local", "struct with 2 owners", "error",
+          "103:5: leak: cannot prove 'x' is empty at this exit"},
+    known{"A", "regrow(move(s), n)", "memory local", "nested aggregate", "error",
+          "103:5: leak: cannot prove 'x' is empty at this exit"},
+    known{"A", "regrow(move(s), n)", "memory local", "fixed array of owners", "error",
+          "103:5: leak: cannot prove 'x' is empty at this exit"},
+    known{"A", "regrow(move(s), n)", "field of a memory local", "own pointer", "error",
+          "103:5: leak: cannot prove 'w.f' is empty at this exit"},
+    known{"A", "regrow(move(s), n)", "field of a memory local", "struct with one owner", "error",
+          "103:5: leak: cannot prove 'w.f' is empty at this exit"},
+    known{"A", "regrow(move(s), n)", "field of a memory local", "struct with 2 owners", "error",
+          "103:5: leak: cannot prove 'w.f' is empty at this exit"},
+    known{"A", "regrow(move(s), n)", "field of a memory local", "nested aggregate", "error",
+          "103:5: leak: cannot prove 'w.f' is empty at this exit"},
+    known{"A", "regrow(move(s), n)", "field of a memory local", "fixed array of owners", "error",
+          "103:5: leak: cannot prove 'w.f' is empty at this exit"},
 };
 
 // The row of KNOWN for the cell of `f`, `k` and `t`, or null.
@@ -932,7 +972,6 @@ fn buffers_drop_made(buffers mut* own p) void {
 // The counts of a run.
 struct counts {
     u64 cells;
-    u64 waiting;
     u64[6] skipped;
     u64[7] programs;
     u64[7] passes;
@@ -1015,7 +1054,7 @@ fn main(string@ args) i32 {
         u64 f = position(args[2], FORMS.len);
         u64 k = position(args[3], CLASSES.len);
         u64 t = position(args[4], SHAPES.len);
-        if (FORMS[f].waits.len != 0 || reason_of(f, k, t) != 0) {
+        if (reason_of(f, k, t) != 0) {
             eprintln("forms_test: the cell has no program");
             return 1;
         }
@@ -1036,9 +1075,7 @@ fn main(string@ args) i32 {
             for (u64 mut t = 0; t < SHAPES.len; t++) {
                 u64 reason = reason_of(f, k, t);
                 n.cells += 1;
-                if (FORMS[f].waits.len != 0) {
-                    n.waiting += 1;
-                } else if (reason != 0) {
+                if (reason != 0) {
                     n.skipped[reason] += 1;
                 } else {
                     run_one(c, bf, f, k, t, listing, &n);
@@ -1061,18 +1098,13 @@ fn main(string@ args) i32 {
     for (u64 mut r = 1; r < REASONS.len; r++) {
         skipped += n.skipped[r];
     }
-    println("cells ", n.cells, ": programs ", programs, ", wait for `regrow` ", n.waiting,
-            ", do not apply ", skipped);
+    println("cells ", n.cells, ": programs ", programs, ", do not apply ", skipped);
     for (u64 mut r = 1; r < REASONS.len; r++) {
         println("do not apply ", n.skipped[r], ": ", REASONS[r]);
     }
     for (u64 mut f = 0; f < FORMS.len; f++) {
-        if (FORMS[f].waits.len != 0) {
-            println(FORMS[f].name, ": waits for `", FORMS[f].waits, "`");
-        } else {
-            println(FORMS[f].name, ": programs ", n.programs[f], ", pass ", n.passes[f],
-                    ", known failures ", n.failures[f]);
-        }
+        println(FORMS[f].name, ": programs ", n.programs[f], ", pass ", n.passes[f],
+                ", known failures ", n.failures[f]);
     }
     println("pass ", passes, ", known failures ", failures);
     for (u64 mut d = 0; d < DEFECTS.len; d++) {

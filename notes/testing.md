@@ -1182,9 +1182,10 @@ bullet at a time and without a rewrite.
   holds a count: 3 of the 7 operations on an inner owner vacate it. A new operation on an inner
   owner changes that line. It judges a batch of functions that it writes: each rule that the typed
   family does not reach has a function there.
-  `tools/mutations/generator.json` holds 108 rows of the generator and of the judgement in 2 stages:
-  `count_test.ft` with `judgement_test.ft` and `known_stop_test.ft`, then `part_6_test.ft` for the 2
-  rows that change `run_part`. On 2026-11-13 each of the 91 rows of that day changed a stage on a
+  `tools/mutations/generator.json` holds 111 rows of the generator, of the judgement and of the
+  form corpus in 3 stages: `count_test.ft` with `judgement_test.ft` and `known_stop_test.ft`, then
+  `part_6_test.ft` for the 2 rows that change `run_part`, then `forms_test.ft` for the 2 rows of
+  the cells of form 7. On 2026-11-13 each of the 91 rows of that day changed a stage on a
   host with the debug preset: 6 rows the exit status of a test, and 85 rows only its stdout. On
   2026-11-14, 12 rows, 6 of them new, and then 12 more, 11 of them new, ran through `tools/mutate.py
   --only` on the named native host, and each gave a `FAIL` line of `test/lang/run_tests.py`. So the
