@@ -1,17 +1,21 @@
 //! run
 //! stdout:
-//| local 1 2 len 0
-//| rvalue 10 11 12
-//| moved 20
-//| deferred early 30 31
-//| deferred late 40 41
-//| pointer 50 51
-//| cleared 55
-//| field 60
-//| frozen 70 71
-//| tree 1 2 3 4 5
+//| local 0 0 1 2 len 0
+//| rvalue 0 0 0 10 11 12
+//| moved 0 20
+//| deferred early 0 0 30 31
+//| deferred late 0 0 40 41
+//| pointer 0 0 50 51
+//| cleared 0 55
+//| field 0 60
+//| frozen 0 0 70 71
+//| tree 0 0 0 0 0 1 2 3 4 5
 //| owners 2
-//| loop 3 exits 1 2
+//| loop 6 exits 1 2
+// In the expected lines, each leading 0 comes from a swap that stores an element (D17.11): `made`
+// swaps each element of its fresh span and `main` swaps each element of `tree`, and each swap gives
+// `node_drop` the empty node that the slot held. The numbers after the zeros are the elements that
+// each `del` gives the drop, in order. `loop` counts 3 such drops and the 3 of the `del`s.
 // Each form of `del(s, d)` (D17.9): a local span, which holds the zero value after the `del`, an
 // rvalue, `move(x)`, a deferred `del` that two exits expand, a span field through a pointer, which
 // leaves the zero value in the field, a
@@ -59,7 +63,11 @@ fn leaf(i32 id) node {
 fn made(u64 n, i32 base) node mut@ own {
     node mut@ own s = new(node, n);
     for (u64 mut i = 0; i < n; i += 1) {
-        s[i] = leaf(base + cast(i, i32));
+        node made = leaf(base + cast(i, i32));
+        node mut* at = &s[i];
+        node old = move(*at);
+        *at = move(made);
+        node_drop(move(old));
     }
     return s;
 }
@@ -138,8 +146,16 @@ fn main() i32 {
     frozen(made(2, 70));
     report("frozen");
     node mut@ own tree = new(node, 2);
-    tree[0] = node{.id = 1, .kids = made(2, 2)};
-    tree[1] = node{.id = 4, .kids = made(1, 5)};
+    node left = node{.id = 1, .kids = made(2, 2)};
+    node mut* at_left = &tree[0];
+    node old_left = move(*at_left);
+    *at_left = move(left);
+    node_drop(move(old_left));
+    node right = node{.id = 4, .kids = made(1, 5)};
+    node mut* at_right = &tree[1];
+    node old_right = move(*at_right);
+    *at_right = move(right);
+    node_drop(move(old_right));
     del(tree, node_drop);
     report("tree");
     i32 mut* own mut@ own owners = new(i32 mut* own, 2);
