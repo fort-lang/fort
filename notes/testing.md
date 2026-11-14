@@ -684,6 +684,28 @@ bullet at a time and without a rewrite.
   `green` and `green_func` accept a flow violation, and `flow_green` accepts none. A green `.fir`
   file keeps every rule, because the pass `verify` runs them all. `//! panic:` matches a
   substring, so a red file whose text passes 100 columns drops the prefix `fir.verify: ` (T-233).
+  **The premise rules V14, V15 and V16 run last, and a hand-written text of an ownership suite
+  may break them.** `flow_green` and a green `.fir` file keep them, and so do the FIR corpus and
+  the pass suites. The interpreter suite has one loose text, `LIVE_OVER`: a `live` in an open
+  scope. The subject of many cases of the ownership suites is a
+  state that the lowering never writes: a `return` with a live owner, a second store into `_0`.
+  A text whose functions keep the 16 rules goes through a strict helper: `pass_env.verified`,
+  `pass_env.verified_each` or `run_env.parse_made`. A text with such a state goes through a
+  loose helper: `pass_env.breaks_premise`, `pass_env.breaks_premises` or
+  `run_env.parse_breaks_made`. A loose helper holds V1 to V13 for each function, and it holds
+  the count of the functions that break V14, V15 or V16, which the test function of the text
+  states. It stops the test when the count is 0 and when the count differs. So a change that
+  adds a premise violation to a text, or that removes one, fails the suite. `parse_batch` of
+  `owner/oracle_test.ft` holds the count `FIR_BREAKS` of its one FIR batch in the same way.
+  Write no count of these functions into a shared file: the test functions hold them.
+  `test/fort/fir_lower_premise_test.ft` holds the rules on functions that the lowering writes: it
+  removes or repeats one statement at a time and holds the rule that the verifier reports, so a
+  case fails when the lowering changes the count of its `dead` statements.
+  `tools/mutations/verify_fort.json` holds the mutants of the three rules. Its first stage builds
+  `fir_verify_test` with the pinned compiler `bootstrap-2` from the source with the mutant. A
+  compiler with the mutant runs the verifier on each function of `std`, and some mutants make it
+  refuse one, so the second stage alone gives a compiler abort and no failed test. The build step
+  of the table fails when the pinned compiler is absent.
   **The pass `run` writes a report in place of the module** (`test/fir/run/`, `spec/fir.md`
   16.3): what the run wrote to the descriptors 1 and 2, then one line for its end. The tests run
   with the real `--std-dir`, so a failed check writes the message of `std.rt`. `run_tests.py
@@ -868,7 +890,9 @@ bullet at a time and without a rewrite.
   the case of the row. A second flow puts the mutant only into the modules that the test imports.
   There, a compiler with no mutant builds the test from a tree with the mutant in `src/`. In that
   flow, 1 of the 8 rows has a new case that goes red by itself: `string_owner` for
-  D17.1-reference-string. No checked-in tool runs that flow.
+  D17.1-reference-string. The table of the 8 rows does not run that flow. The first stage of
+  `tools/mutations/verify_fort.json` runs it for the suite of the verifier: the pinned compiler
+  `bootstrap-2` builds the suite from the tree with the mutant.
   `fir.term_is_abort` gives the flag of an abort block. The case `before_check` of the gate holds a
   block that ends in a `check`, and `abort_block` one that ends in a `panic`. The FIR case
   `leak_abort` holds a block that ends in a `trap`, and the case `unreachable` of the gate one that

@@ -1,0 +1,61 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| pass_env: a text of 0, of 1 and of 2 violations
+//| run_env: a text of 0, of 1 and of 2 violations
+/// The helpers of pass_env and run_env that hold the premise rules V14 to V16 of the verifier for
+/// a hand-written text (spec/fir.md 10). A strict helper accepts a text whose functions keep the
+/// 16 rules. A loose helper accepts a text when the count of its functions that break a premise
+/// rule is the count that the test states. The tests `premise_helper_*_abort_test.ft` hold that
+/// each helper stops the test for each other text.
+import fort.fir;
+import lower_env;
+import pass_env;
+import premise_env;
+import run_env;
+
+// The helpers of pass_env accept a text with its count.
+fn pass_env_accepts_each_count() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    fir.module mut* own keep = pass_env.parse_made(e, premise_env.PRELUDE[..],
+                                                  premise_env.KEEP[..]);
+    defer fir.module_drop_made(move(keep));
+    pass_env.verified(e, fir.module_function_at(keep, 0), "the verifier refuses KEEP");
+    pass_env.verified_each(e, keep, "the verifier refuses KEEP");
+    pass_env.verified_with(e, keep, 0, "the verifier refuses KEEP");
+    fir.module mut* own mixed = pass_env.parse_made(e, premise_env.PRELUDE[..],
+                                                    premise_env.MIXED[..]);
+    defer fir.module_drop_made(move(mixed));
+    pass_env.verified(e, fir.module_function_at(mixed, 0), "the verifier refuses MIXED");
+    pass_env.breaks_premise(e, fir.module_function_at(mixed, 1), "the verifier refuses MIXED");
+    pass_env.breaks_premises(e, mixed, 1, "the verifier refuses MIXED");
+    pass_env.verified_with(e, mixed, 1, "the verifier refuses MIXED");
+    fir.module mut* own both = pass_env.parse_made(e, premise_env.PRELUDE[..],
+                                                  premise_env.BOTH[..]);
+    defer fir.module_drop_made(move(both));
+    pass_env.breaks_premises(e, both, 2, "the verifier refuses BOTH");
+    pass_env.verified_with(e, both, 2, "the verifier refuses BOTH");
+    println("pass_env: a text of 0, of 1 and of 2 violations");
+}
+
+// The helpers of run_env accept a text with its count.
+fn run_env_accepts_each_count() void {
+    run_env.env mut* own e = run_env.make();
+    defer run_env.drop_made(move(e));
+    run_env.check(e, premise_env.PRELUDE[..]);
+    fir.module mut* own keep = run_env.parse_made(e, premise_env.KEEP[..]);
+    defer fir.module_drop_made(move(keep));
+    fir.module mut* own mixed = run_env.parse_breaks_made(e, premise_env.MIXED[..], 1);
+    defer fir.module_drop_made(move(mixed));
+    fir.module mut* own both = run_env.parse_breaks_made(e, premise_env.BOTH[..], 2);
+    defer fir.module_drop_made(move(both));
+    assert(keep->funcs.len == 1 && mixed->funcs.len == 2 && both->funcs.len == 2);
+    println("run_env: a text of 0, of 1 and of 2 violations");
+}
+
+fn main() i32 {
+    pass_env_accepts_each_count();
+    run_env_accepts_each_count();
+    return 0;
+}
