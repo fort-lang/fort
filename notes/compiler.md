@@ -962,9 +962,10 @@ came here.
   (`fail/ownership/069`). Time a change of the pass with
   five interleaved `fort --check src/fort/main.ft` runs of main and of the change
   (`notes/environment.md` 1); the limit is +0.10 s (`spec/ownership-design.md` 9).
-  A memory owner is unknown after each call, so its `del` must come after the last call of the
-  function. Register the `defer del` of a memory owner before every other `defer`, so that it runs
-  last, after the last call (D17.20; `test/lang/run/stdlib/053_io_open_errors.ft`).
+  A memory owner is unknown after each call that a path from its address reaches. So its `del`
+  must come after the last such call of the function. Register the `defer del` of a memory owner
+  before every other `defer`, so that it runs last, after the last call (D17.20;
+  `test/lang/run/stdlib/053_io_open_errors.ft`).
 - **The emptiness pass proves part 2 of the leak rule, and only reports it** (D17.20,
   `spec/fir.md` 11, Inner owners). `owner.prover.find_inners` lists in `proof.inners` each `del` of
   a `T* own` and each `cast` that carries `own` from one to a pointer to another type, where `T`
@@ -1062,8 +1063,18 @@ came here.
   = move(b);` was unproved, because no gen rule makes a place through `_a` empty. A declaration is a
   store into a named local whose bit in the ended dataflow is set (`mark_ended_wholes`), so the
   facts, which give a named local no entry fact, do not decide it. A call keeps each fact through a
-  fresh pointer local (kill rule 5 of D17.11, `prover.survives_call`), and the `addr` of the address
-  of a whole store ends no freshness: the store through it ends the freshness of the local of its
+  fresh pointer local (kill rule 5 of D17.11, `prover.survives_call`). It also keeps each fact of
+  fixed storage of an unaddressed local. The fresh set holds a second bit for each local
+  (`place.is_unaddressed`, `place.set_unaddressed`; `spec/fir.md` 11, Fresh). An `addr` or a
+  `slice` of the fixed storage of the local clears the bit, and no statement sets it. So form 2 of
+  the catalogue, `T mut x = f(); T* at = &x;`, proves `x` empty at its declaration
+  (`test/lang/run/ownership/088`). The bit reads no `dead`. So an address from an earlier pass of a
+  loop kills the fact at the call of the next pass (`fail/ownership/120`, `fail/ownership/121`;
+  `c12` and `c13` of `test/fort/owner/prover_test.ft`). Across runs the rule rests on rule 1 of
+  D10.9 for frame storage, which the compiler implements in a later change: until then the binary
+  can give the next run of a function the stack slot of a dead memory local (step 3 of the proof in
+  `spec/fir.md` 11, Kill). The `addr` of the address of a whole store
+  ends no freshness: the store through it ends the freshness of the local of its
   place, after its test and before its kill rules (`place.apply_fresh_end`). So `*pr =
   make_probes(count)` after `pr = new(probes)` is proved, and the marks of these addresses run in
   each function, also past the whole-store work, so that no other verdict depends on that limit
@@ -1233,14 +1244,15 @@ came here.
   (`test/lang/run/ownership/016`). Read early and one initializer are no forms of X2; the
   coordinator ratified both as simpler forms that remove the use.
 - **End an owning aggregate local in a form that part 1 of the leak rule proves** (D17.20,
-  `spec/fir.md` 11, Aggregates). The pass reads no callee, a call kills each fact of a memory
-  local (D17.11 kill rule 5), and the `dead` markers of a scope come after each of its deferred
-  statements (`spec/fir.md` 9.5), also after the move of a `return` operand (9.6). So each owner
-  below the local needs a `del`, a `move` or a test on null after the last call of the exit. A
-  call that takes the local by `move`, as `drop(move(x))`, kills the facts of `x` too when the
-  function takes the address of `x` anywhere. The end form is the drop form (the user, 2026-11-02,
-  "Drop form everywhere"): each owning type ends through a drop that takes its value by `move`
-  and holds each release of the type once, and the free by pointer moves its value into the drop.
+  `spec/fir.md` 11, Aggregates). The pass reads no callee, a call after the address of a memory
+  local kills each fact of it (D17.11 kill rule 5), and the `dead` markers of a scope come after
+  each of its deferred statements (`spec/fir.md` 9.5), also after the move of a `return` operand
+  (9.6). So each owner below the local needs a `del`, a `move` or a test on null after the last
+  call of the exit. A call that takes the local by `move`, as `drop(move(x))`, kills the facts of
+  `x` too when a path to the call takes the address of `x`. The end form is the drop form (the
+  user, 2026-11-02, "Drop form everywhere"): each owning type ends through a drop that takes its
+  value by `move` and holds each release of the type once, and the free by pointer moves its value
+  into the drop.
   No end frees a value and then dels an owner that the free releases, and no end loops on a chain
   and calls its free in the body: that `del` or that loop hides a release that a mutant deletes
   from the free. Five forms remove a site.

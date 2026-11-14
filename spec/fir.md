@@ -1007,6 +1007,16 @@ changes the function, and the verifier runs after it. The passes run in this ord
      a fresh `_n` is `(*_n)` followed by `field` projections and `index` projections on fixed arrays
      only. A pointer to dead storage reaches that dead storage only, and no later `new` takes it
      (D10.9), so the rule needs no assumption on such a pointer (D17.11).
+     The set of the freshness holds a second bit for each local `_x`, which says that `_x` is
+     unaddressed. A statement takes the address of `_x` when it is an `addr`, or a `slice` of a
+     fixed array, that names fixed storage of `_x`: a statement that makes a local memory
+     (**Facts**). `_x` is unaddressed at a point when no path from `bb0` to the point holds such a
+     statement. Such a statement clears the bit with its reads (**Order**), and no statement sets
+     it. `bb0` starts with the bit of each local but an aggregate `_0`, whose storage is the
+     destination of the caller (5.3). The bits join by intersection, as the freshness does. A
+     `dead` changes no bit. So an address from an earlier pass of a loop clears the bit in each
+     later pass, also with new storage for each pass (D10.9). The set holds two bits for each
+     local, so its dataflow takes two times the second count of the work (**Proof**).
    - **Held address.** When the right side of `lv = e` has a writer, the lowering holds
      `_a = addr mut(p)` and writes `(*_a)` in place of `p` (9.3). The pass reads the place
      `(*_a)` of that `check(overwrite: (*_a))` and of that store as `p`, for the fact, the kill
@@ -1147,7 +1157,28 @@ changes the function, and the verifier runs after it. The passes run in this ord
      operand that copies or moves `_n` ends the freshness of `_n` first. No pointer but `_n` names
      the object of a fresh `_n`, but a held address and the address of a whole store, temporaries
      that are no memory and that only their check and their stores read. So the callee reaches no
-     byte of the object (D10.7). `alloc`, `regrow` and `del` are no calls (D12.2).
+     byte of the object (D10.7). A `call` also keeps each fact about a place in fixed storage of a
+     local that is unaddressed at the call (**Fresh**). `alloc`, `regrow` and `del` are no calls
+     (D12.2).
+     **Proof of the unaddressed locals**, in the form of `spec/ownership-design.md` 5, with A8
+     (D10.7). Take a run of F that reaches a `call` where `_x` is unaddressed.
+     1. A value derives from an address of `_x` only through a statement that takes the address of
+        `_x` (**Fresh**) and that the run executed (D10.7, `spec/ownership-design.md` 3.3). A copy
+        or a `move` of `_x` gives its value, and no address of it.
+     2. The run reached the call on one path from `bb0`. The bit holds at the call only when no
+        path from `bb0` to the call holds such a statement. The path of the run is one of them, so
+        the run took no address of `_x`. An address from an earlier pass of a loop is on that
+        path. So the proof reads no `dead`, and it holds when each pass gives `_x` the same storage.
+     3. An address of `_x` that an earlier run of F took names the frame of that run. That frame is
+        dead storage, and no later frame takes it (D10.9, rule 1). So such an address names no
+        byte of `_x` in this run. This step rests on rule 1 of D10.9 for frame storage, which the
+        compiler implements in a later change (D10.1, D19.4). Until that change, the binary can
+        give the next run of F the stack slot of a dead `_x`. A store through an address that an
+        earlier run kept then writes over the new `_x`.
+     4. The callee reaches storage of F only through a value that derives from an address of a
+        local of F (D10.7). So it writes no byte of `_x`, and each fact about a place in fixed
+        storage of `_x` holds after the call. An aggregate `_0` has no bit: the caller can give its
+        storage to the callee through an address that the caller took.
      The kill at a vacate: a `move p` operand and `del(move p)` vacate `p`, because the owner that
      `p` held belongs to the destination or is released. Each kills before its gen rule. This kill
      holds the sentence of D17.11 that a right-hand side that can change the storage that the
@@ -1490,11 +1521,12 @@ changes the function, and the verifier runs after it. The passes run in this ord
      elements at each constant index of a fixed array, in the order of the inner owners of **Inner
      owners**. Each owner of each local with an exit takes a fact of its own, which each exit of
      the local shares, and the facts join the facts of **Facts**; no gen rule and no kill rule
-     changes. Each call kills the fact of each owner of a memory local (D17.11), also a call that
-     frees them. The aggregate work adds the statements and terminators times the steps of the
-     owners of each such local, 1 more than the most steps from its type to an owner for each
-     owner, to the inner work. When it passes 1048576, the pass proves no such exit; the work of
-     D17.11, the leak work and the inner work keep their own limits, so no other verdict changes.
+     changes. Each call kills the fact of each owner of a memory local that is not unaddressed
+     (D17.11, **Fresh**), also a call that frees them. The aggregate work adds the statements and
+     terminators times the steps of the owners of each such local, 1 more than the most steps from
+     its type to an owner for each owner, to the inner work. When it passes 1048576, the pass
+     proves no such exit; the work of D17.11, the leak work and the inner work keep their own
+     limits, so no other verdict changes.
      The pass reports the error and the note of D17.20 at each such exit that it does not prove,
      once for each location and local, in the order of the exits, after the errors of the owner
      locals of the function. `<place>` names the first owner that the pass does not prove: the
