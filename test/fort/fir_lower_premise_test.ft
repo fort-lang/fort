@@ -1,0 +1,570 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| V14 ok
+//| V15 ok
+//| V16 ok
+/// Checks that the lowering keeps the three premises that owner.prover takes from it (spec/fir.md
+/// 10, rules V14 to V16), and that each statement which keeps a premise is one that the verifier
+/// needs. A case lowers a function of a checked source and holds that it keeps every rule. Then it
+/// changes one statement of the function, for each statement of one kind in turn: it removes the
+/// statement, or it puts a second copy at the end of the block. The case holds the count of these
+/// statements and the rule that the verifier reports for each one.
+import fort.fir;
+import fort.fir_lower;
+import fort.fir_print;
+import fort.fir_verify;
+import lower_env;
+import std.strbuf;
+import fort.types;
+
+// ---- the changes ------------------------------------------------------------------------------
+
+// The kind of statement that a case changes.
+enum site {
+    // `dead(_n)`: the end of the scope of a named local.
+    scope_end,
+    // An assignment of the whole `_0`.
+    result_store,
+    // A statement with a `move` operand of a whole temporary of an `own` reference type.
+    scratch_take,
+    // An assignment of a whole temporary of an `own` reference type.
+    scratch_fill,
+}
+
+// What the verifier reports over the changes of one case: the count of the statements, and for
+// each of them the rule of the first violation. `none` counts the changes that keep every rule.
+struct tally {
+    u32 sites;
+    u32 none;
+    u32 v12;
+    u32 v13;
+    u32 v14;
+    u32 v15;
+    u32 v16;
+    u32 other;
+}
+
+// Whether local `n` of `f` is a temporary of an `own` reference type.
+fn own_temp(fir.func* f, u32 n) bool {
+    fir.local* l = fir.local_at(f, n);
+    return l->kind == fir.local_kind.lk_temp && types.type_is_reference(l->ty) && l->ty->is_own;
+}
+
+// Whether `p` is the whole local `n`.
+fn whole(fir.place p) bool {
+    return p.base == fir.base_kind.bk_local && p.proj_len == 0;
+}
+
+// Whether the statement `s` of `f` moves a whole temporary of an `own` reference type.
+fn takes_scratch(fir.func* f, fir.statement* s) bool {
+    if (s->kind != fir.stmt_kind.st_assign && s->kind != fir.stmt_kind.st_del) {
+        return false;
+    }
+    fir.operand mut o = fir.operand{};
+    u32 mut i = 0;
+    while (fir.stmt_reads(f, s, i, &o)) {
+        if (o.kind == fir.operand_kind.ok_move && whole(o.place) && own_temp(f, o.place.local)) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Whether the statement `s` of `f` is of the kind `which`.
+fn selects(fir.func* f, fir.statement* s, site which) bool {
+    if (which == site.scope_end) {
+        return s->kind == fir.stmt_kind.st_dead;
+    } else if (which == site.scratch_take) {
+        return takes_scratch(f, s);
+    }
+    if (s->kind != fir.stmt_kind.st_assign || !whole(s->place)) {
+        return false;
+    }
+    if (which == site.result_store) {
+        return s->place.local == 0;
+    }
+    return own_temp(f, s->place.local);
+}
+
+// The count of the statements of `f` of the kind `which`.
+fn count_sites(fir.func* f, site which) u32 {
+    u32 mut n = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            if (selects(f, fir.block_statement(f, b, i), which)) {
+                n += 1;
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    return n;
+}
+
+// Removes statement `i` of block `b` of `f`.
+fn remove(fir.func mut* f, u32 b, u32 i) void {
+    fir.block mut* bl = fir.block_mut(f, b);
+    u64 mut k = cast(i, u64);
+    while (k + 1 < bl->statements.len) {
+        bl->statements.items[k] = bl->statements.items[k + 1];
+        k += 1;
+    }
+    bl->statements.len -= 1;
+}
+
+// Puts a second copy of statement `i` of block `b` of `f` at the end of the block, before its
+// terminator. The copy names the operands of the first one, which the verifier only reads.
+fn repeat(fir.func mut* f, u32 b, u32 i) void {
+    fir.statement s = *fir.block_statement(f, b, i);
+    fir.block_mut(f, b)->terminated = false;
+    fir.block_append(f, b, s);
+    fir.block_mut(f, b)->terminated = true;
+}
+
+// Changes statement number `k` of the kind `which` of `f`, in block order: removes it, or puts a
+// second copy at the end of its block when `again`.
+fn change(fir.func mut* f, site which, u32 k, bool again) void {
+    u32 mut n = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            if (selects(f, fir.block_statement(f, b, i), which)) {
+                if (n == k) {
+                    if (again) {
+                        repeat(f, b, i);
+                    } else {
+                        remove(f, b, i);
+                    }
+                    return;
+                }
+                n += 1;
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    assert(false);
+}
+
+// Lowers the function `name` of the source that `e` checked.
+fn lowered(lower_env.env mut* e, string name) fir.func mut* own {
+    fir.func mut* own f = fir.func_make();
+    fir_lower.report mut why = fir_lower.report{};
+    bool ok = fir_lower.lower_function(&e->c.ck, lower_env.decl(e, name), f, &why);
+    assert(ok);
+    return f;
+}
+
+// Adds the rule of the first violation of `f` to `t`.
+fn count_rule(lower_env.env mut* e, fir.func* f, tally mut* t) void {
+    fir_verify.violation mut v = fir_verify.violation{};
+    if (!fir_verify.find_violation(f, &e->rt, &v)) {
+        t->none += 1;
+    } else if (v.rule == fir_verify.RULE_V12) {
+        t->v12 += 1;
+    } else if (v.rule == fir_verify.RULE_V13) {
+        t->v13 += 1;
+    } else if (v.rule == fir_verify.RULE_V14) {
+        t->v14 += 1;
+    } else if (v.rule == fir_verify.RULE_V15) {
+        t->v15 += 1;
+    } else if (v.rule == fir_verify.RULE_V16) {
+        t->v16 += 1;
+    } else {
+        t->other += 1;
+    }
+}
+
+// Checks `source`, lowers its function `name`, and holds that it keeps every rule. Then changes
+// each statement of the kind `which` in turn, each one in a function that the lowering writes
+// anew, and gives what the verifier reports.
+fn measure(lower_env.env mut* e, string@ source, string name, site which, bool again) tally {
+    lower_env.check_lines(e, source, true);
+    tally mut t = tally{};
+    {
+        fir.func mut* own f = lowered(e, name);
+        defer fir.func_drop_made(move(f));
+        count_rule(e, f, &t);
+        assert(t.none == 1);
+        t.none = 0;
+        t.sites = count_sites(f, which);
+    }
+    u32 mut k = 0;
+    while (k < t.sites) {
+        fir.func mut* own f = lowered(e, name);
+        defer fir.func_drop_made(move(f));
+        change(f, which, k, again);
+        count_rule(e, f, &t);
+        k += 1;
+    }
+    return t;
+}
+
+// Holds that `t` counts `sites` statements, that the verifier reports rule `rule` for `hits` of
+// them, and that each other change keeps every rule. A difference prints the function and `t`.
+fn expect(lower_env.env mut* e, string name, tally t, u32 sites, u32 rule, u32 hits) void {
+    u32 mut got = t.v16;
+    if (rule == fir_verify.RULE_V12) {
+        got = t.v12;
+    } else if (rule == fir_verify.RULE_V13) {
+        got = t.v13;
+    } else if (rule == fir_verify.RULE_V14) {
+        got = t.v14;
+    } else if (rule == fir_verify.RULE_V15) {
+        got = t.v15;
+    }
+    if (t.sites == sites && got == hits && t.none == sites - hits) {
+        return;
+    }
+    fir.func mut* own f = lowered(e, name);
+    defer fir.func_drop_made(move(f));
+    strbuf.clear(&e->text);
+    fir_print.print_function(f, &e->text);
+    eprint(strbuf.view(&e->text));
+    eprintln("fir_lower_premise_test: ", name, ": sites ", t.sites, " none ", t.none, " V12 ",
+             t.v12, " V13 ", t.v13, " V14 ", t.v14, " V15 ", t.v15, " V16 ", t.v16, " other ",
+             t.other);
+    assert(false);
+}
+
+// ---- V14 ----------------------------------------------------------------------------------------
+
+// A `return` under an open `defer` and the end of the body each leave the scope of `p`, so the
+// lowering writes two `dead(_p)`. Without one of them a `return` stands in the scope of `p`.
+fn each_return_ends_the_scope_of_an_owner() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string[9] source = {
+        "fn f(bool c) i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    defer del(p);",
+        "    if (c) {",
+        "        return 1;",
+        "    }",
+        "    *p = 7;",
+        "    return *p;",
+        "}",
+    };
+    tally t = measure(e, source[..], "f", site.scope_end, false);
+    expect(e, "f", t, 2, fir_verify.RULE_V14, 2);
+}
+
+// The inner `return` leaves the scopes of `q`, `p` and `n`; the end of the block leaves the scope
+// of `q`; the last `return` leaves the scopes of `p` and `n`. `n` is no owner local, so the two
+// `dead(_n)` are no subject of V14: owner.prover gives `n` no exit.
+fn a_return_ends_each_scope_that_it_leaves() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string[14] source = {
+        "fn g(bool c, bool d) i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    defer del(p);",
+        "    i32 mut n = 0;",
+        "    if (c) {",
+        "        i32 mut* own q = new(i32);",
+        "        defer del(q);",
+        "        if (d) {",
+        "            return 1;",
+        "        }",
+        "        n = 2;",
+        "    }",
+        "    return n;",
+        "}",
+    };
+    tally t = measure(e, source[..], "g", site.scope_end, false);
+    expect(e, "g", t, 6, fir_verify.RULE_V14, 4);
+}
+
+// The scope of `b` is the body of the loop. `break`, `continue`, `return` and the end of the body
+// each leave it. A `dead(_b)` that only the next turn of the loop follows is needed too: the
+// `return` after the loop stands on a path from it.
+fn each_exit_of_a_loop_body_ends_the_scope() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string[19] source = {
+        "fn h(u32 n) u32 {",
+        "    u32 mut i = 0;",
+        "    while (i < n) {",
+        "        u8 mut* own b = new(u8);",
+        "        defer del(b);",
+        "        if (i == 3) {",
+        "            break;",
+        "        }",
+        "        if (i == 5) {",
+        "            i += 2;",
+        "            continue;",
+        "        }",
+        "        if (i == 7) {",
+        "            return i;",
+        "        }",
+        "        i += 1;",
+        "    }",
+        "    return i;",
+        "}",
+    };
+    tally t = measure(e, source[..], "h", site.scope_end, false);
+    expect(e, "h", t, 6, fir_verify.RULE_V14, 4);
+}
+
+// A named local of an owning aggregate type is an owner local: an owning struct and an owning
+// span. Each has one `dead` for each `return`.
+fn an_owning_aggregate_is_an_owner_local() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string[20] source = {
+        "struct box {",
+        "    u8 mut* own p;",
+        "    u32 n;",
+        "}",
+        "fn k(bool c) u32 {",
+        "    box mut b = box{new(u8), 1};",
+        "    defer del(b.p);",
+        "    if (c) {",
+        "        return 0;",
+        "    }",
+        "    return b.n;",
+        "}",
+        "fn s(u64 n, bool c) u64 {",
+        "    u8 mut@ own buf = new(u8, n);",
+        "    defer del(buf);",
+        "    if (c) {",
+        "        return 0;",
+        "    }",
+        "    return buf.len;",
+        "}",
+    };
+    tally t = measure(e, source[..], "k", site.scope_end, false);
+    expect(e, "k", t, 2, fir_verify.RULE_V14, 2);
+    tally u = measure(e, source[..], "s", site.scope_end, false);
+    expect(e, "s", u, 2, fir_verify.RULE_V14, 2);
+}
+
+// A `move` of the local into a call does not end its scope: V14 reads no value, only the scope.
+// So the `dead` on the path of the `move` is needed as the other one is.
+fn a_moved_owner_keeps_its_scope() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string[11] source = {
+        "fn sink(u8 mut* own p) void {",
+        "    del(p);",
+        "}",
+        "fn m(bool c) void {",
+        "    u8 mut* own p = new(u8);",
+        "    if (c) {",
+        "        sink(move(p));",
+        "        return;",
+        "    }",
+        "    del(p);",
+        "}",
+    };
+    tally t = measure(e, source[..], "m", site.scope_end, false);
+    expect(e, "m", t, 2, fir_verify.RULE_V14, 2);
+}
+
+// ---- V15 ----------------------------------------------------------------------------------------
+
+u64 RESULT_LINES = 40;
+
+// Functions with an aggregate result: a struct literal, a parameter or a literal by the path, a
+// call, a named local, a `switch` with a `return` in each arm, and a `string`.
+string[RESULT_LINES] RESULTS = {
+    "struct pair {",
+    "    i32 a;",
+    "    i32 b;",
+    "}",
+    "fn lit(i32 x) pair {",
+    "    return pair{x, 2};",
+    "}",
+    "fn pick(bool c, pair p) pair {",
+    "    if (c) {",
+    "        return p;",
+    "    }",
+    "    return pair{0, 0};",
+    "}",
+    "fn through(i32 x) pair {",
+    "    return lit(x);",
+    "}",
+    "fn local(i32 x) pair {",
+    "    pair mut p = pair{x, x};",
+    "    p.a = 3;",
+    "    return p;",
+    "}",
+    "fn arms(i32 x) pair {",
+    "    switch (x) {",
+    "        case 0: {",
+    "            return pair{0, 0};",
+    "        }",
+    "        case 1: {",
+    "            return pair{1, 1};",
+    "        }",
+    "        default: {",
+    "            return pair{2, 2};",
+    "        }",
+    "    }",
+    "}",
+    "fn text(bool c) string {",
+    "    if (c) {",
+    "        return \"yes\";",
+    "    }",
+    "    return \"no\";",
+    "}",
+};
+
+// The name of each function of RESULTS with the count of its `return` statements.
+struct result_case {
+    string name;
+    u32 returns;
+}
+
+u64 RESULT_CASES = 6;
+
+result_case[RESULT_CASES] RESULT_TABLE = {
+    result_case{"lit", 1},
+    result_case{"pick", 2},
+    result_case{"through", 1},
+    result_case{"local", 1},
+    result_case{"arms", 3},
+    result_case{"text", 2},
+};
+
+// The lowering writes one store of the whole `_0` for each `return` of an aggregate result.
+// Without the store, the `return` gives the caller a value that the call did not write. With a
+// second copy of the store at the end of the block, the copy writes over the first value.
+fn each_return_stores_the_aggregate_result_once() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    for (result_case c : RESULT_TABLE) {
+        tally none = measure(e, RESULTS[..], c.name, site.result_store, false);
+        expect(e, c.name, none, c.returns, fir_verify.RULE_V15, c.returns);
+        tally twice = measure(e, RESULTS[..], c.name, site.result_store, true);
+        expect(e, c.name, twice, c.returns, fir_verify.RULE_V15, c.returns);
+    }
+}
+
+// An owning span goes into `_0` through a temporary while a `defer` is open: `_0 = move _t`.
+// Without the store the rule of the lowest number is V15, and V16 holds too: `_t` keeps its value
+// at the `return`. A second copy of the store reads `_t` after the `move` of it, which is V12.
+fn an_owning_result_is_stored_once() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    string[5] source = {
+        "fn s(u64 n) u8 mut@ own {",
+        "    u8 mut@ own buf = new(u8, n);",
+        "    defer del(buf);",
+        "    return buf;",
+        "}",
+    };
+    tally none = measure(e, source[..], "s", site.result_store, false);
+    expect(e, "s", none, 1, fir_verify.RULE_V15, 1);
+    tally twice = measure(e, source[..], "s", site.result_store, true);
+    expect(e, "s", twice, 1, fir_verify.RULE_V12, 1);
+}
+
+// ---- V16 ----------------------------------------------------------------------------------------
+
+u64 SCRATCH_LINES = 33;
+
+// Functions whose `own` references go through temporaries: the initializer of a declaration, a
+// call result that is the argument of the next call, an assignment in a loop, and a result.
+string[SCRATCH_LINES] SCRATCH = {
+    "fn fresh() u8 mut* own {",
+    "    return new(u8);",
+    "}",
+    "fn sink(u8 mut* own p) void {",
+    "    del(p);",
+    "}",
+    "fn declared(bool c) void {",
+    "    u8 mut* own p = new(u8);",
+    "    if (c) {",
+    "        del(p);",
+    "        return;",
+    "    }",
+    "    del(p);",
+    "}",
+    "fn passed() void {",
+    "    sink(fresh());",
+    "}",
+    "fn turns(u32 n) void {",
+    "    u8 mut* own mut p = null;",
+    "    u32 mut i = 0;",
+    "    while (i < n) {",
+    "        del(p);",
+    "        p = new(u8);",
+    "        i += 1;",
+    "    }",
+    "    del(p);",
+    "}",
+    "fn chosen(bool c) u8 mut* own {",
+    "    if (c) {",
+    "        return fresh();",
+    "    }",
+    "    return null;",
+    "}",
+};
+
+// Each statement that takes the value of a scratch temporary is needed: without it the temporary
+// holds the value at the `return`, or at the store of the next turn of the loop.
+fn each_scratch_temporary_is_emptied() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    tally d = measure(e, SCRATCH[..], "declared", site.scratch_take, false);
+    expect(e, "declared", d, 1, fir_verify.RULE_V16, 1);
+    tally p = measure(e, SCRATCH[..], "passed", site.scratch_take, false);
+    expect(e, "passed", p, 1, fir_verify.RULE_V16, 1);
+    // the temporary of the initializer `null` holds the zero value, so nothing needs its `move`
+    tally t = measure(e, SCRATCH[..], "turns", site.scratch_take, false);
+    expect(e, "turns", t, 2, fir_verify.RULE_V16, 1);
+}
+
+// Each store into a scratch temporary comes while the temporary is empty: a second copy of the
+// store at the end of the block fills it again, over the value or before the `return`.
+fn each_scratch_temporary_is_filled_once() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    tally d = measure(e, SCRATCH[..], "declared", site.scratch_fill, true);
+    expect(e, "declared", d, 1, fir_verify.RULE_V16, 1);
+    tally p = measure(e, SCRATCH[..], "passed", site.scratch_fill, true);
+    expect(e, "passed", p, 1, fir_verify.RULE_V16, 1);
+    // a second store of `null` fills nothing
+    tally t = measure(e, SCRATCH[..], "turns", site.scratch_fill, true);
+    expect(e, "turns", t, 2, fir_verify.RULE_V16, 1);
+}
+
+// `_0` of an `own` reference type takes its value from a temporary: `_0 = move _t`. Without that
+// store the temporary holds the value at the `return`. A second copy of it reads `_t` after the
+// `move`, which is V12. No rule asks for a store of a result of no aggregate type, so the path
+// of `return null` keeps every rule without its store, and with two.
+fn a_reference_result_empties_its_temporary() void {
+    lower_env.env mut* own e = lower_env.make();
+    defer lower_env.drop_made(move(e));
+    tally f = measure(e, SCRATCH[..], "fresh", site.scratch_take, false);
+    expect(e, "fresh", f, 1, fir_verify.RULE_V16, 1);
+    tally again = measure(e, SCRATCH[..], "fresh", site.result_store, true);
+    expect(e, "fresh", again, 1, fir_verify.RULE_V12, 1);
+    tally none = measure(e, SCRATCH[..], "chosen", site.result_store, false);
+    expect(e, "chosen", none, 2, fir_verify.RULE_V16, 1);
+    tally twice = measure(e, SCRATCH[..], "chosen", site.result_store, true);
+    expect(e, "chosen", twice, 2, fir_verify.RULE_V12, 1);
+}
+
+fn main() i32 {
+    each_return_ends_the_scope_of_an_owner();
+    a_return_ends_each_scope_that_it_leaves();
+    each_exit_of_a_loop_body_ends_the_scope();
+    an_owning_aggregate_is_an_owner_local();
+    a_moved_owner_keeps_its_scope();
+    println("V14 ok");
+    each_return_stores_the_aggregate_result_once();
+    an_owning_result_is_stored_once();
+    println("V15 ok");
+    each_scratch_temporary_is_emptied();
+    each_scratch_temporary_is_filled_once();
+    a_reference_result_empties_its_temporary();
+    println("V16 ok");
+    return 0;
+}

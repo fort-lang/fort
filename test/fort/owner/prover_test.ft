@@ -5839,9 +5839,16 @@ fn write_verdicts(fir.func* f, prover.proof* p, strbuf.str_buf mut* out) void {
     assert(p->unproved == unproved);
 }
 
-// Parses `text` against PRELUDE, holds that the verifier accepts each function, proves each one,
-// and holds that function `k` of the module gives the verdicts `want[k]`.
+// Parses `text` against PRELUDE, holds that each function keeps every rule of the verifier, proves
+// each one, and holds that function `k` of the module gives the verdicts `want[k]`.
 fn expect(string@ text, string@ want) void {
+    expect_breaks(text, want, 0);
+}
+
+// As expect does, for a text of which `breaks` functions break a premise rule V14 to V16 of the
+// verifier and each function keeps the rules V1 to V13 (pass_env.verified_with). The test function
+// states the count.
+fn expect_breaks(string@ text, string@ want, u64 breaks) void {
     strbuf.str_buf mut got = strbuf.create();
     defer del(got.data);
     lower_env.env mut* own e = lower_env.make();
@@ -5850,10 +5857,10 @@ fn expect(string@ text, string@ want) void {
     *m = pass_env.parse(e, PRELUDE[..], text);
     defer fir.module_drop_made(move(m));
     assert(m->funcs.len == want.len);
+    pass_env.verified_with(e, m, breaks, "prover_test: the verifier refuses the input");
     u64 mut k = 0;
     while (k < m->funcs.len) {
         fir.func* f = fir.module_function_at(m, k);
-        pass_env.verified(e, f, "prover_test: the verifier refuses the input");
         prover.proof mut* own p = prover.make();
         *p = prover.prove(f);
         write_verdicts(f, p, &got);
@@ -5870,7 +5877,7 @@ fn expect(string@ text, string@ want) void {
 
 // The store of the zero value in the entry block makes a named local empty.
 fn the_entry_store_makes_a_named_local_empty() void {
-    expect(ENTRY[..], ENTRY_VERDICTS[..]);
+    expect_breaks(ENTRY[..], ENTRY_VERDICTS[..], 2);
 }
 
 // `del(move p)` makes `p` empty, and only `p`.
@@ -5880,22 +5887,22 @@ fn del_makes_its_place_empty() void {
 
 // A `move` operand makes its place and each tracked place below it empty.
 fn a_move_makes_its_place_and_each_place_below_it_empty() void {
-    expect(MOVE[..], MOVE_VERDICTS[..]);
+    expect_breaks(MOVE[..], MOVE_VERDICTS[..], 3);
 }
 
 // A store of the zero value makes its place and each tracked place below it empty.
 fn a_zero_store_makes_its_place_and_each_place_below_it_empty() void {
-    expect(ZERO[..], ZERO_VERDICTS[..]);
+    expect_breaks(ZERO[..], ZERO_VERDICTS[..], 6);
 }
 
 // A store of a fresh `new` makes each tracked place through the pointer empty.
 fn a_fresh_new_makes_each_place_through_its_pointer_empty() void {
-    expect(FRESH[..], FRESH_VERDICTS[..]);
+    expect_breaks(FRESH[..], FRESH_VERDICTS[..], 4);
 }
 
 // A store kills the fact of each place with its base that is not separate from it.
 fn a_store_kills_each_fact_with_its_base_that_is_not_separate() void {
-    expect(SAME_BASE[..], SAME_BASE_VERDICTS[..]);
+    expect_breaks(SAME_BASE[..], SAME_BASE_VERDICTS[..], 1);
 }
 
 // Two elements with one key are one place, and an element with no key is not tracked.
@@ -5905,22 +5912,22 @@ fn two_elements_with_one_key_are_one_place() void {
 
 // A store through a fresh pointer local kills only the facts with its base.
 fn a_store_through_a_fresh_pointer_kills_only_its_base() void {
-    expect(FRESH_STORE[..], FRESH_STORE_VERDICTS[..]);
+    expect_breaks(FRESH_STORE[..], FRESH_STORE_VERDICTS[..], 4);
 }
 
 // A store through a pointer or into memory kills each fact reached through memory.
 fn a_store_through_a_pointer_kills_each_fact_reached_through_memory() void {
-    expect(MEMORY[..], MEMORY_VERDICTS[..]);
+    expect_breaks(MEMORY[..], MEMORY_VERDICTS[..], 7);
 }
 
 // A call kills each fact but the facts of a local that is no memory.
 fn a_call_kills_each_fact_but_those_of_a_local_that_is_no_memory() void {
-    expect(CALLS[..], CALLS_VERDICTS[..]);
+    expect_breaks(CALLS[..], CALLS_VERDICTS[..], 8);
 }
 
 // The store of a check takes each kill before it, and the check takes its verdict.
 fn the_store_of_a_check_takes_each_kill_before_it() void {
-    expect(AFTER_CHECK[..], AFTER_CHECK_VERDICTS[..]);
+    expect_breaks(AFTER_CHECK[..], AFTER_CHECK_VERDICTS[..], 7);
 }
 
 // A global is a tracked place with no fact at the entry.
@@ -5930,15 +5937,15 @@ fn a_global_has_no_fact_at_the_entry() void {
 
 // A held address `(*_a)` reads as the place of its `addr mut`.
 fn a_held_address_reads_as_its_place() void {
-    expect(HELD[..], HELD_VERDICTS[..]);
-    expect(HELD_STORE[..], HELD_STORE_VERDICTS[..]);
-    expect(HELD_STALE[..], HELD_STALE_VERDICTS[..]);
-    expect(HELD_MEMORY[..], HELD_MEMORY_VERDICTS[..]);
+    expect_breaks(HELD[..], HELD_VERDICTS[..], 3);
+    expect_breaks(HELD_STORE[..], HELD_STORE_VERDICTS[..], 1);
+    expect_breaks(HELD_STALE[..], HELD_STALE_VERDICTS[..], 5);
+    expect_breaks(HELD_MEMORY[..], HELD_MEMORY_VERDICTS[..], 1);
 }
 
 // A fact holds at the start of a block when it holds at the end of each predecessor.
 fn a_fact_holds_after_a_join_when_it_holds_on_each_edge() void {
-    expect(JOIN[..], JOIN_VERDICTS[..]);
+    expect_breaks(JOIN[..], JOIN_VERDICTS[..], 3);
 }
 
 // The sets of more than one word, a function with no check, and a check that no fact can prove.
@@ -5953,28 +5960,28 @@ fn two_constant_keys_with_one_value_name_one_element() void {
 
 // A loop carries a kill, a store into a key local and an end of freshness around its back edge.
 fn a_loop_carries_each_kill_around_its_back_edge() void {
-    expect(LOOPS[..], LOOPS_VERDICTS[..]);
+    expect_breaks(LOOPS[..], LOOPS_VERDICTS[..], 3);
 }
 
 // Structs as places: a pointee moved whole, an aggregate result and a global struct.
 fn a_struct_is_a_place_with_fields_below_it() void {
-    expect(AGGREGATES[..], AGGREGATES_VERDICTS[..]);
+    expect_breaks(AGGREGATES[..], AGGREGATES_VERDICTS[..], 1);
 }
 
 // Each kind of store against each kind of fact, in the order F1 to F7.
 fn each_kind_of_store_kills_the_facts_that_the_rules_name() void {
-    expect(KILL_MATRIX[..], KILL_MATRIX_VERDICTS[..]);
+    expect_breaks(KILL_MATRIX[..], KILL_MATRIX_VERDICTS[..], 15);
 }
 
 // A store of null into each kind of place in order: each store makes its place empty and kills by
 // the kill rules.
 fn each_store_of_null_makes_its_place_empty_and_kills() void {
-    expect(ZERO_SEQUENCE[..], ZERO_SEQUENCE_VERDICTS[..]);
+    expect_breaks(ZERO_SEQUENCE[..], ZERO_SEQUENCE_VERDICTS[..], 2);
 }
 
 // What ends the freshness of a pointer local, and what does not.
 fn each_read_of_the_pointer_ends_its_freshness() void {
-    expect(FRESHNESS[..], FRESHNESS_VERDICTS[..]);
+    expect_breaks(FRESHNESS[..], FRESHNESS_VERDICTS[..], 14);
 }
 
 // Which right sides store the zero value.
@@ -5994,29 +6001,29 @@ fn the_return_place_is_no_key() void {
 
 // An address is a held address only with one store, one check and one store through it.
 fn an_address_is_held_with_one_store_one_check_and_one_store() void {
-    expect(HELD_SHAPES[..], HELD_SHAPES_VERDICTS[..]);
+    expect_breaks(HELD_SHAPES[..], HELD_SHAPES_VERDICTS[..], 1);
 }
 
 // Only an address of the fixed storage of a local makes it memory.
 fn only_an_address_of_fixed_storage_makes_a_local_memory() void {
-    expect(ADDRESSES[..], ADDRESSES_VERDICTS[..]);
+    expect_breaks(ADDRESSES[..], ADDRESSES_VERDICTS[..], 2);
 }
 
 // A store straight into a memory local or a global keeps the facts of other locals and globals,
 // and kills each fact through a pointer that can hold its address.
 fn a_store_straight_into_a_local_keeps_other_locals() void {
-    expect(STRAIGHT[..], STRAIGHT_VERDICTS[..]);
+    expect_breaks(STRAIGHT[..], STRAIGHT_VERDICTS[..], 6);
 }
 
 // A check takes the verdict of each store that it guards, and a store has a verdict of its own.
 fn a_check_takes_the_verdict_of_each_store_that_it_guards() void {
-    expect(GUARDS[..], GUARDS_VERDICTS[..]);
+    expect_breaks(GUARDS[..], GUARDS_VERDICTS[..], 2);
 }
 
 // Each store into an `own` reference needs a proof, but for the entry zeroing, a temporary and
 // `_0`.
 fn each_store_but_an_entry_zeroing_or_a_temporary_needs_a_proof() void {
-    expect(NEEDS[..], NEEDS_VERDICTS[..]);
+    expect_breaks(NEEDS[..], NEEDS_VERDICTS[..], 16);
 }
 
 // A function with stores that need a proof in two blocks and no check. The entry zeroing of `_4`
@@ -6070,7 +6077,7 @@ fn the_proof_lists_each_store_in_block_order() void {
     *m = pass_env.parse(e, PRELUDE[..], ORDER[..]);
     defer fir.module_drop_made(move(m));
     fir.func* f = fir.module_function_at(m, 0);
-    pass_env.verified(e, f, "prover_test: the verifier refuses the input");
+    pass_env.breaks_premise(e, f, "prover_test: the verifier refuses the input");
     prover.proof mut* own p = prover.make();
     *p = prover.prove(f);
     // the free is under test, and prover.drop_made ends the empty proof that it leaves
@@ -6931,9 +6938,10 @@ fn write_exits(fir.func* f, prover.proof* p, strbuf.str_buf mut* out) void {
     assert(p->leaks == leaks);
 }
 
-// Parses `text` against PRELUDE, holds that the verifier accepts each function, proves each one,
-// and holds that function `k` of the module gives the exit verdicts `want[k]`.
-fn expect_exits(string@ text, string@ want) void {
+// Parses `text` against PRELUDE, holds that each function keeps the rules V1 to V13 of the verifier
+// and that `breaks` functions break a premise rule V14 to V16 (pass_env.verified_with), proves each
+// one, and holds that function `k` of the module gives the exit verdicts `want[k]`.
+fn expect_exits(string@ text, string@ want, u64 breaks) void {
     strbuf.str_buf mut got = strbuf.create();
     defer del(got.data);
     lower_env.env mut* own e = lower_env.make();
@@ -6942,10 +6950,10 @@ fn expect_exits(string@ text, string@ want) void {
     *m = pass_env.parse(e, PRELUDE[..], text);
     defer fir.module_drop_made(move(m));
     assert(m->funcs.len == want.len);
+    pass_env.verified_with(e, m, breaks, "prover_test: the verifier refuses the input");
     u64 mut k = 0;
     while (k < m->funcs.len) {
         fir.func* f = fir.module_function_at(m, k);
-        pass_env.verified(e, f, "prover_test: the verifier refuses the input");
         prover.proof mut* own p = prover.make();
         *p = prover.prove(f);
         write_exits(f, p, &got);
@@ -6960,7 +6968,7 @@ fn expect_exits(string@ text, string@ want) void {
 
 // Each owner local has its obligation at each exit of its scope, and no other local has one.
 fn each_exit_holds_the_obligation_of_its_owner_local() void {
-    expect_exits(EXITS[..], EXITS_VERDICTS[..]);
+    expect_exits(EXITS[..], EXITS_VERDICTS[..], 6);
 }
 
 // Each exit kind of D17.20 has its obligation in the lowering of fort source.
@@ -8814,9 +8822,10 @@ fn write_all(fir.func* f, prover.proof* p, strbuf.str_buf mut* out) void {
     strbuf.append(out, strbuf.view(&part));
 }
 
-// Parses `text` against PRELUDE, holds that the verifier accepts each function, proves each one,
-// and holds that function `k` of the module gives all the verdicts `want[k]` (write_all).
-fn expect_all(string@ text, string@ want) void {
+// Parses `text` against PRELUDE, holds that each function keeps the rules V1 to V13 of the verifier
+// and that `breaks` functions break a premise rule V14 to V16 (pass_env.verified_with), proves each
+// one, and holds that function `k` of the module gives all the verdicts `want[k]` (write_all).
+fn expect_all(string@ text, string@ want, u64 breaks) void {
     strbuf.str_buf mut got = strbuf.create();
     defer del(got.data);
     lower_env.env mut* own e = lower_env.make();
@@ -8825,10 +8834,10 @@ fn expect_all(string@ text, string@ want) void {
     *m = pass_env.parse(e, PRELUDE[..], text);
     defer fir.module_drop_made(move(m));
     assert(m->funcs.len == want.len);
+    pass_env.verified_with(e, m, breaks, "prover_test: the verifier refuses the input");
     u64 mut k = 0;
     while (k < m->funcs.len) {
         fir.func* f = fir.module_function_at(m, k);
-        pass_env.verified(e, f, "prover_test: the verifier refuses the input");
         prover.proof mut* own p = prover.make();
         *p = prover.prove(f);
         write_all(f, p, &got);
@@ -8844,7 +8853,7 @@ fn expect_all(string@ text, string@ want) void {
 // The edge where a test against null finds null holds the fact of the tested place, and only
 // that edge, while no kill rule applies after the read.
 fn the_edge_of_a_test_against_null_holds_the_fact_of_its_place() void {
-    expect_all(NULLS[..], NULLS_VERDICTS[..]);
+    expect_all(NULLS[..], NULLS_VERDICTS[..], 2);
 }
 
 // The tests against null of lowered fort source, each with a comment that gives the verdicts of

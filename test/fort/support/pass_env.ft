@@ -84,12 +84,83 @@ fn parse(lower_env.env mut* e, string@ prelude, string@ text) fir.module {
 fn verified(lower_env.env mut* e, fir.func* f, string what) void {
     fir_verify.violation mut v = fir_verify.violation{};
     if (fir_verify.find_violation(f, &e->rt, &v)) {
-        strbuf.clear(&e->text);
-        fir_print.print_function(f, &e->text);
-        fir_verify.violation_text(f, &v, &e->text);
-        eprintln(strbuf.view(&e->text));
-        panic(what);
+        refuse(e, f, &v, what);
     }
+}
+
+// Whether `f` breaks a premise rule V14 to V16 of the verifier (spec/fir.md 10). A violation of a
+// rule V1 to V13 stops the test with `what`. The premise rules run last, so a violation of one
+// says that `f` keeps each rule V1 to V13.
+fn premise_broken(lower_env.env mut* e, fir.func* f, string what) bool {
+    fir_verify.violation mut v = fir_verify.violation{};
+    if (!fir_verify.find_violation(f, &e->rt, &v)) {
+        return false;
+    }
+    if (v.rule < fir_verify.RULE_V14) {
+        refuse(e, f, &v, what);
+    }
+    return true;
+}
+
+/// Holds that `f` keeps each rule V1 to V13 of the verifier and breaks a premise rule V14 to V16
+/// (spec/fir.md 10). It is for a text that a test of an ownership pass writes by hand: the test
+/// holds what the pass says of a function that breaks a premise of the lowering, which the lowering
+/// does not write. A function that keeps the 16 rules stops the test: it goes through `verified`.
+fn breaks_premise(lower_env.env mut* e, fir.func* f, string what) void {
+    if (!premise_broken(e, f, what)) {
+        eprintln("the function ", f->sym->name, " keeps each premise rule");
+        panic("pass_env.breaks_premise: the function goes through pass_env.verified");
+    }
+}
+
+/// Holds that each function of `m` keeps each rule V1 to V13 of the verifier, and that `breaks`
+/// functions of `m` break a premise rule V14 to V16. `breaks` is the count that the test function
+/// of a text states, and it is 1 or more: a text whose functions keep the 16 rules goes through
+/// verified_each. A text that breaks no premise stops the test, as each other count does.
+fn breaks_premises(lower_env.env mut* e, fir.module* m, u64 breaks, string what) void {
+    if (breaks == 0) {
+        panic("pass_env.breaks_premises: a text that keeps each rule goes through verified_each");
+    }
+    u64 mut broken = 0;
+    u64 mut k = 0;
+    while (k < m->funcs.len) {
+        if (premise_broken(e, fir.module_function_at(m, k), what)) {
+            broken += 1;
+        }
+        k += 1;
+    }
+    if (broken != breaks) {
+        eprintln(broken, " functions break a premise rule, and not ", breaks);
+        panic("pass_env.breaks_premises: another count of functions breaks a premise rule");
+    }
+}
+
+/// Holds that each function of `m` keeps every rule of the verifier.
+fn verified_each(lower_env.env mut* e, fir.module* m, string what) void {
+    u64 mut k = 0;
+    while (k < m->funcs.len) {
+        verified(e, fir.module_function_at(m, k), what);
+        k += 1;
+    }
+}
+
+/// Holds the rules of a text whose test function states the count `breaks` of its functions that
+/// break a premise rule: verified_each for the count 0, and breaks_premises for each other count.
+fn verified_with(lower_env.env mut* e, fir.module* m, u64 breaks, string what) void {
+    if (breaks == 0) {
+        verified_each(e, m, what);
+    } else {
+        breaks_premises(e, m, breaks, what);
+    }
+}
+
+// Prints `f` and its violation `v`, and stops the test with `what`.
+fn refuse(lower_env.env mut* e, fir.func* f, fir_verify.violation* v, string what) void {
+    strbuf.clear(&e->text);
+    fir_print.print_function(f, &e->text);
+    fir_verify.violation_text(f, v, &e->text);
+    eprintln(strbuf.view(&e->text));
+    panic(what);
 }
 
 /// Runs the emptiness pass on `f` for its proof, which reports nothing, and then the build-mode

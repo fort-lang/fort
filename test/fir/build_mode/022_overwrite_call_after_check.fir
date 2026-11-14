@@ -40,6 +40,7 @@
 //|         _1 = const zero i32 mut* own;
 //|         _1 = call fn main.make() #41:1 s0;
 //|         del(move _1);
+//|         dead(_1);
 //|         return;
 //|     }
 //| }
@@ -72,6 +73,7 @@ fn main.k() -> void {
     bb1: {
         _1 = call fn main.make() #41:1;
         del(move _1);
+        dead(_1);
         return;
     }
 }
